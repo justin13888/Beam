@@ -10,8 +10,7 @@ import { problem } from "@/test/problem";
 import { recordRequests } from "@/test/requests";
 import { server } from "@/test/server";
 
-type MediaMetadata =
-	components["schemas"]["beam_server.models.media.MediaMetadata"];
+type MediaMetadata = components["schemas"]["MediaMetadata"];
 
 const movieInProgress = factory.historyItem({
 	file_id: "file-1",
@@ -78,7 +77,7 @@ const mediaById: Record<string, MediaMetadata> = {
 
 /** Serve `/v1/history` and the media lookups the page fans out to. */
 function serveHistory(
-	items: components["schemas"]["beam_server.services.playback.HistoryItem"][],
+	items: components["schemas"]["HistoryItem"][],
 	total: number,
 ) {
 	server.use(

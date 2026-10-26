@@ -24,12 +24,9 @@ vi.mock("@/components/VideoPlayer", () => ({
 
 const { EpisodeList } = await import("./media.$id");
 
-type EpisodeMetadata =
-	components["schemas"]["beam_server.models.media.show.EpisodeMetadata"];
-type MediaSource =
-	components["schemas"]["beam_server.models.media.source.MediaSource"];
-type ShowMetadata =
-	components["schemas"]["beam_server.models.media.show.ShowMetadata"];
+type EpisodeMetadata = components["schemas"]["EpisodeMetadata"];
+type MediaSource = components["schemas"]["MediaSource"];
+type ShowMetadata = components["schemas"]["ShowMetadata"];
 
 const playableEpisode: EpisodeMetadata = {
 	id: "ep-1",
@@ -89,9 +86,7 @@ function source(fileId: string, height: number, codec: string): MediaSource {
 
 /** Serve the media document and its sources. */
 function serveMedia(
-	metadata:
-		| components["schemas"]["beam_server.models.media.MediaMetadata"]
-		| null,
+	metadata: components["schemas"]["MediaMetadata"] | null,
 	sources: MediaSource[] = [],
 ) {
 	server.use(

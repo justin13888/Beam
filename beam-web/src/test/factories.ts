@@ -14,28 +14,20 @@ import type { Connection, PageInfo } from "@/lib/apiClient";
  */
 type Schemas = components["schemas"];
 
-export type User = Schemas["beam_auth.server.oidc_routes.MeResponse"];
-export type Library = Schemas["beam_server.models.library.Library"];
-export type LibraryFile =
-	Schemas["beam_server.models.library.file.LibraryFile"];
-export type MediaMetadata = Schemas["beam_server.models.media.MediaMetadata"];
-export type MovieMetadata =
-	Schemas["beam_server.models.media.movie.MovieMetadata"];
-export type ShowMetadata =
-	Schemas["beam_server.models.media.show.ShowMetadata"];
-export type MediaSource =
-	Schemas["beam_server.models.media.source.MediaSource"];
-export type HistoryItem = Schemas["beam_server.services.playback.HistoryItem"];
-export type ContinueWatchingItem =
-	Schemas["beam_server.services.playback.ContinueWatchingItem"];
-export type AdminUser = Schemas["beam_server.models.admin.AdminUserDto"];
-export type AdminLogEntry =
-	Schemas["beam_server.models.admin.AdminLogEntryDto"];
-export type AdminEvent = Schemas["beam_server.models.admin.AdminEventDto"];
-export type AdminStatus =
-	Schemas["beam_server.models.admin.AdminStatusResponse"];
-export type SessionSummary =
-	Schemas["beam_auth.server.oidc_routes.SessionSummary"];
+export type User = Schemas["CurrentUser"];
+export type Library = Schemas["Library"];
+export type LibraryFile = Schemas["LibraryFile"];
+export type MediaMetadata = Schemas["MediaMetadata"];
+export type MovieMetadata = Schemas["MovieMetadata"];
+export type ShowMetadata = Schemas["ShowMetadata"];
+export type MediaSource = Schemas["MediaSource"];
+export type HistoryItem = Schemas["HistoryItem"];
+export type ContinueWatchingItem = Schemas["ContinueWatchingItem"];
+export type AdminUser = Schemas["AdminUser"];
+export type AdminLogEntry = Schemas["AdminLogEntry"];
+export type AdminEvent = Schemas["AdminEvent"];
+export type AdminStatus = Schemas["AdminStatus"];
+export type SessionSummary = Schemas["SessionSummary"];
 
 /**
  * A `/v1` list response: the items as one page, the whole list unless

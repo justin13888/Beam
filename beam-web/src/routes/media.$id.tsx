@@ -15,14 +15,10 @@ import { apiError } from "@/lib/problem";
 import { nextPlayableEpisode } from "@/lib/upNext";
 import { formatDuration } from "@/lib/utils";
 
-type MediaMetadata =
-	components["schemas"]["beam_server.models.media.MediaMetadata"];
-type ShowMetadata =
-	components["schemas"]["beam_server.models.media.show.ShowMetadata"];
-type EpisodeMetadata =
-	components["schemas"]["beam_server.models.media.show.EpisodeMetadata"];
-type MediaSource =
-	components["schemas"]["beam_server.models.media.source.MediaSource"];
+type MediaMetadata = components["schemas"]["MediaMetadata"];
+type ShowMetadata = components["schemas"]["ShowMetadata"];
+type EpisodeMetadata = components["schemas"]["EpisodeMetadata"];
+type MediaSource = components["schemas"]["MediaSource"];
 
 const mediaQueryOptions = (mediaId: string) =>
 	queryOptions({

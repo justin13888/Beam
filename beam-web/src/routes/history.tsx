@@ -21,12 +21,9 @@ import { apiClient } from "@/lib/apiClient";
 import { artworkSrc } from "@/lib/artwork";
 import { apiError } from "@/lib/problem";
 
-type HistoryItem =
-	components["schemas"]["beam_server.services.playback.HistoryItem"];
-type MediaMetadata =
-	components["schemas"]["beam_server.models.media.MediaMetadata"];
-type ShowMetadata =
-	components["schemas"]["beam_server.models.media.show.ShowMetadata"];
+type HistoryItem = components["schemas"]["HistoryItem"];
+type MediaMetadata = components["schemas"]["MediaMetadata"];
+type ShowMetadata = components["schemas"]["ShowMetadata"];
 
 /** Matches the server's default page size for `GET /v1/history`. */
 const PAGE_SIZE = 50;

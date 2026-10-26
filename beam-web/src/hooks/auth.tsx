@@ -10,8 +10,7 @@ import type { components } from "@/api.gen";
 import { env } from "@/env";
 import { apiClient } from "@/lib/apiClient";
 
-export type User =
-	components["schemas"]["beam_auth.server.oidc_routes.MeResponse"];
+export type User = components["schemas"]["CurrentUser"];
 
 export interface AuthContextType {
 	user: User | null;

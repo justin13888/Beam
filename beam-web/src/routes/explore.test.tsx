@@ -10,10 +10,8 @@ import { renderRoute, waitForRouter } from "@/test/harness";
 import { recordRequests } from "@/test/requests";
 import { server } from "@/test/server";
 
-type MediaConnection =
-	components["schemas"]["beam_server.services.metadata.MediaConnection"];
-type MediaEdge =
-	components["schemas"]["beam_server.services.metadata.MediaEdge"];
+type MediaConnection = components["schemas"]["MediaConnection"];
+type MediaEdge = components["schemas"]["MediaEdge"];
 
 function movieEdge(id: string, title: string, cursor: string): MediaEdge {
 	return {

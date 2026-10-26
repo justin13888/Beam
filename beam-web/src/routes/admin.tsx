@@ -34,13 +34,10 @@ import {
 	usePlaybackTelemetry,
 } from "../hooks/usePlaybackTelemetry";
 
-type AdminLogEntry =
-	components["schemas"]["beam_server.models.admin.AdminLogEntryDto"];
-type AdminUser = components["schemas"]["beam_server.models.admin.AdminUserDto"];
-type AdminStatus =
-	components["schemas"]["beam_server.models.admin.AdminStatusResponse"];
-type RecentScan =
-	components["schemas"]["beam_server.models.admin.RecentScanDto"];
+type AdminLogEntry = components["schemas"]["AdminLogEntry"];
+type AdminUser = components["schemas"]["AdminUser"];
+type AdminStatus = components["schemas"]["AdminStatus"];
+type RecentScan = components["schemas"]["RecentScan"];
 
 const PAGE_SIZE = 50;
 

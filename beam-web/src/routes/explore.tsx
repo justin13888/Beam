@@ -19,10 +19,8 @@ import { apiClient } from "@/lib/apiClient";
 import { artworkSrc } from "@/lib/artwork";
 import { apiError } from "@/lib/problem";
 
-type MediaTypeFilter =
-	components["schemas"]["beam_server.services.metadata.MediaTypeFilter"];
-type SortOrder =
-	components["schemas"]["beam_server.services.metadata.SortOrder"];
+type MediaTypeFilter = components["schemas"]["TitleKind"];
+type SortOrder = components["schemas"]["SortOrder"];
 
 /** The subset of the API's `sort_by` fields exposed as explore controls. */
 const SORT_BY_OPTIONS = ["title", "year", "rating"] as const;

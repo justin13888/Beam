@@ -17,10 +17,8 @@ vi.mock("../hooks/useAdminEventStream", () => ({
 	useAdminEventStream: () => ({ events: [], connected: false }),
 }));
 
-type AdminLogEntry =
-	components["schemas"]["beam_server.models.admin.AdminLogEntryDto"];
-type AdminStatus =
-	components["schemas"]["beam_server.models.admin.AdminStatusResponse"];
+type AdminLogEntry = components["schemas"]["AdminLogEntry"];
+type AdminStatus = components["schemas"]["AdminStatus"];
 
 /** The operator running these tests. Their own row must not offer a disable. */
 const operator = factory.user({

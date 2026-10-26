@@ -22,7 +22,7 @@ import { apiClient, asConnection } from "@/lib/apiClient";
 import { apiError } from "@/lib/problem";
 import { RouteError } from "../components/RouteError";
 
-type Library = components["schemas"]["beam_server.models.library.Library"];
+type Library = components["schemas"]["Library"];
 
 // `/libraries/` -- an index route, not a layout.
 //

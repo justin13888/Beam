@@ -15,8 +15,7 @@ import { useAuth } from "@/hooks/auth";
 import { apiClient } from "@/lib/apiClient";
 import { apiError } from "@/lib/problem";
 
-type Session =
-	components["schemas"]["beam_auth.server.oidc_routes.SessionSummary"];
+type Session = components["schemas"]["SessionSummary"];
 
 export const Route = createFileRoute("/profile")({
 	beforeLoad: ({ context, location }) => {

@@ -19,29 +19,27 @@ export const BASE_URL = "http://localhost:8000";
 export const mockUser = factory.user();
 
 /** An empty, well-formed page of media. */
-const emptyMediaConnection: Schemas["beam_server.services.metadata.MediaConnection"] =
-	{
-		edges: [],
-		page_info: {
-			has_next_page: false,
-			has_previous_page: false,
-			start_cursor: null,
-			end_cursor: null,
-		},
-	};
+const emptyMediaConnection: Schemas["MediaConnection"] = {
+	edges: [],
+	page_info: {
+		has_next_page: false,
+		has_previous_page: false,
+		start_cursor: null,
+		end_cursor: null,
+	},
+};
 
-const emptyHistory: Schemas["beam_server.routes.playback.HistoryResponse"] = {
+const emptyHistory: Schemas["HistoryConnection"] = {
 	items: [],
 	total: 0,
 };
 
-const emptyAdminUsers: Schemas["beam_server.models.admin.AdminUserListResponse"] =
-	{
-		items: [],
-		total: 0,
-	};
+const emptyAdminUsers: Schemas["AdminUserConnection"] = {
+	items: [],
+	total: 0,
+};
 
-const adminStatus: Schemas["beam_server.models.admin.AdminStatusResponse"] = {
+const adminStatus: Schemas["AdminStatus"] = {
 	uptime_secs: 3600,
 	version: "0.1.0",
 	counts: { users: 1, libraries: 1, files: 0 },
@@ -61,9 +59,7 @@ export const handlers = [
 		() => new HttpResponse(null, { status: 200 }),
 	),
 	http.get(`${BASE_URL}/v1/sessions`, () =>
-		HttpResponse.json<Schemas["beam_auth.server.oidc_routes.SessionSummary"][]>(
-			[],
-		),
+		HttpResponse.json<Schemas["SessionSummary"][]>([]),
 	),
 	http.delete(
 		`${BASE_URL}/v1/sessions/:id`,
@@ -78,38 +74,28 @@ export const handlers = [
 		problem(404, "Not found", "#media-not-found"),
 	),
 	http.get(`${BASE_URL}/v1/media/:id/sources`, () =>
-		HttpResponse.json<Schemas["beam_server.models.media.source.MediaSource"][]>(
-			[],
-		),
+		HttpResponse.json<Schemas["MediaSource"][]>([]),
 	),
 	http.get(`${BASE_URL}/v1/genres`, () =>
-		HttpResponse.json<Schemas["beam_server.routes.genres.GenreListResponse"]>({
+		HttpResponse.json<Schemas["GenreConnection"]>({
 			genres: [],
 		}),
 	),
 
 	// ── libraries ────────────────────────────────────────────────────────
 	http.get(`${BASE_URL}/v1/libraries`, () =>
-		HttpResponse.json(
-			factory.connection<Schemas["beam_server.models.library.Library"]>([]),
-		),
+		HttpResponse.json(factory.connection<Schemas["Library"]>([])),
 	),
 	http.get(`${BASE_URL}/v1/libraries/:id`, () =>
 		problem(404, "No library has that id", "#library-not-found"),
 	),
 	http.get(`${BASE_URL}/v1/libraries/:id/files`, () =>
-		HttpResponse.json(
-			factory.connection<
-				Schemas["beam_server.models.library.file.LibraryFile"]
-			>([]),
-		),
+		HttpResponse.json(factory.connection<Schemas["LibraryFile"]>([])),
 	),
 
 	// ── playback ─────────────────────────────────────────────────────────
 	http.get(`${BASE_URL}/v1/continue-watching`, () =>
-		HttpResponse.json<
-			Schemas["beam_server.services.playback.ContinueWatchingItem"][]
-		>([]),
+		HttpResponse.json<Schemas["ContinueWatchingItem"][]>([]),
 	),
 	http.get(`${BASE_URL}/v1/history`, () => HttpResponse.json(emptyHistory)),
 	http.put(
@@ -125,24 +111,20 @@ export const handlers = [
 		HttpResponse.json(factory.adminUser()),
 	),
 	http.get(`${BASE_URL}/v1/admin/logs`, () =>
-		HttpResponse.json<Schemas["beam_server.models.admin.AdminLogEntryDto"][]>(
-			[],
-		),
+		HttpResponse.json<Schemas["AdminLogEntry"][]>([]),
 	),
 	http.get(`${BASE_URL}/v1/admin/logs/count`, () =>
-		HttpResponse.json<
-			Schemas["beam_server.models.admin.AdminLogCountResponse"]
-		>({ count: 0 }),
+		HttpResponse.json<Schemas["AdminLogCountResponse"]>({ count: 0 }),
 	),
 	http.get(`${BASE_URL}/v1/admin/status`, () => HttpResponse.json(adminStatus)),
 	http.get(`${BASE_URL}/v1/admin/events`, () =>
-		HttpResponse.json<Schemas["beam_server.models.admin.AdminEventDto"][]>([]),
+		HttpResponse.json<Schemas["AdminEvent"][]>([]),
 	),
 	http.post(`${BASE_URL}/v1/admin/libraries`, () =>
 		HttpResponse.json(factory.library(), { status: 201 }),
 	),
 	http.post(`${BASE_URL}/v1/admin/libraries/:id/scan`, () =>
-		HttpResponse.json<Schemas["beam_server.models.admin.ScanLibraryResponse"]>({
+		HttpResponse.json<Schemas["ScanJob"]>({
 			added: 0,
 		}),
 	),

@@ -27,12 +27,9 @@ import { apiClient, asConnection } from "@/lib/apiClient";
 import { apiError } from "@/lib/problem";
 import { RouteError } from "../components/RouteError";
 
-type LibraryFile =
-	components["schemas"]["beam_server.models.library.file.LibraryFile"];
-type FileIndexStatus =
-	components["schemas"]["beam_server.models.library.file.FileIndexStatus"];
-type FileContentType =
-	components["schemas"]["beam_server.models.library.file.FileContentType"];
+type LibraryFile = components["schemas"]["LibraryFile"];
+type FileIndexStatus = components["schemas"]["FileIndexStatus"];
+type FileContentType = components["schemas"]["FileContentType"];
 
 export const Route = createFileRoute("/libraries/$id")({
 	errorComponent: RouteError,
