@@ -634,8 +634,13 @@ pub struct AdminStatus {
     pub counts: AdminStatusCounts,
     pub enrichment: EnrichmentQueueCounts,
     /// Whether each metadata provider is configured (FR-307): a title only
-    /// an unconfigured provider could match stays un-enriched.
+    /// an unconfigured provider could match stays un-enriched. TMDB and
+    /// AniList only, the providers `/v1` was frozen with; read
+    /// `metadata_providers` for every provider.
     pub enrichment_providers: Vec<crate::models::enrichment::EnrichmentProviderStatus>,
+    /// Whether each metadata provider this server has is configured
+    /// (FR-307), TheTVDB included, in the order enrichment asks them.
+    pub metadata_providers: Vec<crate::models::enrichment::MetadataProviderStatus>,
     /// Most recent `library_scan` admin log entries, newest first.
     pub recent_scans: Vec<RecentScan>,
     /// How the filesystem watcher observes each library.

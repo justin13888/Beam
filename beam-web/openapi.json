@@ -19441,7 +19441,7 @@
           "tmdb",
           "anilist"
         ],
-        "description": "A metadata provider enrichment can use."
+        "description": "A metadata provider enrichment can use.\n\nClosed at the providers `/v1` was frozen with (ADR-0021): a value added\nto an enumeration a response carries breaks every client that decodes\nit strictly. A provider added since -- TheTVDB (issue #267) -- is\nreported in the admin status's `metadata_providers` alone."
       },
       "EnrichmentProviderState": {
         "type": "string",
@@ -19474,6 +19474,30 @@
           "state"
         ],
         "description": "One provider's configuration, for the admin status (FR-307)."
+      },
+      "MetadataProviderStatus": {
+        "properties": {
+          "provider": {
+            "type": "string",
+            "description": "The provider's name, as a match names it -- `tmdb` in `tmdb:603`:\n`tmdb`, `anilist` or `tvdb` today. A string, not an enumeration, so\na provider a later release adds is no breaking change; show one you\ndo not recognise by its name."
+          },
+          "state": {
+            "$ref": "#/components/schemas/EnrichmentProviderState"
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What to do about it, when it is not configured or unavailable."
+          }
+        },
+        "type": "object",
+        "required": [
+          "provider",
+          "state"
+        ],
+        "description": "One metadata provider's configuration, for the admin status (FR-307):\nevery provider this server has, where [`EnrichmentProviderStatus`] has\nthe frozen set alone."
       },
       "RecentScan": {
         "properties": {
@@ -19601,7 +19625,14 @@
               "$ref": "#/components/schemas/EnrichmentProviderStatus"
             },
             "type": "array",
-            "description": "Whether each metadata provider is configured (FR-307): a title only\nan unconfigured provider could match stays un-enriched."
+            "description": "Whether each metadata provider is configured (FR-307): a title only\nan unconfigured provider could match stays un-enriched. TMDB and\nAniList only, the providers `/v1` was frozen with; read\n`metadata_providers` for every provider."
+          },
+          "metadata_providers": {
+            "items": {
+              "$ref": "#/components/schemas/MetadataProviderStatus"
+            },
+            "type": "array",
+            "description": "Whether each metadata provider this server has is configured\n(FR-307), TheTVDB included, in the order enrichment asks them."
           },
           "recent_scans": {
             "items": {
@@ -19622,6 +19653,7 @@
           "counts",
           "enrichment",
           "enrichment_providers",
+          "metadata_providers",
           "recent_scans",
           "watcher"
         ]

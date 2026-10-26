@@ -19,6 +19,7 @@ use kynos::response::stream::sse::{Event, KeepAlive, Sse};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::error::RecvError;
 
+use crate::models::enrichment::MetadataProviderStatus;
 use crate::models::{
     AdminEvent, AdminEventConnection, AdminLogConnection, AdminLogEntry, AdminStatus,
     AdminStatusCounts, AdminUser, AdminUserConnection, CreateLibraryRequest, EnrichmentQueueCounts,
@@ -879,6 +880,10 @@ pub async fn get_admin_status(
         .into_iter()
         .map(|library| library.id);
     let watcher = WatcherStatus::from_snapshot(state.services.watch_status.snapshot(), library_ids);
+    let metadata_providers = crate::state::provider_statuses(
+        &state.config,
+        &state.services.enrichment_control.available_providers(),
+    );
 
     Ok(Json(AdminStatus {
         uptime_secs: state.uptime_secs(),
@@ -889,10 +894,11 @@ pub async fn get_admin_status(
             files,
         },
         enrichment: EnrichmentQueueCounts::from(enrichment),
-        enrichment_providers: crate::state::provider_statuses(
-            &state.config,
-            &state.services.enrichment_control.available_providers(),
-        ),
+        enrichment_providers: metadata_providers
+            .iter()
+            .filter_map(MetadataProviderStatus::frozen)
+            .collect(),
+        metadata_providers,
         recent_scans: recent_scans.into_iter().map(RecentScan::from).collect(),
         watcher,
     }))
