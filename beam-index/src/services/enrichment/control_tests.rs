@@ -18,6 +18,7 @@ use beam_domain::providers::enrichment::{
 };
 use beam_domain::repositories::AdminLogRepository;
 use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
+use beam_domain::repositories::collection::in_memory::InMemoryCollectionRepository;
 use beam_domain::repositories::enrichment::in_memory::InMemoryEnrichmentStateRepository;
 use beam_domain::repositories::genre::in_memory::InMemoryGenreRepository;
 use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
@@ -157,6 +158,7 @@ impl Harness {
             self.shows.clone(),
             Arc::new(InMemoryGenreRepository::default()),
             Arc::new(InMemoryPersonRepository::default()),
+            Arc::new(InMemoryCollectionRepository::default()),
             self.provider.clone(),
             Arc::new(LocalAdminLogService::new(Arc::new(
                 InMemoryAdminLogRepository::default(),
@@ -531,6 +533,7 @@ async fn locks_are_set_whole_and_the_sweep_leaves_them_alone() {
         h.shows.clone(),
         genres.clone(),
         Arc::new(InMemoryPersonRepository::default()),
+        Arc::new(InMemoryCollectionRepository::default()),
         h.provider.clone(),
         Arc::new(LocalAdminLogService::new(Arc::new(
             InMemoryAdminLogRepository::default(),
@@ -591,6 +594,7 @@ async fn a_shows_locks_hold_through_the_sweep() {
         h.shows.clone(),
         genres.clone(),
         Arc::new(InMemoryPersonRepository::default()),
+        Arc::new(InMemoryCollectionRepository::default()),
         h.provider.clone(),
         Arc::new(LocalAdminLogService::new(Arc::new(
             InMemoryAdminLogRepository::default(),

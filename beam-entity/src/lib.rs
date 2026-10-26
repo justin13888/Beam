@@ -4,6 +4,8 @@
 
 pub mod admin_log;
 pub mod applied_nfo;
+pub mod collection;
+pub mod collection_movie;
 pub mod credit;
 pub mod device_auth;
 pub mod episode;
@@ -28,10 +30,13 @@ pub mod show;
 pub mod show_genre;
 pub mod sidecar_subtitle;
 pub mod user;
+pub mod user_list_entry;
 pub mod watch_state;
 
 pub use admin_log::Entity as AdminLog;
 pub use applied_nfo::Entity as AppliedNfo;
+pub use collection::Entity as Collection;
+pub use collection_movie::Entity as CollectionMovie;
 pub use credit::Entity as Credit;
 pub use device_auth::Entity as DeviceAuth;
 pub use episode::Entity as Episode;
@@ -56,4 +61,5 @@ pub use show::Entity as Show;
 pub use show_genre::Entity as ShowGenre;
 pub use sidecar_subtitle::Entity as SidecarSubtitle;
 pub use user::Entity as User;
+pub use user_list_entry::Entity as UserListEntry;
 pub use watch_state::Entity as WatchState;

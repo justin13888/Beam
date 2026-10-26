@@ -197,6 +197,39 @@ pub mod fixture {
         fn shows(&self) -> &dyn crate::repositories::ShowRepository;
     }
 
+    /// Everything the [`crate::user_list_repository_contract`] suite needs
+    /// from a backing store. Identifiers are allocated by the fixture, as for
+    /// [`WatchStateFixture`], because a real Postgres enforces the user,
+    /// movie and show foreign keys.
+    #[async_trait::async_trait]
+    pub trait UserListFixture: Send + Sync {
+        /// The repository under contract.
+        fn repo(&self) -> &dyn crate::repositories::UserListRepository;
+
+        /// The clock the repository stamps `added_at` from.
+        fn clock(&self) -> &TestClock;
+
+        /// A user that exists as far as the backing store is concerned.
+        async fn new_user(&self) -> Uuid;
+
+        /// A movie's id.
+        async fn new_movie(&self) -> Uuid;
+
+        /// A show's id.
+        async fn new_show(&self) -> Uuid;
+    }
+
+    /// Everything the [`crate::collection_repository_contract`] suite needs:
+    /// the repository under contract and the movie repository over the same
+    /// store, since a real Postgres holds a membership to its movie by a
+    /// foreign key. Listing and counting are global, so a Postgres fixture
+    /// must give each test a store of its own.
+    pub trait CollectionRepositoryFixture: Send + Sync {
+        /// The repository under contract, empty.
+        fn repo(&self) -> &dyn crate::repositories::CollectionRepository;
+        fn movies(&self) -> &dyn crate::repositories::MovieRepository;
+    }
+
     /// Everything the [`crate::playback_telemetry_repository_contract`] suite
     /// needs from a backing store. The counters reference nothing, so the
     /// repository is all there is -- but `summarize` and `prune_before` are
@@ -4560,6 +4593,7 @@ macro_rules! movie_repository_contract {
                 rating: Some(8.2),
                 genres: Vec::new(),
                 credits: None,
+                collection: None,
             };
             // Each field locked alone: that one keeps the value it had before
             // enrichment, and every other takes the provider's.
@@ -7631,6 +7665,416 @@ macro_rules! enrichment_state_repository_contract {
                 seen.extend(rows.iter().map(|r| r.id));
             }
             assert_eq!(seen, expected);
+        }
+    };
+}
+
+/// Behavioural contract for [`crate::repositories::UserListRepository`]: a
+/// title is on a list once, lists and users are kept apart, a list reads
+/// newest addition first a page at a time, and a title merge carries its
+/// entries (issue #262).
+///
+/// `$setup` names an `async fn() -> impl UserListFixture`.
+#[macro_export]
+macro_rules! user_list_repository_contract {
+    ($setup:path) => {
+        use ::std::time::Duration;
+        use $crate::models::user_list::{UserList, UserListEntry, UserListPosition};
+        use $crate::models::watch_state::TitleRef;
+        use $crate::repositories::contract::fixture::UserListFixture as _;
+        use $crate::services::Clock as _;
+
+        fn titles(entries: &[UserListEntry]) -> Vec<TitleRef> {
+            entries.iter().map(|e| e.title).collect()
+        }
+
+        #[tokio::test]
+        async fn adding_a_title_twice_keeps_its_first_entry() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let user = fixture.new_user().await;
+            let movie = TitleRef::Movie(fixture.new_movie().await);
+
+            let first = repo.add(user, UserList::Watchlist, movie).await.unwrap();
+            assert_eq!(first.user_id, user);
+            assert_eq!(first.list, UserList::Watchlist);
+            assert_eq!(first.title, movie);
+            assert_eq!(first.added_at, fixture.clock().now());
+            fixture.clock().advance(Duration::from_secs(60));
+            let again = repo.add(user, UserList::Watchlist, movie).await.unwrap();
+
+            assert_eq!(again, first, "the same entry, added when it first was");
+            assert_eq!(repo.count(user, UserList::Watchlist).await.unwrap(), 1);
+        }
+
+        #[tokio::test]
+        async fn a_list_reads_newest_addition_first_a_page_at_a_time() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let user = fixture.new_user().await;
+            let mut added = Vec::new();
+            for i in 0..5 {
+                let title = if i % 2 == 0 {
+                    TitleRef::Movie(fixture.new_movie().await)
+                } else {
+                    TitleRef::Show(fixture.new_show().await)
+                };
+                repo.add(user, UserList::Favourites, title).await.unwrap();
+                added.push(title);
+                fixture.clock().advance(Duration::from_secs(1));
+            }
+            added.reverse();
+
+            let first = repo
+                .find_page(user, UserList::Favourites, None, 2)
+                .await
+                .unwrap();
+            assert_eq!(titles(&first), added[..2]);
+            let after = first.last().map(UserListPosition::from);
+            let second = repo
+                .find_page(user, UserList::Favourites, after, 2)
+                .await
+                .unwrap();
+            assert_eq!(titles(&second), added[2..4]);
+            let after = second.last().map(UserListPosition::from);
+            let third = repo
+                .find_page(user, UserList::Favourites, after, 2)
+                .await
+                .unwrap();
+            assert_eq!(titles(&third), added[4..]);
+            assert_eq!(repo.count(user, UserList::Favourites).await.unwrap(), 5);
+        }
+
+        #[tokio::test]
+        async fn titles_added_in_one_instant_page_by_id_without_skipping_any() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let user = fixture.new_user().await;
+            let mut expected = Vec::new();
+            for _ in 0..4 {
+                let title = TitleRef::Movie(fixture.new_movie().await);
+                expected.push(repo.add(user, UserList::Watchlist, title).await.unwrap());
+            }
+            // Newest first is `(added_at, id)` descending; every `added_at`
+            // is the same, so the id decides.
+            expected.sort_by(|a, b| b.id.cmp(&a.id));
+
+            let mut seen = Vec::new();
+            let mut after = None;
+            loop {
+                let page = repo
+                    .find_page(user, UserList::Watchlist, after, 1)
+                    .await
+                    .unwrap();
+                let Some(last) = page.last() else {
+                    break;
+                };
+                after = Some(UserListPosition::from(last));
+                seen.extend(page);
+            }
+            assert_eq!(seen, expected);
+        }
+
+        #[tokio::test]
+        async fn lists_and_users_are_kept_apart() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let (alice, bob) = (fixture.new_user().await, fixture.new_user().await);
+            let movie = TitleRef::Movie(fixture.new_movie().await);
+            let series = TitleRef::Show(fixture.new_show().await);
+
+            repo.add(alice, UserList::Watchlist, movie).await.unwrap();
+            repo.add(alice, UserList::Favourites, series).await.unwrap();
+            repo.add(bob, UserList::Favourites, movie).await.unwrap();
+
+            let page = |user, list| async move {
+                titles(&repo.find_page(user, list, None, 10).await.unwrap())
+            };
+            assert_eq!(page(alice, UserList::Watchlist).await, [movie]);
+            assert_eq!(page(alice, UserList::Favourites).await, [series]);
+            assert_eq!(page(bob, UserList::Favourites).await, [movie]);
+            assert!(page(bob, UserList::Watchlist).await.is_empty());
+            assert_eq!(repo.count(bob, UserList::Watchlist).await.unwrap(), 0);
+        }
+
+        #[tokio::test]
+        async fn a_title_reports_each_list_it_is_on() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let user = fixture.new_user().await;
+            let movie = TitleRef::Movie(fixture.new_movie().await);
+            let series = TitleRef::Show(fixture.new_show().await);
+
+            assert!(repo.lists_of(user, movie).await.unwrap().is_empty());
+            repo.add(user, UserList::Favourites, movie).await.unwrap();
+            repo.add(user, UserList::Watchlist, movie).await.unwrap();
+            repo.add(user, UserList::Watchlist, series).await.unwrap();
+
+            assert_eq!(
+                repo.lists_of(user, movie).await.unwrap(),
+                [UserList::Watchlist, UserList::Favourites]
+            );
+            assert_eq!(
+                repo.lists_of(user, series).await.unwrap(),
+                [UserList::Watchlist]
+            );
+            let stranger = fixture.new_user().await;
+            assert!(repo.lists_of(stranger, movie).await.unwrap().is_empty());
+        }
+
+        #[tokio::test]
+        async fn removing_takes_the_title_off_that_list_only() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let user = fixture.new_user().await;
+            let movie = TitleRef::Movie(fixture.new_movie().await);
+            repo.add(user, UserList::Watchlist, movie).await.unwrap();
+            repo.add(user, UserList::Favourites, movie).await.unwrap();
+
+            assert!(repo.remove(user, UserList::Watchlist, movie).await.unwrap());
+            assert!(
+                !repo.remove(user, UserList::Watchlist, movie).await.unwrap(),
+                "a title no longer on the list is no change"
+            );
+            assert_eq!(
+                repo.lists_of(user, movie).await.unwrap(),
+                [UserList::Favourites]
+            );
+            assert_eq!(repo.count(user, UserList::Watchlist).await.unwrap(), 0);
+        }
+
+        #[tokio::test]
+        async fn a_merge_carries_entries_and_keeps_the_earlier_addition() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let (alice, bob) = (fixture.new_user().await, fixture.new_user().await);
+            let loser = TitleRef::Movie(fixture.new_movie().await);
+            let survivor = TitleRef::Movie(fixture.new_movie().await);
+
+            let alices_first = repo.add(alice, UserList::Watchlist, loser).await.unwrap();
+            fixture.clock().advance(Duration::from_secs(10));
+            repo.add(alice, UserList::Watchlist, survivor)
+                .await
+                .unwrap();
+            repo.add(bob, UserList::Favourites, loser).await.unwrap();
+
+            repo.carry(loser, survivor).await.unwrap();
+
+            assert!(repo.lists_of(alice, loser).await.unwrap().is_empty());
+            assert!(repo.lists_of(bob, loser).await.unwrap().is_empty());
+            let alices = repo
+                .find_page(alice, UserList::Watchlist, None, 10)
+                .await
+                .unwrap();
+            assert_eq!(titles(&alices), [survivor], "one entry, not two");
+            assert_eq!(
+                alices[0].added_at, alices_first.added_at,
+                "added when the earlier of the two was"
+            );
+            assert_eq!(
+                repo.lists_of(bob, survivor).await.unwrap(),
+                [UserList::Favourites]
+            );
+        }
+
+        #[tokio::test]
+        async fn a_merge_is_between_two_titles_of_one_kind() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let user = fixture.new_user().await;
+            let movie = TitleRef::Movie(fixture.new_movie().await);
+            let series = TitleRef::Show(fixture.new_show().await);
+            repo.add(user, UserList::Watchlist, movie).await.unwrap();
+
+            assert!(repo.carry(movie, series).await.is_err());
+            repo.carry(movie, movie).await.unwrap();
+            assert_eq!(
+                repo.lists_of(user, movie).await.unwrap(),
+                [UserList::Watchlist],
+                "neither a refused carry nor one onto itself moves anything"
+            );
+
+            let other = TitleRef::Show(fixture.new_show().await);
+            repo.add(user, UserList::Favourites, series).await.unwrap();
+            repo.carry(series, other).await.unwrap();
+            assert_eq!(
+                repo.lists_of(user, other).await.unwrap(),
+                [UserList::Favourites]
+            );
+        }
+    };
+}
+
+/// Behavioural contract for [`crate::repositories::CollectionRepository`]: a
+/// collection is one row per provider id however many movies are in it, a
+/// movie is in at most one, and the listing holds only collections some
+/// movie is in, by name, a page at a time (issue #262).
+///
+/// `$setup` names an `async fn() -> impl CollectionRepositoryFixture`.
+#[macro_export]
+macro_rules! collection_repository_contract {
+    ($setup:path) => {
+        use ::uuid::Uuid;
+        use $crate::models::movie::CreateMovie;
+        use $crate::providers::enrichment::{CollectionEnrichment, ExternalMediaRef};
+        use $crate::repositories::contract::fixture::CollectionRepositoryFixture;
+
+        async fn new_movie(fixture: &impl CollectionRepositoryFixture) -> Uuid {
+            fixture
+                .movies()
+                .find_or_create_by_identity(CreateMovie::new(
+                    format!("collected movie {}", Uuid::new_v4()),
+                    None,
+                    None,
+                ))
+                .await
+                .unwrap()
+                .id
+        }
+
+        fn collection(native: &str, name: &str) -> CollectionEnrichment {
+            CollectionEnrichment {
+                collection_ref: ExternalMediaRef::new("tmdb", native),
+                name: name.to_string(),
+                poster_url: Some(format!("https://image.example/{native}-poster.jpg")),
+                backdrop_url: None,
+            }
+        }
+
+        fn sorted(mut ids: Vec<Uuid>) -> Vec<Uuid> {
+            ids.sort();
+            ids
+        }
+
+        #[tokio::test]
+        async fn movies_reporting_one_collection_share_one_row() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let (first, second) = (new_movie(&fixture).await, new_movie(&fixture).await);
+            repo.set_movie_collection(first, Some(&collection("2344", "The Matrix Collection")))
+                .await
+                .unwrap();
+            repo.set_movie_collection(second, Some(&collection("2344", "The Matrix Collection")))
+                .await
+                .unwrap();
+
+            let of_first = repo
+                .movie_collection(first)
+                .await
+                .unwrap()
+                .expect("the first movie's collection");
+            let of_second = repo
+                .movie_collection(second)
+                .await
+                .unwrap()
+                .expect("the second movie's collection");
+            assert_eq!(of_first, of_second);
+            assert_eq!(of_first.external_ref, "tmdb:2344");
+            assert_eq!(of_first.name, "The Matrix Collection");
+            assert_eq!(
+                of_first.poster_url.as_deref(),
+                Some("https://image.example/2344-poster.jpg")
+            );
+            assert_eq!(
+                repo.find_by_id(of_first.id).await.unwrap(),
+                Some(of_first.clone())
+            );
+            assert_eq!(
+                sorted(repo.movie_ids(of_first.id).await.unwrap()),
+                sorted(vec![first, second])
+            );
+            assert!(repo.find_by_id(Uuid::new_v4()).await.unwrap().is_none());
+            assert!(repo.movie_ids(Uuid::new_v4()).await.unwrap().is_empty());
+        }
+
+        #[tokio::test]
+        async fn a_later_report_refreshes_the_collection_and_moves_the_movie() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let (movie, other) = (new_movie(&fixture).await, new_movie(&fixture).await);
+            repo.set_movie_collection(movie, Some(&collection("1", "Old Name")))
+                .await
+                .unwrap();
+            repo.set_movie_collection(other, Some(&collection("1", "Old Name")))
+                .await
+                .unwrap();
+            let original = repo.movie_collection(movie).await.unwrap().unwrap();
+
+            let renamed = CollectionEnrichment {
+                backdrop_url: Some("https://image.example/1-backdrop.jpg".to_string()),
+                ..collection("1", "New Name")
+            };
+            repo.set_movie_collection(other, Some(&renamed))
+                .await
+                .unwrap();
+            let refreshed = repo.movie_collection(movie).await.unwrap().unwrap();
+            assert_eq!(refreshed.id, original.id, "one provider id, one row");
+            assert_eq!(refreshed.name, "New Name");
+            assert_eq!(
+                refreshed.backdrop_url.as_deref(),
+                Some("https://image.example/1-backdrop.jpg")
+            );
+
+            repo.set_movie_collection(movie, Some(&collection("2", "Another")))
+                .await
+                .unwrap();
+            assert_eq!(
+                repo.movie_collection(movie).await.unwrap().unwrap().name,
+                "Another",
+                "a movie is in one collection at a time"
+            );
+            assert_eq!(repo.movie_ids(original.id).await.unwrap(), [other]);
+
+            repo.set_movie_collection(movie, None).await.unwrap();
+            assert!(repo.movie_collection(movie).await.unwrap().is_none());
+            repo.set_movie_collection(movie, None).await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn the_listing_holds_collections_with_movies_by_name_a_page_at_a_time() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            for (native, name) in [
+                ("10", "zeta Saga"),
+                ("11", "Alien Collection"),
+                ("12", "Mad Max Collection"),
+                // Folding only ASCII case puts `É` (U+00C9) after `z`.
+                ("13", "Évasion"),
+            ] {
+                let movie = new_movie(&fixture).await;
+                repo.set_movie_collection(movie, Some(&collection(native, name)))
+                    .await
+                    .unwrap();
+            }
+            let second_alien = new_movie(&fixture).await;
+            repo.set_movie_collection(second_alien, Some(&collection("11", "Alien Collection")))
+                .await
+                .unwrap();
+            // A collection its only movie left is not listed.
+            let leaver = new_movie(&fixture).await;
+            repo.set_movie_collection(leaver, Some(&collection("14", "Abandoned")))
+                .await
+                .unwrap();
+            repo.set_movie_collection(leaver, None).await.unwrap();
+
+            let names = |page: Vec<$crate::models::collection::CollectionSummary>| {
+                page.into_iter()
+                    .map(|s| (s.collection.name, s.movie_count))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                names(repo.list(2, 0).await.unwrap()),
+                [
+                    ("Alien Collection".to_string(), 2),
+                    ("Mad Max Collection".to_string(), 1)
+                ]
+            );
+            assert_eq!(
+                names(repo.list(2, 2).await.unwrap()),
+                [("zeta Saga".to_string(), 1), ("Évasion".to_string(), 1)]
+            );
+            assert!(repo.list(2, 4).await.unwrap().is_empty());
+            assert_eq!(repo.count().await.unwrap(), 4);
         }
     };
 }

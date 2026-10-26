@@ -33,6 +33,13 @@ pub struct UserTitleState {
     /// The source the viewer last played, to resume on it. Absent when none
     /// was played, or its file has since been removed.
     pub last_file_id: Option<Uuid>,
+    /// Whether the movie is on the viewer's watchlist. Present on a movie's
+    /// detail; absent on an episode, which no list holds, and wherever else
+    /// the state is reported.
+    pub in_watchlist: Option<bool>,
+    /// Whether the movie is among the viewer's favourites. Present exactly
+    /// where `in_watchlist` is.
+    pub in_favourites: Option<bool>,
 }
 
 impl From<beam_domain::models::WatchState> for UserTitleState {
@@ -56,6 +63,8 @@ impl From<beam_domain::models::WatchState> for UserTitleState {
             play_count,
             last_played_at: Some(last_played_at),
             last_file_id,
+            in_watchlist: None,
+            in_favourites: None,
         }
     }
 }
@@ -69,6 +78,12 @@ pub struct UserGroupState {
     pub watched_episode_count: u32,
     /// How many episodes there are.
     pub episode_count: u32,
+    /// Whether the show is on the viewer's watchlist. Present on a show's
+    /// detail; absent on a season, which no list holds.
+    pub in_watchlist: Option<bool>,
+    /// Whether the show is among the viewer's favourites. Present exactly
+    /// where `in_watchlist` is.
+    pub in_favourites: Option<bool>,
 }
 
 impl UserGroupState {
@@ -85,6 +100,8 @@ impl UserGroupState {
             played: total > 0 && watched == total,
             watched_episode_count: watched,
             episode_count: total,
+            in_watchlist: None,
+            in_favourites: None,
         }
     }
 }

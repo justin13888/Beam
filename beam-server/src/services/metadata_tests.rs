@@ -137,6 +137,7 @@ mod tests {
             people: Arc::new(
                 beam_domain::repositories::person::in_memory::InMemoryPersonRepository::default(),
             ),
+            collections: Arc::new(beam_domain::repositories::collection::in_memory::InMemoryCollectionRepository::default()),
         })
     }
 
@@ -1790,6 +1791,7 @@ mod browse {
                 catalog,
                 genres: self.genres.clone(),
                 people: self.people.clone(),
+                collections: Arc::new(beam_domain::repositories::collection::in_memory::InMemoryCollectionRepository::default()),
             })
         }
 
@@ -2262,6 +2264,7 @@ mod browse {
                 catalog: Arc::new(MockCatalogRepository::new()),
                 genres: library.genres.clone(),
                 people: library.people.clone(),
+                collections: Arc::new(beam_domain::repositories::collection::in_memory::InMemoryCollectionRepository::default()),
             })
         };
         let id = Uuid::new_v4();
@@ -2400,6 +2403,7 @@ mod browse {
                     beam_domain::repositories::person::in_memory::InMemoryPersonRepository::default(
                     ),
                 ),
+                collections: Arc::new(beam_domain::repositories::collection::in_memory::InMemoryCollectionRepository::default()),
             })
             .search_media(request(None, None))
             .await;

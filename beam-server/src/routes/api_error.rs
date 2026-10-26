@@ -807,6 +807,116 @@ pub enum HistoryError {
     Internal(String),
 }
 
+/// `PUT` and `DELETE` on `/v1/watchlist/{id}` and `/v1/favourites/{id}`
+/// (issue #262): an id that names nothing, a season or an episode, or a store
+/// that failed.
+#[derive(Debug, thiserror::Error, ApiError)]
+pub enum ListMembershipError {
+    /// The id names a season or an episode: only a movie or a show is put on
+    /// a list.
+    #[error("{0}")]
+    #[problem(
+        status = 400,
+        type = "https://beam.justinchung.net/reference/errors/#not-a-title",
+        title = "Not a movie or a show"
+    )]
+    NotATitle(String),
+    #[error("{0}")]
+    #[problem(
+        status = 404,
+        type = "https://beam.justinchung.net/reference/errors/#media-not-found",
+        title = "Media not found"
+    )]
+    MediaNotFound(String),
+    #[error("{0}")]
+    #[problem(
+        status = 500,
+        type = "https://beam.justinchung.net/reference/errors/#internal",
+        title = "Internal server error"
+    )]
+    Internal(String),
+}
+
+/// `GET /v1/watchlist` and `GET /v1/favourites` (issue #262).
+#[derive(Debug, thiserror::Error, ApiError)]
+pub enum ListPageError {
+    /// `after` is not a cursor this list issued -- the other list's included.
+    #[error("{0}")]
+    #[problem(
+        status = 400,
+        type = "https://beam.justinchung.net/reference/errors/#invalid-cursor",
+        title = "Invalid cursor"
+    )]
+    InvalidCursor(String),
+    /// `first` is outside 1-100. Kynos refuses that from the query's schema
+    /// bounds first, as a `400` with `about:blank`, so this is the handler's
+    /// second guard and no request answers it.
+    #[error("{0}")]
+    #[problem(
+        status = 400,
+        type = "https://beam.justinchung.net/reference/errors/#invalid-pagination",
+        title = "Invalid pagination"
+    )]
+    InvalidPagination(String),
+    #[error("{0}")]
+    #[problem(
+        status = 500,
+        type = "https://beam.justinchung.net/reference/errors/#internal",
+        title = "Internal server error"
+    )]
+    Internal(String),
+}
+
+/// `GET /v1/collections` (issue #262). A store failure is a 500, never an
+/// empty page.
+#[derive(Debug, thiserror::Error, ApiError)]
+pub enum CollectionListError {
+    /// `after` is not a cursor the collection listing issued.
+    #[error("{0}")]
+    #[problem(
+        status = 400,
+        type = "https://beam.justinchung.net/reference/errors/#invalid-cursor",
+        title = "Invalid cursor"
+    )]
+    InvalidCursor(String),
+    /// `first` is outside 1-100: as on `ListPageError`, Kynos's query check
+    /// answers first.
+    #[error("{0}")]
+    #[problem(
+        status = 400,
+        type = "https://beam.justinchung.net/reference/errors/#invalid-pagination",
+        title = "Invalid pagination"
+    )]
+    InvalidPagination(String),
+    #[error("{0}")]
+    #[problem(
+        status = 500,
+        type = "https://beam.justinchung.net/reference/errors/#internal",
+        title = "Internal server error"
+    )]
+    Internal(String),
+}
+
+/// `GET /v1/collections/{id}` (issue #262): an id that names no collection
+/// any movie is in, or a store that failed.
+#[derive(Debug, thiserror::Error, ApiError)]
+pub enum CollectionLookupError {
+    #[error("{0}")]
+    #[problem(
+        status = 404,
+        type = "https://beam.justinchung.net/reference/errors/#collection-not-found",
+        title = "Collection not found"
+    )]
+    CollectionNotFound(String),
+    #[error("{0}")]
+    #[problem(
+        status = 500,
+        type = "https://beam.justinchung.net/reference/errors/#internal",
+        title = "Internal server error"
+    )]
+    Internal(String),
+}
+
 /// `GET /v1/admin/users` and `GET /v1/admin/logs`: the lists paged by an
 /// offset inside an opaque cursor (issue #190).
 #[derive(Debug, thiserror::Error, ApiError)]

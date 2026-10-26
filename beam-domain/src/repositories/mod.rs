@@ -1,6 +1,7 @@
 pub mod admin_log;
 pub mod applied_nfo;
 pub mod catalog;
+pub mod collection;
 // Shared behavioural contracts, instantiated over the in-memory doubles here and
 // over the SeaORM implementations in `beam-index` under `pg-integration`.
 // Not `cfg`-gated: the module contains only `macro_rules!` definitions, which
@@ -18,11 +19,13 @@ pub mod playback_telemetry;
 pub mod show;
 pub mod sidecar_subtitle;
 pub mod stream;
+pub mod user_list;
 pub mod watch_state;
 
 pub use admin_log::AdminLogRepository;
 pub use applied_nfo::AppliedNfoRepository;
 pub use catalog::CatalogRepository;
+pub use collection::CollectionRepository;
 pub use enrichment::EnrichmentStateRepository;
 pub use file::FileRepository;
 pub use genre::GenreRepository;
@@ -34,4 +37,5 @@ pub use playback_telemetry::PlaybackTelemetryRepository;
 pub use show::ShowRepository;
 pub use sidecar_subtitle::SidecarSubtitleRepository;
 pub use stream::MediaStreamRepository;
+pub use user_list::UserListRepository;
 pub use watch_state::WatchStateRepository;

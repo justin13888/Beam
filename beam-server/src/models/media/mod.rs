@@ -2,11 +2,13 @@ use kynos::Schema;
 use serde::Serialize;
 
 mod artwork;
+mod collection;
 mod movie;
 mod show;
 mod source;
 
 pub use artwork::*;
+pub use collection::*;
 pub use movie::*;
 pub use show::*;
 pub use source::*;

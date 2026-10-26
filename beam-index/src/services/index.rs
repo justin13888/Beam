@@ -38,12 +38,12 @@ use beam_domain::models::file::{
 };
 use beam_domain::models::movie::{CreateMovie, CreateMovieEntry, Movie, MovieEntry};
 use beam_domain::models::show::{CreateEpisode, CreateShow, Episode, Show};
-use beam_domain::models::watch_state::WatchTarget;
+use beam_domain::models::watch_state::{TitleRef, WatchTarget};
 use beam_domain::models::{PinSource, ProviderPin};
 use beam_domain::repositories::{
     AppliedNfoRepository, EnrichmentStateRepository, FileRepository, LibraryRepository,
     MediaStreamRepository, MovieRepository, ShowRepository, SidecarSubtitleRepository,
-    WatchStateRepository,
+    UserListRepository, WatchStateRepository,
 };
 use beam_domain::services::{Clock, IdGenerator, RealClock, UuidGenerator};
 use beam_domain::utils::classification::{Classification, ContainerTags, Hints, classify};
@@ -1285,6 +1285,9 @@ pub struct LocalIndexService {
     enrichment_repo: Option<Arc<dyn EnrichmentStateRepository>>,
     sidecar_repo: Option<Arc<dyn SidecarSubtitleRepository>>,
     applied_nfo_repo: Option<Arc<dyn AppliedNfoRepository>>,
+    /// Users' watchlists and favourites (issue #262), whose entries a title
+    /// merge carries onto the survivor. Unset, a merge carries none.
+    user_list_repo: Option<Arc<dyn UserListRepository>>,
     divergence_policy: DivergencePolicy,
     clock: Arc<dyn Clock>,
     id_generator: Arc<dyn IdGenerator>,
@@ -1334,6 +1337,7 @@ impl LocalIndexService {
             enrichment_repo: None,
             sidecar_repo: None,
             applied_nfo_repo: None,
+            user_list_repo: None,
             divergence_policy: DivergencePolicy::default(),
             clock: Arc::new(RealClock),
             id_generator: Arc::new(UuidGenerator),
@@ -1419,6 +1423,22 @@ impl LocalIndexService {
     pub fn with_sidecar_repo(mut self, repo: Arc<dyn SidecarSubtitleRepository>) -> Self {
         self.sidecar_repo = Some(repo);
         self
+    }
+
+    /// Wire up users' watchlists and favourites (issue #262): when set, a
+    /// title merge carries the retired title's entries onto the survivor
+    /// rather than letting them go with it.
+    pub fn with_user_list_repo(mut self, repo: Arc<dyn UserListRepository>) -> Self {
+        self.user_list_repo = Some(repo);
+        self
+    }
+
+    /// Carry users' list entries for `from` onto `to`, when lists are wired.
+    async fn carry_list_entries(&self, from: TitleRef, to: TitleRef) -> Result<(), DbErr> {
+        match &self.user_list_repo {
+            Some(lists) => lists.carry(from, to).await,
+            None => Ok(()),
+        }
     }
 
     /// Wire up what each NFO held when it was last applied (issue #184): when
@@ -3490,6 +3510,9 @@ impl LocalIndexService {
                     WatchTarget::Movie { movie_id: survivor },
                 )
                 .await?;
+            // So are their watchlists and favourites, for the same reason.
+            self.carry_list_entries(TitleRef::Movie(loser), TitleRef::Movie(survivor))
+                .await?;
             for entry in self.movie_repo.find_entries_by_movie_id(loser).await? {
                 let MovieEntry {
                     id: entry_id,
@@ -3641,6 +3664,10 @@ impl LocalIndexService {
                 settled.insert(loser);
                 continue;
             }
+            // Users' lists hold the show itself, not its episodes: carried
+            // once, before anything moves, as a movie merge carries them.
+            self.carry_list_entries(TitleRef::Show(loser), TitleRef::Show(survivor))
+                .await?;
             for season in self.show_repo.find_seasons_by_show_id(loser).await? {
                 let target_season = self
                     .show_repo

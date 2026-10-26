@@ -830,7 +830,7 @@
         "tags": [
           "media"
         ],
-        "summary": "Fetch a single media item's full metadata by id, with the caller's state for the movie, or for the show and each of its seasons and episodes.",
+        "summary": "Fetch a single media item's full metadata by id, with the caller's state for the movie, or for the show and each of its seasons and episodes -- whether the movie or show is on their watchlist and among their favourites included.",
         "operationId": "getMediaDetail",
         "parameters": [
           {
@@ -1487,6 +1487,310 @@
                         "type": {
                           "type": "string",
                           "const": "https://beam.justinchung.net/reference/errors/#person-not-found"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#internal"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BeamSession": []
+          }
+        ]
+      }
+    },
+    "/v1/collections": {
+      "get": {
+        "tags": [
+          "media"
+        ],
+        "summary": "The collections the library's movies are in, by name, ignoring case.",
+        "description": "Collections come from provider enrichment: TMDB groups a franchise's\nmovies into one. A collection none of the library's movies is in is not\nlisted.",
+        "operationId": "listCollections",
+        "parameters": [
+          {
+            "name": "first",
+            "in": "query",
+            "description": "This many collections (1-100, default 20), after `after` or from the\nstart.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "maximum": 100.0,
+              "minimum": 1.0,
+              "format": "uint32"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "description": "An opaque cursor -- a page's `end_cursor` -- to page on from.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden; Cross-origin request rejected; Malformed Origin/Referer header",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request; Invalid cursor; Invalid pagination",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "about:blank"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#invalid-cursor"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Invalid cursor"
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#invalid-pagination"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Invalid pagination"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CollectionConnection"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#internal"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BeamSession": []
+          }
+        ]
+      }
+    },
+    "/v1/collections/{id}": {
+      "get": {
+        "tags": [
+          "media"
+        ],
+        "summary": "One collection and every movie of the library in it, in release order, with the caller's state for each.",
+        "operationId": "getCollection",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Collection id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden; Cross-origin request rejected; Malformed Origin/Referer header",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CollectionDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Collection not found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#collection-not-found"
                         }
                       }
                     }
@@ -3621,6 +3925,930 @@
                       }
                     }
                   ]
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#internal"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BeamSession": []
+          }
+        ]
+      }
+    },
+    "/v1/watchlist/{id}": {
+      "put": {
+        "tags": [
+          "playback"
+        ],
+        "summary": "Put a movie or a show on the caller's watchlist.",
+        "description": "One already there keeps its place. A season or an episode is refused:\nput its show on the list instead.",
+        "operationId": "addToWatchlist",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "A movie or show id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden; Cross-origin request rejected; Malformed Origin/Referer header",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request; Not a movie or a show",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "about:blank"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#not-a-title"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "the request succeeded and there is no content to send"
+          },
+          "404": {
+            "description": "Media not found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#media-not-found"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#internal"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BeamSession": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "playback"
+        ],
+        "summary": "Take a movie or a show off the caller's watchlist. One not on it changes nothing.",
+        "operationId": "removeFromWatchlist",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "A movie or show id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden; Cross-origin request rejected; Malformed Origin/Referer header",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request; Not a movie or a show",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "about:blank"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#not-a-title"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "the request succeeded and there is no content to send"
+          },
+          "404": {
+            "description": "Media not found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#media-not-found"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#internal"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BeamSession": []
+          }
+        ]
+      }
+    },
+    "/v1/watchlist": {
+      "get": {
+        "tags": [
+          "playback"
+        ],
+        "summary": "The caller's watchlist, most recently added first, a page at a time.",
+        "operationId": "getWatchlist",
+        "parameters": [
+          {
+            "name": "first",
+            "in": "query",
+            "description": "This many titles (1-100, default 50).",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "maximum": 100.0,
+              "minimum": 1.0,
+              "format": "uint32"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "description": "An opaque cursor -- a page's `end_cursor` -- to page on from.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden; Cross-origin request rejected; Malformed Origin/Referer header",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request; Invalid cursor; Invalid pagination",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "about:blank"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#invalid-cursor"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Invalid cursor"
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#invalid-pagination"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Invalid pagination"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserListConnection"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#internal"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BeamSession": []
+          }
+        ]
+      }
+    },
+    "/v1/favourites/{id}": {
+      "put": {
+        "tags": [
+          "playback"
+        ],
+        "summary": "Mark a movie or a show as one of the caller's favourites.",
+        "description": "One already a favourite keeps its place. A season or an episode is\nrefused: favourite its show instead.",
+        "operationId": "addToFavourites",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "A movie or show id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden; Cross-origin request rejected; Malformed Origin/Referer header",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request; Not a movie or a show",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "about:blank"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#not-a-title"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "the request succeeded and there is no content to send"
+          },
+          "404": {
+            "description": "Media not found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#media-not-found"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#internal"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BeamSession": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "playback"
+        ],
+        "summary": "Take a movie or a show out of the caller's favourites. One not among them changes nothing.",
+        "operationId": "removeFromFavourites",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "A movie or show id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden; Cross-origin request rejected; Malformed Origin/Referer header",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request; Not a movie or a show",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "about:blank"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#not-a-title"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "the request succeeded and there is no content to send"
+          },
+          "404": {
+            "description": "Media not found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#media-not-found"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#internal"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BeamSession": []
+          }
+        ]
+      }
+    },
+    "/v1/favourites": {
+      "get": {
+        "tags": [
+          "playback"
+        ],
+        "summary": "The caller's favourites, most recently added first, a page at a time.",
+        "operationId": "getFavourites",
+        "parameters": [
+          {
+            "name": "first",
+            "in": "query",
+            "description": "This many titles (1-100, default 50).",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "maximum": 100.0,
+              "minimum": 1.0,
+              "format": "uint32"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "description": "An opaque cursor -- a page's `end_cursor` -- to page on from.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden; Cross-origin request rejected; Malformed Origin/Referer header",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request; Invalid cursor; Invalid pagination",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "about:blank"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#invalid-cursor"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Invalid cursor"
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#invalid-pagination"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Invalid pagination"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserListConnection"
                 }
               }
             }
@@ -13498,9 +14726,10 @@
           "show",
           "season",
           "episode",
-          "person"
+          "person",
+          "collection"
         ],
-        "description": "What the artwork belongs to: a kind of title, or a person."
+        "description": "What the artwork belongs to: a kind of title, a person, or a collection."
       },
       "ArtworkVariant": {
         "type": "string",
@@ -13650,6 +14879,20 @@
             ],
             "format": "uuid",
             "description": "The source the viewer last played, to resume on it. Absent when none\nwas played, or its file has since been removed."
+          },
+          "in_watchlist": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the movie is on the viewer's watchlist. Present on a movie's\ndetail; absent on an episode, which no list holds, and wherever else\nthe state is reported."
+          },
+          "in_favourites": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the movie is among the viewer's favourites. Present exactly\nwhere `in_watchlist` is."
           }
         },
         "type": "object",
@@ -13756,6 +14999,20 @@
             "minimum": 0.0,
             "format": "uint32",
             "description": "How many episodes there are."
+          },
+          "in_watchlist": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the show is on the viewer's watchlist. Present on a show's\ndetail; absent on a season, which no list holds."
+          },
+          "in_favourites": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the show is among the viewer's favourites. Present exactly\nwhere `in_watchlist` is."
           }
         },
         "type": "object",
@@ -14071,6 +15328,25 @@
           "seasons"
         ]
       },
+      "CollectionRef": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The collection: `GET /v1/collections/{id}` lists its movies."
+          },
+          "name": {
+            "type": "string",
+            "description": "The collection's name, as the provider gives it."
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name"
+        ],
+        "description": "The collection a movie is in, as its detail names it."
+      },
       "MovieMetadata": {
         "properties": {
           "id": {
@@ -14209,6 +15485,17 @@
               "null"
             ],
             "description": "The movie's key crew -- directors, writers, producers, composer,\ncinematographer, editor -- by department and then job. Absent in a\nbrowse result, as `cast` is."
+          },
+          "collection": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CollectionRef"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The provider collection the movie is in, such as a franchise:\n`GET /v1/collections/{id}` lists its movies. Absent when it is in\nnone, and in a browse result, which does not read collections."
           }
         },
         "type": "object",
@@ -14929,6 +16216,115 @@
         ],
         "description": "One person, with every credit they have in the library.\n\nBoth lists are newest first -- by the title's year, a title with none\nlast -- and then by title."
       },
+      "Collection": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Stable identifier for this collection."
+          },
+          "name": {
+            "type": "string",
+            "description": "The collection's name, as the provider gives it."
+          },
+          "poster_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Path of the collection's poster, served by the artwork route; absent\nwhen the provider has none."
+          },
+          "backdrop_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Path of the collection's backdrop, served by the artwork route;\nabsent when the provider has none."
+          },
+          "movie_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "format": "uint64",
+            "description": "How many of the library's movies are in it: at least 1."
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "movie_count"
+        ],
+        "description": "A provider collection with at least one movie in the library."
+      },
+      "CollectionConnection": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/Collection"
+            },
+            "type": "array",
+            "description": "The collections on this page, by name."
+          },
+          "page_info": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "Where this page sits in the whole listing."
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0.0,
+            "format": "uint64",
+            "description": "How many collections there are, across every page."
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "page_info",
+          "total"
+        ],
+        "description": "One page of the collection listing, by name."
+      },
+      "CollectionDetail": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Stable identifier for this collection."
+          },
+          "name": {
+            "type": "string",
+            "description": "The collection's name, as the provider gives it."
+          },
+          "poster_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Path of the collection's poster, served by the artwork route; absent\nwhen the provider has none."
+          },
+          "backdrop_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Path of the collection's backdrop, served by the artwork route;\nabsent when the provider has none."
+          },
+          "movies": {
+            "items": {
+              "$ref": "#/components/schemas/MovieMetadata"
+            },
+            "type": "array",
+            "description": "The collection's movies, in release order -- by year, then release\ndate, a movie with neither last -- each as a browse result lists it,\nwith the viewer's state."
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "movies"
+        ],
+        "description": "One collection, with every movie of the library in it."
+      },
       "MediaSortField": {
         "type": "string",
         "enum": [
@@ -15491,6 +16887,50 @@
           "client_kind"
         ],
         "description": "What `POST /v1/telemetry/playback` takes: one client's events since its\nlast report, at most 50 in total. An omitted list is empty.\n\nA client batches and flushes on its own schedule; the server counts each\nevent under the UTC day it arrives and forgets the file it named. An event\nwhose file the server cannot resolve -- unknown, or missing from disk -- is\ndropped, not refused."
+      },
+      "UserListItem": {
+        "properties": {
+          "added_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the viewer added it: the list is newest first by this."
+          },
+          "media": {
+            "$ref": "#/components/schemas/MediaMetadata",
+            "description": "The movie or show, as a browse result lists it, with the viewer's\nstate for a movie."
+          }
+        },
+        "type": "object",
+        "required": [
+          "added_at",
+          "media"
+        ],
+        "description": "One title on the viewer's watchlist or among their favourites."
+      },
+      "UserListConnection": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/UserListItem"
+            },
+            "type": "array"
+          },
+          "page_info": {
+            "$ref": "#/components/schemas/PageInfo"
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0.0,
+            "format": "uint64"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "page_info",
+          "total"
+        ],
+        "description": "One page of the viewer's watchlist or favourites, newest addition first.\n\nPass `page_info.end_cursor` as `after` for the next page. `total` counts\nevery title on the list."
       },
       "Library": {
         "properties": {

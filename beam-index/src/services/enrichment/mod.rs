@@ -19,7 +19,8 @@ use beam_domain::providers::enrichment::{
     ShowEnrichment,
 };
 use beam_domain::repositories::{
-    EnrichmentStateRepository, GenreRepository, MovieRepository, PersonRepository, ShowRepository,
+    CollectionRepository, EnrichmentStateRepository, GenreRepository, MovieRepository,
+    PersonRepository, ShowRepository,
 };
 
 use crate::services::admin_log::AdminLogService;
@@ -148,6 +149,8 @@ pub struct MetadataEnrichmentService {
     genre_repo: Arc<dyn GenreRepository>,
     /// Where a match's cast and crew are stored (issue #261).
     person_repo: Arc<dyn PersonRepository>,
+    /// Where a movie match's collection is stored (issue #262).
+    collection_repo: Arc<dyn CollectionRepository>,
     provider: Arc<dyn EnrichmentProvider>,
     admin_log: Arc<dyn AdminLogService>,
     notifications: Arc<dyn NotificationService>,
@@ -164,6 +167,7 @@ impl MetadataEnrichmentService {
         show_repo: Arc<dyn ShowRepository>,
         genre_repo: Arc<dyn GenreRepository>,
         person_repo: Arc<dyn PersonRepository>,
+        collection_repo: Arc<dyn CollectionRepository>,
         provider: Arc<dyn EnrichmentProvider>,
         admin_log: Arc<dyn AdminLogService>,
         notifications: Arc<dyn NotificationService>,
@@ -175,6 +179,7 @@ impl MetadataEnrichmentService {
             show_repo,
             genre_repo,
             person_repo,
+            collection_repo,
             provider,
             admin_log,
             notifications,
@@ -552,6 +557,15 @@ impl MetadataEnrichmentService {
                 {
                     warn!(error = %err, movie_id = %movie_id, "failed to persist movie credits");
                 }
+                // Best-effort too: a movie whose collection failed to store
+                // is still enriched, and stays in the one it was in.
+                if let Err(err) = self
+                    .collection_repo
+                    .set_movie_collection(movie_id, enrichment.collection.as_ref())
+                    .await
+                {
+                    warn!(error = %err, movie_id = %movie_id, "failed to persist movie collection");
+                }
                 self.mark_enriched(row, ref_id.as_str(), confidence).await
             }
             Err(EnrichmentError::NotFound) if by_id.is_some() => {
@@ -863,6 +877,7 @@ mod tests {
         CreditEnrichment, CreditRole, MovieEnrichment, MovieSearchHit, ShowEnrichment,
         ShowSearchHit,
     };
+    use beam_domain::repositories::collection::in_memory::InMemoryCollectionRepository;
     use beam_domain::repositories::enrichment::in_memory::InMemoryEnrichmentStateRepository;
     use beam_domain::repositories::genre::in_memory::InMemoryGenreRepository;
     use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
@@ -920,6 +935,30 @@ mod tests {
         Arc<InMemoryNotificationService>,
         Arc<InMemoryPersonRepository>,
     ) {
+        harness_storing(
+            provider,
+            credit_store,
+            Arc::new(InMemoryCollectionRepository::default()),
+        )
+    }
+
+    /// [`harness`], and the store collections are written to.
+    fn harness_with_collections(
+        provider: InMemoryEnrichmentProvider,
+        collections: Arc<dyn CollectionRepository>,
+    ) -> Harness {
+        harness_storing(provider, |people| people, collections).0
+    }
+
+    fn harness_storing(
+        provider: InMemoryEnrichmentProvider,
+        credit_store: impl FnOnce(Arc<InMemoryPersonRepository>) -> Arc<dyn PersonRepository>,
+        collections: Arc<dyn CollectionRepository>,
+    ) -> (
+        Harness,
+        Arc<InMemoryNotificationService>,
+        Arc<InMemoryPersonRepository>,
+    ) {
         let people = Arc::new(InMemoryPersonRepository::default());
         let notifications = Arc::new(InMemoryNotificationService::new());
         let movie_repo = Arc::new(InMemoryMovieRepository::default());
@@ -938,6 +977,7 @@ mod tests {
             show_repo.clone(),
             genre_repo.clone(),
             credit_store(people.clone()),
+            collections,
             Arc::new(provider),
             admin_log,
             notifications.clone(),
@@ -1101,6 +1141,155 @@ mod tests {
         assert_eq!(credits.len(), 1);
         assert_eq!(credits[0].person.name, "Bryan Cranston");
         assert_eq!(credits[0].role, lead("Walter White"));
+    }
+
+    fn matrix_collection() -> beam_domain::providers::enrichment::CollectionEnrichment {
+        beam_domain::providers::enrichment::CollectionEnrichment {
+            collection_ref: ExternalMediaRef::new("tmdb", "2344"),
+            name: "The Matrix Collection".to_string(),
+            poster_url: Some("https://image.tmdb.org/collection.jpg".to_string()),
+            backdrop_url: None,
+        }
+    }
+
+    /// The collection of a movie that was in `stored` once a match reporting
+    /// `reported` is applied to it, through a service writing to
+    /// `collections`.
+    async fn movie_collection_after_match(
+        collections: Arc<dyn CollectionRepository>,
+        stored: Option<beam_domain::providers::enrichment::CollectionEnrichment>,
+        reported: Option<beam_domain::providers::enrichment::CollectionEnrichment>,
+    ) -> (
+        Option<beam_domain::models::collection::Collection>,
+        Arc<InMemoryEnrichmentStateRepository>,
+        uuid::Uuid,
+    ) {
+        let hit = MovieSearchHit {
+            external_ref: ExternalMediaRef::new("tmdb", "603"),
+            title: "The Matrix".to_string(),
+            original_title: None,
+            year: Some(1999),
+            popularity: None,
+            vote_average: None,
+        };
+        let provider = InMemoryEnrichmentProvider::new(&["tmdb"])
+            .with_movie_search("The Matrix", vec![hit])
+            .with_movie_enrichment(MovieEnrichment {
+                tmdb_id: Some(603),
+                title: "The Matrix".to_string(),
+                year: Some(1999),
+                collection: reported,
+                ..Default::default()
+            });
+        let (service, movie_repo, _shows, state_repo, _genres, _clock) =
+            harness_with_collections(provider, collections.clone());
+        let movie = movie_repo
+            .find_or_create_by_identity(CreateMovie::new(
+                "The Matrix".to_string(),
+                Some(1999),
+                None,
+            ))
+            .await
+            .unwrap();
+        if let Some(stored) = &stored {
+            collections
+                .set_movie_collection(movie.id, Some(stored))
+                .await
+                .unwrap();
+        }
+        state_repo
+            .ensure_pending(EnrichmentTargetId::Movie(movie.id))
+            .await
+            .unwrap();
+
+        assert_eq!(service.sweep_once().await.enriched, 1);
+        (
+            collections.movie_collection(movie.id).await.unwrap(),
+            state_repo,
+            movie.id,
+        )
+    }
+
+    #[tokio::test]
+    async fn a_movie_match_stores_its_collection() {
+        let (collection, _, _) = movie_collection_after_match(
+            Arc::new(InMemoryCollectionRepository::default()),
+            None,
+            Some(matrix_collection()),
+        )
+        .await;
+        let collection = collection.expect("the movie's collection");
+        assert_eq!(collection.external_ref, "tmdb:2344");
+        assert_eq!(collection.name, "The Matrix Collection");
+    }
+
+    #[tokio::test]
+    async fn a_match_reporting_no_collection_takes_the_movie_out_of_its_old_one() {
+        let (collection, _, _) = movie_collection_after_match(
+            Arc::new(InMemoryCollectionRepository::default()),
+            Some(matrix_collection()),
+            None,
+        )
+        .await;
+        assert_eq!(collection, None);
+    }
+
+    /// A collection store whose writes fail, its reads answered by the
+    /// in-memory store it wraps.
+    #[derive(Debug)]
+    struct FailingCollectionWrites(InMemoryCollectionRepository);
+
+    #[async_trait::async_trait]
+    impl CollectionRepository for FailingCollectionWrites {
+        async fn set_movie_collection(
+            &self,
+            _: uuid::Uuid,
+            _: Option<&beam_domain::providers::enrichment::CollectionEnrichment>,
+        ) -> Result<(), sea_orm::DbErr> {
+            Err(sea_orm::DbErr::Custom(
+                "collection store unavailable".to_string(),
+            ))
+        }
+        async fn movie_collection(
+            &self,
+            movie_id: uuid::Uuid,
+        ) -> Result<Option<beam_domain::models::collection::Collection>, sea_orm::DbErr> {
+            self.0.movie_collection(movie_id).await
+        }
+        async fn find_by_id(
+            &self,
+            id: uuid::Uuid,
+        ) -> Result<Option<beam_domain::models::collection::Collection>, sea_orm::DbErr> {
+            self.0.find_by_id(id).await
+        }
+        async fn movie_ids(&self, id: uuid::Uuid) -> Result<Vec<uuid::Uuid>, sea_orm::DbErr> {
+            self.0.movie_ids(id).await
+        }
+        async fn list(
+            &self,
+            limit: u64,
+            offset: u64,
+        ) -> Result<Vec<beam_domain::models::collection::CollectionSummary>, sea_orm::DbErr>
+        {
+            self.0.list(limit, offset).await
+        }
+        async fn count(&self) -> Result<u64, sea_orm::DbErr> {
+            self.0.count().await
+        }
+    }
+
+    #[tokio::test]
+    async fn a_movie_whose_collection_fails_to_store_is_enriched_all_the_same() {
+        let (collection, state_repo, movie_id) = movie_collection_after_match(
+            Arc::new(FailingCollectionWrites(
+                InMemoryCollectionRepository::default(),
+            )),
+            None,
+            Some(matrix_collection()),
+        )
+        .await;
+        assert_eq!(collection, None, "the write failed, so nothing is stored");
+        assert_enriched_as(&state_repo, EnrichmentTargetId::Movie(movie_id), "tmdb:603").await;
     }
 
     /// A person store whose credit writes fail, its reads answered by the

@@ -115,6 +115,13 @@ impl MetadataService for StubMetadataService {
     ) -> Result<Option<crate::models::SeasonDetail>, MetadataError> {
         Ok(None)
     }
+
+    async fn get_titles(
+        &self,
+        _titles: &[beam_domain::models::watch_state::TitleRef],
+    ) -> Result<Vec<crate::models::MediaMetadata>, MetadataError> {
+        Ok(vec![])
+    }
 }
 
 /// A notification service whose live feed is finite.
@@ -373,6 +380,8 @@ fn build_fixture(
             admin_log_for_control,
         ),
         people: crate::routes::test_support::idle_people(movie_repo.clone(), show_repo.clone()),
+        lists: crate::routes::test_support::unused_lists(),
+        collections: crate::routes::test_support::unused_collections(),
         movie_repo: movie_repo.clone(),
         show_repo,
         artwork: crate::routes::test_support::cold_artwork_cache(),

@@ -4,10 +4,12 @@ pub mod admin;
 pub mod api_error;
 pub mod artwork;
 pub mod auth;
+pub mod collections;
 pub mod delivery;
 pub mod enrichment;
 pub mod genres;
 pub mod health;
+pub mod lists;
 pub mod media;
 pub mod metrics_mw;
 pub mod middleware;
@@ -84,6 +86,10 @@ pub fn rest_routes() -> Router<AppState, Propagate, (), RestScopes> {
             media::get_season_detail,
         ])
         .mount(kynos::routes![people::get_person])
+        .mount(kynos::routes![
+            collections::list_collections,
+            collections::get_collection,
+        ])
         // `browse_media` fans out into metadata queries, so it is the most
         // expensive read path and the one worth a budget; people search is a
         // search too, and shares it. Their own group: two `RateLimit`s on one
@@ -104,6 +110,14 @@ pub fn rest_routes() -> Router<AppState, Propagate, (), RestScopes> {
             playback::dismiss_continue_watching,
             playback::get_history,
             playback::report_playback_telemetry,
+        ])
+        .mount(kynos::routes![
+            lists::add_to_watchlist,
+            lists::remove_from_watchlist,
+            lists::get_watchlist,
+            lists::add_to_favourites,
+            lists::remove_from_favourites,
+            lists::get_favourites,
         ])
         .mount(kynos::routes![
             stream::stream_file,

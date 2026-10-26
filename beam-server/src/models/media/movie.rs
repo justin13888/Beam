@@ -1,4 +1,4 @@
-use super::{ExternalIdentifiers, Ratings, Title};
+use super::{CollectionRef, ExternalIdentifiers, Ratings, Title};
 use crate::models::people::{CastCredit, CrewCredit};
 use crate::models::playback::UserTitleState;
 use chrono::NaiveDate;
@@ -49,4 +49,8 @@ pub struct MovieMetadata {
     /// cinematographer, editor -- by department and then job. Absent in a
     /// browse result, as `cast` is.
     pub crew: Option<Vec<CrewCredit>>,
+    /// The provider collection the movie is in, such as a franchise:
+    /// `GET /v1/collections/{id}` lists its movies. Absent when it is in
+    /// none, and in a browse result, which does not read collections.
+    pub collection: Option<CollectionRef>,
 }

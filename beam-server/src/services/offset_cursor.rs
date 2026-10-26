@@ -1,5 +1,6 @@
 //! The cursor of a list paged by offset (issue #190): the admin user list,
-//! the admin log, and people search (issue #261). An opaque token naming the list it was issued by and the
+//! the admin log, people search (issue #261), and the collection listing
+//! (issue #262). An opaque token naming the list it was issued by and the
 //! position of the row a page ended on, as base64url JSON:
 //!
 //! ```json
@@ -39,6 +40,8 @@ pub enum OffsetList {
     AdminLogs,
     /// `GET /v1/people`.
     People,
+    /// `GET /v1/collections` (issue #262).
+    Collections,
 }
 
 /// Why a cursor was refused: every case is the caller's to fix.
@@ -139,7 +142,12 @@ mod tests {
         /// would skip or repeat it at a page boundary.
         #[test]
         fn an_offset_round_trips(at in 0u64..=MAX_AT) {
-            for list in [OffsetList::AdminUsers, OffsetList::AdminLogs, OffsetList::People] {
+            for list in [
+                OffsetList::AdminUsers,
+                OffsetList::AdminLogs,
+                OffsetList::People,
+                OffsetList::Collections,
+            ] {
                 let cursor = encode(list, at);
                 prop_assert_eq!(decode(list, &cursor), Ok(at));
                 prop_assert_eq!(start_after(list, Some(&cursor)), Ok(at + 1));
@@ -197,6 +205,10 @@ mod tests {
             ),
             (encode(OffsetList::AdminLogs, 3), "the admin log's cursor"),
             (encode(OffsetList::People, 3), "people search's cursor"),
+            (
+                encode(OffsetList::Collections, 3),
+                "the collection listing's cursor",
+            ),
             (
                 encode(OffsetList::AdminUsers, MAX_AT + 1),
                 "a position whose next page is past Postgres's OFFSET",

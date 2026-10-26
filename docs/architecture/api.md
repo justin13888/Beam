@@ -26,12 +26,14 @@ role.
 |---|---|---|
 | `/v1/health` | GET | Deep health check (public): probes the database and returns `200` `{status:"healthy"}` or `503` `{status:"degraded"}` with per-dependency `checks` (each `{status: "ok" \| "error", detail}`, `detail` the failure reason), `checked_at` and process `uptime_secs` |
 | `/v1/media` | GET | Browse/search catalog (cursor pagination, filters, sort) |
-| `/v1/media/{id}` | GET | Full metadata for one movie or show, with its `cast` (billing order) and key `crew` (by department and job) from enrichment; both are absent in a browse result |
+| `/v1/media/{id}` | GET | Full metadata for one movie or show, with its `cast` (billing order) and key `crew` (by department and job) from enrichment, a movie's `collection` (`{id, name}`, absent when it is in none), and the caller's `user_state` -- `in_watchlist` and `in_favourites` included; the credits and the collection are absent in a browse result |
+| `/v1/collections` | GET | The provider collections (TMDB `belongs_to_collection`, e.g. a franchise) that at least one of the library's movies is in, by name ignoring ASCII case: a `CollectionConnection` paged by `first` (1-100, default 20) and `after`, with `total`; each with its `movie_count` and artwork paths |
+| `/v1/collections/{id}` | GET | One collection (`CollectionDetail`) and its `movies` as browse results with the caller's state, in release order (year, then release date, a movie with neither last); `404` `collection-not-found` for an unknown id or a collection no movie is in any more |
 | `/v1/people` | GET | People search: the cast and crew credited in the library whose name contains `query` (ignoring case; every credited person without it), by name. A `PersonConnection` paged by `first` (1-100, default 20) and `after`, with `total`; shares the `search` rate-limit class with `/v1/media` |
 | `/v1/people/{id}` | GET | One person (`PersonDetail`) and their filmography: `cast` and `crew` credits in the library, newest title first; `404` `person-not-found` for an unknown id or a person no title credits any more |
 | `/v1/media/{id}/sources` | GET | Playable/downloadable source files for a movie or an episode, primary first, each with its video, audio and subtitle tracks |
 | `/v1/genres` | GET | Every genre in the catalog, for filter chips: a `GenreConnection`, never paged |
-| `/v1/artwork/{kind}/{id}/{variant}` | GET, HEAD | Poster, backdrop or thumbnail art, and people's portraits, fetched from the provider once and served from Beam's cache. `kind` is `movie`/`show`/`season`/`episode`/`person`; `variant` is `poster`/`backdrop`/`thumbnail`/`profile` (a person has only `profile`) |
+| `/v1/artwork/{kind}/{id}/{variant}` | GET, HEAD | Poster, backdrop or thumbnail art, people's portraits and collections' art, fetched from the provider once and served from Beam's cache. `kind` is `movie`/`show`/`season`/`episode`/`person`/`collection`; `variant` is `poster`/`backdrop`/`thumbnail`/`profile` (a person has only `profile`, a collection `poster` and `backdrop`) |
 | `/v1/libraries`, `/v1/libraries/{id}`, `/v1/libraries/{id}/files` | GET | Library listing (a `LibraryConnection`, never paged) and contents: a `LibraryFileConnection` paged by `first` (1-500, default 100) and `after`, by stored path then id. File paths are relative to the library root, in the listing and inside its cursor (NFR-108); another library's cursor is `400 #invalid-cursor` |
 | `/v1/files/{fileId}/stream` | GET, HEAD | Direct-play byte-range streaming (see `streaming.md`) |
 | `/v1/files/{fileId}/download` | GET, HEAD | Full-file download (attachment) |
@@ -44,6 +46,8 @@ role.
 | `/v1/continue-watching` | GET | One row per movie to resume and per show at its next-up episode, newest first, with display fields: a `ContinueWatchingConnection` of at most `first` (1-50, default 20) rows, with no cursors: `page_info.has_next_page` says whether candidates were left unexamined -- the rows filled first, or the load reached its 1,000-title ceiling (FR-508) |
 | `/v1/continue-watching/{id}` | DELETE | Hide a title (an episode or season id hides its show) until it is next played (FR-701); `204` |
 | `/v1/history` | GET | Every movie and episode the caller played or marked, newest first: a `HistoryConnection` paged by `first`/`after` with `total` |
+| `/v1/watchlist`, `/v1/favourites` | GET | The caller's watchlist or favourites, newest addition first: a `UserListConnection` of `{added_at, media}` items (`media` a browse result, with the caller's state for a movie) paged by `first` (1-100, default 50) and `after`, with `total`. Each list's cursor names it, so the other list's is `400 #invalid-cursor` |
+| `/v1/watchlist/{id}`, `/v1/favourites/{id}` | PUT, DELETE | Put a movie or show on the list / take it off; `204` either way, idempotently (a title already there keeps its place). `400` `not-a-title` for a season or episode id, `404` `media-not-found` for an id naming nothing |
 | `/v1/telemetry/playback` | POST | Report a batch of playback starts, start failures, rebuffers and source switches (at most 50 events). Counted as daily aggregates under the named files' coarse dimensions, never the file or the user; `409` `playback-telemetry-disabled` unless the operator enabled it, `422` `validation-failed` with per-pointer `errors` ([ADR-0019](decisions/ADR-0019-telemetry-posture.md)) |
 | `/v1/auth/login`, `/v1/auth/callback` | GET | OIDC login redirect and callback |
 | `/v1/auth/device` | POST | Start a device login (RFC 8628) for a client with no browser: user code, verification URI, opaque device handle. `501` when the IdP does not offer the grant ([ADR-0017](decisions/ADR-0017-device-authorization-grant.md)) |
@@ -198,6 +202,13 @@ that does not apply to that kind of title (a season has no backdrop, an episode 
     holds the root-relative path the page reported, never the absolute one (NFR-108), and its
     library's id, so another library's cursor is `400 #invalid-cursor`. No `total`: the library's
     `file_count` is it.
+  - `GET /v1/watchlist` and `GET /v1/favourites` by `first` (1-100, default 50) and `after`, with
+    `total`, newest addition first: `added_at` then entry id, both descending, as a keyset on
+    `idx_user_list_entries_page`. Their cursor (`services/user_list_cursor.rs`) holds that pair at
+    full precision and names its list, so the watchlist's cursor is `400 #invalid-cursor` on
+    favourites.
+  - `GET /v1/people` and `GET /v1/collections` (`first` 1-100, default 20) with `total`, by name
+    ignoring ASCII case, through the offset cursor below.
   - `GET /v1/admin/users` (`first` 1-100, default 50) and `GET /v1/admin/logs` (`first` 1-200,
     default 50) with `total`. Both read by `LIMIT`/`OFFSET` underneath, so the offset rides inside
     an opaque cursor (`services/offset_cursor.rs`) naming its list: the other list's cursor is
