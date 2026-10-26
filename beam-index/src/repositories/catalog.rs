@@ -47,7 +47,10 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use sea_orm::{DatabaseConnection, DbBackend, DbErr, FromQueryResult, Statement, Value};
+use sea_orm::{
+    ConnectionTrait, DatabaseConnection, DbBackend, DbErr, FromQueryResult, Statement,
+    TransactionTrait, Value,
+};
 use uuid::Uuid;
 
 use beam_domain::models::catalog::{
@@ -55,7 +58,7 @@ use beam_domain::models::catalog::{
     SortDirection, SortKey, TitleKind,
 };
 use beam_domain::repositories::CatalogRepository;
-use beam_domain::repositories::catalog::mismatched_position;
+use beam_domain::repositories::catalog::{mismatched_position, unranked_relevance};
 
 /// Only live movies: a present file behind one of the movie's entries.
 const LIVE_MOVIE: &str = "EXISTS (SELECT 1 FROM movie_entries me \
@@ -90,6 +93,8 @@ struct CatalogRow {
     rating: Option<f32>,
     created_at: chrono::DateTime<chrono::FixedOffset>,
     runtime: Option<i32>,
+    /// The title's trigram distance from the query; `NULL` without one.
+    relevance: Option<f32>,
 }
 
 impl CatalogRow {
@@ -102,6 +107,7 @@ impl CatalogRow {
             rating,
             created_at,
             runtime,
+            relevance,
         } = self;
         let kind = TitleKind::parse(&kind).ok_or_else(|| {
             DbErr::Custom(format!("the catalogue projected an unknown kind {kind:?}"))
@@ -114,6 +120,9 @@ impl CatalogRow {
                 SortKey::DateAdded(created_at.with_timezone(&chrono::Utc))
             }
             CatalogSortField::Runtime => SortKey::Runtime(runtime),
+            CatalogSortField::Relevance => SortKey::Relevance(relevance.ok_or_else(|| {
+                DbErr::Custom("the catalogue ranked a title without a query".to_string())
+            })?),
         };
         Ok(CatalogPosition { kind, id, key })
     }
@@ -183,8 +192,13 @@ impl BranchFilters {
         };
         let mut conditions = vec![live.to_string()];
         if let Some(q) = &self.query {
+            // `%` is `similarity() > pg_trgm.similarity_threshold`, which
+            // `SIMILARITY_THRESHOLD` sets for the statement; unlike the
+            // function, the operator and `ILIKE` are both what
+            // `idx_*_title_trgm` answers, so a search can start from its
+            // matches rather than from the whole sort index.
             conditions.push(format!(
-                "(similarity({table}.title, {q}) > 0.2 OR {table}.title ILIKE '%' || {q} || '%')"
+                "({table}.title % {q} OR {table}.title ILIKE '%' || {q} || '%')"
             ));
         }
         if let Some(slug) = &self.genre {
@@ -209,14 +223,24 @@ impl BranchFilters {
         }
         conditions
     }
+
+    /// A branch's trigram distance from the query, or `NULL` with none.
+    fn relevance(&self, table: &str) -> String {
+        match &self.query {
+            Some(q) => format!("({table}.title <-> {q})"),
+            None => "NULL::real".to_string(),
+        }
+    }
 }
 
 /// Where a branch of `kind` reads `field` from.
 ///
 /// The title is `lower(title)` spelled exactly as `idx_*_title_sort` index
 /// it, so a branch ordered by it reads that index in order.
-fn branch_column(kind: TitleKind, field: CatalogSortField) -> &'static str {
-    match (kind, field) {
+fn branch_column(kind: TitleKind, field: CatalogSortField, filters: &BranchFilters) -> String {
+    let column = match (kind, field) {
+        (TitleKind::Movie, CatalogSortField::Relevance) => return filters.relevance("movies"),
+        (TitleKind::Show, CatalogSortField::Relevance) => return filters.relevance("shows"),
         (TitleKind::Movie, CatalogSortField::Title) => "lower(movies.title)",
         (TitleKind::Show, CatalogSortField::Title) => "lower(shows.title)",
         (TitleKind::Movie, CatalogSortField::Year) => "movies.year",
@@ -227,7 +251,8 @@ fn branch_column(kind: TitleKind, field: CatalogSortField) -> &'static str {
         (TitleKind::Show, CatalogSortField::DateAdded) => "shows.created_at",
         (TitleKind::Movie, CatalogSortField::Runtime) => "movies.runtime_mins",
         (TitleKind::Show, CatalogSortField::Runtime) => "NULL::integer",
-    }
+    };
+    column.to_string()
 }
 
 /// The outer query's name for the column a branch projects `field` as.
@@ -238,6 +263,7 @@ fn outer_column(field: CatalogSortField) -> &'static str {
         CatalogSortField::Rating => "t.rating",
         CatalogSortField::DateAdded => "t.created_at",
         CatalogSortField::Runtime => "t.runtime",
+        CatalogSortField::Relevance => "t.relevance",
     }
 }
 
@@ -248,7 +274,7 @@ fn branch(
     keyset: &Keyset,
     limit: &str,
 ) -> String {
-    let (projection, table) = match kind {
+    let (columns, table) = match kind {
         TitleKind::Movie => (
             "'movie'::text AS kind, movies.id, lower(movies.title) AS title_key, movies.year, \
              movies.rating_tmdb AS rating, movies.created_at, movies.runtime_mins AS runtime",
@@ -260,9 +286,10 @@ fn branch(
             "shows",
         ),
     };
+    let projection = format!("{columns}, {} AS relevance", filters.relevance(table));
     let tuple = sort_tuple(
         sort,
-        branch_column(kind, sort.field),
+        &branch_column(kind, sort.field, filters),
         &format!("{table}.id"),
     );
     let mut conditions = filters.conditions(kind);
@@ -279,7 +306,9 @@ fn branch(
 /// `(null flag, COALESCE(key, 0), id)` for the ones that can be.
 fn sort_tuple(sort: CatalogSort, column: &str, id: &str) -> Vec<String> {
     let mut tuple = match sort.field {
-        CatalogSortField::Title | CatalogSortField::DateAdded => vec![column.to_string()],
+        CatalogSortField::Title | CatalogSortField::DateAdded | CatalogSortField::Relevance => {
+            vec![column.to_string()]
+        }
         CatalogSortField::Year | CatalogSortField::Rating | CatalogSortField::Runtime => {
             let flag = match sort.direction {
                 SortDirection::Asc => format!("({column} IS NULL)"),
@@ -308,6 +337,11 @@ fn bind_position(
     let mut placeholders = match (&position.key, sort.field) {
         (SortKey::Title(title), CatalogSortField::Title) => vec![binds.push(title.clone())],
         (SortKey::DateAdded(at), CatalogSortField::DateAdded) => vec![binds.push(*at)],
+        // A `real`, as `<->` computes it, so the position's own row compares
+        // equal to it rather than a double-precision neighbour.
+        (SortKey::Relevance(distance), CatalogSortField::Relevance) => {
+            vec![binds.push(*distance)]
+        }
         (SortKey::Year(value), CatalogSortField::Year)
         | (SortKey::Runtime(value), CatalogSortField::Runtime) => vec![
             flagged(value.is_some(), binds),
@@ -401,6 +435,9 @@ fn keyset(sort: CatalogSort, seek: &Seek, binds: &mut Binds) -> Result<Keyset, D
 
 /// The whole statement for `query`.
 fn browse_statement(query: &CatalogQuery) -> Result<Statement, DbErr> {
+    if let Some(err) = mismatched_position(query).or_else(|| unranked_relevance(query)) {
+        return Err(err);
+    }
     let mut binds = Binds::default();
     let filters = BranchFilters::bind(&query.filters, &mut binds);
     let keyset = keyset(query.sort, &query.seek, &mut binds)?;
@@ -413,8 +450,8 @@ fn browse_statement(query: &CatalogQuery) -> Result<Statement, DbErr> {
     let mut order = sort_tuple(query.sort, outer_column(query.sort.field), "t.id");
     order.push("t.kind".to_string());
     let sql = format!(
-        "SELECT t.kind, t.id, t.title_key, t.year, t.rating, t.created_at, t.runtime \
-         FROM ({}) AS t ORDER BY {} LIMIT {limit}",
+        "SELECT t.kind, t.id, t.title_key, t.year, t.rating, t.created_at, t.runtime, \
+         t.relevance FROM ({}) AS t ORDER BY {} LIMIT {limit}",
         branches.join(" UNION ALL "),
         keyset.order_by(&order),
     );
@@ -425,23 +462,49 @@ fn browse_statement(query: &CatalogQuery) -> Result<Statement, DbErr> {
     ))
 }
 
+/// What a title search's `%` means: a similarity above 0.2, looser than
+/// pg_trgm's default 0.3, so a one-letter typo in a short title still finds
+/// it. Set for the browse's own transaction only, never for the session a
+/// pooled connection goes back with.
+pub const SIMILARITY_THRESHOLD: &str = "SET LOCAL pg_trgm.similarity_threshold = 0.2";
+
 impl SqlCatalogRepository {
     /// The one statement [`CatalogRepository::browse`] runs for `query`,
     /// exposed so the `pg-integration` tier can `EXPLAIN` exactly it.
     pub fn statement(query: &CatalogQuery) -> Result<Statement, DbErr> {
         browse_statement(query)
     }
+
+    /// The setting `browse` runs [`Self::statement`] under, in a transaction
+    /// of its own, when `query` searches: [`SIMILARITY_THRESHOLD`].
+    #[must_use]
+    pub fn setting(query: &CatalogQuery) -> Option<&'static str> {
+        query
+            .filters
+            .query
+            .is_some()
+            .then_some(SIMILARITY_THRESHOLD)
+    }
 }
 
 #[async_trait]
 impl CatalogRepository for SqlCatalogRepository {
     async fn browse(&self, query: &CatalogQuery) -> Result<Vec<CatalogPosition>, DbErr> {
-        if let Some(err) = mismatched_position(query) {
-            return Err(err);
-        }
-        let rows = CatalogRow::find_by_statement(browse_statement(query)?)
-            .all(self.db.as_ref())
-            .await?;
+        let statement = browse_statement(query)?;
+        let rows = match Self::setting(query) {
+            Some(setting) => {
+                let txn = self.db.begin().await?;
+                txn.execute_unprepared(setting).await?;
+                let rows = CatalogRow::find_by_statement(statement).all(&txn).await?;
+                txn.commit().await?;
+                rows
+            }
+            None => {
+                CatalogRow::find_by_statement(statement)
+                    .all(self.db.as_ref())
+                    .await?
+            }
+        };
         let mut positions = rows
             .into_iter()
             .map(|row| row.into_position(query.sort.field))

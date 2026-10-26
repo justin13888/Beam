@@ -142,6 +142,81 @@ async fn titles_differing_only_in_case_sort_together_and_page_exactly() {
     );
 }
 
+/// A search's `%` runs at a similarity threshold of 0.2, not pg_trgm's 0.3:
+/// `matirx` shares 3 of 11 trigrams with `Matrix` (0.27), so a one-letter
+/// typo still finds a short title -- and only inside the browse's own
+/// transaction, so the pooled connection goes back at the default.
+#[tokio::test]
+async fn a_search_matches_at_a_similarity_of_two_tenths_and_leaves_the_session_as_it_was() {
+    use beam_domain::models::CreateMovie;
+    use beam_domain::models::catalog::{CatalogFilters, CatalogQuery, CatalogSort, Seek};
+    use beam_domain::models::catalog::{CatalogSortField, SortDirection};
+    use sea_orm::{ConnectionTrait, Statement};
+
+    let fixture = setup().await;
+    let movie = fixture
+        .movies
+        .find_or_create_by_identity(CreateMovie::new("Matrix", None, None))
+        .await
+        .unwrap();
+    let library = fixture.new_library().await;
+    fixture.give_every_title_a_file(library).await;
+
+    let db = fixture.schema.db();
+    let similarity: f32 = db
+        .query_one_raw(Statement::from_string(
+            sea_orm::DbBackend::Postgres,
+            "SELECT similarity('Matrix', 'matirx') AS s",
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get("", "s")
+        .unwrap();
+    assert!(
+        (0.2..0.3).contains(&similarity),
+        "the case sits between the two thresholds: {similarity}"
+    );
+
+    for sort in [CatalogSortField::Title, CatalogSortField::Relevance] {
+        let found = fixture
+            .repo
+            .browse(&CatalogQuery {
+                filters: CatalogFilters {
+                    query: Some("matirx".to_string()),
+                    ..Default::default()
+                },
+                sort: CatalogSort {
+                    field: sort,
+                    direction: SortDirection::Asc,
+                },
+                seek: Seek::Forward(None),
+                limit: std::num::NonZeroU32::new(10).unwrap(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            found.iter().map(|p| p.id).collect::<Vec<_>>(),
+            [movie.id],
+            "{sort:?}"
+        );
+    }
+
+    let threshold: String = db
+        .query_one_raw(Statement::from_string(
+            sea_orm::DbBackend::Postgres,
+            // Unknown to a connection that has not loaded pg_trgm yet, which
+            // is the default too.
+            "SELECT COALESCE(current_setting('pg_trgm.similarity_threshold', true), '0.3') AS t",
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get("", "t")
+        .unwrap();
+    assert_eq!(threshold, "0.3", "the setting ended with the browse");
+}
+
 impl PgFixture {
     /// A present file for every movie (through an entry) and every show
     /// (through a season and an episode) in the schema.

@@ -4922,6 +4922,378 @@
             "BeamSession": []
           }
         ]
+      },
+      "head": {
+        "tags": [
+          "playback"
+        ],
+        "summary": "The same fields with no body, for a player checking a subtitle's size and validator before it fetches it, as the stream routes allow.",
+        "description": "Declared rather than synthesised: Kynos does not derive a `HEAD` from a\n`GET`, because the two are separate operations in the description.",
+        "operationId": "headSubtitle",
+        "parameters": [
+          {
+            "name": "file_id",
+            "in": "path",
+            "description": "The video file the subtitle belongs to.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "subtitle_id",
+            "in": "path",
+            "description": "The subtitle's `sidecar_id` in its source's `subtitle_tracks`.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Range",
+            "in": "header",
+            "description": "The part of the representation to transfer, per RFC 9110 section 14.2. A field this operation cannot apply is ignored and the whole representation is sent.",
+            "schema": {
+              "type": "string",
+              "pattern": "^bytes=(?:\\d+-\\d*|-\\d+)(?:\\s*,\\s*(?:\\d+-\\d*|-\\d+)){0,7}$"
+            },
+            "example": "bytes=0-1023"
+          },
+          {
+            "name": "If-Range",
+            "in": "header",
+            "description": "The entity tag the client's partial copy came from, per RFC 9110 section 13.1.5. The `Range` is honoured only if it matches this representation under the strong comparison; otherwise the whole representation is sent.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "description": "The entity tag the client's copy was taken from, per RFC 9110 section 13.1.1",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "If-Unmodified-Since",
+            "in": "header",
+            "description": "The date the client's copy carries, refused if the representation changed since, per RFC 9110 section 13.1.4",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "If-None-Match",
+            "in": "header",
+            "description": "The entity tag the client already holds, per RFC 9110 section 13.1.2",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "If-Modified-Since",
+            "in": "header",
+            "description": "The date the client's copy carries, per RFC 9110 section 13.1.3",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden; Cross-origin request rejected; Malformed Origin/Referer header",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "the whole representation",
+            "headers": {
+              "Accept-Ranges": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Last-Modified": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "text/vtt": {
+                "schema": {}
+              },
+              "application/x-subrip": {
+                "schema": {}
+              },
+              "text/x-ass": {
+                "schema": {}
+              },
+              "text/x-ssa": {
+                "schema": {}
+              }
+            }
+          },
+          "206": {
+            "description": "the part the request asked for",
+            "headers": {
+              "Accept-Ranges": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Last-Modified": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Range": {
+                "description": "The part of the representation enclosed, and its complete length, per RFC 9110 section 14.4.",
+                "required": true,
+                "content": {
+                  "text/plain": {
+                    "schema": {
+                      "type": "string",
+                      "pattern": "^bytes \\d+-\\d+/\\d+$"
+                    }
+                  }
+                }
+              }
+            },
+            "content": {
+              "text/vtt": {
+                "schema": {}
+              },
+              "application/x-subrip": {
+                "schema": {}
+              },
+              "text/x-ass": {
+                "schema": {}
+              },
+              "text/x-ssa": {
+                "schema": {}
+              }
+            }
+          },
+          "304": {
+            "description": "the client's copy is current",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Last-Modified": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "412": {
+            "description": "the representation is not the one the client's copy came from"
+          },
+          "416": {
+            "description": "Range Not Satisfiable",
+            "headers": {
+              "Content-Range": {
+                "description": "The complete length of the selected representation, per RFC 9110 section 15.5.17.",
+                "required": true,
+                "content": {
+                  "text/plain": {
+                    "schema": {
+                      "type": "string",
+                      "pattern": "^bytes \\*/\\d+$"
+                    }
+                  }
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "File not found; Subtitle not found; Source file missing from disk; Subtitle rendition unavailable",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#file-not-found"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "File not found"
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#subtitle-not-found"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Subtitle not found"
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#source-file-missing"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Source file missing from disk"
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#subtitle-rendition-unavailable"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Subtitle rendition unavailable"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#internal"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BeamSession": []
+          }
+        ]
       }
     },
     "/v1/files/{file_id}/subtitles/{subtitle_id}/webvtt": {
@@ -4931,6 +5303,359 @@
         ],
         "summary": "A SubRip or WebVTT subtitle file as WebVTT, which a browser's `<track>` element reads: SubRip converted, WebVTT normalised to UTF-8. Offered exactly where the track's `webvtt_url` is present; an ASS or SSA file, or one over 8 MiB, is `#subtitle-rendition-unavailable`.",
         "operationId": "getSubtitleWebVtt",
+        "parameters": [
+          {
+            "name": "file_id",
+            "in": "path",
+            "description": "The video file the subtitle belongs to.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "subtitle_id",
+            "in": "path",
+            "description": "The subtitle's `sidecar_id` in its source's `subtitle_tracks`.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Range",
+            "in": "header",
+            "description": "The part of the representation to transfer, per RFC 9110 section 14.2. A field this operation cannot apply is ignored and the whole representation is sent.",
+            "schema": {
+              "type": "string",
+              "pattern": "^bytes=(?:\\d+-\\d*|-\\d+)(?:\\s*,\\s*(?:\\d+-\\d*|-\\d+)){0,7}$"
+            },
+            "example": "bytes=0-1023"
+          },
+          {
+            "name": "If-Range",
+            "in": "header",
+            "description": "The entity tag the client's partial copy came from, per RFC 9110 section 13.1.5. The `Range` is honoured only if it matches this representation under the strong comparison; otherwise the whole representation is sent.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "description": "The entity tag the client's copy was taken from, per RFC 9110 section 13.1.1",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "If-Unmodified-Since",
+            "in": "header",
+            "description": "The date the client's copy carries, refused if the representation changed since, per RFC 9110 section 13.1.4",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "If-None-Match",
+            "in": "header",
+            "description": "The entity tag the client already holds, per RFC 9110 section 13.1.2",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "If-Modified-Since",
+            "in": "header",
+            "description": "The date the client's copy carries, per RFC 9110 section 13.1.3",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden; Cross-origin request rejected; Malformed Origin/Referer header",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "the whole representation",
+            "headers": {
+              "Accept-Ranges": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Last-Modified": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "text/vtt": {
+                "schema": {}
+              }
+            }
+          },
+          "206": {
+            "description": "the part the request asked for",
+            "headers": {
+              "Accept-Ranges": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Last-Modified": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Range": {
+                "description": "The part of the representation enclosed, and its complete length, per RFC 9110 section 14.4.",
+                "required": true,
+                "content": {
+                  "text/plain": {
+                    "schema": {
+                      "type": "string",
+                      "pattern": "^bytes \\d+-\\d+/\\d+$"
+                    }
+                  }
+                }
+              }
+            },
+            "content": {
+              "text/vtt": {
+                "schema": {}
+              }
+            }
+          },
+          "304": {
+            "description": "the client's copy is current",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Last-Modified": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "412": {
+            "description": "the representation is not the one the client's copy came from"
+          },
+          "416": {
+            "description": "Range Not Satisfiable",
+            "headers": {
+              "Content-Range": {
+                "description": "The complete length of the selected representation, per RFC 9110 section 15.5.17.",
+                "required": true,
+                "content": {
+                  "text/plain": {
+                    "schema": {
+                      "type": "string",
+                      "pattern": "^bytes \\*/\\d+$"
+                    }
+                  }
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "File not found; Subtitle not found; Source file missing from disk; Subtitle rendition unavailable",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#file-not-found"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "File not found"
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#subtitle-not-found"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Subtitle not found"
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#source-file-missing"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Source file missing from disk"
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#subtitle-rendition-unavailable"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Subtitle rendition unavailable"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#internal"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BeamSession": []
+          }
+        ]
+      },
+      "head": {
+        "tags": [
+          "playback"
+        ],
+        "summary": "The same fields with no body. The rendition is still rendered: its length and validator are the rendered text's, so a `HEAD` cannot report them without it.",
+        "operationId": "headSubtitleWebVtt",
         "parameters": [
           {
             "name": "file_id",
@@ -13546,7 +14271,8 @@
           "year",
           "rating",
           "date_added",
-          "runtime"
+          "runtime",
+          "relevance"
         ],
         "description": "Sort field options for media search."
       },

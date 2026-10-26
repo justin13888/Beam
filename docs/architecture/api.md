@@ -33,8 +33,8 @@ role.
 | `/v1/libraries`, `/v1/libraries/{id}`, `/v1/libraries/{id}/files` | GET | Library listing (a `LibraryConnection`, never paged) and contents: a `LibraryFileConnection` paged by `first` (1-500, default 100) and `after`, by stored path then id. File paths are relative to the library root, in the listing and inside its cursor (NFR-108); another library's cursor is `400 #invalid-cursor` |
 | `/v1/files/{fileId}/stream` | GET, HEAD | Direct-play byte-range streaming (see `streaming.md`) |
 | `/v1/files/{fileId}/download` | GET, HEAD | Full-file download (attachment) |
-| `/v1/files/{fileId}/subtitles/{subtitleId}` | GET | A subtitle file beside the video, as stored, Range-capable; `404` `subtitle-not-found` for an id this file's sources do not list ([ADR-0020](decisions/ADR-0020-text-subtitle-delivery.md)) |
-| `/v1/files/{fileId}/subtitles/{subtitleId}/webvtt` | GET | The same SubRip or WebVTT file as WebVTT, for a browser's `<track>`; `404` `subtitle-rendition-unavailable` for ASS, SSA or a file over 8 MiB |
+| `/v1/files/{fileId}/subtitles/{subtitleId}` | GET, HEAD | A subtitle file beside the video, as stored, Range-capable; `404` `subtitle-not-found` for an id this file's sources do not list ([ADR-0020](decisions/ADR-0020-text-subtitle-delivery.md)) |
+| `/v1/files/{fileId}/subtitles/{subtitleId}/webvtt` | GET, HEAD | The same SubRip or WebVTT file as WebVTT, for a browser's `<track>`; `404` `subtitle-rendition-unavailable` for ASS, SSA or a file over 8 MiB |
 | `/v1/media/{id}/progress` | GET, DELETE | The caller's state for a movie or an episode (`UserTitleState`; all zeros if never played) / forget its resume position, keeping it played. `400` `progress-not-available-for-show` for a show or season id |
 | `/v1/media/{id}/watched` | PUT, DELETE | Mark a movie, episode, season or show watched (each episode of a season or show, idempotently) / unwatched (forgotten entirely); `204` |
 | `/v1/episodes/{id}`, `/v1/seasons/{id}` | GET | One episode (`EpisodeDetail`: its season, show and the episodes either side by next-up's rules: `(season, episode)` order, playable episodes only, the next after the run its primary file holds, and never back from a numbered season into season 0) or one season (`SeasonDetail`), with the caller's state |
@@ -150,12 +150,16 @@ that does not apply to that kind of title (a season has no backdrop, an episode 
     a page after a title that has since left the listing starts where that title was. A cursor
     that is not the server's, or was issued under another `sort_by`/`sort_order`, is
     `400 #invalid-cursor`. It is unsigned: everything in it is either public or checked.
-  - Every `sort_by` (`title`, `year`, `rating`, `date_added`, `runtime`) orders in the database in
+  - Every `sort_by` (`title`, `year`, `rating`, `date_added`, `runtime`, `relevance`) orders in the database in
     both directions, a title with no value for the field sorting **last** either way, ties broken
     by id, then kind. A show has no runtime and sorts with the films that lack one; `date_added` is
     when the title was first indexed. Title order is `lower(title)` under the database collation.
-    A `query` keeps the requested sort rather than ranking by relevance. A `query` holding a NUL
-    character, which no title can contain, is `400 #invalid-search-query`.
+    A `query` keeps the requested sort; `sort_by=relevance` ranks by it instead: each title's
+    trigram distance from the `query` (`pg_trgm`'s `<->`), so `asc` -- the default -- lists the
+    best match first and `desc` the worst, ties broken by id, then kind, as in every sort. Its
+    cursor carries that distance. `sort_by=relevance` without a `query` has nothing to rank by and
+    is `400 #invalid-search-query`, and so is a `query` holding a NUL character, which no title can
+    contain.
   - Filters apply to movies and shows alike, `min_rating` included; `genre` matches by name or
     slug. `min_rating` is on the 0-10 scale `ratings.tmdb` is reported on, compared in the single
     precision a rating is stored in, an unrated title counting as 0. A numeric filter out of its

@@ -62,6 +62,11 @@ pub enum CatalogSortField {
     DateAdded,
     /// Runtime in minutes; shows, and films without one, sort last.
     Runtime,
+    /// How far the title is from the filters' `query`: trigram distance, so
+    /// ascending is best match first. Only a listing with a query has one;
+    /// any other is refused (see
+    /// [`crate::repositories::catalog::unranked_relevance`]).
+    Relevance,
 }
 
 /// Which way a sort runs.
@@ -97,6 +102,10 @@ pub enum SortKey {
     DateAdded(DateTime<Utc>),
     /// Whole minutes.
     Runtime(Option<i32>),
+    /// The title's distance from the query, from 0 (the same text, ignoring
+    /// case) to 1 (no trigram in common), in the single precision Postgres
+    /// computes it in. Every title has one, so it is never missing.
+    Relevance(f32),
 }
 
 impl SortKey {
@@ -109,6 +118,7 @@ impl SortKey {
             Self::Rating(_) => CatalogSortField::Rating,
             Self::DateAdded(_) => CatalogSortField::DateAdded,
             Self::Runtime(_) => CatalogSortField::Runtime,
+            Self::Relevance(_) => CatalogSortField::Relevance,
         }
     }
 }
@@ -156,6 +166,7 @@ impl CatalogPosition {
             (SortKey::Rating(a), SortKey::Rating(b)) => {
                 nullable(*a, *b, |a, b| directed(a.total_cmp(&b)))
             }
+            (SortKey::Relevance(a), SortKey::Relevance(b)) => directed(a.total_cmp(b)),
             (a, b) => (a.field() as u8).cmp(&(b.field() as u8)),
         };
         key.then_with(|| directed((self.id, self.kind).cmp(&(other.id, other.kind))))
@@ -275,6 +286,19 @@ mod tests {
         assert_eq!(movie.display_cmp(&show, SortDirection::Asc), Ordering::Less);
         assert_eq!(
             movie.display_cmp(&show, SortDirection::Desc),
+            Ordering::Greater
+        );
+    }
+
+    /// Relevance is a distance: ascending puts the closest title first, and
+    /// the distance decides before the id does.
+    #[test]
+    fn relevance_runs_closest_first_ascending() {
+        let near = at(TitleKind::Movie, 2, SortKey::Relevance(0.0));
+        let far = at(TitleKind::Movie, 1, SortKey::Relevance(0.5));
+        assert_eq!(near.display_cmp(&far, SortDirection::Asc), Ordering::Less);
+        assert_eq!(
+            near.display_cmp(&far, SortDirection::Desc),
             Ordering::Greater
         );
     }

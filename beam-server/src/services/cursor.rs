@@ -15,6 +15,12 @@
 //! place in a listing the caller could page to anyway -- a key no store could
 //! hold, such as a title containing NUL, is refused as malformed.
 //!
+//! A `relevance` cursor's key is the boundary title's trigram distance from
+//! the query, as the store computed it (issue #247). The query itself is not
+//! in the cursor, as no filter is: one passed on under another query seeks to
+//! the same distance in that query's listing, a place the caller could page
+//! to anyway.
+//!
 //! The key is kept, not just the id, so a page after a title that has since
 //! gone -- its file removed, its title renamed -- still starts in the right
 //! place. A raw id could only restart from the beginning.
@@ -65,7 +71,15 @@ fn key_value(key: &SortKey) -> serde_json::Value {
         // narrows it back without loss.
         SortKey::Rating(rating) => serde_json::Value::from(rating.map(f64::from)),
         SortKey::DateAdded(at) => serde_json::Value::from(at.to_rfc3339()),
+        SortKey::Relevance(distance) => serde_json::Value::from(f64::from(*distance)),
     }
+}
+
+/// `wide` as the `f32` `encode` widened it from, or `None` for a value no
+/// `f32` holds, which `encode` did not write.
+fn narrowed(wide: f64) -> Option<f32> {
+    let narrow = wide as f32;
+    (f64::from(narrow) == wide).then_some(narrow)
 }
 
 fn key_from(sort: MediaSortField, value: serde_json::Value) -> Option<SortKey> {
@@ -73,6 +87,7 @@ fn key_from(sort: MediaSortField, value: serde_json::Value) -> Option<SortKey> {
         serde_json::from_value(value).ok()
     }
     Some(match sort {
+        MediaSortField::Relevance => SortKey::Relevance(narrowed(value.as_f64()?)?),
         // No stored title holds a NUL -- Postgres text cannot -- and binding
         // one fails the whole statement, so it is refused here as the
         // caller's error rather than surfacing as the server's.
@@ -87,15 +102,10 @@ fn key_from(sort: MediaSortField, value: serde_json::Value) -> Option<SortKey> {
         MediaSortField::Runtime => SortKey::Runtime(nullable(value)?),
         MediaSortField::Rating => {
             let rating: Option<f64> = nullable(value)?;
-            let narrowed = rating.map(|r| r as f32);
-            // A value no `f32` holds was not written by `encode`.
-            if rating
-                .zip(narrowed)
-                .is_some_and(|(wide, narrow)| f64::from(narrow) != wide)
-            {
-                return None;
-            }
-            SortKey::Rating(narrowed)
+            SortKey::Rating(match rating {
+                Some(wide) => Some(narrowed(wide)?),
+                None => None,
+            })
         }
         MediaSortField::DateAdded => SortKey::DateAdded(
             DateTime::parse_from_rfc3339(value.as_str()?)
