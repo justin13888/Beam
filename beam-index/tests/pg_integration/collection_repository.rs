@@ -6,7 +6,7 @@ use beam_domain::repositories::{CollectionRepository, MovieRepository, ShowRepos
 use beam_index::repositories::{SqlCollectionRepository, SqlMovieRepository, SqlShowRepository};
 use beam_test_support::postgres::ScopedSchema;
 use beam_test_support::seed;
-use uuid::Uuid;
+// `Uuid` comes into scope with the contract macro below.
 
 struct PgFixture {
     // Held so the schema outlives the repositories that use it.
