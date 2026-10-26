@@ -14,7 +14,10 @@ import { artworkSrc } from "@/lib/artwork";
 import {
 	browserTypeSupport,
 	chooseSource,
+	decodesEfficiently,
+	decodingQualities,
 	type SourceVerdict,
+	softwareDecodeDetail,
 } from "@/lib/playback-capability";
 import { apiError } from "@/lib/problem";
 import { nextPlayableEpisode } from "@/lib/upNext";
@@ -164,9 +167,40 @@ export function MediaDetailPage({
 	});
 
 	const canPlay = useMemo(() => browserTypeSupport(), []);
+	// How smoothly and power-efficiently this browser decodes each playable
+	// source. The answer is asynchronous, so the choice is made from the
+	// synchronous verdicts first and refined once it arrives; where
+	// `navigator.mediaCapabilities` does not exist it is an empty map.
+	const verdicts = useMemo(
+		() => chooseSource(sources ?? [], canPlay, null).verdicts,
+		[sources, canPlay],
+	);
+	const { data: qualities } = useQuery({
+		queryKey: [
+			"media",
+			playableId,
+			"decoding-quality",
+			sources?.map((s) => s.file_id),
+		],
+		queryFn: () => decodingQualities(sources ?? [], verdicts),
+		enabled: !!sources && sources.length > 0,
+		// A property of this browser and these files, which does not change
+		// while the page is open.
+		staleTime: Number.POSITIVE_INFINITY,
+	});
+	// The source playback began in. Once playback has begun, a refined
+	// choice must not swap the file out from under the viewer and restart it,
+	// so the playing source is held until the viewer picks another file.
+	const [playingSourceId, setPlayingSourceId] = useState<string | null>(null);
 	const choice = useMemo(
-		() => chooseSource(sources ?? [], canPlay, selectedFileId),
-		[sources, canPlay, selectedFileId],
+		() =>
+			chooseSource(
+				sources ?? [],
+				canPlay,
+				playingSourceId ?? selectedFileId,
+				qualities,
+			),
+		[sources, canPlay, selectedFileId, playingSourceId, qualities],
 	);
 	const selectedSource = choice.chosen;
 	// Sources came back and not one of them plays in this browser.
@@ -277,6 +311,12 @@ export function MediaDetailPage({
 	const selectedVerdict = selectedSource
 		? choice.verdicts.get(selectedSource.file_id)
 		: undefined;
+	// The pick plays, but this browser decodes it in software: the core's
+	// `Playability::Software` case, which is said rather than hidden.
+	const softwareDecodeNotice =
+		selectedSource && choice.quality && !decodesEfficiently(choice.quality)
+			? softwareDecodeDetail(selectedSource)
+			: null;
 	const hasNextPart = partIndex < parts.length - 1;
 
 	// The episode to auto-advance to when the current one ends (null for
@@ -291,6 +331,7 @@ export function MediaDetailPage({
 		setStartOver(false);
 		setPartOverride(null);
 		resetBeacon();
+		setPlayingSourceId(null);
 		setSelectedFileId(fileId);
 	}
 
@@ -301,6 +342,7 @@ export function MediaDetailPage({
 		setStartOver(false);
 		setPartOverride(null);
 		resetBeacon();
+		setPlayingSourceId(null);
 		setSelectedEpisodeId(episode.id);
 		setSelectedFileId(episode.file_id);
 	}
@@ -326,6 +368,7 @@ export function MediaDetailPage({
 			setStartOver(false);
 			setPartOverride(null);
 			resetBeacon();
+			setPlayingSourceId(null);
 			setSelectedEpisodeId(upNextEpisode.id);
 			setSelectedFileId(upNextEpisode.file_id);
 		}
@@ -402,9 +445,12 @@ export function MediaDetailPage({
 						poster={posterUrl}
 						startTime={resumePosition}
 						autoPlay={autoPlayNext}
-						onProgress={(currentTime, duration) =>
-							report(currentTime, duration)
-						}
+						onProgress={(currentTime, duration) => {
+							if (playingSourceId === null && selectedSource) {
+								setPlayingSourceId(selectedSource.file_id);
+							}
+							report(currentTime, duration);
+						}}
 						onEnded={handleEnded}
 						onError={() =>
 							setPlaybackError(
@@ -413,6 +459,12 @@ export function MediaDetailPage({
 						}
 						className="mb-4 w-full max-w-4xl"
 					/>
+
+					{softwareDecodeNotice && (
+						<p className="mb-4 text-sm text-amber-400">
+							{softwareDecodeNotice}
+						</p>
+					)}
 
 					<div className="mb-6 flex flex-wrap items-center gap-3">
 						{sources && sources.length > 1 && (
@@ -427,6 +479,9 @@ export function MediaDetailPage({
 									const verdict = choice.verdicts.get(s.file_id);
 									const unplayable =
 										verdict && !verdict.playable ? verdict : null;
+									const quality = qualities?.get(s.file_id);
+									const software =
+										quality !== undefined && !decodesEfficiently(quality);
 									return (
 										<option
 											key={s.file_id}
@@ -435,7 +490,9 @@ export function MediaDetailPage({
 										>
 											{unplayable
 												? `${sourceLabel(s)} — ${unplayable.detail}`
-												: sourceLabel(s)}
+												: software
+													? `${sourceLabel(s)} — decodes in software here`
+													: sourceLabel(s)}
 										</option>
 									);
 								})}

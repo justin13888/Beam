@@ -17,6 +17,7 @@
 import type { components } from "@/api.gen";
 
 type MediaSource = components["schemas"]["MediaSource"];
+type AudioTrack = components["schemas"]["AudioTrack"];
 
 /** Whether the browser can play a MIME type, `codecs` parameter included. */
 export type MediaTypeSupport = (type: string) => boolean;
@@ -55,6 +56,11 @@ export type SourceVerdict =
 			playable: true;
 			/** The container's MIME type, without codecs, as the browser accepted it. */
 			mimeType: string;
+			/** The RFC 6381 string the browser accepted for the first video track. */
+			videoCodec: string;
+			/** The audio track the browser plays (the first it decodes) and its
+			 * RFC 6381 string; null for a file with no audio. */
+			audio: { track: AudioTrack; codec: string } | null;
 	  }
 	| { playable: false; reason: RejectionReason; detail: string };
 
@@ -227,7 +233,7 @@ export function judgeSource(
 	if (!canPlay(withCodecs(videoMime, [videoCodec]))) return videoUnsupported;
 
 	if (source.audio_tracks.length === 0) {
-		return { playable: true, mimeType: videoMime };
+		return { playable: true, mimeType: videoMime, videoCodec, audio: null };
 	}
 
 	// Playable when any one audio track is: a browser plays the first track it
@@ -239,7 +245,12 @@ export function judgeSource(
 		if (!audioCodec) continue;
 		const mime = containerMime(container.kind, videoName, audioName);
 		if (canPlay(withCodecs(mime, [videoCodec, audioCodec]))) {
-			return { playable: true, mimeType: mime };
+			return {
+				playable: true,
+				mimeType: mime,
+				videoCodec,
+				audio: { track, codec: audioCodec },
+			};
 		}
 		// The track would move the file out of the container the browser
 		// accepted (WebM to Matroska), and the browser does not open that one.
@@ -254,11 +265,128 @@ export function judgeSource(
 	};
 }
 
+/**
+ * How well this browser decodes a source it can play, from
+ * `MediaCapabilities.decodingInfo`: the browser's nearest analogue to the
+ * core's `Playability::Hardware` / `Playability::Software` split. A source
+ * that is both smooth and power-efficient is decoded the way the core calls
+ * hardware; anything less is the software case. These flags rank sources and
+ * never reject one: `canPlayType` already said the file plays.
+ */
+export interface DecodingQuality {
+	smooth: boolean;
+	powerEfficient: boolean;
+}
+
+/** Whether a quality is the hardware-like case the choice prefers. */
+export function decodesEfficiently(quality: DecodingQuality): boolean {
+	return quality.smooth && quality.powerEfficient;
+}
+
+/** The notice for a pick that decodes in software here, worded as the core's
+ * `Playability::Software` detail is. */
+export function softwareDecodeDetail(source: MediaSource): string {
+	const codec = source.video_tracks[0]?.codec ?? "This file";
+	return `${codec.toUpperCase()} decodes in software here and may stutter`;
+}
+
+/** The part of `navigator.mediaCapabilities` this module asks. */
+export type DecodingCapabilities = Pick<MediaCapabilities, "decodingInfo">;
+
+/**
+ * The `decodingInfo` query for a source `judgeSource` found playable, or null
+ * where the probe lacks what the query requires. A `file` video
+ * configuration requires a bit rate and a frame rate; the bit rate falls back
+ * to the file's average (size over duration), but an unknown frame rate is
+ * not guessed, because the answer depends on it -- such a source is left
+ * unranked rather than ranked on an invented number.
+ */
+export function decodingConfiguration(
+	source: MediaSource,
+	verdict: SourceVerdict,
+): MediaDecodingConfiguration | null {
+	if (!verdict.playable) return null;
+	const video = source.video_tracks[0];
+	if (!video?.frame_rate) return null;
+	const averageBitRate =
+		source.duration_secs && source.duration_secs > 0
+			? Math.round((source.size_bytes * 8) / source.duration_secs)
+			: null;
+	const bitrate = video.bit_rate ?? averageBitRate;
+	if (!bitrate) return null;
+
+	const configuration: MediaDecodingConfiguration = {
+		type: "file",
+		video: {
+			contentType: withCodecs(verdict.mimeType, [verdict.videoCodec]),
+			width: video.width,
+			height: video.height,
+			bitrate,
+			framerate: video.frame_rate,
+		},
+	};
+	if (verdict.audio) {
+		const { track, codec } = verdict.audio;
+		configuration.audio = {
+			// The audio half is asked as an audio type of the same container.
+			contentType: withCodecs(verdict.mimeType.replace(/^video\//, "audio/"), [
+				codec,
+			]),
+			...(track.channels ? { channels: String(track.channels) } : {}),
+			...(track.bit_rate ? { bitrate: track.bit_rate } : {}),
+			...(track.sample_rate ? { samplerate: track.sample_rate } : {}),
+		};
+	}
+	return configuration;
+}
+
+/**
+ * Ask the browser how well it decodes each playable source. Resolves to the
+ * qualities it answered, by `file_id`; a source it was not asked about (not
+ * playable, or no usable configuration) or whose query failed is absent, and
+ * so unranked. Where `navigator.mediaCapabilities` does not exist (older
+ * browsers, jsdom) it resolves to an empty map, which leaves `chooseSource`
+ * choosing exactly as it does without one.
+ */
+export async function decodingQualities(
+	sources: readonly MediaSource[],
+	verdicts: ReadonlyMap<string, SourceVerdict>,
+	capabilities: DecodingCapabilities | undefined = globalThis.navigator
+		?.mediaCapabilities,
+): Promise<Map<string, DecodingQuality>> {
+	const qualities = new Map<string, DecodingQuality>();
+	if (!capabilities) return qualities;
+	await Promise.all(
+		sources.map(async (source) => {
+			const verdict = verdicts.get(source.file_id);
+			if (!verdict) return;
+			const configuration = decodingConfiguration(source, verdict);
+			if (!configuration) return;
+			try {
+				const info = await capabilities.decodingInfo(configuration);
+				qualities.set(source.file_id, {
+					// A configuration the browser calls unsupported is neither
+					// smooth nor efficient, whatever the other flags say; it still
+					// plays, since `canPlayType` accepted it.
+					smooth: info.supported && info.smooth,
+					powerEfficient: info.supported && info.powerEfficient,
+				});
+			} catch {
+				// A configuration the browser refuses to evaluate (a TypeError for
+				// a content type it cannot parse) ranks nothing.
+			}
+		}),
+	);
+	return qualities;
+}
+
 export interface SourceChoice {
 	/** The source to play, or null when none plays here. */
 	chosen: MediaSource | null;
 	/** Every source's verdict, by `file_id`, in the order given. */
 	verdicts: Map<string, SourceVerdict>;
+	/** The chosen source's decoding quality, where the browser reported one. */
+	quality: DecodingQuality | null;
 }
 
 /** Whether `fileId` names this source: its first file, or any of its parts. */
@@ -281,11 +409,19 @@ export function sourceHoldsFile(source: MediaSource, fileId: string): boolean {
  * `requestedFileId` -- a viewer's pick, a deep link, an episode's file -- may
  * name any part of a source. An unplayable request falls back to the best
  * playable source rather than being attempted and failing.
+ *
+ * `qualities`, from `decodingQualities`, refines the fallback the way the
+ * core's hardware-first pool does: the first playable source that decodes
+ * smoothly and power-efficiently is preferred to the rest, so a source that
+ * merely *can* play does not beat one that plays well. Where none does, or
+ * the answers are absent or still pending, the first playable source is
+ * chosen as before. A requested source is honoured whatever its quality.
  */
 export function chooseSource(
 	sources: readonly MediaSource[],
 	canPlay: MediaTypeSupport,
 	requestedFileId: string | null,
+	qualities: ReadonlyMap<string, DecodingQuality> = new Map(),
 ): SourceChoice {
 	const verdicts = new Map<string, SourceVerdict>();
 	for (const source of sources) {
@@ -297,5 +433,14 @@ export function chooseSource(
 	const requested = requestedFileId
 		? playable.find((s) => sourceHoldsFile(s, requestedFileId))
 		: undefined;
-	return { chosen: requested ?? playable[0] ?? null, verdicts };
+	const efficient = playable.find((s) => {
+		const quality = qualities.get(s.file_id);
+		return quality !== undefined && decodesEfficiently(quality);
+	});
+	const chosen = requested ?? efficient ?? playable[0] ?? null;
+	return {
+		chosen,
+		verdicts,
+		quality: (chosen && qualities.get(chosen.file_id)) ?? null,
+	};
 }

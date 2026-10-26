@@ -4,8 +4,13 @@ import * as factory from "@/test/factories";
 import {
 	browserTypeSupport,
 	chooseSource,
+	type DecodingCapabilities,
+	type DecodingQuality,
+	decodingConfiguration,
+	decodingQualities,
 	judgeSource,
 	type MediaTypeSupport,
+	softwareDecodeDetail,
 } from "./playback-capability";
 
 type MediaSource = components["schemas"]["MediaSource"];
@@ -59,6 +64,8 @@ function src(
 		height = 1080,
 		hdr = null as string | null,
 		audioCodecs = ["aac"],
+		frameRate = null as number | null,
+		bitRate = null as number | null,
 		...overrides
 	}: {
 		container?: string | null;
@@ -66,6 +73,8 @@ function src(
 		height?: number;
 		hdr?: string | null;
 		audioCodecs?: string[];
+		frameRate?: number | null;
+		bitRate?: number | null;
 	} & Partial<MediaSource> = {},
 ): MediaSource {
 	return factory.mediaSource({
@@ -78,8 +87,8 @@ function src(
 						codec: video,
 						width: height * 2,
 						height,
-						frame_rate: null,
-						bit_rate: null,
+						frame_rate: frameRate,
+						bit_rate: bitRate,
 						hdr_format: hdr,
 					},
 				]
@@ -108,10 +117,25 @@ describe("judgeSource", () => {
 			"video/mp4",
 		],
 	])("plays %s", (_, source, mimeType) => {
-		expect(judgeSource(source, chrome.canPlay)).toEqual({
+		expect(judgeSource(source, chrome.canPlay)).toMatchObject({
 			playable: true,
 			mimeType,
 		});
+	});
+
+	it("names the codec strings and the audio track the browser accepted", () => {
+		const verdict = judgeSource(
+			src("a", { audioCodecs: ["dts", "aac"] }),
+			chrome.canPlay,
+		);
+		expect(verdict).toMatchObject({
+			playable: true,
+			videoCodec: "avc1.640033",
+			audio: { codec: "mp4a.40.2", track: { codec: "aac" } },
+		});
+		expect(
+			judgeSource(src("b", { audioCodecs: [] }), chrome.canPlay),
+		).toMatchObject({ playable: true, audio: null });
 	});
 
 	it.each([
@@ -217,7 +241,7 @@ describe("judgeSource", () => {
 				}),
 				browser(["video/webm"], ["vp09", "opus"]).canPlay,
 			),
-		).toEqual({ playable: true, mimeType: "video/webm" });
+		).toMatchObject({ playable: true, mimeType: "video/webm" });
 	});
 });
 
@@ -308,5 +332,289 @@ describe("browserTypeSupport", () => {
 	it("relies on canPlayType alone where MediaSource does not exist", () => {
 		const video = { canPlayType: () => "" as const };
 		expect(browserTypeSupport(video, undefined)(type)).toBe(false);
+	});
+});
+
+const efficient: DecodingQuality = { smooth: true, powerEfficient: true };
+const software: DecodingQuality = { smooth: false, powerEfficient: false };
+
+describe("chooseSource with decoding qualities", () => {
+	const sources = [
+		src("4k", { height: 2160 }),
+		src("hd", { height: 1080 }),
+		src("sd", { height: 480 }),
+	];
+
+	it("prefers the first source that decodes smoothly and efficiently", () => {
+		const choice = chooseSource(
+			sources,
+			chrome.canPlay,
+			null,
+			new Map([
+				["4k", software],
+				["hd", efficient],
+				["sd", efficient],
+			]),
+		);
+		expect(choice.chosen?.file_id).toBe("hd");
+		expect(choice.quality).toEqual(efficient);
+	});
+
+	it.each([
+		["smooth but not power-efficient", { smooth: true, powerEfficient: false }],
+		["power-efficient but not smooth", { smooth: false, powerEfficient: true }],
+	])("does not prefer a source that is only %s", (_, partial) => {
+		const choice = chooseSource(
+			sources,
+			chrome.canPlay,
+			null,
+			new Map([
+				["4k", partial],
+				["hd", efficient],
+			]),
+		);
+		expect(choice.chosen?.file_id).toBe("hd");
+	});
+
+	it("keeps the server's first playable source when none decodes efficiently", () => {
+		const choice = chooseSource(
+			sources,
+			chrome.canPlay,
+			null,
+			new Map([
+				["4k", software],
+				["hd", software],
+			]),
+		);
+		expect(choice.chosen?.file_id).toBe("4k");
+		expect(choice.quality).toEqual(software);
+	});
+
+	it("rejects nothing on these flags: every verdict stays playable", () => {
+		const choice = chooseSource(
+			sources,
+			chrome.canPlay,
+			null,
+			new Map(sources.map((s) => [s.file_id, software])),
+		);
+		for (const verdict of choice.verdicts.values()) {
+			expect(verdict.playable).toBe(true);
+		}
+	});
+
+	it("never prefers an efficient source the browser cannot play", () => {
+		const choice = chooseSource(
+			[src("vp8", { video: "vp8" }), ...sources],
+			chrome.canPlay,
+			null,
+			new Map([
+				["vp8", efficient],
+				["4k", software],
+				["hd", efficient],
+			]),
+		);
+		expect(choice.chosen?.file_id).toBe("hd");
+	});
+
+	it("honours a requested source whatever its quality", () => {
+		const choice = chooseSource(
+			sources,
+			chrome.canPlay,
+			"4k",
+			new Map([
+				["4k", software],
+				["hd", efficient],
+			]),
+		);
+		expect(choice.chosen?.file_id).toBe("4k");
+		expect(choice.quality).toEqual(software);
+	});
+
+	it("reports no quality for a source the browser was not asked about", () => {
+		expect(
+			chooseSource(sources, chrome.canPlay, null, new Map()).quality,
+		).toBeNull();
+	});
+});
+
+describe("decodingConfiguration", () => {
+	function playable(source: MediaSource) {
+		return judgeSource(source, chrome.canPlay);
+	}
+
+	it("asks about the accepted video and audio types with the probed figures", () => {
+		const source = src("a", {
+			height: 1080,
+			frameRate: 23.976,
+			bitRate: 8_000_000,
+			audio_tracks: [
+				{
+					...audio("aac"),
+					channels: 6,
+					bit_rate: 384_000,
+					sample_rate: 48_000,
+				},
+			],
+		});
+		expect(decodingConfiguration(source, playable(source))).toEqual({
+			type: "file",
+			video: {
+				contentType: 'video/mp4; codecs="avc1.640033"',
+				width: 2160,
+				height: 1080,
+				bitrate: 8_000_000,
+				framerate: 23.976,
+			},
+			audio: {
+				contentType: 'audio/mp4; codecs="mp4a.40.2"',
+				channels: "6",
+				bitrate: 384_000,
+				samplerate: 48_000,
+			},
+		});
+	});
+
+	it("falls back to the file's average bit rate, and omits unknown audio figures", () => {
+		const source = src("a", {
+			frameRate: 25,
+			size_bytes: 1_000_000,
+			duration_secs: 8,
+			audio_tracks: [{ ...audio("opus"), channels: 0 }],
+			container_format: "matroska,webm",
+			video_tracks: [
+				{
+					index: 0,
+					codec: "vp9",
+					width: 1920,
+					height: 1080,
+					frame_rate: 25,
+					bit_rate: null,
+					hdr_format: null,
+				},
+			],
+		});
+		const configuration = decodingConfiguration(source, playable(source));
+		expect(configuration?.video?.bitrate).toBe(1_000_000);
+		expect(configuration?.audio).toEqual({
+			contentType: 'audio/webm; codecs="opus"',
+		});
+	});
+
+	it("leaves out the audio half for a file without audio", () => {
+		const source = src("a", { frameRate: 24, bitRate: 1, audioCodecs: [] });
+		const configuration = decodingConfiguration(source, playable(source));
+		expect(configuration?.video).toBeDefined();
+		expect(configuration?.audio).toBeUndefined();
+	});
+
+	it.each([
+		["an unknown frame rate", src("a", { bitRate: 1_000_000 })],
+		[
+			"no bit rate and no duration to average over",
+			src("a", { frameRate: 24, duration_secs: null }),
+		],
+		[
+			"no bit rate and a zero duration",
+			src("a", { frameRate: 24, duration_secs: 0 }),
+		],
+	])("asks nothing for %s", (_, source) => {
+		expect(decodingConfiguration(source, playable(source))).toBeNull();
+	});
+
+	it("asks nothing for an unplayable source", () => {
+		const source = src("a", { video: "vp8", frameRate: 24, bitRate: 1 });
+		expect(decodingConfiguration(source, playable(source))).toBeNull();
+	});
+});
+
+describe("decodingQualities", () => {
+	const ranked = (fileId: string, height = 1080, video = "h264") =>
+		src(fileId, { video, height, frameRate: 24, bitRate: 5_000_000 });
+
+	/** A browser that decodes pictures up to `maxHeight` in hardware. */
+	function hardwareUpTo(maxHeight: number) {
+		return vi.fn(async (c: MediaDecodingConfiguration) => {
+			const hardware = (c.video?.height ?? 0) <= maxHeight;
+			return {
+				supported: true,
+				smooth: hardware,
+				powerEfficient: hardware,
+				keySystemAccess: null,
+			} as MediaCapabilitiesDecodingInfo;
+		});
+	}
+
+	function verdictsOf(sources: MediaSource[]) {
+		return chooseSource(sources, chrome.canPlay, null).verdicts;
+	}
+
+	it("resolves to nothing where the browser has no MediaCapabilities", async () => {
+		const sources = [ranked("a")];
+		expect(
+			(await decodingQualities(sources, verdictsOf(sources), undefined)).size,
+		).toBe(0);
+	});
+
+	it("records each answer, and only for playable sources it could ask about", async () => {
+		const sources = [
+			ranked("hw", 1080),
+			ranked("sw", 2160),
+			ranked("vp8", 480, "vp8"),
+			src("unprobed"),
+		];
+		const decodingInfo = hardwareUpTo(1080);
+		const qualities = await decodingQualities(sources, verdictsOf(sources), {
+			decodingInfo,
+		});
+		expect(decodingInfo).toHaveBeenCalledTimes(2);
+		expect([...qualities.keys()].sort()).toEqual(["hw", "sw"]);
+		expect(qualities.get("hw")).toEqual(efficient);
+		expect(qualities.get("sw")).toEqual(software);
+	});
+
+	it("counts a configuration the browser calls unsupported as neither smooth nor efficient", async () => {
+		const sources = [ranked("a")];
+		const capabilities: DecodingCapabilities = {
+			decodingInfo: async () =>
+				({
+					supported: false,
+					smooth: true,
+					powerEfficient: true,
+					keySystemAccess: null,
+				}) as MediaCapabilitiesDecodingInfo,
+		};
+		const qualities = await decodingQualities(
+			sources,
+			verdictsOf(sources),
+			capabilities,
+		);
+		expect(qualities.get("a")).toEqual(software);
+	});
+
+	it("leaves a source whose query fails unranked, without failing the rest", async () => {
+		const sources = [ranked("bad", 2160), ranked("good", 1080)];
+		const answer = hardwareUpTo(2160);
+		const capabilities: DecodingCapabilities = {
+			decodingInfo: async (c) => {
+				if (c.video?.height === 2160) {
+					throw new TypeError("unparseable content type");
+				}
+				return answer(c);
+			},
+		};
+		const qualities = await decodingQualities(
+			sources,
+			verdictsOf(sources),
+			capabilities,
+		);
+		expect([...qualities.keys()]).toEqual(["good"]);
+	});
+});
+
+describe("softwareDecodeDetail", () => {
+	it("names the video codec, as the core's Software detail does", () => {
+		expect(softwareDecodeDetail(src("a", { video: "hevc" }))).toBe(
+			"HEVC decodes in software here and may stutter",
+		);
 	});
 });
