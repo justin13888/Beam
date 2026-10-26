@@ -827,4 +827,135 @@ mod tests {
         assert_eq!(response.header("content-type"), Some("image/jpeg"));
         assert!(response.bytes().is_empty(), "a HEAD carries no body");
     }
+
+    /// A real JPEG of `width` by `height`, so a resize has pixels to work on.
+    fn jpeg(width: u32, height: u32) -> Vec<u8> {
+        let pixels = image::RgbImage::from_fn(width, height, |x, y| {
+            image::Rgb([(x % 256) as u8, (y % 256) as u8, 128])
+        });
+        let mut encoded = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut encoded)
+            .encode_image(&pixels)
+            .expect("the fixture encodes");
+        encoded
+    }
+
+    fn dimensions(bytes: &[u8]) -> (u32, u32) {
+        let decoded = image::load_from_memory(bytes).expect("a decodable image");
+        (decoded.width(), decoded.height())
+    }
+
+    #[tokio::test]
+    async fn a_sized_poster_is_narrower_and_revalidates_under_its_own_etag() {
+        let original = jpeg(1000, 1500);
+        let fixture = fixture(InMemoryArtworkFetcher::new().with_image(
+            POSTER_URL,
+            ImageFormat::Jpeg,
+            &original,
+        ));
+        let id = movie_with_poster(&fixture, Some(POSTER_URL)).await;
+        let client = client(&fixture);
+        let token = signed_in(&fixture).await;
+        let full_path = format!("/v1/artwork/movie/{id}/poster");
+        let sized_path = format!("/v1/artwork/movie/{id}/poster?size=w185");
+
+        let full = client
+            .get(&full_path)
+            .cookie("beam_session", &token)
+            .send()
+            .await;
+        let sized = client
+            .get(&sized_path)
+            .cookie("beam_session", &token)
+            .send()
+            .await;
+
+        assert_eq!(full.status(), StatusCode::OK);
+        assert_eq!(full.bytes().as_ref(), original.as_slice());
+        assert_eq!(sized.status(), StatusCode::OK);
+        assert_eq!(sized.header("content-type"), Some("image/jpeg"));
+        assert_eq!(dimensions(sized.bytes().as_ref()), (185, 278));
+        let full_etag = full.header("etag").expect("a validator").to_string();
+        let sized_etag = sized.header("etag").expect("a validator").to_string();
+        assert_ne!(
+            full_etag, sized_etag,
+            "each size is its own representation and needs its own validator",
+        );
+        assert_eq!(
+            fixture.fetcher.call_count(),
+            1,
+            "a size is made from the cached original, not fetched again",
+        );
+
+        let revalidated = client
+            .get(&sized_path)
+            .cookie("beam_session", &token)
+            .header("if-none-match", &sized_etag)
+            .send()
+            .await;
+        assert_eq!(revalidated.status(), StatusCode::NOT_MODIFIED);
+
+        // The original's validator does not stand for the rendition.
+        let mismatched = client
+            .get(&sized_path)
+            .cookie("beam_session", &token)
+            .header("if-none-match", &full_etag)
+            .send()
+            .await;
+        assert_eq!(mismatched.status(), StatusCode::OK);
+        assert_eq!(mismatched.bytes(), sized.bytes());
+    }
+
+    #[tokio::test]
+    async fn a_size_that_is_not_on_the_ladder_is_refused_before_the_provider_is_asked() {
+        let fixture = fixture(InMemoryArtworkFetcher::new().with_image(
+            POSTER_URL,
+            ImageFormat::Jpeg,
+            &jpeg(1000, 1500),
+        ));
+        let id = movie_with_poster(&fixture, Some(POSTER_URL)).await;
+        let client = client(&fixture);
+        let token = signed_in(&fixture).await;
+
+        for size in ["w200", "185", "original", ""] {
+            let response = client
+                .get(&format!("/v1/artwork/movie/{id}/poster?size={size}"))
+                .cookie("beam_session", &token)
+                .send()
+                .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "size={size}");
+        }
+        assert_eq!(fixture.fetcher.call_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_sized_head_describes_the_rendition() {
+        let fixture = fixture(InMemoryArtworkFetcher::new().with_image(
+            POSTER_URL,
+            ImageFormat::Jpeg,
+            &jpeg(1000, 1500),
+        ));
+        let id = movie_with_poster(&fixture, Some(POSTER_URL)).await;
+        let client = client(&fixture);
+        let token = signed_in(&fixture).await;
+        let path = format!("/v1/artwork/movie/{id}/poster?size=w342");
+
+        let got = client
+            .get(&path)
+            .cookie("beam_session", &token)
+            .send()
+            .await;
+        let head = client
+            .head(&path)
+            .cookie("beam_session", &token)
+            .send()
+            .await;
+
+        assert_eq!(head.status(), StatusCode::OK);
+        assert_eq!(head.header("etag"), got.header("etag"));
+        assert_eq!(
+            head.header("content-length"),
+            Some(got.bytes().len().to_string().as_str()),
+        );
+    }
 }

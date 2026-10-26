@@ -185,3 +185,26 @@ pub fn artwork_path(
 ) -> String {
     format!("/v1/artwork/{kind}/{id}/{variant}")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::ArtworkSize;
+
+    /// The description lists the serde spelling and the route parses the
+    /// `FromStr` one, so the two must be one spelling -- and the ladder must
+    /// climb, or "the smallest rung at least this wide" means nothing.
+    #[test]
+    fn every_size_parses_from_the_spelling_it_is_described_with() {
+        for size in ArtworkSize::ALL {
+            let described = serde_json::to_value(size).expect("serialises");
+            let spelled = described.as_str().expect("a string value");
+            assert_eq!(spelled.parse::<ArtworkSize>().ok(), Some(*size));
+            assert_eq!(size.to_string(), spelled);
+        }
+        assert!(
+            ArtworkSize::ALL
+                .windows(2)
+                .all(|pair| pair[0].width() < pair[1].width())
+        );
+    }
+}
