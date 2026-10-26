@@ -16,8 +16,9 @@ API; `beam-android`, a native Android client for phone and tablet; and `beam-app
 SwiftUI client for iOS, iPadOS and macOS. All three are built against the same domain API (see
 NFR-6xx in `non-functional.md`). Android TV and tvOS remain outstanding. Neither has a web view to
 lift a session cookie from; both can now sign in by the device authorization grant wherever the
-identity provider offers it (FR-111, NFR-605), so what remains is the clients themselves. See the
-[client roadmap umbrella #78](https://github.com/justin13888/beam/issues/78).
+identity provider offers it (FR-111, NFR-605), so what remains is the clients themselves:
+[#65](https://github.com/justin13888/beam/issues/65) for Android TV and the tvOS half of
+[#66](https://github.com/justin13888/beam/issues/66).
 
 Native clients exist for a specific reason rather than as a matter of taste. Beam direct-plays, so
 whether a title plays at all is decided by what the client can decode; a browser without an HEVC or
@@ -90,12 +91,17 @@ another source ([#142](https://github.com/justin13888/beam/issues/142)).
 
 ## Out of scope (tracked in issues)
 
-- Remaining native clients — umbrella [#78](https://github.com/justin13888/beam/issues/78):
-  Android TV [#65](https://github.com/justin13888/beam/issues/65) and the tvOS remainder of
-  [#66](https://github.com/justin13888/beam/issues/66). Android mobile
+- Remaining native clients: Android TV [#65](https://github.com/justin13888/beam/issues/65) and the
+  tvOS remainder of [#66](https://github.com/justin13888/beam/issues/66). Android mobile
   [#67](https://github.com/justin13888/beam/issues/67) and Apple iOS/macOS
-  [#66](https://github.com/justin13888/beam/issues/66) have shipped; both remaining clients inherit
-  `beam-client-core`, and both need a native token mint before they can sign in at all.
+  [#66](https://github.com/justin13888/beam/issues/66) have shipped. Both remaining clients inherit
+  `beam-client-core` and sign in by the device authorization grant
+  ([#151](https://github.com/justin13888/beam/issues/151)); tvOS is further held back by
+  `aarch64-apple-tvos` being a Tier 3 Rust target.
+- Browser playback reach beyond what the browser decodes natively: a per-browser capability matrix
+  for direct play ([#139](https://github.com/justin13888/beam/issues/139)) and client-side
+  Matroska demux in `beam-web` ([#140](https://github.com/justin13888/beam/issues/140)), the
+  browser counterpart of the Apple client's sample-buffer engine.
 
 ## Non-goals
 
