@@ -12,7 +12,10 @@
  * The browser is asked, not assumed: `HTMLMediaElement.canPlayType` and
  * `MediaSource.isTypeSupported` judge the container and codecs together, and
  * this module only translates a source's probed container and FFmpeg codec
- * names into the MIME types those two take.
+ * names into the MIME types those two take. Where the browser also has
+ * `MediaCapabilities.decodingInfo`, its smooth and power-efficient answers
+ * rank the playable sources the way the core's hardware-before-software pool
+ * does (`decodingQualities`), without rejecting any.
  */
 import type { components } from "@/api.gen";
 

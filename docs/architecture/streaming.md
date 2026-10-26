@@ -61,7 +61,13 @@ source as not directly playable with its reason. The web player
 lists any source with a `disc_structure`, and any transport stream, as unplayable in a browser
 without asking the browser, and judges every other source by `canPlayType` and
 `MediaSource.isTypeSupported` on its container and codecs; it plays the first playable source in the
-order above, keeps the others in its picker with their reasons, and says so when none plays. A Blu-ray clip is a BDAV transport stream
+order above, keeps the others in its picker with their reasons, and says so when none plays. Where
+the browser has `MediaCapabilities.decodingInfo`
+([#316](https://github.com/justin13888/beam/issues/316)), the first playable source it reports as
+both smooth and power-efficient is preferred to the rest -- the browser's analogue of the Android
+app's hardware-before-software pool -- without rejecting any source on those flags; the answer is
+asynchronous, so the choice is refined when it arrives unless playback has already begun, and a
+pick that decodes in software here says so. A Blu-ray clip is a BDAV transport stream
 (`mpegts`, each packet carrying a 4-byte timestamp): the Android app's container list admits
 `mpegts`, so its capability check judges the clip by its codecs -- often refusing its DTS or TrueHD
 audio -- though ExoPlayer has not been verified to demux BDAV's timestamped packets, which a client
