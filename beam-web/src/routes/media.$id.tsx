@@ -140,7 +140,12 @@ export function MediaDetailPage({
 	// Media can have multiple playable editions/qualities (ADR-0004: never
 	// live-transcode -- pick among pre-existing files instead).
 	const playableId = movie ? mediaId : selectedEpisodeId;
-	const { data: sources } = useQuery({
+	const {
+		data: sources,
+		error: sourcesError,
+		refetch: refetchSources,
+		isFetching: sourcesFetching,
+	} = useQuery({
 		queryKey: ["media", playableId, "sources"],
 		queryFn: async (): Promise<MediaSource[]> => {
 			if (!playableId) return [];
@@ -209,13 +214,21 @@ export function MediaDetailPage({
 				item.file_id === unjudgedFileId ||
 				parts.some((part) => part.file_id === item.file_id),
 		) ?? null;
-	const resumePartIndex =
-		savedProgress && !startOver
-			? Math.max(
-					0,
-					parts.findIndex((part) => part.file_id === savedProgress.file_id),
-				)
-			: 0;
+	// The part to start in: the one the saved progress names; failing that
+	// (no saved progress for this title, or the lookup missed it), the part
+	// the viewer asked for -- a `?fileId=` deep link may name a later part;
+	// failing both, the first.
+	const savedPartIndex = savedProgress
+		? parts.findIndex((part) => part.file_id === savedProgress.file_id)
+		: -1;
+	const requestedPartIndex = parts.findIndex(
+		(part) => part.file_id === selectedFileId,
+	);
+	const resumePartIndex = startOver
+		? 0
+		: savedPartIndex >= 0
+			? savedPartIndex
+			: Math.max(0, requestedPartIndex);
 	const partIndex = partOverride ?? resumePartIndex;
 	const currentPart = parts[partIndex] ?? null;
 	// The saved position is within the part it was saved for; a part reached
@@ -451,7 +464,27 @@ export function MediaDetailPage({
 				</>
 			) : nothingPlayable ? (
 				<UnplayableSources sources={sources} verdicts={choice.verdicts} />
-			) : playableId && !sources ? null : (
+			) : playableId && !sources ? (
+				// Loading renders nothing; a failed load says so and offers a
+				// retry, rather than leaving an empty page.
+				sourcesError ? (
+					<div className="mb-6 flex items-center gap-3">
+						<p className="text-red-500">{sourcesError.message}</p>
+						<button
+							type="button"
+							onClick={() => refetchSources()}
+							disabled={sourcesFetching}
+							className="inline-flex items-center gap-1.5 rounded-md border border-gray-700 px-3 py-1.5 text-sm text-gray-300 hover:bg-gray-800 hover:text-white disabled:opacity-50"
+						>
+							<RefreshCw
+								size={14}
+								className={sourcesFetching ? "animate-spin" : ""}
+							/>
+							Retry
+						</button>
+					</div>
+				) : null
+			) : (
 				<p className="mb-6 text-gray-500">
 					{show && !selectedEpisodeId
 						? "Select an episode to play."

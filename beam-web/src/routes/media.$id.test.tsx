@@ -449,6 +449,75 @@ describe("/media/$id (multi-part)", () => {
 			"42",
 		);
 	});
+
+	it("starts at the part a deep link names when no saved progress names one", async () => {
+		serveMedia({ Movie: movie }, [twoParts]);
+		server.use(
+			http.get(`${BASE_URL}/v1/continue-watching`, () =>
+				HttpResponse.json<components["schemas"]["ContinueWatchingConnection"]>(
+					factory.connection([]),
+				),
+			),
+		);
+		renderRoute("/media/movie-1?fileId=cd2");
+
+		await waitFor(() => expect(currentStreamSrc()).toContain("/cd2/stream"));
+		expect(screen.getByTestId("video-player")).toHaveAttribute(
+			"data-start",
+			"0",
+		);
+		expect(screen.getByText("Part 2 of 2")).toBeInTheDocument();
+	});
+
+	it("starts at the deep-linked part when the progress lookup fails", async () => {
+		serveMedia({ Movie: movie }, [twoParts]);
+		server.use(
+			http.get(`${BASE_URL}/v1/continue-watching`, () =>
+				problem(500, "boom", "#internal"),
+			),
+		);
+		renderRoute("/media/movie-1?fileId=cd2");
+
+		await waitFor(() => expect(currentStreamSrc()).toContain("/cd2/stream"));
+		expect(screen.getByText("Part 2 of 2")).toBeInTheDocument();
+	});
+});
+
+describe("/media/$id (sources fail to load)", () => {
+	it("says the sources failed to load and retries on request", async () => {
+		serveMedia({ Movie: movie });
+		let fail = true;
+		server.use(
+			http.get(`${BASE_URL}/v1/media/:id/sources`, () =>
+				fail
+					? problem(500, "Sources unavailable", "#internal")
+					: HttpResponse.json<components["schemas"]["MediaSourceConnection"]>(
+							factory.connection([source("file-hd", 1080, "h264")]),
+						),
+			),
+		);
+		const user = userEvent.setup();
+		renderRoute("/media/movie-1");
+
+		const retry = await screen.findByRole("button", { name: "Retry" });
+		// The failure is stated, not an empty page, and the file is not
+		// streamed blind.
+		expect(
+			screen.getByText("Failed to load media sources"),
+		).toBeInTheDocument();
+		expect(screen.queryByTestId("video-player")).not.toBeInTheDocument();
+		expect(screen.queryByText("No streamable file.")).not.toBeInTheDocument();
+
+		fail = false;
+		await user.click(retry);
+
+		await waitFor(() =>
+			expect(currentStreamSrc()).toBe(
+				"http://localhost:8000/v1/files/file-hd/stream",
+			),
+		);
+		expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+	});
 });
 
 describe("/media/$id (show)", () => {
