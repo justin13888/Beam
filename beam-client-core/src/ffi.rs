@@ -14,7 +14,8 @@ use crate::capability::{
 use crate::catalog::{
     AdminEvent, AdminLogEntry, AdminLogPage, AdminStatus, AdminUser, AdminUserPage, BrowseQuery,
     ContinueWatchingEntry, DeviceSession, EpisodeSummary, HistoryEntry, HistoryPage,
-    LibraryFileSummary, LibrarySummary, MediaDetail, MediaPage, ServerHealth, browse_params,
+    LibraryFileSummary, LibrarySummary, MediaDetail, MediaPage, ScanJob, ServerHealth,
+    browse_params,
 };
 use crate::clock::{Clock, SystemClock};
 use crate::error::BeamError;
@@ -31,7 +32,6 @@ use crate::telemetry::{
     TelemetryClientKind, TelemetryFlush, TelemetryQueue, batch_body,
 };
 use crate::transport::{ABOUT_BLANK, FailureKind, SessionMiddleware, TransportFailure, classify};
-use crate::upnext::{UpNextSeason, next_playable_episode};
 use secrecy::{ExposeSecret, SecretString};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
@@ -44,6 +44,10 @@ const ACTIVE_SERVER_KEY: &str = "servers/active";
 /// the largest `GET /v1/libraries/{id}/files` takes, so the fewest round
 /// trips.
 const LIBRARY_FILES_PAGE: i64 = 500;
+/// The fragment of the problem type `GET /v1/admin/libraries/{id}/scan`
+/// answers with when the library has not been scanned since the server
+/// started.
+const SCAN_NOT_FOUND: &str = "#scan-not-found";
 
 /// A server as the UI sees it.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -174,13 +178,6 @@ struct ServerContext {
     /// Playback telemetry waiting to be reported to this server. Per server,
     /// because every event names one of this server's files.
     telemetry: Arc<TelemetryQueue>,
-    /// Titles already resolved for this server.
-    ///
-    /// The playback endpoints return bare identifiers, so every
-    /// continue-watching tile would otherwise cost a detail request on every
-    /// refresh. Held behind its own `Arc` so a lookup can be performed without
-    /// keeping the server map locked across an await.
-    metadata: Arc<RwLock<HashMap<String, MediaDetail>>>,
     /// The certificates the user has accepted for this server, and the last
     /// one the verifier turned away.
     trust: Arc<crate::tls::TrustDecision>,
@@ -913,16 +910,6 @@ impl BeamClient {
         })
     }
 
-    /// The next episode to play after this one.
-    #[must_use]
-    pub fn up_next(
-        &self,
-        seasons: Vec<UpNextSeason>,
-        current_episode_id: String,
-    ) -> Option<crate::upnext::UpNextEpisode> {
-        next_playable_episode(&seasons, &current_episode_id)
-    }
-
     // -- catalog ----------------------------------------------------------
 
     /// One page of the catalog, filtered and sorted.
@@ -941,8 +928,10 @@ impl BeamClient {
 
     /// Everything a detail screen shows for one title.
     ///
-    /// The result is cached per server, because the continue-watching and
-    /// history screens resolve the same titles repeatedly.
+    /// Read from the server every time, never cached: the detail carries the
+    /// viewer's watched state (issue #188), which playback and a watched mark
+    /// change under it, so a cached copy would show an episode just finished
+    /// as unwatched.
     ///
     /// # Errors
     ///
@@ -950,11 +939,40 @@ impl BeamClient {
     pub async fn media_detail(&self, media_id: String) -> Result<MediaDetail, BeamError> {
         let wire_media_id = parse_uuid("media_id", &media_id)?;
         let (server_id, client, record) = self.active_context()?;
-        let cache = self.metadata_cache(&server_id)?;
-        match Self::fetch_detail(&client, &record, &cache, wire_media_id).await {
-            Ok(detail) => Ok(detail),
-            Err(failure) => Err(self.fail(&server_id, &failure).await),
-        }
+        let response = self
+            .send(&server_id, client.get_media_detail(wire_media_id))
+            .await?;
+        Ok(MediaDetail::from_generated(response.into_inner(), &record))
+    }
+
+    /// Mark a movie, an episode, a season or a whole show watched.
+    ///
+    /// A season or a show marks each of its episodes. Marking a title already
+    /// watched changes nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::BadRequest`] when `id` is not a UUID and
+    /// [`BeamError::NotFound`] for an id the server does not know.
+    pub async fn mark_watched(&self, id: String) -> Result<(), BeamError> {
+        let wire_id = parse_uuid("id", &id)?;
+        let (server_id, client, _) = self.active_context()?;
+        self.send(&server_id, client.mark_watched(wire_id)).await?;
+        Ok(())
+    }
+
+    /// Mark a movie, an episode, a season or a whole show unwatched: its
+    /// played state, play count and resume position are all forgotten.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::mark_watched`].
+    pub async fn mark_unwatched(&self, id: String) -> Result<(), BeamError> {
+        let wire_id = parse_uuid("id", &id)?;
+        let (server_id, client, _) = self.active_context()?;
+        self.send(&server_id, client.mark_unwatched(wire_id))
+            .await?;
+        Ok(())
     }
 
     /// Every genre the catalog contains, for the explore filters.
@@ -969,45 +987,45 @@ impl BeamClient {
         Ok(response.into_inner().items)
     }
 
-    /// The next playable episode of a series after the given one.
+    /// The episode of `show_id` that plays after `current_episode_id`.
     ///
-    /// Resolves the series itself rather than making the caller assemble the
-    /// season list, so auto-advance is one call from the player.
+    /// The server's answer, `EpisodeDetail::next_episode_id` (issue #188),
+    /// rather than one worked out here: next-up skips episodes with no file,
+    /// crosses season boundaries, and steps over the run of episodes a
+    /// multi-episode file holds, and only the server knows the last of those.
+    /// So every client advances to the same episode.
+    ///
+    /// `None` after the last episode, and for an episode that is not
+    /// `show_id`'s: auto-advance never carries a viewer into another show.
     ///
     /// # Errors
     ///
-    /// Propagates transport and server failures.
+    /// Returns [`BeamError::BadRequest`] for an identifier that is not a UUID,
+    /// and propagates transport and server failures.
     pub async fn up_next_in_show(
         &self,
         show_id: String,
         current_episode_id: String,
     ) -> Result<Option<EpisodeSummary>, BeamError> {
-        let MediaDetail::Show { seasons, .. } = self.media_detail(show_id).await? else {
-            return Ok(None);
-        };
-        let as_up_next: Vec<UpNextSeason> = seasons
-            .iter()
-            .map(|season| UpNextSeason {
-                season_number: i32::try_from(season.season_number).unwrap_or(i32::MAX),
-                episodes: season
-                    .episodes
-                    .iter()
-                    .map(|episode| crate::upnext::UpNextEpisode {
-                        id: episode.id.clone(),
-                        episode_number: i32::try_from(episode.episode_number).unwrap_or(i32::MAX),
-                        file_id: episode.file_id.clone(),
-                    })
-                    .collect(),
-            })
-            .collect();
+        let wire_show_id = parse_uuid("show_id", &show_id)?;
+        let wire_current_id = parse_uuid("current_episode_id", &current_episode_id)?;
+        let (server_id, client, record) = self.active_context()?;
 
-        let Some(next) = next_playable_episode(&as_up_next, &current_episode_id) else {
+        let current = self
+            .send(&server_id, client.get_episode_detail(wire_current_id))
+            .await?
+            .into_inner();
+        if current.show.id != wire_show_id {
+            return Ok(None);
+        }
+        let Some(next_id) = current.next_episode_id else {
             return Ok(None);
         };
-        Ok(seasons
-            .into_iter()
-            .flat_map(|season| season.episodes)
-            .find(|episode| episode.id == next.id))
+        let next = self
+            .send(&server_id, client.get_episode_detail(next_id))
+            .await?
+            .into_inner();
+        Ok(Some(EpisodeSummary::from_generated(&next.episode, &record)))
     }
 
     // -- libraries --------------------------------------------------------
@@ -1088,17 +1106,14 @@ impl BeamClient {
 
     // -- playback ---------------------------------------------------------
 
-    /// Partially-watched titles, ready to resume, newest first.
+    /// Titles to resume and next episodes to start, newest first.
     ///
-    /// The server returns identifiers only, so the core resolves each title's
-    /// metadata before returning -- concurrently, and against the per-server
-    /// cache, so a home screen costs one round trip per *distinct* unseen
-    /// title rather than one per tile on every refresh.
+    /// One round trip: every row carries what it displays (issue #188), so
+    /// nothing is looked up per row.
     ///
     /// # Errors
     ///
-    /// Propagates transport and server failures. A title whose metadata cannot
-    /// be resolved is still returned, with `media` left `None`.
+    /// Propagates transport and server failures.
     pub async fn continue_watching(
         &self,
         limit: Option<u32>,
@@ -1111,32 +1126,19 @@ impl BeamClient {
             .send(&server_id, client.get_continue_watching(params))
             .await?;
 
-        let mut entries: Vec<ContinueWatchingEntry> = response
+        Ok(response
             .into_inner()
             .items
             .into_iter()
-            .map(ContinueWatchingEntry::from_generated)
-            .collect();
-
-        let cache = self.metadata_cache(&server_id)?;
-        let ids: Vec<String> = entries.iter().map(|entry| entry.media_id.clone()).collect();
-        let resolved = Self::hydrate(&client, &record, &cache, ids).await;
-        for entry in &mut entries {
-            if let Some(detail) = resolved.get(&entry.media_id) {
-                entry.media = Some(detail.summary().clone());
-                entry.episode = entry
-                    .episode_id
-                    .as_deref()
-                    .and_then(|id| find_episode(detail, id));
-            }
-        }
-        Ok(entries)
+            .map(|item| ContinueWatchingEntry::from_generated(item, &record))
+            .collect())
     }
 
     /// One page of watch history, newest first: `first` rows, after the
     /// page whose `end_cursor` is `after`, or from the start.
     ///
-    /// Hydrated the same way as [`Self::continue_watching`].
+    /// Each row carries what it displays, as [`Self::continue_watching`]'s
+    /// do.
     ///
     /// # Errors
     ///
@@ -1159,24 +1161,11 @@ impl BeamClient {
         let total = u64::try_from(response.total).unwrap_or(0);
         let end_cursor = response.page_info.end_cursor;
         let has_next_page = response.page_info.has_next_page;
-        let mut items: Vec<HistoryEntry> = response
+        let items: Vec<HistoryEntry> = response
             .items
             .into_iter()
-            .map(HistoryEntry::from_generated)
+            .map(|item| HistoryEntry::from_generated(item, &record))
             .collect();
-
-        let cache = self.metadata_cache(&server_id)?;
-        let ids: Vec<String> = items.iter().map(|entry| entry.media_id.clone()).collect();
-        let resolved = Self::hydrate(&client, &record, &cache, ids).await;
-        for entry in &mut items {
-            if let Some(detail) = resolved.get(&entry.media_id) {
-                entry.media = Some(detail.summary().clone());
-                entry.episode = entry
-                    .episode_id
-                    .as_deref()
-                    .and_then(|id| find_episode(detail, id));
-            }
-        }
         Ok(HistoryPage {
             items,
             total,
@@ -1789,10 +1778,31 @@ impl BeamClient {
         Ok(())
     }
 
-    /// Re-fetch metadata for one title.
+    /// The latest scan of a library since the server started, running or
+    /// finished; `None` when it has not been scanned since.
     ///
-    /// Evicts the core's cached copy, so the next read reflects the refresh
-    /// rather than serving what the screen was already showing.
+    /// # Errors
+    ///
+    /// Returns [`BeamError::BadRequest`] when `library_id` is not a UUID,
+    /// [`BeamError::Forbidden`] for a non-administrator, and
+    /// [`BeamError::NotFound`] for a library the server does not know.
+    pub async fn library_scan(&self, library_id: String) -> Result<Option<ScanJob>, BeamError> {
+        let wire_library_id = parse_uuid("library_id", &library_id)?;
+        let (server_id, client, _) = self.active_context()?;
+        match self
+            .send(&server_id, client.get_library_scan(wire_library_id))
+            .await
+        {
+            Ok(response) => Ok(Some(ScanJob::from_generated(response.into_inner()))),
+            // The server forgets scans when it restarts, and says so with its
+            // own problem type: that is an answer -- not scanned since --
+            // rather than a failure, unlike the library itself being unknown.
+            Err(BeamError::NotFound { code, .. }) if code.ends_with(SCAN_NOT_FOUND) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Re-fetch metadata for one title.
     ///
     /// # Errors
     ///
@@ -1805,14 +1815,6 @@ impl BeamClient {
             client.refresh_media_metadata(wire_media_id, None),
         )
         .await?;
-        if let Ok(cache) = self.metadata_cache(&server_id) {
-            // Evict under the key `fetch_detail` inserts with, the canonical
-            // spelling: `parse_uuid` also accepts uppercase and braced forms.
-            cache
-                .write()
-                .expect("metadata lock")
-                .remove(&wire_media_id.to_string());
-        }
         Ok(())
     }
 
@@ -1848,18 +1850,6 @@ fn parse_day(field: &str, value: &str) -> Result<crate::api::Date, BeamError> {
             detail: format!("{field} is not a YYYY-MM-DD date"),
             code: ABOUT_BLANK.to_owned(),
         })
-}
-
-/// The episode with this id, wherever it sits in a series.
-fn find_episode(detail: &MediaDetail, episode_id: &str) -> Option<EpisodeSummary> {
-    let MediaDetail::Show { seasons, .. } = detail else {
-        return None;
-    };
-    seasons
-        .iter()
-        .flat_map(|season| &season.episodes)
-        .find(|episode| episode.id == episode_id)
-        .cloned()
 }
 
 impl BeamClient {
@@ -1925,7 +1915,6 @@ impl BeamClient {
             throttle: Arc::new(ProgressThrottle::new(Arc::clone(&self.clock))),
             queue,
             telemetry: Arc::new(TelemetryQueue::new()),
-            metadata: Arc::new(RwLock::new(HashMap::new())),
             trust,
         };
         self.servers
@@ -2133,77 +2122,6 @@ impl BeamClient {
             (context.client.clone(), context.record.clone())
         })?;
         Ok((server_id, client, record))
-    }
-
-    /// The metadata cache belonging to one server.
-    fn metadata_cache(
-        &self,
-        server_id: &str,
-    ) -> Result<Arc<RwLock<HashMap<String, MediaDetail>>>, BeamError> {
-        self.with_context(server_id, |context| Arc::clone(&context.metadata))
-    }
-
-    /// One title, from the cache when it is there and from the server when it
-    /// is not.
-    async fn fetch_detail(
-        client: &GeneratedClient,
-        record: &ServerRecord,
-        cache: &Arc<RwLock<HashMap<String, MediaDetail>>>,
-        media_id: uuid::Uuid,
-    ) -> Result<MediaDetail, TransportFailure> {
-        let key = media_id.to_string();
-        if let Some(hit) = cache.read().expect("metadata lock").get(&key) {
-            return Ok(hit.clone());
-        }
-        let response = TransportFailure::capture(client.get_media_detail(media_id)).await?;
-        let detail = MediaDetail::from_generated(response.into_inner(), record);
-        cache
-            .write()
-            .expect("metadata lock")
-            .insert(key, detail.clone());
-        Ok(detail)
-    }
-
-    /// Resolve many titles at once, de-duplicated.
-    ///
-    /// Failures are dropped rather than propagated: a continue-watching row
-    /// whose artwork could not be fetched is still a valid place to resume
-    /// from, and failing the whole screen over one of them would be worse than
-    /// showing it plainly.
-    async fn hydrate(
-        client: &GeneratedClient,
-        record: &ServerRecord,
-        cache: &Arc<RwLock<HashMap<String, MediaDetail>>>,
-        media_ids: Vec<String>,
-    ) -> HashMap<String, MediaDetail> {
-        let mut wanted: Vec<String> = media_ids;
-        wanted.sort_unstable();
-        wanted.dedup();
-
-        let mut tasks = tokio::task::JoinSet::new();
-        for media_id in wanted {
-            // The ids come from the server's own rows, so one that is not a
-            // UUID names nothing to fetch; it is dropped like any other
-            // failure here.
-            let Ok(wire_id) = uuid::Uuid::parse_str(&media_id) else {
-                continue;
-            };
-            let client = client.clone();
-            let record = record.clone();
-            let cache = Arc::clone(cache);
-            tasks.spawn(async move {
-                let detail = Self::fetch_detail(&client, &record, &cache, wire_id).await;
-                (media_id, detail)
-            });
-        }
-
-        let mut resolved = HashMap::new();
-        while let Some(joined) = tasks.join_next().await {
-            if let Ok((media_id, Ok(detail))) = joined {
-                resolved.insert(media_id, detail);
-            }
-        }
-        resolved
     }
 
     /// Queue `event` for the active server, where there is one to queue.
@@ -2434,6 +2352,22 @@ fn to_view(
     // the server lists by stream index. The server lists sources primary
     // first, and this keeps that order.
     let video = source.video_tracks.into_iter().next();
+    let parts = source
+        .parts
+        .into_iter()
+        .map(|part| {
+            Ok(crate::capability::select::SourcePartView {
+                file_id: part.file_id.to_string(),
+                part_number: part
+                    .part_number
+                    .and_then(|number| u32::try_from(number).ok()),
+                size_bytes: u64::try_from(part.size_bytes).unwrap_or(0),
+                duration_secs: part.duration_secs,
+                stream_url: record.absolute_url(&part.stream_url)?,
+                subtitle_tracks: subtitle_views(part.subtitle_tracks, record)?,
+            })
+        })
+        .collect::<Result<Vec<_>, BeamError>>()?;
     Ok(MediaSourceView {
         file_id: source.file_id.to_string(),
         size_bytes: u64::try_from(source.size_bytes).unwrap_or(0),
@@ -2460,7 +2394,64 @@ fn to_view(
             .collect(),
         stream_url: record.absolute_url(&source.stream_url)?,
         download_url: record.absolute_url(&source.download_url)?,
+        parts,
+        disc_structure: source.disc_structure.map(|structure| match structure {
+            crate::api::types::MediaSourcediscStructure::Dvd => {
+                crate::capability::select::DiscStructure::Dvd
+            }
+            crate::api::types::MediaSourcediscStructure::BluRay => {
+                crate::capability::select::DiscStructure::BluRay
+            }
+        }),
+        subtitle_tracks: subtitle_views(source.subtitle_tracks, record)?,
     })
+}
+
+/// Normalise a file's subtitle tracks, resolving a sidecar's URLs against the
+/// server that served them.
+fn subtitle_views(
+    tracks: Vec<crate::api::types::SubtitleTrack>,
+    record: &ServerRecord,
+) -> Result<Vec<crate::capability::select::SubtitleTrackView>, BeamError> {
+    use crate::capability::select::{SubtitleOrigin, SubtitleTrackView};
+    tracks
+        .into_iter()
+        .map(|track| {
+            let crate::api::types::SubtitleTrack {
+                origin,
+                index,
+                sidecar_id,
+                codec,
+                language,
+                title,
+                is_default,
+                is_forced,
+                is_hearing_impaired,
+                is_text,
+                url,
+                webvtt_url,
+            } = track;
+            Ok(SubtitleTrackView {
+                origin: match origin {
+                    crate::api::types::SubtitleOrigin::Embedded => SubtitleOrigin::Embedded,
+                    crate::api::types::SubtitleOrigin::Sidecar => SubtitleOrigin::Sidecar,
+                },
+                index: index.and_then(|value| u32::try_from(value).ok()),
+                sidecar_id: sidecar_id.map(|id| id.to_string()),
+                codec,
+                language,
+                title,
+                is_default,
+                is_forced,
+                is_hearing_impaired,
+                is_text,
+                url: url.map(|path| record.absolute_url(&path)).transpose()?,
+                webvtt_url: webvtt_url
+                    .map(|path| record.absolute_url(&path))
+                    .transpose()?,
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -2468,7 +2459,6 @@ mod tests {
     use super::*;
     use crate::ports::kv::{FailureMode, InMemoryKeyValueStore};
     use crate::transport::CannedBackend;
-    use crate::upnext::{UpNextEpisode, UpNextSeason};
 
     /// Everything here exercises the façade without a network. That is most of
     /// it: the registry, the session state machine, trust decisions, and the
@@ -2767,30 +2757,6 @@ mod tests {
         assert_eq!(client.list_servers().expect("listable").len(), 1);
     }
 
-    #[tokio::test]
-    async fn up_next_is_resolved_locally_from_the_seasons_it_is_given() {
-        let client = client();
-        let seasons = vec![UpNextSeason {
-            season_number: 1,
-            episodes: vec![
-                UpNextEpisode {
-                    id: "e1".to_owned(),
-                    episode_number: 1,
-                    file_id: Some("f1".to_owned()),
-                },
-                UpNextEpisode {
-                    id: "e2".to_owned(),
-                    episode_number: 2,
-                    file_id: Some("f2".to_owned()),
-                },
-            ],
-        }];
-
-        let next = client.up_next(seasons, "e1".to_owned());
-
-        assert_eq!(next.map(|episode| episode.id), Some("e2".to_owned()));
-    }
-
     /// The title the transport tests ask about; what it names never matters.
     const MEDIA_ID: &str = "00000000-0000-0000-0000-000000000007";
 
@@ -2804,16 +2770,19 @@ mod tests {
     /// What `GET /v1/media/{id}` answers for [`MEDIA_ID`].
     const MOVIE_DETAIL: &str = r#"{"Movie":{"id":"00000000-0000-0000-0000-000000000007","title":{"original":"Le Samourai"},"genres":[],"user_state":{"played":false,"position_secs":0.0,"play_count":0}}}"#;
 
-    /// A refresh named by a non-canonical spelling of the id still evicts the
-    /// detail cached under the canonical one, so the next read goes back to
-    /// the server instead of serving the stale title.
+    /// The same movie, once the viewer has marked it watched.
+    const WATCHED_MOVIE_DETAIL: &str = r#"{"Movie":{"id":"00000000-0000-0000-0000-000000000007","title":{"original":"Le Samourai"},"genres":[],"user_state":{"played":true,"position_secs":0.0,"play_count":1}}}"#;
+
+    /// Marking a title watched and reading it back shows it watched: the mark
+    /// is a `PUT` on the title's `watched`, and the read after it reaches the
+    /// server rather than a copy taken before the mark (issue #188).
     #[tokio::test]
-    async fn refreshing_by_a_non_canonical_id_evicts_the_cached_detail() {
+    async fn a_watched_mark_shows_on_the_next_detail_read() {
         let (client, id, _) = signed_in_client().await;
         let backend = Arc::new(CannedBackend::answering_in_turn(vec![
             (200, "application/json", MOVIE_DETAIL),
             (204, "application/json", ""),
-            (200, "application/json", MOVIE_DETAIL),
+            (200, "application/json", WATCHED_MOVIE_DETAIL),
         ]));
         client
             .use_transport(
@@ -2822,33 +2791,240 @@ mod tests {
             )
             .expect("the server is registered");
 
-        client
+        let before = client
             .media_detail(MEDIA_ID.to_owned())
             .await
             .expect("the canned detail is served");
         client
-            .refresh_media_metadata(format!("{{{}}}", MEDIA_ID.to_uppercase()))
+            .mark_watched(MEDIA_ID.to_owned())
             .await
-            .expect("a braced uppercase id is still a valid identifier");
-        client
+            .expect("the canned 204 accepts the mark");
+        let after = client
             .media_detail(MEDIA_ID.to_owned())
             .await
             .expect("the canned detail is served again");
 
-        let methods: Vec<reqwest::Method> = backend
+        assert!(!before.summary().played);
+        assert!(after.summary().played, "the read after the mark is fresh");
+        let recorded = backend.recorded();
+        assert_eq!(recorded[1].method, reqwest::Method::PUT);
+        assert_eq!(
+            recorded[1].url.path(),
+            format!("/v1/media/{MEDIA_ID}/watched")
+        );
+        assert_eq!(recorded[2].method, reqwest::Method::GET);
+    }
+
+    #[tokio::test]
+    async fn an_unwatched_mark_is_a_delete_of_the_titles_watched_state() {
+        let (client, id, _) = signed_in_client().await;
+        let backend = Arc::new(CannedBackend::answering(204, "application/json", ""));
+        client
+            .use_transport(
+                &id,
+                Arc::clone(&backend) as Arc<dyn crate::api::HttpBackend>,
+            )
+            .expect("the server is registered");
+
+        client
+            .mark_unwatched(MEDIA_ID.to_owned())
+            .await
+            .expect("the canned 204 accepts the mark");
+
+        let recorded = backend.recorded();
+        assert_eq!(recorded[0].method, reqwest::Method::DELETE);
+        assert_eq!(
+            recorded[0].url.path(),
+            format!("/v1/media/{MEDIA_ID}/watched")
+        );
+        assert!(matches!(
+            client.mark_watched("not-a-uuid".to_owned()).await,
+            Err(BeamError::BadRequest { .. })
+        ));
+    }
+
+    const SHOW_ID: &str = "5a5a5a5a-0000-4000-8000-000000000001";
+    const CURRENT_EPISODE: &str = "e0000001-0000-4000-8000-000000000001";
+    const NEXT_EPISODE: &str = "e0000005-0000-4000-8000-000000000005";
+
+    /// `GET /v1/episodes/{id}` for an episode of `show` whose next-up is
+    /// `next` (JSON `null` for none).
+    fn episode_detail(episode: &str, show: &str, next: &str) -> String {
+        format!(
+            r#"{{"episode":{{"id":"{episode}","episode_number":4,"title":"Return","source_count":1,
+                "user_state":{{"played":false,"position_secs":0.0,"play_count":0}},
+                "file_id":"f4f4f4f4-0000-4000-8000-000000000004"}},
+               "season_id":"5e5e5e5e-0000-4000-8000-000000000001","season_number":2,
+               "show":{{"id":"{show}","title":{{"original":"Dark"}}}},
+               "next_episode_id":{next}}}"#
+        )
+    }
+
+    /// A signed-in server answering each request with the next of `answers`.
+    async fn client_answering_in_turn(
+        answers: Vec<(u16, &'static str, &'static str)>,
+    ) -> (Arc<BeamClient>, Arc<CannedBackend>) {
+        let (client, id, _) = signed_in_client().await;
+        let backend = Arc::new(CannedBackend::answering_in_turn(answers));
+        client
+            .use_transport(
+                &id,
+                Arc::clone(&backend) as Arc<dyn crate::api::HttpBackend>,
+            )
+            .expect("the server is registered");
+        (client, backend)
+    }
+
+    /// Auto-advance follows the server's `next_episode_id`, and returns the
+    /// next episode as the server describes it.
+    #[tokio::test]
+    async fn up_next_is_the_episode_the_server_names_next() {
+        let current: &'static str = Box::leak(
+            episode_detail(CURRENT_EPISODE, SHOW_ID, &format!("\"{NEXT_EPISODE}\""))
+                .into_boxed_str(),
+        );
+        let next: &'static str =
+            Box::leak(episode_detail(NEXT_EPISODE, SHOW_ID, "null").into_boxed_str());
+        let (client, backend) = client_answering_in_turn(vec![
+            (200, "application/json", current),
+            (200, "application/json", next),
+        ])
+        .await;
+
+        let episode = client
+            .up_next_in_show(SHOW_ID.to_owned(), CURRENT_EPISODE.to_owned())
+            .await
+            .expect("both episodes decode")
+            .expect("the server names a next episode");
+
+        assert_eq!(episode.id, NEXT_EPISODE);
+        assert_eq!(
+            episode.file_id.as_deref(),
+            Some("f4f4f4f4-0000-4000-8000-000000000004")
+        );
+        let paths: Vec<String> = backend
             .recorded()
-            .into_iter()
-            .map(|request| request.method)
+            .iter()
+            .map(|request| request.url.path().to_owned())
             .collect();
         assert_eq!(
-            methods,
+            paths,
             vec![
-                reqwest::Method::GET,
-                reqwest::Method::POST,
-                reqwest::Method::GET
-            ],
-            "the read after the refresh must reach the server, not the cache"
+                format!("/v1/episodes/{CURRENT_EPISODE}"),
+                format!("/v1/episodes/{NEXT_EPISODE}"),
+            ]
         );
+    }
+
+    #[tokio::test]
+    async fn there_is_no_up_next_after_the_last_episode() {
+        let last: &'static str =
+            Box::leak(episode_detail(CURRENT_EPISODE, SHOW_ID, "null").into_boxed_str());
+        let (client, backend) =
+            client_answering_in_turn(vec![(200, "application/json", last)]).await;
+
+        let episode = client
+            .up_next_in_show(SHOW_ID.to_owned(), CURRENT_EPISODE.to_owned())
+            .await
+            .expect("the episode decodes");
+
+        assert_eq!(episode, None);
+        assert_eq!(backend.recorded().len(), 1, "nothing to look up next");
+    }
+
+    #[tokio::test]
+    async fn up_next_never_crosses_into_another_show() {
+        let elsewhere: &'static str = Box::leak(
+            episode_detail(
+                CURRENT_EPISODE,
+                "0f0f0f0f-0000-4000-8000-00000000000f",
+                &format!("\"{NEXT_EPISODE}\""),
+            )
+            .into_boxed_str(),
+        );
+        let (client, backend) =
+            client_answering_in_turn(vec![(200, "application/json", elsewhere)]).await;
+
+        let episode = client
+            .up_next_in_show(SHOW_ID.to_owned(), CURRENT_EPISODE.to_owned())
+            .await
+            .expect("the episode decodes");
+
+        assert_eq!(episode, None);
+        assert_eq!(backend.recorded().len(), 1);
+    }
+
+    /// `GET /v1/admin/libraries/{id}/scan` for a scan part-way through.
+    const RUNNING_SCAN: &str = r#"{"id":"5c000000-0000-4000-8000-000000000001",
+        "library_id":"00000000-0000-0000-0000-00000000000a","trigger":"manual",
+        "state":"running","queued_at":"2026-01-01T00:00:00Z",
+        "started_at":"2026-01-01T00:00:01Z","finished_at":null,
+        "progress":{"total_count":120,"processed_count":30,"added_count":12,
+                    "changed_count":3,"unchanged_count":15,"deferred_count":0,
+                    "failed_count":1,"marked_missing_count":2,"restored_count":0,
+                    "relinked_count":0,"purged_count":0},
+        "failure":null}"#;
+    const LIBRARY_ID: &str = "00000000-0000-0000-0000-00000000000a";
+
+    #[tokio::test]
+    async fn a_running_scan_reports_its_progress() {
+        let (client, backend) =
+            client_answering_in_turn(vec![(200, "application/json", RUNNING_SCAN)]).await;
+
+        let job = client
+            .library_scan(LIBRARY_ID.to_owned())
+            .await
+            .expect("the scan decodes")
+            .expect("the library has a scan");
+
+        assert_eq!(job.state, crate::catalog::ScanJobState::Running);
+        assert_eq!(job.library_id, LIBRARY_ID);
+        assert_eq!((job.processed_count, job.total_count), (30, Some(120)));
+        assert_eq!(
+            (
+                job.added_count,
+                job.changed_count,
+                job.failed_count,
+                job.missing_count
+            ),
+            (12, 3, 1, 2)
+        );
+        assert_eq!(job.finished_at_unix, None);
+        assert_eq!(
+            backend.recorded()[0].url.path(),
+            format!("/v1/admin/libraries/{LIBRARY_ID}/scan")
+        );
+    }
+
+    /// The server forgets scans when it restarts: that is "not scanned
+    /// since", an answer, while an unknown library is still a failure.
+    #[tokio::test]
+    async fn no_scan_since_the_server_started_is_none_and_an_unknown_library_is_an_error() {
+        let (client, _) = client_answering_in_turn(vec![
+            (
+                404,
+                "application/problem+json",
+                r#"{"type":"https://beam.justinchung.net/reference/errors/#scan-not-found","status":404,"title":"No scan of this library since the server started"}"#,
+            ),
+            (
+                404,
+                "application/problem+json",
+                r#"{"type":"https://beam.justinchung.net/reference/errors/#library-not-found","status":404,"title":"Library not found"}"#,
+            ),
+        ])
+        .await;
+
+        assert_eq!(
+            client
+                .library_scan(LIBRARY_ID.to_owned())
+                .await
+                .expect("not scanned is an answer"),
+            None
+        );
+        assert!(matches!(
+            client.library_scan(LIBRARY_ID.to_owned()).await,
+            Err(BeamError::NotFound { .. })
+        ));
     }
 
     /// A library file, as `GET /v1/libraries/{id}/files` lists one.
@@ -3207,6 +3383,128 @@ mod tests {
         assert_eq!(other.file_id, "f2f2f2f2-0000-4000-8000-000000000002");
         assert_eq!(other.video_codec, None, "no video track, no picture");
         assert_eq!((other.width, other.height), (None, None));
+    }
+
+    /// A multi-part source (issue #233) carries every part in the server's
+    /// order with its own absolute stream URL and its own sidecars, a disc rip
+    /// (issue #234) its structure, and a sidecar subtitle (issue #189) the
+    /// URLs the player fetches it from -- resolved, so the player needs no
+    /// base URL of its own.
+    #[tokio::test]
+    async fn a_multi_part_disc_source_carries_its_parts_structure_and_sidecars() {
+        const SOURCES: &str = r#"{"items":[
+            {"file_id":"c1c1c1c1-0000-4000-8000-000000000001","is_primary":true,
+             "edition":null,"episode_span":null,"disc_structure":"blu_ray",
+             "parts":[
+                {"file_id":"c1c1c1c1-0000-4000-8000-000000000001","part_number":1,
+                 "size_bytes":3000,"duration_secs":3000.0,"subtitle_tracks":[],
+                 "stream_url":"/v1/files/c1c1c1c1-0000-4000-8000-000000000001/stream",
+                 "download_url":"/v1/files/c1c1c1c1-0000-4000-8000-000000000001/download"},
+                {"file_id":"c2c2c2c2-0000-4000-8000-000000000002","part_number":2,
+                 "size_bytes":2000,"duration_secs":2800.0,
+                 "subtitle_tracks":[
+                    {"origin":"sidecar","index":null,
+                     "sidecar_id":"5d5d5d5d-0000-4000-8000-000000000002",
+                     "codec":"subrip","language":"spa","title":"Forced",
+                     "is_default":false,"is_forced":true,"is_hearing_impaired":false,
+                     "is_text":true,
+                     "url":"/v1/files/c2c2c2c2-0000-4000-8000-000000000002/subtitles/5d5d5d5d-0000-4000-8000-000000000002",
+                     "webvtt_url":"/v1/files/c2c2c2c2-0000-4000-8000-000000000002/subtitles/5d5d5d5d-0000-4000-8000-000000000002/webvtt"}],
+                 "stream_url":"/v1/files/c2c2c2c2-0000-4000-8000-000000000002/stream",
+                 "download_url":"/v1/files/c2c2c2c2-0000-4000-8000-000000000002/download"}],
+             "size_bytes":5000,
+             "mime_type":null,"container_format":"mpegts","duration_secs":5800.0,
+             "video_tracks":[{"index":0,"codec":"h264","width":1920,"height":1080,
+                              "frame_rate":null,"bit_rate":null,"hdr_format":null}],
+             "audio_tracks":[],
+             "subtitle_tracks":[
+                {"origin":"embedded","index":3,"sidecar_id":null,
+                 "codec":"hdmv_pgs_subtitle","language":"eng","title":null,
+                 "is_default":true,"is_forced":false,"is_hearing_impaired":false,
+                 "is_text":false,"url":null,"webvtt_url":null}],
+             "stream_url":"/v1/files/c1c1c1c1-0000-4000-8000-000000000001/stream",
+             "download_url":"/v1/files/c1c1c1c1-0000-4000-8000-000000000001/download"}
+        ],
+        "page_info":{"has_next_page":false,"has_previous_page":false,
+                     "start_cursor":null,"end_cursor":null}}"#;
+        let client = client_answering_sources(SOURCES).await;
+
+        let views = client
+            .media_sources(MEDIA_ID.to_owned())
+            .await
+            .expect("the sources decode");
+        let source = &views[0];
+
+        assert_eq!(
+            source.disc_structure,
+            Some(crate::capability::select::DiscStructure::BluRay)
+        );
+        let parts: Vec<(&str, Option<u32>, Option<f64>, &str)> = source
+            .parts
+            .iter()
+            .map(|part| {
+                (
+                    part.file_id.as_str(),
+                    part.part_number,
+                    part.duration_secs,
+                    part.stream_url.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            parts,
+            vec![
+                (
+                    "c1c1c1c1-0000-4000-8000-000000000001",
+                    Some(1),
+                    Some(3000.0),
+                    "https://beam.test/v1/files/c1c1c1c1-0000-4000-8000-000000000001/stream"
+                ),
+                (
+                    "c2c2c2c2-0000-4000-8000-000000000002",
+                    Some(2),
+                    Some(2800.0),
+                    "https://beam.test/v1/files/c2c2c2c2-0000-4000-8000-000000000002/stream"
+                ),
+            ]
+        );
+        assert!(source.contains_file("c2c2c2c2-0000-4000-8000-000000000002"));
+
+        let embedded = &source.subtitle_tracks[0];
+        assert_eq!(
+            embedded.origin,
+            crate::capability::select::SubtitleOrigin::Embedded
+        );
+        assert_eq!(embedded.index, Some(3));
+        assert!(!embedded.is_text);
+        assert_eq!(
+            (embedded.url.as_deref(), embedded.webvtt_url.as_deref()),
+            (None, None)
+        );
+
+        let sidecar = &source.parts[1].subtitle_tracks[0];
+        assert_eq!(
+            sidecar.origin,
+            crate::capability::select::SubtitleOrigin::Sidecar
+        );
+        assert_eq!(
+            sidecar.sidecar_id.as_deref(),
+            Some("5d5d5d5d-0000-4000-8000-000000000002")
+        );
+        assert_eq!(sidecar.language.as_deref(), Some("spa"));
+        assert!(sidecar.is_forced);
+        assert_eq!(
+            sidecar.webvtt_url.as_deref(),
+            Some(
+                "https://beam.test/v1/files/c2c2c2c2-0000-4000-8000-000000000002/subtitles/5d5d5d5d-0000-4000-8000-000000000002/webvtt"
+            )
+        );
+        assert_eq!(
+            sidecar.url.as_deref(),
+            Some(
+                "https://beam.test/v1/files/c2c2c2c2-0000-4000-8000-000000000002/subtitles/5d5d5d5d-0000-4000-8000-000000000002"
+            )
+        );
     }
 
     /// Two H.264 versions of one title: a 1080p file at 8 Mbps and a 720p
@@ -3914,9 +4212,9 @@ mod tests {
         );
     }
 
-    /// A 401 whose failure is dropped -- `hydrate` shows a continue-watching
-    /// row plainly rather than failing the whole screen over one unresolved
-    /// title -- leaves the middleware's flag set with nothing to consume it.
+    /// A 401 whose failure is dropped -- a request that never passed through
+    /// [`BeamClient::send`] -- leaves the middleware's flag set with nothing
+    /// to consume it.
     ///
     /// The flag belongs to the session that provoked it. Left standing across
     /// a sign-in it was spent on the next unrelated failure, expiring a
@@ -3938,17 +4236,15 @@ mod tests {
                 Arc::clone(&rejecting) as Arc<dyn crate::api::HttpBackend>,
             )
             .expect("the server is registered");
-        let resolved = BeamClient::hydrate(
-            &client.client_for(&id).expect("the server is registered"),
-            &client.record_for(&id).expect("the server is registered"),
-            &client
-                .metadata_cache(&id)
-                .expect("the server is registered"),
-            vec![MEDIA_ID.to_owned()],
+        // A request made around `send`, so nothing hands its 401 to the
+        // session machine -- the shape a dropped failure has.
+        let generated = client.client_for(&id).expect("the server is registered");
+        let dropped = TransportFailure::capture(
+            generated.get_media_detail(parse_uuid("media_id", MEDIA_ID).expect("a UUID")),
         )
         .await;
         assert!(
-            resolved.is_empty(),
+            dropped.is_err(),
             "the 401 is dropped, which is what leaves the flag unconsumed"
         );
 

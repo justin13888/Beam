@@ -38,6 +38,105 @@ pub struct MediaSourceView {
     pub stream_url: String,
     /// Server-relative download URL.
     pub download_url: String,
+    /// The files this source plays, in order (issue #233): one for a whole
+    /// file, each part of a multi-part movie otherwise.
+    ///
+    /// A player queues one item per part, and reports progress against the
+    /// part that is playing, at the position within that part. Empty only for
+    /// a view built without the server's list, which a player treats as the
+    /// single part `file_id` names.
+    #[uniffi(default)]
+    pub parts: Vec<SourcePartView>,
+    /// The disc structure this source was copied from whole (issue #234), when
+    /// it is a DVD or Blu-ray folder rip's main title.
+    #[uniffi(default)]
+    pub disc_structure: Option<DiscStructure>,
+    /// The first part's subtitle tracks: the file's own, by stream index, then
+    /// the subtitle files beside it (issue #189).
+    #[uniffi(default)]
+    pub subtitle_tracks: Vec<SubtitleTrackView>,
+}
+
+impl MediaSourceView {
+    /// Whether `file_id` names this source: its first file, or any of its
+    /// parts.
+    ///
+    /// Continue-watching names the part last played, which for a multi-part
+    /// movie need not be the first, so a lookup by the first file alone would
+    /// lose the viewer's place.
+    #[must_use]
+    pub fn contains_file(&self, file_id: &str) -> bool {
+        self.file_id == file_id || self.parts.iter().any(|part| part.file_id == file_id)
+    }
+}
+
+/// One file of a source, played in the order the source lists it.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct SourcePartView {
+    /// The file this part plays.
+    pub file_id: String,
+    /// The part the filename names (`CD2` is `2`), from 1; absent for a whole
+    /// file.
+    pub part_number: Option<u32>,
+    /// This part's size on disk.
+    pub size_bytes: u64,
+    /// This part's duration, where probing determined one.
+    pub duration_secs: Option<f64>,
+    /// Absolute direct-play URL for this part.
+    pub stream_url: String,
+    /// This part's own subtitle tracks: a subtitle file beside a part times
+    /// that part.
+    pub subtitle_tracks: Vec<SubtitleTrackView>,
+}
+
+/// The disc structure a source was copied from whole.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum DiscStructure {
+    /// A DVD's VOBs: MPEG program streams.
+    Dvd,
+    /// A Blu-ray's clips: BDAV MPEG transport streams (`.m2ts`).
+    BluRay,
+}
+
+/// Where a subtitle track comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum SubtitleOrigin {
+    /// A stream inside the media file, which the player's extractor finds.
+    Embedded,
+    /// A subtitle file beside the media file, which the player fetches itself.
+    Sidecar,
+}
+
+/// One subtitle track of a source file.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct SubtitleTrackView {
+    /// Embedded in the file, or a file beside it.
+    pub origin: SubtitleOrigin,
+    /// The stream's index in its file; present exactly for an embedded track.
+    pub index: Option<u32>,
+    /// The subtitle file's identifier; present exactly for a sidecar.
+    pub sidecar_id: Option<String>,
+    /// FFmpeg's codec name: `subrip`, `webvtt`, `ass`, `mov_text`, or an image
+    /// format such as `hdmv_pgs_subtitle`.
+    pub codec: String,
+    /// The ISO 639-2/B language code (`eng`, `spa`).
+    pub language: Option<String>,
+    /// The track's own title (`Commentary`, `pt-BR`).
+    pub title: Option<String>,
+    /// Whether the file marks this track as the default.
+    pub is_default: bool,
+    /// Subtitles only for foreign-language dialogue.
+    pub is_forced: bool,
+    /// Subtitles for the deaf and hard of hearing (SDH).
+    pub is_hearing_impaired: bool,
+    /// Text a client can render itself, as opposed to an image format it
+    /// must decode.
+    pub is_text: bool,
+    /// Absolute URL of the track as stored; present exactly for a sidecar.
+    pub url: Option<String>,
+    /// Absolute URL of the track as WebVTT, for a SubRip or WebVTT sidecar
+    /// small enough to convert.
+    pub webvtt_url: Option<String>,
 }
 
 /// One audio track within a source.
@@ -74,6 +173,10 @@ pub enum RejectionReason {
     NoVideoStream,
     /// Only a software decoder matched, and software decoding is disabled.
     SoftwareDecodeDisabled,
+    /// A Blu-ray folder rip, whose BDAV transport streams (`.m2ts`, a 4-byte
+    /// timestamp before every packet) no native player here is confirmed to
+    /// demux.
+    DiscStructureUnsupported,
 }
 
 impl RejectionReason {
@@ -93,7 +196,9 @@ impl RejectionReason {
     pub const fn failure_reason(self) -> Option<crate::telemetry::FailureReason> {
         use crate::telemetry::FailureReason;
         match self {
-            Self::ContainerUnsupported => Some(FailureReason::Container),
+            Self::ContainerUnsupported | Self::DiscStructureUnsupported => {
+                Some(FailureReason::Container)
+            }
             Self::VideoCodecUnsupported
             | Self::ResolutionExceedsDecoder
             | Self::BitrateExceedsDecoder
@@ -173,6 +278,20 @@ pub struct SourceSelection {
 /// Judge one source against a device, in isolation.
 #[must_use]
 pub fn playability(source: &MediaSourceView, profile: &DeviceProfile) -> Playability {
+    // Before the container check, because it would pass: a Blu-ray's clips
+    // probe as `mpegts`, which ExoPlayer lists, but they are BDAV streams --
+    // 192-byte packets, a timestamp before each -- and ExoPlayer's TS
+    // extractor reads 188-byte packets only. Until playback of one is
+    // confirmed on a device, saying so beats a decoder error mid-start. A DVD
+    // is left to the ordinary checks: its VOBs are plain MPEG program streams,
+    // which a device either demuxes and decodes or does not.
+    if source.disc_structure == Some(DiscStructure::BluRay) {
+        return Playability::Unsupported {
+            reason: RejectionReason::DiscStructureUnsupported,
+            detail: "Blu-ray disc folders cannot be played on this device".to_owned(),
+        };
+    }
+
     let container = source.container.as_deref().unwrap_or_default();
     if !profile.supports_container(container) {
         return Playability::Unsupported {
@@ -449,9 +568,11 @@ pub fn select_downgrade(
     current_file_id: &str,
     profile: &DeviceProfile,
 ) -> Option<SourceSelection> {
+    // Any part: a multi-part movie that stalls in its second part is playing
+    // the second part's file, not the one the source is named by.
     let current = sources
         .iter()
-        .find(|source| source.file_id == current_file_id)?;
+        .find(|source| source.contains_file(current_file_id))?;
     let cheaper: Vec<MediaSourceView> = sources
         .iter()
         .filter(|candidate| demands_less_than(candidate, current))
@@ -750,6 +871,77 @@ mod tests {
     }
 
     #[test]
+    fn a_blu_ray_folder_is_rejected_even_where_its_container_would_pass() {
+        // The clips probe as `mpegts`, which the profile lists, and as H.264,
+        // which it decodes: every ordinary check passes, and ExoPlayer would
+        // still fail on the 192-byte BDAV packets. The alternative edition
+        // plays instead.
+        let blu_ray = MediaSourceBuilder::new("bd")
+            .container("mpegts")
+            .video("h264", 1920, 1080)
+            .disc(DiscStructure::BluRay)
+            .build();
+        let remux = MediaSourceBuilder::new("mkv").container("mkv").build();
+        let profile = DeviceProfileBuilder::phone_h264_hevc()
+            .containers(&["mkv", "mpegts"])
+            .build();
+
+        let chosen = select_source(&[blu_ray, remux], &profile, &QualityPolicy::Highest)
+            .expect("the remux plays");
+        assert_eq!(chosen.source.file_id, "mkv");
+        let rejected = chosen
+            .rejected
+            .iter()
+            .find(|r| r.file_id == "bd")
+            .expect("the Blu-ray is listed, not hidden");
+        assert_eq!(rejected.reason, RejectionReason::DiscStructureUnsupported);
+    }
+
+    #[test]
+    fn a_dvd_folder_is_judged_by_the_ordinary_checks() {
+        // A DVD's VOBs are plain MPEG program streams: a device that demuxes
+        // and decodes them plays them, so the disc structure alone is no
+        // reason to refuse one.
+        let dvd = MediaSourceBuilder::new("dvd")
+            .container("mpeg")
+            .video("h264", 720, 480)
+            .disc(DiscStructure::Dvd)
+            .build();
+        let can_demux = DeviceProfileBuilder::phone_h264_hevc()
+            .containers(&["mpeg"])
+            .build();
+        let cannot_demux = DeviceProfileBuilder::phone_h264_hevc()
+            .containers(&["mkv"])
+            .build();
+
+        let chosen = select_source(
+            std::slice::from_ref(&dvd),
+            &can_demux,
+            &QualityPolicy::Highest,
+        )
+        .expect("a demuxable DVD plays");
+        assert_eq!(chosen.source.file_id, "dvd");
+        let rejections = select_source(&[dvd], &cannot_demux, &QualityPolicy::Highest)
+            .expect_err("an undemuxable DVD does not");
+        assert_eq!(rejections[0].reason, RejectionReason::ContainerUnsupported);
+    }
+
+    #[test]
+    fn a_source_contains_every_one_of_its_parts_and_nothing_else() {
+        let multi_part = MediaSourceBuilder::new("cd1")
+            .parts(&[("cd1", 3000.0), ("cd2", 2800.0)])
+            .build();
+        assert!(multi_part.contains_file("cd1"));
+        assert!(multi_part.contains_file("cd2"));
+        assert!(!multi_part.contains_file("cd3"));
+
+        // A view built without the server's parts still names its own file.
+        let whole = MediaSourceBuilder::new("whole").build();
+        assert!(whole.contains_file("whole"));
+        assert!(!whole.contains_file("cd1"));
+    }
+
+    #[test]
     fn a_resolution_above_the_decoder_ceiling_is_rejected() {
         let sources = [uhd_hevc()];
         let profile = DeviceProfileBuilder::new()
@@ -902,6 +1094,21 @@ mod tests {
             chosen.reason,
             "Switched to 1080p because playback kept stalling"
         );
+    }
+
+    #[test]
+    fn a_downgrade_from_a_later_part_finds_the_source_it_belongs_to() {
+        let multi_part_uhd = MediaSourceBuilder::new("uhd-cd1")
+            .video("hevc", 3840, 2160)
+            .bitrate(60_000_000)
+            .size(40_000_000_000)
+            .parts(&[("uhd-cd1", 3600.0), ("uhd-cd2", 3600.0)])
+            .build();
+        let sources = [multi_part_uhd, hd_h264()];
+        let profile = DeviceProfileBuilder::phone_h264_hevc().build();
+
+        let chosen = select_downgrade(&sources, "uhd-cd2", &profile).expect("a smaller source");
+        assert_eq!(chosen.source.file_id, "hd");
     }
 
     #[test]

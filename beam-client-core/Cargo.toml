@@ -52,9 +52,9 @@ thiserror = { workspace = true }
 webpki-roots = "1.0.9"
 x509-parser = "0.18.1"
 tracing = { workspace = true }
-# Only the `rt` feature: the core needs `JoinSet` to fan out the metadata
-# lookups the playback endpoints force (they return bare identifiers), and
-# nothing else. `full` would put a multi-threaded scheduler, process and signal
+# Only the `rt` feature: the core needs `task_local!`, which scopes a failed
+# response's problem document to the request that read it (`transport.rs`),
+# and nothing else. `full` would put a multi-threaded scheduler, process and signal
 # handling into an Android `.so` that already runs on the platform's runtime.
 tokio = { version = "1.54.1", default-features = false, features = ["rt"] }
 uniffi = { version = "0.32", features = ["tokio"] }

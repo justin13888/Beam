@@ -58,6 +58,19 @@ pub struct MediaSummary {
     pub season_count: u32,
     /// Number of episodes across every season, for a series.
     pub episode_count: u32,
+    /// Whether the viewer has watched it (issue #188): a film watched to the
+    /// end or marked watched; a series every episode of which is. A series in
+    /// a browse result reads as unwatched, since browse sends no viewer state
+    /// for one; its detail fills it.
+    #[uniffi(default)]
+    pub played: bool,
+    /// Where to resume a film, in seconds; 0 for one not started, one just
+    /// finished, and a series.
+    #[uniffi(default)]
+    pub resume_position_secs: f64,
+    /// How many of a series' episodes the viewer has watched; 0 for a film.
+    #[uniffi(default)]
+    pub watched_episode_count: u32,
 }
 
 /// One page of a cursor-paginated browse.
@@ -93,6 +106,12 @@ pub struct EpisodeSummary {
     /// `None` means the episode is known to metadata but has no file, which
     /// is what up-next skips over.
     pub file_id: Option<String>,
+    /// Whether the viewer has watched it to the end or marked it watched.
+    #[uniffi(default)]
+    pub played: bool,
+    /// Where to resume it, in seconds; 0 for one not started or just finished.
+    #[uniffi(default)]
+    pub resume_position_secs: f64,
 }
 
 /// One season of a series.
@@ -108,6 +127,15 @@ pub struct SeasonSummary {
     pub genres: Vec<String>,
     /// Episodes, in the order the server returned them.
     pub episodes: Vec<EpisodeSummary>,
+    /// Stable identifier, which marking the whole season watched names.
+    #[uniffi(default)]
+    pub id: String,
+    /// Whether every episode is watched, and there is at least one.
+    #[uniffi(default)]
+    pub played: bool,
+    /// How many of its episodes the viewer has watched.
+    #[uniffi(default)]
+    pub watched_episode_count: u32,
 }
 
 /// Everything a detail screen shows.
@@ -274,11 +302,12 @@ pub struct LibraryFileSummary {
     pub scanned_at_unix: i64,
 }
 
-/// A partially-watched title, ready to resume.
+/// A title to resume, or the next episode of a show to start.
 ///
-/// `media` is populated by the core rather than the server: the API returns
-/// only identifiers, so a tile would otherwise have nothing to draw. See
-/// [`crate::ffi::BeamClient::continue_watching`] for how it is filled in.
+/// The server sends what a row displays (issue #188), so `media` and `episode`
+/// are built from the row itself rather than looked up: they carry the title,
+/// artwork and episode numbering a tile draws, and nothing a row does not
+/// send -- no genres, no synopsis.
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
 pub struct ContinueWatchingEntry {
     /// The title this progress belongs to.
@@ -297,13 +326,16 @@ pub struct ContinueWatchingEntry {
     pub progress_fraction: Option<f64>,
     /// When progress was last reported, as a Unix timestamp.
     pub updated_at_unix: i64,
-    /// The title's metadata, resolved by the core.
-    ///
-    /// `None` when the lookup failed, which the UI renders as a plain tile
-    /// rather than dropping the entry -- the user's place is still valid.
+    /// The title's tile-level fields, as the row carries them. Always present
+    /// for a row the server sent; optional so a record a platform builds by
+    /// hand can leave it out.
     pub media: Option<MediaSummary>,
-    /// The episode's own metadata, when this is a series and it resolved.
+    /// The episode to play, as the row carries it, when this is a series.
     pub episode: Option<EpisodeSummary>,
+    /// Whether the row offers the next episode of a show the viewer finished
+    /// one of, rather than a title to resume; it starts at 0.
+    #[uniffi(default)]
+    pub is_next_up: bool,
 }
 
 /// One watch-history row.
@@ -327,9 +359,9 @@ pub struct HistoryEntry {
     pub completed: bool,
     /// When it was last played, as a Unix timestamp.
     pub updated_at_unix: i64,
-    /// The title's metadata, resolved by the core.
+    /// The title's tile-level fields, as the row carries them (issue #188).
     pub media: Option<MediaSummary>,
-    /// The episode's own metadata, when this is a series and it resolved.
+    /// The episode, as the row carries it, when this is a series.
     pub episode: Option<EpisodeSummary>,
 }
 
@@ -379,6 +411,46 @@ pub enum EventCategory {
     LibraryScan,
     /// Anything else the server reports.
     System,
+}
+
+/// Where a library scan is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum ScanJobState {
+    /// Accepted, and waiting for the library's turn.
+    Queued,
+    /// Walking and indexing the library now.
+    Running,
+    /// Finished.
+    Succeeded,
+    /// Stopped short; `failure` says why.
+    Failed,
+}
+
+/// The latest scan of one library since the server started.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ScanJob {
+    /// The scan's identifier.
+    pub id: String,
+    /// The library it scans.
+    pub library_id: String,
+    /// Where it is.
+    pub state: ScanJobState,
+    /// Files the walk found to index; `None` until the walk has finished.
+    pub total_count: Option<u64>,
+    /// Files handled so far, whatever became of them.
+    pub processed_count: u64,
+    /// Files indexed for the first time.
+    pub added_count: u64,
+    /// Indexed files whose content changed.
+    pub changed_count: u64,
+    /// Files that could not be processed.
+    pub failed_count: u64,
+    /// Files no longer on disk, newly marked missing.
+    pub missing_count: u64,
+    /// When it finished, as a Unix timestamp, once it has.
+    pub finished_at_unix: Option<i64>,
+    /// Why a failed scan failed. Names no filesystem path.
+    pub failure: Option<String>,
 }
 
 /// Aggregate counts on the admin dashboard.
@@ -606,6 +678,9 @@ impl MediaSummary {
             file_id: movie.file_id.map(|id| id.to_string()),
             season_count: 0,
             episode_count: 0,
+            played: movie.user_state.played,
+            resume_position_secs: movie.user_state.position_secs,
+            watched_episode_count: 0,
         }
     }
 
@@ -646,12 +721,19 @@ impl MediaSummary {
             file_id: None,
             season_count: narrow_u32(Some(show.season_count)).unwrap_or(0),
             episode_count: narrow_u32(Some(show.episode_count)).unwrap_or(0),
+            played: show.user_state.as_ref().is_some_and(|state| state.played),
+            resume_position_secs: 0.0,
+            watched_episode_count: show
+                .user_state
+                .as_ref()
+                .and_then(|state| narrow_u32(Some(state.watched_episode_count)))
+                .unwrap_or(0),
         }
     }
 }
 
 impl EpisodeSummary {
-    fn from_generated(episode: &wire::EpisodeMetadata, record: &ServerRecord) -> Self {
+    pub(crate) fn from_generated(episode: &wire::EpisodeMetadata, record: &ServerRecord) -> Self {
         Self {
             id: episode.id.to_string(),
             episode_number: narrow_u32(Some(episode.episode_number)).unwrap_or(0),
@@ -661,6 +743,8 @@ impl EpisodeSummary {
             air_date: episode.air_date.as_ref().map(|date| date.0.to_string()),
             duration_secs: episode.duration_secs,
             file_id: episode.file_id.map(|id| id.to_string()),
+            played: episode.user_state.played,
+            resume_position_secs: episode.user_state.position_secs,
         }
     }
 }
@@ -677,6 +761,13 @@ impl SeasonSummary {
                 .iter()
                 .map(|episode| EpisodeSummary::from_generated(episode, record))
                 .collect(),
+            id: season.id.to_string(),
+            played: season.user_state.as_ref().is_some_and(|state| state.played),
+            watched_episode_count: season
+                .user_state
+                .as_ref()
+                .and_then(|state| narrow_u32(Some(state.watched_episode_count)))
+                .unwrap_or(0),
         }
     }
 }
@@ -741,6 +832,46 @@ impl LibrarySummary {
             last_scan_file_count: last_scan_file_count.and_then(|count| u32::try_from(count).ok()),
             last_scan_started_at_unix: last_scan_started_at.map(|at| at.0.unix_timestamp()),
             last_scan_finished_at_unix: last_scan_finished_at.map(|at| at.0.unix_timestamp()),
+        }
+    }
+}
+
+impl ScanJob {
+    /// Normalise a generated scan job.
+    #[must_use]
+    pub fn from_generated(job: wire::ScanJob) -> Self {
+        let wire::ScanJob {
+            id,
+            library_id,
+            // Who started it is not something the operator acts on.
+            trigger: _,
+            state,
+            queued_at: _,
+            started_at: _,
+            finished_at,
+            progress,
+            failure,
+        } = job;
+        let count = |value: i64| u64::try_from(value).unwrap_or(0);
+        Self {
+            id: id.to_string(),
+            library_id: library_id.to_string(),
+            state: match state {
+                wire::ScanState::Queued => ScanJobState::Queued,
+                wire::ScanState::Running => ScanJobState::Running,
+                wire::ScanState::Succeeded => ScanJobState::Succeeded,
+                wire::ScanState::Failed => ScanJobState::Failed,
+            },
+            total_count: progress
+                .total_count
+                .and_then(|total| u64::try_from(total).ok()),
+            processed_count: count(progress.processed_count),
+            added_count: count(progress.added_count),
+            changed_count: count(progress.changed_count),
+            failed_count: count(progress.failed_count),
+            missing_count: count(progress.marked_missing_count),
+            finished_at_unix: finished_at.map(|at| at.0.unix_timestamp()),
+            failure,
         }
     }
 }
@@ -816,12 +947,10 @@ fn kind_from_wire(media_type: wire::TitleKind) -> MediaKind {
 }
 
 impl ContinueWatchingEntry {
-    /// Normalise a generated continue-watching row, before hydration.
+    /// Normalise a generated continue-watching row, from its own display
+    /// fields: no request per row.
     #[must_use]
-    pub fn from_generated(item: wire::ContinueWatchingItem) -> Self {
-        // The server now sends each row's title, artwork and episode numbers
-        // (issue #188); the core still hydrates rows from its own cache, and
-        // moving it onto these fields is a follow-up.
+    pub fn from_generated(item: wire::ContinueWatchingItem, record: &ServerRecord) -> Self {
         let wire::ContinueWatchingItem {
             duration_secs,
             episode_id,
@@ -830,34 +959,116 @@ impl ContinueWatchingEntry {
             media_type,
             position_secs,
             last_played_at,
-            reason: _,
-            title: _,
-            poster_url: _,
-            backdrop_url: _,
+            reason,
+            title,
+            poster_url,
+            backdrop_url,
+            // A row shows its episode as "E4", within the show; the season is
+            // the show detail's to present.
             season_number: _,
-            episode_number: _,
-            episode_title: _,
-            thumbnail_url: _,
+            episode_number,
+            episode_title,
+            thumbnail_url,
         } = item;
-        Self {
+        let row = RowDisplay {
+            kind: kind_from_wire(media_type),
             media_id: media_id.to_string(),
             episode_id: episode_id.map(|id| id.to_string()),
             file_id: file_id.to_string(),
-            kind: kind_from_wire(media_type),
+            title,
+            poster_url,
+            backdrop_url,
+            episode_number,
+            episode_title,
+            thumbnail_url,
+            duration_secs,
+            position_secs,
+            played: false,
+        };
+        let (media, episode) = row.summaries(record);
+
+        Self {
+            media_id: row.media_id,
+            episode_id: row.episode_id,
+            file_id: row.file_id,
+            kind: row.kind,
             position_secs,
             duration_secs,
             progress_fraction: progress_fraction(position_secs, duration_secs),
             updated_at_unix: last_played_at.0.unix_timestamp(),
-            media: None,
-            episode: None,
+            media: Some(media),
+            episode,
+            is_next_up: matches!(reason, wire::ContinueWatchingReason::NextUp),
         }
     }
 }
 
+/// What a continue-watching or history row sends to display itself.
+struct RowDisplay {
+    kind: MediaKind,
+    media_id: String,
+    episode_id: Option<String>,
+    file_id: String,
+    title: String,
+    poster_url: Option<String>,
+    backdrop_url: Option<String>,
+    episode_number: Option<i64>,
+    episode_title: Option<String>,
+    thumbnail_url: Option<String>,
+    duration_secs: Option<f64>,
+    position_secs: f64,
+    played: bool,
+}
+
+impl RowDisplay {
+    /// The title's and the episode's tile-level fields, from the row alone.
+    ///
+    /// Only what the row carries: a row sends no genres, synopsis or rating,
+    /// and inventing them would make a partial summary look complete.
+    fn summaries(&self, record: &ServerRecord) -> (MediaSummary, Option<EpisodeSummary>) {
+        let media = MediaSummary {
+            id: self.media_id.clone(),
+            kind: self.kind,
+            title: self.title.clone(),
+            original_title: self.title.clone(),
+            year: None,
+            description: None,
+            poster_url: absolute(record, self.poster_url.clone()),
+            backdrop_url: absolute(record, self.backdrop_url.clone()),
+            genres: Vec::new(),
+            runtime_minutes: None,
+            tmdb_rating: None,
+            file_id: (self.kind == MediaKind::Movie).then(|| self.file_id.clone()),
+            season_count: 0,
+            episode_count: 0,
+            played: self.kind == MediaKind::Movie && self.played,
+            resume_position_secs: if self.kind == MediaKind::Movie {
+                self.position_secs
+            } else {
+                0.0
+            },
+            watched_episode_count: 0,
+        };
+        let episode = self.episode_id.as_ref().map(|id| EpisodeSummary {
+            id: id.clone(),
+            episode_number: narrow_u32(self.episode_number).unwrap_or(0),
+            title: self.episode_title.clone().unwrap_or_default(),
+            description: None,
+            thumbnail_url: absolute(record, self.thumbnail_url.clone()),
+            air_date: None,
+            duration_secs: self.duration_secs,
+            file_id: Some(self.file_id.clone()),
+            played: self.played,
+            resume_position_secs: self.position_secs,
+        });
+        (media, episode)
+    }
+}
+
 impl HistoryEntry {
-    /// Normalise a generated history row, before hydration.
+    /// Normalise a generated history row, from its own display fields.
     #[must_use]
-    pub fn from_generated(item: wire::HistoryItem) -> Self {
+    pub fn from_generated(item: wire::HistoryItem, record: &ServerRecord) -> Self {
         let wire::HistoryItem {
             played,
             duration_secs,
@@ -868,26 +1079,42 @@ impl HistoryEntry {
             position_secs,
             last_played_at,
             play_count: _,
-            title: _,
-            poster_url: _,
-            backdrop_url: _,
+            title,
+            poster_url,
+            backdrop_url,
             season_number: _,
-            episode_number: _,
-            episode_title: _,
-            thumbnail_url: _,
+            episode_number,
+            episode_title,
+            thumbnail_url,
         } = item;
-        Self {
+        let row = RowDisplay {
+            kind: kind_from_wire(media_type),
             media_id: media_id.to_string(),
             episode_id: episode_id.map(|id| id.to_string()),
             file_id: file_id.to_string(),
-            kind: kind_from_wire(media_type),
+            title,
+            poster_url,
+            backdrop_url,
+            episode_number,
+            episode_title,
+            thumbnail_url,
+            duration_secs,
+            position_secs,
+            played,
+        };
+        let (media, episode) = row.summaries(record);
+        Self {
+            media_id: row.media_id,
+            episode_id: row.episode_id,
+            file_id: row.file_id,
+            kind: row.kind,
             position_secs,
             duration_secs,
             progress_fraction: progress_fraction(position_secs, duration_secs),
             completed: played,
             updated_at_unix: last_played_at.0.unix_timestamp(),
-            media: None,
-            episode: None,
+            media: Some(media),
+            episode,
         }
     }
 }
@@ -1376,6 +1603,59 @@ mod tests {
         assert_eq!(session.last_active_unix, 1_700_007_200);
     }
 
+    /// The viewer's state rides the detail (issue #188): per episode, per
+    /// season, and for the whole show -- and a season carries the id that
+    /// marking it watched names.
+    #[test]
+    fn a_show_detail_carries_the_viewers_watched_state_at_every_level() {
+        const WATCHED: &str = r#"{"Show":{
+            "id":"22222222-2222-4222-8222-222222222222",
+            "title":{"original":"Le Bureau"},
+            "genres":[],"season_count":1,"episode_count":2,
+            "user_state":{"played":false,"watched_episode_count":1,"episode_count":2},
+            "seasons":[
+                {"id":"5e500001-0000-4000-8000-000000000001","season_number":1,"dates":{},"genres":[],
+                 "user_state":{"played":false,"watched_episode_count":1,"episode_count":2},
+                 "episodes":[
+                    {"id":"e0000001-0000-4000-8000-000000000001","episode_number":1,"title":"Pilot","source_count":1,
+                     "user_state":{"played":true,"position_secs":0.0,"play_count":1}},
+                    {"id":"e0000002-0000-4000-8000-000000000002","episode_number":2,"title":"Second","source_count":1,
+                     "user_state":{"played":false,"position_secs":600.0,"play_count":0}}
+                ]}
+            ]
+        }}"#;
+        let detail = MediaDetail::from_generated(node(WATCHED), &record());
+        let MediaDetail::Show { seasons, summary } = &detail else {
+            panic!("a Show node must lower to a Show detail");
+        };
+        assert!(!summary.played);
+        assert_eq!(summary.watched_episode_count, 1);
+        let season = &seasons[0];
+        assert_eq!(season.id, "5e500001-0000-4000-8000-000000000001");
+        assert!(!season.played);
+        assert_eq!(season.watched_episode_count, 1);
+        assert!(season.episodes[0].played);
+        assert!(!season.episodes[1].played);
+        assert!((season.episodes[1].resume_position_secs - 600.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn a_watched_movie_reads_as_played_and_a_browsed_show_as_unwatched() {
+        let watched = MOVIE.replace(
+            r#""user_state":{"played":false,"position_secs":0.0,"play_count":0}"#,
+            r#""user_state":{"played":true,"position_secs":1200.0,"play_count":2}"#,
+        );
+        let movie = MediaDetail::from_generated(node(&watched), &record());
+        assert!(movie.summary().played);
+        assert!((movie.summary().resume_position_secs - 1200.0).abs() < f64::EPSILON);
+
+        // Browse sends no viewer state for a show; it reads as unwatched
+        // rather than failing to decode.
+        let browsed = MediaDetail::from_generated(node(BROWSED_SHOW), &record());
+        assert!(!browsed.summary().played);
+        assert_eq!(browsed.summary().watched_episode_count, 0);
+    }
+
     #[test]
     fn movie_detail_lowers_to_the_movie_branch() {
         let detail = MediaDetail::from_generated(node(MOVIE), &record());
@@ -1434,17 +1714,17 @@ mod tests {
         let make = |media_type: &str| {
             let item: wire::ContinueWatchingItem =
                 serde_json::from_str(&continue_json(media_type, None)).expect("a valid item");
-            ContinueWatchingEntry::from_generated(item)
+            ContinueWatchingEntry::from_generated(item, &record())
         };
         assert_eq!(make("show").kind, MediaKind::Show);
         assert_eq!(make("movie").kind, MediaKind::Movie);
     }
 
     #[test]
-    fn a_continue_watching_row_starts_unhydrated_and_carries_its_progress() {
+    fn a_continue_watching_row_carries_its_progress() {
         let json = continue_json("show", Some("00000000-0000-0000-0000-0000000000e1"));
         let item: wire::ContinueWatchingItem = serde_json::from_str(&json).expect("a valid item");
-        let entry = ContinueWatchingEntry::from_generated(item);
+        let entry = ContinueWatchingEntry::from_generated(item, &record());
         assert_eq!(entry.progress_fraction, Some(0.25));
         assert_eq!(entry.updated_at_unix, 1_767_225_600);
         assert_eq!(entry.media_id, "00000000-0000-0000-0000-0000000000a1");
@@ -1452,8 +1732,67 @@ mod tests {
             entry.episode_id.as_deref(),
             Some("00000000-0000-0000-0000-0000000000e1")
         );
-        assert!(entry.media.is_none(), "hydration is the client's job");
+        assert!(!entry.is_next_up, "a resume row");
+    }
+
+    /// The row draws itself from what the server sent (issue #188): the
+    /// title and artwork on `media`, the episode's numbering, title and still
+    /// on `episode`, every URL resolved against the server -- with no lookup.
+    #[test]
+    fn a_next_up_row_is_drawn_from_its_own_display_fields() {
+        let json = r#"{"reason":"next_up","file_id":"00000000-0000-0000-0000-0000000000f2",
+                       "media_id":"00000000-0000-0000-0000-0000000000a1","media_type":"show",
+                       "episode_id":"00000000-0000-0000-0000-0000000000e2",
+                       "position_secs":0.0,"duration_secs":3000.0,
+                       "last_played_at":"2026-01-01T00:00:00Z","title":"Dark",
+                       "poster_url":"/v1/artwork/show/a1/poster",
+                       "backdrop_url":"/v1/artwork/show/a1/backdrop",
+                       "season_number":2,"episode_number":5,"episode_title":"Truths",
+                       "thumbnail_url":"/v1/artwork/episode/e2/still"}"#;
+        let item: wire::ContinueWatchingItem = serde_json::from_str(json).expect("a valid item");
+        let entry = ContinueWatchingEntry::from_generated(item, &record());
+
+        assert!(entry.is_next_up);
+        let media = entry.media.expect("the row's title");
+        assert_eq!(media.title, "Dark");
+        assert_eq!(media.kind, MediaKind::Show);
+        assert_eq!(
+            media.poster_url.as_deref(),
+            Some("https://beam.local:8000/v1/artwork/show/a1/poster")
+        );
+        assert_eq!(
+            media.backdrop_url.as_deref(),
+            Some("https://beam.local:8000/v1/artwork/show/a1/backdrop")
+        );
+        assert_eq!(media.file_id, None, "a show plays through its episodes");
+        let episode = entry.episode.expect("the row's episode");
+        assert_eq!(episode.id, "00000000-0000-0000-0000-0000000000e2");
+        assert_eq!(episode.episode_number, 5);
+        assert_eq!(episode.title, "Truths");
+        assert_eq!(
+            episode.thumbnail_url.as_deref(),
+            Some("https://beam.local:8000/v1/artwork/episode/e2/still")
+        );
+        assert_eq!(
+            episode.file_id.as_deref(),
+            Some("00000000-0000-0000-0000-0000000000f2")
+        );
+    }
+
+    #[test]
+    fn a_movie_row_has_no_episode_and_names_its_file() {
+        let json = continue_json("movie", None);
+        let item: wire::ContinueWatchingItem = serde_json::from_str(&json).expect("a valid item");
+        let entry = ContinueWatchingEntry::from_generated(item, &record());
+
         assert!(entry.episode.is_none());
+        let media = entry.media.expect("the row's title");
+        assert_eq!(media.title, "Heat");
+        assert_eq!(
+            media.file_id.as_deref(),
+            Some("00000000-0000-0000-0000-0000000000f1")
+        );
+        assert!((media.resume_position_secs - 30.0).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -1462,15 +1801,20 @@ mod tests {
                        "media_id":"00000000-0000-0000-0000-0000000000a1","media_type":"show",
                        "episode_id":"00000000-0000-0000-0000-0000000000e1","played":true,
                        "play_count":2,"position_secs":0.0,"duration_secs":120.0,
-                       "last_played_at":"2026-01-01T00:00:00Z","title":"Dark"}"#;
+                       "last_played_at":"2026-01-01T00:00:00Z","title":"Dark",
+                       "episode_number":1,"episode_title":"Secrets"}"#;
         let item: wire::HistoryItem = serde_json::from_str(json).expect("a valid item");
-        let entry = HistoryEntry::from_generated(item);
+        let entry = HistoryEntry::from_generated(item, &record());
         assert!(entry.completed);
         assert_eq!(
             entry.episode_id.as_deref(),
             Some("00000000-0000-0000-0000-0000000000e1")
         );
         assert_eq!(entry.progress_fraction, Some(0.0));
+        assert_eq!(entry.media.expect("the row's title").title, "Dark");
+        let episode = entry.episode.expect("the row's episode");
+        assert_eq!(episode.title, "Secrets");
+        assert!(episode.played);
     }
 
     #[test]

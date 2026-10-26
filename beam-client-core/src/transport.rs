@@ -707,8 +707,8 @@ mod tests {
         );
     }
 
-    /// The same two requests, each on a spawned task -- the shape `hydrate`
-    /// produces through its `JoinSet`. The scope travels with the future, so
+    /// The same two requests, each on a spawned task -- the shape a fan-out
+    /// of lookups through a `JoinSet` produces. The scope travels with the future, so
     /// it does not matter which task, or how many, poll it.
     #[tokio::test]
     async fn concurrent_spawned_tasks_each_read_their_own_document() {

@@ -61,7 +61,6 @@ pub mod telemetry;
 pub mod tls;
 pub mod transport;
 pub mod trust;
-pub mod upnext;
 
 pub use capability::{
     AudioCodec, DecoderCapability, DeviceProfile, MediaSourceView, Playability, QualityPolicy,
@@ -72,7 +71,7 @@ pub use catalog::{
     AdminEvent, AdminLogEntry, AdminLogPage, AdminStatus, AdminUser, AdminUserPage, BrowseQuery,
     ContinueWatchingEntry, DeviceSession, EpisodeSummary, HistoryEntry, HistoryPage,
     LibraryFileSummary, LibrarySummary, MediaDetail, MediaKind, MediaPage, MediaSortField,
-    MediaSummary, MediaTypeFilter, SeasonSummary, ServerHealth, SortOrder,
+    MediaSummary, MediaTypeFilter, ScanJob, ScanJobState, SeasonSummary, ServerHealth, SortOrder,
 };
 pub use clock::{Clock, SystemClock};
 pub use error::{BeamError, StorageError};
@@ -89,7 +88,6 @@ pub use telemetry::{
 };
 pub use tls::{TrustDecision, install_crypto_provider};
 pub use trust::CertificateDetails;
-pub use upnext::{UpNextEpisode, UpNextSeason, next_playable_episode};
 
 uniffi::setup_scaffolding!();
 
