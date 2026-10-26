@@ -261,14 +261,10 @@ and shadcn/ui, talking exclusively to `beam-server`'s REST API. The typed client
 the server's OpenAPI document via `openapi-typescript` into `src/api.gen.ts` and wrapped by
 `openapi-fetch` in `src/lib/apiClient.ts`; TanStack Query handles caching/loading state. `mise run
 codegen:openapi` exports `beam-web/openapi.json` from the Rust types, and CI and the Containerfile
-regenerate the typed client from it.
-
-**That regeneration is currently switched off and `api.gen.ts` is stale.** `openapi-typescript`
-7.13.0 cannot read the OpenAPI 3.2 document the Kynos migration produces (see
-[api.md](api.md#openapi-docs-and-codegen)), and `beam-web` is being rewritten shortly, so it is
-stood down rather than mechanically renamed: the codegen step and the `ts:typecheck`/`ts:test` gates
-carry a [#146](https://github.com/justin13888/beam/issues/146) TODO. Everything below describes the
-app as it stands, not a client regenerated against the current contract.
+regenerate the typed client from it (`mise run codegen:openapi:web` does only that step, from the
+committed document). Every `/v1` list is read as the `{ items, page_info }` connection the server
+sends; the pages that step through one keep the cursor each visited page was fetched after
+(`src/lib/cursorPages.ts`), since those lists take only `first` and `after`.
 
 - **Routes** (`src/routes/`, file-based via `createFileRoute`): `index.tsx` (home /
   continue-watching), `libraries.tsx` / `libraries.$id.tsx`, `media.$id.tsx` (detail + player),

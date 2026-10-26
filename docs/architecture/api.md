@@ -299,15 +299,15 @@ The OpenAPI 3.2 document is served at `/api-doc/openapi.json`, with a Scalar int
 3. `openapi-typescript` converts the document to `beam-web/src/api.gen.ts`, and `openapi-fetch`
    provides the thin typed client `beam-web` consumes.
 
-**Step 3 is currently switched off, and `api.gen.ts` is stale.** `openapi-typescript` 7.13.0 cannot
-read a 3.2 document: it delegates to `@redocly/openapi-core` 1.34.8, whose `detectSpec` knows only
-3.0 and 3.1 and throws `Unsupported OpenAPI version: 3.2.0`. Redocly 2.x speaks 3.2; the generator
-has not bumped to it. Since `beam-web` is being rewritten shortly, it is stood down rather than
-worked around: the client codegen step and the `ts:typecheck`/`ts:test` gates carry a
-[#146](https://github.com/justin13888/beam/issues/146) TODO, and the schema keys in `api.gen.ts`
-still use the pre-migration dotted names. While that holds, the TypeScript compiler is **not** a
-contract check for `beam-web`; the Rust side of the contract is checked by `codegen:openapi:check`
-and by the router refusing to build if it cannot describe itself.
+`openapi-typescript` reads the 3.2 document through `@redocly/openapi-core`, whose `detectSpec`
+accepts 3.2 only from 1.34.22 on; 7.13.0 asks for `^1.34.6`, so the root `package.json` raises the
+floor with an `overrides` entry inside that range
+([#146](https://github.com/justin13888/beam/issues/146)). Redocly reads 3.2 as 3.1, so the
+generated types do not model 3.2-only keywords: the SSE operation's `itemSchema` gives
+`useAdminEventStream` no typed payload, and it reads `AdminEvent` by name instead. `api.gen.ts` is
+gitignored; `mise run codegen:openapi:web` regenerates it from the committed document, and
+`ts:typecheck` and `ts:build:web` run that first, so the TypeScript compiler checks `beam-web`
+against the contract `codegen:openapi:check` pins to the router.
 
 ### Wire conventions (frozen /v1)
 

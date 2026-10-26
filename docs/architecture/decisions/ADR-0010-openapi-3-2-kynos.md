@@ -110,10 +110,11 @@ What shipped, and where it differs from the decision above.
   operations, the SSE `200`'s content type — now appear in the document.
 - **The browser fork turned out to be a dependency bump.** `openapi-typescript` 7.13.0 cannot read a
   3.2 document at all: it delegates to `@redocly/openapi-core` 1.34.8, whose `detectSpec` knows only
-  3.0 and 3.1. Redocly 2.x speaks 3.2; `openapi-typescript` has not bumped. The upstream fix is far
-  smaller than the fork this ADR mandated, so the fork is a fallback rather than the plan.
-  `beam-web` is not regenerated in the meantime, and its `ts:typecheck`/`ts:test` gates are off — a
-  deliberate stand-down for a client being rewritten, not a claim that the contract is satisfied.
+  3.0 and 3.1. `beam-web` was stood down, its `ts:typecheck`/`ts:test` gates off, until
+  [#146](https://github.com/justin13888/beam/issues/146): Redocly 1.34.22 accepts 3.2, inside
+  `openapi-typescript`'s own `^1.34.6` range, so a root `overrides` floor was enough to regenerate
+  the client and restore the gates without a fork. Redocly reads 3.2 as 3.1, so the SSE
+  `itemSchema` stays unmodelled in the TypeScript types.
 - **`/v1` is preserved in path and method; names are not.** Every operation the Salvo server served
   is served, with two `HEAD` operations added for ranged delivery. Operation IDs and schema keys
   were renamed (`getAdminEvents`, `MediaMetadata`), so generated clients are regenerated rather than
