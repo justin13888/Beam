@@ -48,6 +48,16 @@ const LIBRARY_FILES_PAGE: i64 = 500;
 /// answers with when the library has not been scanned since the server
 /// started.
 const SCAN_NOT_FOUND: &str = "#scan-not-found";
+/// How long [`BeamClient::playback_plan`] waits for a title's sources before
+/// it plays the file alone.
+///
+/// The lookup runs before every start, a downloaded file's included, and the
+/// shared HTTP client sets no timeout of its own: on a network that drops
+/// packets, an unbounded lookup would hold a download that plays offline for
+/// as long as the OS takes to give up on the connection. Three seconds is
+/// several round trips on any connection that could stream, and short enough
+/// that a start without one still feels like a start.
+const PLAYBACK_PLAN_LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// A server as the UI sees it.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -975,7 +985,8 @@ impl BeamClient {
     ///
     /// `title_id` is the movie or episode the file belongs to, which is where
     /// its source -- and so its parts -- are listed. Without one, or when the
-    /// lookup fails, the plan is the file alone: a downloaded file played
+    /// lookup fails or takes longer than three seconds,
+    /// the plan is the file alone: a downloaded file played
     /// with no connection is exactly that, and a failed lookup must not stop
     /// a file that would play from playing.
     ///
@@ -996,13 +1007,23 @@ impl BeamClient {
         } = self.playback_config(file_id.clone())?;
 
         let sources = match title_id {
-            Some(title_id) => match self.media_sources(title_id).await {
-                Ok(sources) => sources,
-                Err(error) => {
-                    tracing::warn!(%error, "playing one file alone: its source could not be listed");
-                    Vec::new()
+            Some(title_id) => {
+                let lookup = self.media_sources(title_id);
+                match tokio::time::timeout(PLAYBACK_PLAN_LOOKUP_TIMEOUT, lookup).await {
+                    Ok(Ok(sources)) => sources,
+                    Ok(Err(error)) => {
+                        tracing::warn!(%error, "playing one file alone: its source could not be listed");
+                        Vec::new()
+                    }
+                    Err(_elapsed) => {
+                        tracing::warn!(
+                            timeout_secs = PLAYBACK_PLAN_LOOKUP_TIMEOUT.as_secs(),
+                            "playing one file alone: listing its source timed out"
+                        );
+                        Vec::new()
+                    }
                 }
-            },
+            }
             None => Vec::new(),
         };
         let (parts, start_part_index) = plan_parts(&sources, &file_id, url);
@@ -3748,6 +3769,35 @@ mod tests {
             .await
             .expect("a failed lookup is not a failed plan");
 
+        assert_eq!(plan.parts.len(), 1);
+        assert_eq!(plan.parts[0].file_id, "f-1");
+        assert_eq!(plan.parts[0].url, "https://beam.test/v1/files/f-1/stream");
+        assert_eq!(plan.start_part_index, 0);
+    }
+
+    /// A server that never answers holds a start for the bounded lookup
+    /// only, then the file plays alone -- a download is not held for as long
+    /// as the OS takes to give up on a connection that drops every packet.
+    ///
+    /// Tokio's paused clock advances only once the runtime is idle, so the
+    /// elapsed virtual time is exactly how long the plan waited.
+    #[tokio::test(start_paused = true)]
+    async fn a_plan_whose_source_lookup_never_answers_is_the_file_alone_once_bounded() {
+        let (client, id, _) = signed_in_client().await;
+        client
+            .use_transport(
+                &id,
+                Arc::new(crate::transport::SilentBackend) as Arc<dyn crate::api::HttpBackend>,
+            )
+            .expect("the server is registered");
+        let started = tokio::time::Instant::now();
+
+        let plan = client
+            .playback_plan(Some(MEDIA_ID.to_owned()), "f-1".to_owned())
+            .await
+            .expect("a lookup that never answers is not a failed plan");
+
+        assert_eq!(started.elapsed(), PLAYBACK_PLAN_LOOKUP_TIMEOUT);
         assert_eq!(plan.parts.len(), 1);
         assert_eq!(plan.parts[0].file_id, "f-1");
         assert_eq!(plan.parts[0].url, "https://beam.test/v1/files/f-1/stream");

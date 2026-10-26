@@ -431,7 +431,7 @@ fn retry_after_secs(headers: &reqwest::header::HeaderMap) -> Option<u64> {
 }
 
 #[cfg(test)]
-pub(crate) use canned::{CannedBackend, RecordedRequest};
+pub(crate) use canned::{CannedBackend, RecordedRequest, SilentBackend};
 
 #[mutants::skip]
 #[cfg(test)]
@@ -517,6 +517,17 @@ mod canned {
                 .body(body.to_owned())
                 .expect("a canned response is well-formed");
             Box::pin(async move { Ok(reqwest::Response::from(response)) })
+        }
+    }
+
+    /// A backend that never answers: a server behind a network that drops
+    /// every packet, as the caller sees it before any OS timeout.
+    #[derive(Debug, Default)]
+    pub(crate) struct SilentBackend;
+
+    impl crate::api::HttpBackend for SilentBackend {
+        fn execute(&self, _request: reqwest::Request) -> crate::api::ExecuteFuture<'_> {
+            Box::pin(std::future::pending())
         }
     }
 }
