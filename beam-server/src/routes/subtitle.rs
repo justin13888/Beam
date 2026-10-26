@@ -21,7 +21,7 @@ use beam_domain::models::sidecar::SubtitleFormat;
 
 use crate::routes::api_error::{SessionAuth, SubtitleDeliveryError};
 use crate::routes::delivery::{AnyMedia, MediaRanges, RuntimeDelivery};
-use crate::routes::stream::{FileByteSource, validator_tag};
+use crate::routes::stream::{FileByteSource, hides_file, validator_tag};
 use crate::routes::tags::Playback;
 use crate::services::subtitle::{LocatedSubtitle, SubtitleError, WebVttRendition};
 use crate::state::AppState;
@@ -105,12 +105,12 @@ impl From<SubtitleError> for SubtitleDeliveryError {
 )]
 #[tracing::instrument(skip_all)]
 pub async fn get_subtitle(
-    _auth: SessionAuth,
+    auth: SessionAuth,
     Path(path): Path<SubtitlePath>,
     conditions: Conditions,
     Inject(state): Inject<AppState>,
 ) -> Result<RuntimeDelivery<StoredSubtitleRanges>, SubtitleDeliveryError> {
-    deliver_stored(&state, &path, &conditions).await
+    deliver_stored(&state, &auth, &path, &conditions).await
 }
 
 /// The same fields with no body, for a player checking a subtitle's size and
@@ -125,20 +125,38 @@ pub async fn get_subtitle(
 )]
 #[tracing::instrument(skip_all)]
 pub async fn head_subtitle(
-    _auth: SessionAuth,
+    auth: SessionAuth,
     Path(path): Path<SubtitlePath>,
     conditions: Conditions,
     Inject(state): Inject<AppState>,
 ) -> Result<RuntimeDelivery<StoredSubtitleRanges>, SubtitleDeliveryError> {
-    deliver_stored(&state, &path, &conditions).await
+    deliver_stored(&state, &auth, &path, &conditions).await
+}
+
+/// The subtitles of a file the caller may not see answer as those of a file
+/// that does not exist (issue #263).
+async fn refuse_hidden_file(
+    state: &AppState,
+    auth: &SessionAuth,
+    file_id: uuid::Uuid,
+) -> Result<(), SubtitleDeliveryError> {
+    match hides_file(state, auth, file_id).await {
+        Ok(false) => Ok(()),
+        Ok(true) => Err(SubtitleError::FileNotFound.into()),
+        Err(_) => Err(SubtitleDeliveryError::Internal(
+            "Failed to look up file".into(),
+        )),
+    }
 }
 
 /// What both methods on a stored subtitle answer; a `HEAD` drops the body.
 async fn deliver_stored(
     state: &AppState,
+    auth: &SessionAuth,
     path: &SubtitlePath,
     conditions: &Conditions,
 ) -> Result<RuntimeDelivery<StoredSubtitleRanges>, SubtitleDeliveryError> {
+    refuse_hidden_file(state, auth, path.file_id).await?;
     let LocatedSubtitle {
         path: file_path,
         library_root,
@@ -158,7 +176,7 @@ async fn deliver_stored(
     let delivery = Served::<_, AnyMedia>::new(source)
         .etag(ETag::strong(validator_tag(modified, length)))
         .last_modified(modified)
-        .cache_control("public, max-age=3600")
+        .cache_control("private, max-age=3600")
         .deliver(conditions)
         .await
         .map_err(|err| {
@@ -183,12 +201,12 @@ async fn deliver_stored(
 )]
 #[tracing::instrument(skip_all)]
 pub async fn get_subtitle_webvtt(
-    _auth: SessionAuth,
+    auth: SessionAuth,
     Path(path): Path<SubtitlePath>,
     conditions: Conditions,
     Inject(state): Inject<AppState>,
 ) -> Result<RuntimeDelivery<WebVttRanges>, SubtitleDeliveryError> {
-    deliver_webvtt(&state, &path, &conditions).await
+    deliver_webvtt(&state, &auth, &path, &conditions).await
 }
 
 /// The same fields with no body. The rendition is still rendered: its length
@@ -201,20 +219,22 @@ pub async fn get_subtitle_webvtt(
 )]
 #[tracing::instrument(skip_all)]
 pub async fn head_subtitle_webvtt(
-    _auth: SessionAuth,
+    auth: SessionAuth,
     Path(path): Path<SubtitlePath>,
     conditions: Conditions,
     Inject(state): Inject<AppState>,
 ) -> Result<RuntimeDelivery<WebVttRanges>, SubtitleDeliveryError> {
-    deliver_webvtt(&state, &path, &conditions).await
+    deliver_webvtt(&state, &auth, &path, &conditions).await
 }
 
 /// What both methods on a WebVTT rendition answer; a `HEAD` drops the body.
 async fn deliver_webvtt(
     state: &AppState,
+    auth: &SessionAuth,
     path: &SubtitlePath,
     conditions: &Conditions,
 ) -> Result<RuntimeDelivery<WebVttRanges>, SubtitleDeliveryError> {
+    refuse_hidden_file(state, auth, path.file_id).await?;
     let WebVttRendition {
         text,
         modified,
@@ -234,7 +254,7 @@ async fn deliver_webvtt(
     let delivery = match Served::<_, AnyMedia>::new(InMemory::new(Bytes::from(text)))
         .etag(etag)
         .last_modified(modified)
-        .cache_control("public, max-age=3600")
+        .cache_control("private, max-age=3600")
         .deliver(conditions)
         .await
     {

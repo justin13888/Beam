@@ -36,6 +36,10 @@ pub struct Movie {
     pub anilist_id: Option<u32>,
     pub rating_tmdb: Option<f32>,
     pub rating_imdb: Option<f32>,
+    /// The provider's certification (`PG-13`), in the spelling
+    /// [`crate::models::access::normalize_certification`] stores (issue
+    /// #263); `None` while none is reported.
+    pub content_rating: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -112,6 +116,7 @@ impl From<beam_entity::movie::Model> for Movie {
             anilist_id: model.anilist_id.map(|id| id as u32),
             rating_tmdb: model.rating_tmdb,
             rating_imdb: model.rating_imdb,
+            content_rating: model.content_rating,
             created_at: model.created_at.with_timezone(&Utc),
             updated_at: model.updated_at.with_timezone(&Utc),
         }
@@ -157,6 +162,7 @@ mod entity_conversion_tests {
             anilist_id: None,
             rating_tmdb: None,
             rating_imdb: None,
+            content_rating: None,
             created_at: now,
             updated_at: now,
         }

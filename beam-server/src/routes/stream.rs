@@ -32,6 +32,7 @@ use beam_index::library_file::{open_regular_file, relative_to};
 
 use crate::routes::api_error::{DeliveryError, SessionAuth};
 use crate::routes::delivery::{AnyMedia, MediaRanges, RuntimeDelivery};
+use crate::routes::playback::caller_access;
 use crate::routes::tags::Playback;
 use crate::services::library::LocatedFile;
 use crate::state::AppState;
@@ -157,6 +158,28 @@ async fn locate_file(
     Ok((path, library_root, content_type))
 }
 
+/// Whether the caller's access policy hides the file `file_id`. Shared with
+/// subtitle delivery, which serves the sidecars of a file.
+pub(crate) async fn hides_file(
+    state: &AppState,
+    auth: &SessionAuth,
+    file_id: Uuid,
+) -> Result<bool, DeliveryError> {
+    let internal = |err: &dyn std::fmt::Display| {
+        error!(%err, "failed to read the caller's access to a file");
+        DeliveryError::Internal("Failed to look up file".into())
+    };
+    let (_, policy) = caller_access(state, auth)
+        .await
+        .map_err(|err| internal(&err))?;
+    state
+        .services
+        .access
+        .hides_file(&policy, file_id)
+        .await
+        .map_err(|err| internal(&err))
+}
+
 /// A validator that changes whenever the bytes do.
 ///
 /// Modification time and size, which is the shape nginx mints and is strong
@@ -181,10 +204,16 @@ pub(crate) fn validator_tag(modified: SystemTime, length: u64) -> String {
 /// Builds the delivery both endpoints share.
 async fn deliver(
     state: &AppState,
+    auth: &SessionAuth,
     file_id: Uuid,
     conditions: &Conditions,
     attachment: bool,
 ) -> Result<MediaDelivery, DeliveryError> {
+    // A file of a title the caller may not see is one that does not exist
+    // (issue #263).
+    if hides_file(state, auth, file_id).await? {
+        return Err(DeliveryError::FileNotFound("File not found".into()));
+    }
     let (path, library_root, content_type) = locate_file(state, file_id).await?;
     // Missing, or no longer a regular file reached without a link: either
     // way the file indexed is not there to serve.
@@ -198,7 +227,7 @@ async fn deliver(
     let mut served = Served::<_, AnyMedia>::new(source)
         .etag(validator(modified, length))
         .last_modified(modified)
-        .cache_control("public, max-age=3600");
+        .cache_control("private, max-age=3600");
 
     if attachment {
         // Kynos owns the RFC 6266 encoding, so the hand-written quote escaping
@@ -229,12 +258,12 @@ fn download_filename(path: &FsPath, file_id: Uuid) -> String {
 #[kynos::get("/files/{file_id}/stream", tag = Playback, operation_id = "streamFile")]
 #[tracing::instrument(skip_all)]
 pub async fn stream_file(
-    _auth: SessionAuth,
+    auth: SessionAuth,
     Path(path): Path<FilePath>,
     conditions: Conditions,
     Inject(state): Inject<AppState>,
 ) -> Result<MediaDelivery, DeliveryError> {
-    deliver(&state, path.file_id, &conditions, false).await
+    deliver(&state, &auth, path.file_id, &conditions, false).await
 }
 
 /// The same fields with no body, for a player sizing the stream before it
@@ -242,12 +271,12 @@ pub async fn stream_file(
 #[kynos::head("/files/{file_id}/stream", tag = Playback, operation_id = "headStreamFile")]
 #[tracing::instrument(skip_all)]
 pub async fn head_stream_file(
-    _auth: SessionAuth,
+    auth: SessionAuth,
     Path(path): Path<FilePath>,
     conditions: Conditions,
     Inject(state): Inject<AppState>,
 ) -> Result<MediaDelivery, DeliveryError> {
-    deliver(&state, path.file_id, &conditions, false).await
+    deliver(&state, &auth, path.file_id, &conditions, false).await
 }
 
 /// Download the full source file as an attachment. Same auth and Range
@@ -257,24 +286,24 @@ pub async fn head_stream_file(
 #[kynos::get("/files/{file_id}/download", tag = Playback, operation_id = "downloadFile")]
 #[tracing::instrument(skip_all)]
 pub async fn download_file(
-    _auth: SessionAuth,
+    auth: SessionAuth,
     Path(path): Path<FilePath>,
     conditions: Conditions,
     Inject(state): Inject<AppState>,
 ) -> Result<MediaDelivery, DeliveryError> {
-    deliver(&state, path.file_id, &conditions, true).await
+    deliver(&state, &auth, path.file_id, &conditions, true).await
 }
 
 /// The same fields with no body, for a client sizing the download first.
 #[kynos::head("/files/{file_id}/download", tag = Playback, operation_id = "headDownloadFile")]
 #[tracing::instrument(skip_all)]
 pub async fn head_download_file(
-    _auth: SessionAuth,
+    auth: SessionAuth,
     Path(path): Path<FilePath>,
     conditions: Conditions,
     Inject(state): Inject<AppState>,
 ) -> Result<MediaDelivery, DeliveryError> {
-    deliver(&state, path.file_id, &conditions, true).await
+    deliver(&state, &auth, path.file_id, &conditions, true).await
 }
 
 #[cfg(test)]

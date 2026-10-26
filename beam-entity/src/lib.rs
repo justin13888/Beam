@@ -30,6 +30,8 @@ pub mod show;
 pub mod show_genre;
 pub mod sidecar_subtitle;
 pub mod user;
+pub mod user_access_policy;
+pub mod user_library_access;
 pub mod user_list_entry;
 pub mod watch_state;
 
@@ -61,5 +63,7 @@ pub use show::Entity as Show;
 pub use show_genre::Entity as ShowGenre;
 pub use sidecar_subtitle::Entity as SidecarSubtitle;
 pub use user::Entity as User;
+pub use user_access_policy::Entity as UserAccessPolicy;
+pub use user_library_access::Entity as UserLibraryAccess;
 pub use user_list_entry::Entity as UserListEntry;
 pub use watch_state::Entity as WatchState;

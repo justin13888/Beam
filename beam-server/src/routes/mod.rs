@@ -147,6 +147,8 @@ pub fn rest_routes() -> Router<AppState, Propagate, (), RestScopes> {
             admin::stream_admin_events,
             admin::list_admin_users,
             admin::update_admin_user,
+            admin::get_admin_user_access,
+            admin::set_admin_user_access,
             admin::get_admin_status,
             admin::preview_library_telemetry,
             admin::get_playback_telemetry,

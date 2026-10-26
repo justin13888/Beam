@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use sea_orm::DbErr;
 use uuid::Uuid;
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use crate::models::catalog::ShowChildCounts;
 use crate::models::enrichment::{FieldLocks, MetadataField};
@@ -104,6 +104,9 @@ pub trait ShowRepository: Send + Sync + std::fmt::Debug {
         library_id: Uuid,
         show_id: Uuid,
     ) -> Result<(), DbErr>;
+    /// The libraries each of `show_ids` is associated with, as
+    /// [`crate::repositories::MovieRepository::library_ids`] reads a movie's.
+    async fn library_ids(&self, show_ids: &[Uuid]) -> Result<HashMap<Uuid, BTreeSet<Uuid>>, DbErr>;
     /// The season numbered `season_number` of `show_id`, inserting it only
     /// if no such season exists yet.
     ///
@@ -216,6 +219,18 @@ pub mod in_memory {
                 .collect()
         }
 
+        /// Every library the show `show_id` is associated with, as
+        /// `InMemoryMovieRepository::libraries_of`.
+        pub fn libraries_of(&self, show_id: Uuid) -> BTreeSet<Uuid> {
+            self.library_links
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(_, show)| *show == show_id)
+                .map(|(library, _)| *library)
+                .collect()
+        }
+
         /// Episode ids some file row references -- only present files when
         /// `present_only`. `None` when unlinked.
         fn referenced_episodes(&self, present_only: bool) -> Option<HashSet<Uuid>> {
@@ -317,6 +332,7 @@ pub mod in_memory {
                 tvdb_id: None,
                 anilist_id: None,
                 rating_tmdb: None,
+                content_rating: None,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             };
@@ -502,6 +518,19 @@ pub mod in_memory {
             Ok(())
         }
 
+        async fn library_ids(
+            &self,
+            show_ids: &[Uuid],
+        ) -> Result<HashMap<Uuid, BTreeSet<Uuid>>, DbErr> {
+            let mut libraries: HashMap<Uuid, BTreeSet<Uuid>> = HashMap::new();
+            for (library_id, show_id) in self.library_links.lock().unwrap().iter() {
+                if show_ids.contains(show_id) {
+                    libraries.entry(*show_id).or_default().insert(*library_id);
+                }
+            }
+            Ok(libraries)
+        }
+
         async fn find_or_create_season(
             &self,
             show_id: Uuid,
@@ -664,6 +693,7 @@ pub mod in_memory {
                 if open(MetadataField::Rating) {
                     show.rating_tmdb = enrichment.rating;
                 }
+                show.content_rating = enrichment.content_rating.clone();
                 show.updated_at = chrono::Utc::now();
             }
             Ok(())
@@ -785,6 +815,7 @@ pub mod in_memory_fixture {
                 tvdb_id: None,
                 anilist_id: None,
                 rating_tmdb: None,
+                content_rating: None,
                 created_at: now,
                 updated_at: now,
             };

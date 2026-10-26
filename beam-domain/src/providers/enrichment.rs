@@ -91,6 +91,11 @@ pub struct MovieEnrichment {
     pub poster_url: Option<String>,
     pub backdrop_url: Option<String>,
     pub rating: Option<f32>,
+    /// The provider's certification for the movie (issue #263), as
+    /// [`crate::models::access::normalize_certification`] spells it.
+    /// Replaces the one stored on every enrichment: `None` clears it, as a
+    /// provider reporting none means.
+    pub content_rating: Option<String>,
     pub genres: Vec<String>,
     /// The title's cast and crew. `None` when the provider did not report
     /// them -- it has no credits for this title kind, or fetching them
@@ -141,6 +146,8 @@ pub struct ShowEnrichment {
     pub backdrop_url: Option<String>,
     /// The provider's rating on its 0-10 scale, as `MovieEnrichment::rating`.
     pub rating: Option<f32>,
+    /// The provider's certification, as `MovieEnrichment::content_rating`.
+    pub content_rating: Option<String>,
     pub genres: Vec<String>,
     /// As `MovieEnrichment::credits`: the show's cast and crew across its
     /// seasons, or `None` to leave the stored ones alone.

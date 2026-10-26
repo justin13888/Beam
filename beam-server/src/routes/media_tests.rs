@@ -111,6 +111,7 @@ fn state_with_service(metadata: Arc<dyn MetadataService>) -> AppState {
 
     let services = AppServices {
         hash: base.services.hash.clone(),
+        access: base.services.access.clone(),
         library: base.services.library.clone(),
         metadata,
         subtitles: crate::routes::test_support::idle_subtitles(),
@@ -203,6 +204,7 @@ fn movie_metadata(id: &str, title: &str) -> MediaMetadata {
         backdrop_url: None,
         genres: vec![],
         ratings: None,
+        content_rating: None,
         identifiers: None,
         file_id: None,
         source_count: None,

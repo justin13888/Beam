@@ -24,14 +24,14 @@ use crate::models::{
     AdminStatusCounts, AdminUser, AdminUserConnection, CreateLibraryRequest, EnrichmentQueueCounts,
     FieldError, Library, LibraryConnection, LibraryFile, LibraryFileConnection,
     LibraryTelemetryPreview, PageInfo, PlaybackTelemetryReport, RecentScan, ScanJob,
-    UpdateAdminUserRequest, WatcherStatus,
+    UpdateAdminUserRequest, UserAccess, WatcherStatus,
 };
 use crate::routes::api_error::{
     AdminAuth, AdminListError, AdminUserError, InternalError, LibraryCreateError,
     LibraryFilesError, LibraryRefError, LibraryScanError, LibraryScanReadError, MediaRefreshError,
-    PlaybackTelemetryReportError, SessionAuth,
+    PlaybackTelemetryReportError, SessionAuth, UserAccessReadError, UserAccessUpdateError,
 };
-use crate::routes::playback::page_size;
+use crate::routes::playback::{caller_access, page_size};
 use crate::routes::tags::Admin;
 use crate::services::library::LibraryError;
 use crate::services::library_files_cursor;
@@ -39,6 +39,7 @@ use crate::services::offset_cursor::{self, OffsetList};
 use crate::services::playback_telemetry::ReportError;
 use crate::services::telemetry::LibraryReportPreview;
 use crate::state::AppState;
+use beam_domain::models::access::{AccessPolicy, ContentRating, LibraryAccess};
 use beam_index::services::enrichment::control::{ControlError, RefreshScope};
 
 // The service errors are one vocabulary per service; the route errors are one
@@ -244,26 +245,37 @@ pub async fn list_libraries(
     auth: SessionAuth,
     Inject(state): Inject<AppState>,
 ) -> Result<Json<LibraryConnection>, InternalError> {
+    let (_, policy) = caller_access(&state, &auth).await?;
     let libraries = state
         .services
         .library
         .get_libraries(auth.0.user_id.clone())
         .await
-        .map_err(|e| InternalError::Internal(e.to_string()))?;
+        .map_err(|e| InternalError::Internal(e.to_string()))?
+        .into_iter()
+        .filter(|library| policy.admits_library(library.id))
+        .collect();
     Ok(Json(LibraryConnection {
         items: libraries,
         page_info: PageInfo::complete(),
     }))
 }
 
-/// One library by id.
+/// One library by id. A library the caller has not been granted answers as
+/// one that does not exist.
 #[kynos::get("/libraries/{id}", tag = Admin, operation_id = "getLibrary")]
 pub async fn get_library(
-    _auth: SessionAuth,
+    auth: SessionAuth,
     Path(path): Path<LibraryPath>,
     Inject(state): Inject<AppState>,
 ) -> Result<Json<Library>, LibraryRefError> {
-    match state.services.library.get_library_by_id(path.id).await? {
+    let (_, policy) = caller_access(&state, &auth).await?;
+    let library = if policy.admits_library(path.id) {
+        state.services.library.get_library_by_id(path.id).await?
+    } else {
+        None
+    };
+    match library {
         Some(library) => Ok(Json(library)),
         None => Err(LibraryRefError::LibraryNotFound(format!(
             "library {} not found",
@@ -276,17 +288,30 @@ pub async fn get_library(
 ///
 /// Pass `page_info.end_cursor` as `after` for the next page; a cursor
 /// another library's list issued is refused.
+///
+/// A library the caller has not been granted answers as one that does not
+/// exist, and so does every library for a caller with a maximum content
+/// rating: a file's path names its title whatever that title's rating.
 #[kynos::get(
     "/libraries/{id}/files",
     tag = Admin,
     operation_id = "getLibraryFiles"
 )]
 pub async fn get_library_files(
-    _auth: SessionAuth,
+    auth: SessionAuth,
     Path(path): Path<LibraryPath>,
     Query(query): Query<FilesQuery>,
     Inject(state): Inject<AppState>,
 ) -> Result<Json<LibraryFileConnection>, LibraryFilesError> {
+    let (_, policy) = caller_access(&state, &auth)
+        .await
+        .map_err(|err| LibraryFilesError::Internal(err.to_string()))?;
+    if !policy.admits_library(path.id) || policy.max_rating.is_some() {
+        return Err(LibraryFilesError::LibraryNotFound(format!(
+            "library {} not found",
+            path.id
+        )));
+    }
     let FilesQuery { first, after } = query;
     let first =
         page_size(first, FILES_DEFAULT, FILES_MAX).map_err(LibraryFilesError::InvalidPagination)?;
@@ -687,6 +712,117 @@ pub async fn update_admin_user(
     }
 
     Ok(NoContent)
+}
+
+// ── Per-user access (admin only, issue #263) ────────────────────────────────
+
+/// Which libraries a user sees, and the highest content rating.
+///
+/// A user nobody restricted sees every library with no maximum rating.
+#[kynos::get(
+    "/admin/users/{id}/access",
+    tag = Admin,
+    operation_id = "getAdminUserAccess"
+)]
+pub async fn get_admin_user_access(
+    _auth: AdminAuth,
+    Path(path): Path<UserPath>,
+    Inject(state): Inject<AppState>,
+) -> Result<Json<UserAccess>, UserAccessReadError> {
+    let internal = |e: sea_orm::DbErr| UserAccessReadError::Internal(e.to_string());
+
+    let target = state
+        .services
+        .user_repo
+        .find_by_id(path.id)
+        .await
+        .map_err(internal)?
+        .ok_or_else(|| UserAccessReadError::UserNotFound(format!("user {} not found", path.id)))?;
+    let policy = state
+        .services
+        .access
+        .policy(target.id)
+        .await
+        .map_err(internal)?;
+    Ok(Json(UserAccess::from(policy)))
+}
+
+/// Set which libraries a user sees, and the highest content rating, as one
+/// whole: what is not in the body is not kept. Answers what is now stored.
+///
+/// Takes effect on the user's next request. A title the user may not see
+/// answers every route as one that does not exist and is never listed, so
+/// its existence does not leak. An administrator is held to their own
+/// access as any user is; the `/v1/admin` operations are not.
+#[kynos::put(
+    "/admin/users/{id}/access",
+    tag = Admin,
+    operation_id = "setAdminUserAccess"
+)]
+pub async fn set_admin_user_access(
+    _auth: AdminAuth,
+    Path(path): Path<UserPath>,
+    Inject(state): Inject<AppState>,
+    Json(body): Json<UserAccess>,
+) -> Result<Json<UserAccess>, UserAccessUpdateError> {
+    let internal = |e: sea_orm::DbErr| UserAccessUpdateError::Internal(e.to_string());
+
+    let target = state
+        .services
+        .user_repo
+        .find_by_id(path.id)
+        .await
+        .map_err(internal)?
+        .ok_or_else(|| {
+            UserAccessUpdateError::UserNotFound(format!("user {} not found", path.id))
+        })?;
+
+    let UserAccess {
+        all_libraries,
+        library_ids,
+        max_content_rating,
+    } = body;
+    let mut errors = Vec::new();
+    if all_libraries && !library_ids.is_empty() {
+        errors.push(FieldError {
+            pointer: "/library_ids".to_owned(),
+            detail: "must be empty when all_libraries is true".to_owned(),
+        });
+    }
+    for (index, library_id) in library_ids.iter().enumerate() {
+        if state
+            .services
+            .library_repo
+            .find_by_id(*library_id)
+            .await
+            .map_err(internal)?
+            .is_none()
+        {
+            errors.push(FieldError {
+                pointer: format!("/library_ids/{index}"),
+                detail: format!("no library has the id {library_id}"),
+            });
+        }
+    }
+    if !errors.is_empty() {
+        return Err(UserAccessUpdateError::ValidationFailed { errors });
+    }
+
+    let policy = AccessPolicy {
+        libraries: if all_libraries {
+            LibraryAccess::All
+        } else {
+            LibraryAccess::Only(library_ids.into_iter().collect())
+        },
+        max_rating: max_content_rating.map(ContentRating::from),
+    };
+    state
+        .services
+        .access
+        .replace(target.id, &policy)
+        .await
+        .map_err(internal)?;
+    Ok(Json(UserAccess::from(policy)))
 }
 
 // ── Admin system status (admin only, issue #85) ─────────────────────────────

@@ -284,6 +284,7 @@ impl Harness {
             anilist_id: None,
             rating_tmdb: None,
             rating_imdb: None,
+            content_rating: None,
             created_at: now,
             updated_at: now,
         };
@@ -335,6 +336,7 @@ impl Harness {
             tvdb_id: None,
             anilist_id: None,
             rating_tmdb: None,
+            content_rating: None,
             created_at: now,
             updated_at: now,
         };
@@ -668,6 +670,7 @@ async fn a_title_whose_only_file_is_missing_is_hidden_but_kept() {
         &catalog,
         &beam_domain::models::catalog::CatalogQuery {
             filters: Default::default(),
+            access: Default::default(),
             sort: beam_domain::models::catalog::CatalogSort {
                 field: beam_domain::models::catalog::CatalogSortField::Title,
                 direction: beam_domain::models::catalog::SortDirection::Asc,

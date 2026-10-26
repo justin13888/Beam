@@ -476,6 +476,31 @@ impl MovieRepository for SqlMovieRepository {
         Ok(())
     }
 
+    async fn library_ids(
+        &self,
+        movie_ids: &[Uuid],
+    ) -> Result<std::collections::HashMap<Uuid, std::collections::BTreeSet<Uuid>>, DbErr> {
+        use beam_entity::library_movie;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+        let mut libraries: std::collections::HashMap<Uuid, std::collections::BTreeSet<Uuid>> =
+            std::collections::HashMap::new();
+        if movie_ids.is_empty() {
+            return Ok(libraries);
+        }
+        for link in library_movie::Entity::find()
+            .filter(library_movie::Column::MovieId.is_in(movie_ids.iter().copied()))
+            .all(self.db.as_ref())
+            .await?
+        {
+            libraries
+                .entry(link.movie_id)
+                .or_default()
+                .insert(link.library_id);
+        }
+        Ok(libraries)
+    }
+
     async fn apply_enrichment(
         &self,
         movie_id: Uuid,
@@ -526,6 +551,7 @@ impl MovieRepository for SqlMovieRepository {
         if open(MetadataField::Rating) {
             active.rating_tmdb = Set(enrichment.rating);
         }
+        active.content_rating = Set(enrichment.content_rating.clone());
         active.updated_at = Set(chrono::Utc::now().into());
         active.update(self.db.as_ref()).await?;
         Ok(())

@@ -14,6 +14,7 @@ use crate::models::{
 use crate::services::cursor;
 use crate::services::people::title_credits;
 use crate::services::sources::{PrimarySource, SourceCatalog};
+use beam_domain::models::access::AccessPolicy;
 use beam_domain::models::catalog::{
     self, CatalogFilters, CatalogPosition, CatalogQuery, CatalogSort, CatalogSortField, Seek,
     ShowChildCounts, SortDirection,
@@ -84,6 +85,9 @@ pub struct BrowseRequest {
     pub sort_by: MediaSortField,
     pub sort_order: SortOrder,
     pub filters: MediaSearchFilters,
+    /// The caller's access policy: only the titles it admits are listed
+    /// (issue #263).
+    pub access: AccessPolicy,
 }
 
 /// The page size when a request names none.
@@ -265,6 +269,7 @@ fn movie_metadata(
         anilist_id: _,
         rating_tmdb,
         rating_imdb: _,
+        content_rating,
         created_at: _,
         updated_at: _,
     } = movie;
@@ -292,6 +297,7 @@ fn movie_metadata(
             .map(|_| artwork_path(ArtworkKind::Movie, id, ArtworkVariant::Backdrop)),
         genres,
         ratings: ratings(rating_tmdb),
+        content_rating,
         identifiers: identifiers(imdb_id, tmdb_id, tvdb_id),
         file_id,
         source_count,
@@ -325,6 +331,7 @@ fn show_metadata(
         tvdb_id,
         anilist_id: _,
         rating_tmdb,
+        content_rating,
         created_at: _,
         updated_at: _,
     } = show;
@@ -347,6 +354,7 @@ fn show_metadata(
             .map(|_| artwork_path(ArtworkKind::Show, id, ArtworkVariant::Backdrop)),
         genres,
         ratings: ratings(rating_tmdb),
+        content_rating,
         identifiers: identifiers(imdb_id, tmdb_id, tvdb_id),
         season_count,
         episode_count,
@@ -741,6 +749,7 @@ impl MetadataService for DbMetadataService {
             sort_by,
             sort_order,
             filters,
+            access,
         } = request;
         let PageRequest {
             direction,
@@ -779,6 +788,7 @@ impl MetadataService for DbMetadataService {
         let size_usize = size.get() as usize;
         let query = CatalogQuery {
             filters: CatalogFilters::try_from(filters)?,
+            access,
             sort: CatalogSort {
                 field: sort_by.into(),
                 direction: sort_order.into(),

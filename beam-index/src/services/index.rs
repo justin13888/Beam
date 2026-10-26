@@ -6864,6 +6864,7 @@ mod tests {
                     anilist_id: None,
                     rating_tmdb: None,
                     rating_imdb: None,
+                    content_rating: None,
                     created_at: chrono::Utc::now(),
                     updated_at: chrono::Utc::now(),
                 })
@@ -7015,6 +7016,7 @@ mod tests {
                     tvdb_id: None,
                     anilist_id: None,
                     rating_tmdb: None,
+                    content_rating: None,
                     created_at: chrono::Utc::now(),
                     updated_at: chrono::Utc::now(),
                 })

@@ -351,6 +351,7 @@ fn build_fixture(
 
     let services = AppServices {
         hash: Arc::new(StubHashService),
+        access: crate::routes::test_support::open_access(),
         library,
         metadata: Arc::new(StubMetadataService),
         subtitles: crate::routes::test_support::idle_subtitles(),

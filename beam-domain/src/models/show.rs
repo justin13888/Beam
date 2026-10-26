@@ -32,6 +32,8 @@ pub struct Show {
     pub anilist_id: Option<u32>,
     /// The provider's rating on its 0-10 scale, as `Movie::rating_tmdb`.
     pub rating_tmdb: Option<f32>,
+    /// The provider's certification (`TV-14`), as `Movie::content_rating`.
+    pub content_rating: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -120,6 +122,7 @@ impl From<beam_entity::show::Model> for Show {
             tvdb_id: model.tvdb_id.map(|id| id as u32),
             anilist_id: model.anilist_id.map(|id| id as u32),
             rating_tmdb: model.rating_tmdb,
+            content_rating: model.content_rating,
             created_at: model.created_at.with_timezone(&Utc),
             updated_at: model.updated_at.with_timezone(&Utc),
         }

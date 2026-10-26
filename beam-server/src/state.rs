@@ -30,6 +30,7 @@ use crate::models::enrichment::{
 use crate::{
     config::ServerConfig,
     services::{
+        access::{AccessRepositories, AccessService},
         admin_log::{AdminLogService, LocalAdminLogService},
         artwork::{ArtworkCache, ArtworkCacheConfig},
         collections::CollectionService,
@@ -139,6 +140,9 @@ impl Deref for AppState {
 #[derive(Debug)]
 pub struct AppServices {
     pub hash: Arc<dyn HashService>,
+    /// Which libraries and content ratings each user may see (issue #263),
+    /// applied by every route that reads or delivers a title.
+    pub access: Arc<AccessService>,
     pub library: Arc<dyn LibraryService>,
     pub metadata: Arc<dyn MetadataService>,
     /// Sidecar subtitle delivery, as stored and as WebVTT (issue #189).
@@ -503,8 +507,21 @@ impl AppServices {
             watch_status.clone(),
         ));
 
+        let access = Arc::new(AccessService::new(AccessRepositories {
+            policies: Arc::new(
+                beam_index::repositories::SqlAccessPolicyRepository::with_clock(
+                    db.clone(),
+                    clock.clone(),
+                ),
+            ),
+            movies: movie_repo.clone(),
+            shows: show_repo.clone(),
+            files: file_repo.clone(),
+        }));
+
         let services = Self {
             hash: hash_service.clone() as Arc<dyn HashService>,
+            access,
             library: Arc::new(LocalLibraryService::new(
                 library_repo.clone(),
                 file_repo.clone(),

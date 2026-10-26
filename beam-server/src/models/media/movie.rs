@@ -30,6 +30,10 @@ pub struct MovieMetadata {
     pub genres: Vec<String>,
     /// Movie ratings
     pub ratings: Option<Ratings>,
+    /// The provider's certification for the movie, such as `PG-13`; absent
+    /// while none is known. A user's maximum content rating is compared
+    /// against it.
+    pub content_rating: Option<String>,
     /// External identifiers to movie
     pub identifiers: Option<ExternalIdentifiers>,
 

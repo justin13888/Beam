@@ -1,5 +1,6 @@
 use std::path::Path;
 
+pub mod access_policy;
 pub mod admin_log;
 pub mod applied_nfo;
 pub mod catalog;
@@ -19,6 +20,7 @@ pub mod user_list;
 pub mod watch_state;
 
 // SQL implementations
+pub use access_policy::SqlAccessPolicyRepository;
 pub use admin_log::SqlAdminLogRepository;
 pub use applied_nfo::SqlAppliedNfoRepository;
 pub use catalog::SqlCatalogRepository;

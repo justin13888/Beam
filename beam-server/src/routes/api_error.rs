@@ -605,6 +605,61 @@ pub enum AdminUserError {
     Internal(String),
 }
 
+/// `GET /v1/admin/users/{id}/access`.
+#[derive(Debug, thiserror::Error, ApiError)]
+pub enum UserAccessReadError {
+    #[error("{0}")]
+    #[problem(
+        status = 404,
+        type = "https://beam.justinchung.net/reference/errors/#user-not-found",
+        title = "User not found"
+    )]
+    UserNotFound(String),
+
+    #[error("{0}")]
+    #[problem(
+        status = 500,
+        type = "https://beam.justinchung.net/reference/errors/#internal",
+        title = "Internal server error"
+    )]
+    Internal(String),
+}
+
+/// `PUT /v1/admin/users/{id}/access`.
+#[derive(Debug, thiserror::Error, ApiError)]
+pub enum UserAccessUpdateError {
+    #[error("{0}")]
+    #[problem(
+        status = 404,
+        type = "https://beam.justinchung.net/reference/errors/#user-not-found",
+        title = "User not found"
+    )]
+    UserNotFound(String),
+
+    /// `library_ids` names a library that does not exist, or is not empty
+    /// while `all_libraries` is `true`: one entry per broken rule, each
+    /// naming its field.
+    #[error("the request body breaks {} rule(s)", errors.len())]
+    #[problem(
+        status = 422,
+        type = "https://beam.justinchung.net/reference/errors/#validation-failed",
+        title = "Validation failed"
+    )]
+    ValidationFailed {
+        // kynos gap: as for `FixMatchError::ValidationFailed`; getkono/kynos#991.
+        #[problem(extension)]
+        errors: Vec<crate::models::FieldError>,
+    },
+
+    #[error("{0}")]
+    #[problem(
+        status = 500,
+        type = "https://beam.justinchung.net/reference/errors/#internal",
+        title = "Internal server error"
+    )]
+    Internal(String),
+}
+
 /// `PUT /v1/files/{file_id}/progress`.
 ///
 /// The path parameter is typed `Uuid`, so a malformed id is Kynos's

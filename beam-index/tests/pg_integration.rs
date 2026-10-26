@@ -15,6 +15,8 @@
 //! the migrations declare are really there, and that the migrations reverse.
 #![cfg(feature = "pg-integration")]
 
+#[path = "pg_integration/access_policy.rs"]
+mod access_policy;
 #[path = "pg_integration/applied_nfo.rs"]
 mod applied_nfo;
 #[path = "pg_integration/catalog_repository.rs"]

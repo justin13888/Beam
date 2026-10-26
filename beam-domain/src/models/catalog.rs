@@ -207,6 +207,9 @@ pub enum Seek {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CatalogQuery {
     pub filters: CatalogFilters,
+    /// Whose listing this is: only the titles the policy admits are listed
+    /// (issue #263), before any filter, sort or seek reads them.
+    pub access: crate::models::access::AccessPolicy,
     pub sort: CatalogSort,
     pub seek: Seek,
     /// At most this many rows. Never zero: an empty page is asked for by not

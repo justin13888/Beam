@@ -1364,6 +1364,7 @@ mod title_identity {
             anilist_id: None,
             rating_tmdb: None,
             rating_imdb: None,
+            content_rating: None,
             created_at: now,
             updated_at: now,
         }
@@ -1388,6 +1389,7 @@ mod title_identity {
             tvdb_id: None,
             anilist_id: None,
             rating_tmdb: None,
+            content_rating: None,
             created_at: now,
             updated_at: now,
         }

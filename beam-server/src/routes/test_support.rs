@@ -476,6 +476,35 @@ pub(crate) fn idle_collections(
     ))
 }
 
+/// Access policies over `movies`, `shows` and `files`, nobody restricted
+/// until a test replaces a policy through the returned service.
+pub(crate) fn access_over(
+    movies: Arc<dyn beam_domain::repositories::MovieRepository>,
+    shows: Arc<dyn beam_domain::repositories::ShowRepository>,
+    files: Arc<dyn beam_domain::repositories::FileRepository>,
+) -> Arc<crate::services::access::AccessService> {
+    Arc::new(crate::services::access::AccessService::new(
+        crate::services::access::AccessRepositories {
+            policies: Arc::new(
+                beam_domain::repositories::access_policy::in_memory::InMemoryAccessPolicyRepository::default(),
+            ),
+            movies,
+            shows,
+            files,
+        },
+    ))
+}
+
+/// Access policies over empty stores, for a test that restricts nobody: an
+/// unrestricted policy reads no title.
+pub(crate) fn open_access() -> Arc<crate::services::access::AccessService> {
+    access_over(
+        Arc::new(InMemoryMovieRepository::default()),
+        Arc::new(InMemoryShowRepository::default()),
+        Arc::new(InMemoryFileRepository::default()),
+    )
+}
+
 /// Subtitle delivery over an empty index: every lookup is a miss.
 pub(crate) fn idle_subtitles() -> Arc<dyn crate::services::subtitle::SubtitleService> {
     Arc::new(crate::services::subtitle::DbSubtitleService::new(
@@ -540,6 +569,7 @@ fn make_app_state_with_services(
     let collections = idle_collections(metadata.clone(), playback.clone());
     let services = AppServices {
         hash: Arc::new(StubHashService),
+        access: open_access(),
         library: Arc::new(StubLibraryService),
         metadata,
         subtitles: idle_subtitles(),

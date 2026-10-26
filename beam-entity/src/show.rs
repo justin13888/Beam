@@ -42,6 +42,8 @@ pub struct Model {
 
     /// The provider's rating on its own 0-10 scale, as `movies.rating_tmdb`.
     pub rating_tmdb: Option<f32>,
+    /// The provider's certification (`TV-14`), as `movies.content_rating`.
+    pub content_rating: Option<String>,
 
     pub created_at: DateTimeWithTimeZone,
     pub updated_at: DateTimeWithTimeZone,

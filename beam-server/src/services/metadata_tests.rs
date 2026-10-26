@@ -67,6 +67,7 @@ mod tests {
             anilist_id: None,
             rating_tmdb: None,
             rating_imdb: None,
+            content_rating: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }
@@ -234,6 +235,7 @@ mod tests {
             tvdb_id: None,
             anilist_id: None,
             rating_tmdb: None,
+            content_rating: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
@@ -326,6 +328,7 @@ mod tests {
             tvdb_id: None,
             anilist_id: None,
             rating_tmdb: None,
+            content_rating: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
@@ -452,6 +455,7 @@ mod tests {
             tvdb_id: None,
             anilist_id: None,
             rating_tmdb: None,
+            content_rating: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
@@ -1520,6 +1524,7 @@ mod tests {
             tvdb_id: None,
             anilist_id: None,
             rating_tmdb: None,
+            content_rating: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
@@ -1653,6 +1658,7 @@ mod tests {
                 sort_by: MediaSortField::Title,
                 sort_order: SortOrder::Asc,
                 filters: only_shows(),
+                access: beam_domain::models::access::AccessPolicy::unrestricted(),
             })
             .await
             .expect("browse succeeds");
@@ -1862,6 +1868,7 @@ mod browse {
             sort_by: MediaSortField::Title,
             sort_order: SortOrder::Asc,
             filters: MediaSearchFilters::default(),
+            access: beam_domain::models::access::AccessPolicy::unrestricted(),
         }
     }
 

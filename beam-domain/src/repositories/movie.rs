@@ -1,3 +1,5 @@
+use std::collections::{BTreeSet, HashMap};
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sea_orm::DbErr;
@@ -135,8 +137,15 @@ pub trait MovieRepository: Send + Sync + std::fmt::Debug {
         library_id: Uuid,
         movie_id: Uuid,
     ) -> Result<(), DbErr>;
+    /// The libraries each of `movie_ids` is associated with -- what
+    /// [`Self::ensure_library_association`] recorded -- which decide who may
+    /// see it (issue #263). A movie with no association, and an id no movie
+    /// has, is absent from the map. One read, however many ids.
+    async fn library_ids(&self, movie_ids: &[Uuid])
+    -> Result<HashMap<Uuid, BTreeSet<Uuid>>, DbErr>;
     /// Apply enrichment-provider data to an existing movie (display title,
-    /// year, description, external IDs, artwork, rating). Overwrites the
+    /// year, description, external IDs, artwork, rating, certification).
+    /// Overwrites the
     /// current values -- enrichment is treated as the more authoritative
     /// source once a match is accepted -- except those `locks` holds, which
     /// an administrator locked (issue #185) and which are left exactly as
@@ -201,6 +210,19 @@ pub mod in_memory {
                 .iter()
                 .filter(|(library, _)| *library == library_id)
                 .map(|(_, movie)| *movie)
+                .collect()
+        }
+
+        /// Every library the movie `movie_id` is associated with: what
+        /// [`MovieRepository::library_ids`] reads, synchronously, for the
+        /// doubles that filter by it.
+        pub fn libraries_of(&self, movie_id: Uuid) -> std::collections::BTreeSet<Uuid> {
+            self.library_links
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(_, movie)| *movie == movie_id)
+                .map(|(library, _)| *library)
                 .collect()
         }
 
@@ -292,6 +314,7 @@ pub mod in_memory {
                 anilist_id: None,
                 rating_tmdb: None,
                 rating_imdb: None,
+                content_rating: None,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             };
@@ -534,6 +557,19 @@ pub mod in_memory {
             Ok(())
         }
 
+        async fn library_ids(
+            &self,
+            movie_ids: &[Uuid],
+        ) -> Result<HashMap<Uuid, BTreeSet<Uuid>>, DbErr> {
+            let mut libraries: HashMap<Uuid, BTreeSet<Uuid>> = HashMap::new();
+            for (library_id, movie_id) in self.library_links.lock().unwrap().iter() {
+                if movie_ids.contains(movie_id) {
+                    libraries.entry(*movie_id).or_default().insert(*library_id);
+                }
+            }
+            Ok(libraries)
+        }
+
         async fn apply_enrichment(
             &self,
             movie_id: Uuid,
@@ -575,6 +611,7 @@ pub mod in_memory {
                 if open(MetadataField::Rating) {
                     movie.rating_tmdb = enrichment.rating;
                 }
+                movie.content_rating = enrichment.content_rating.clone();
                 movie.updated_at = chrono::Utc::now();
             }
             Ok(())
@@ -653,6 +690,7 @@ pub mod in_memory_fixture {
                 anilist_id: None,
                 rating_tmdb: None,
                 rating_imdb: None,
+                content_rating: None,
                 created_at: now,
                 updated_at: now,
             };

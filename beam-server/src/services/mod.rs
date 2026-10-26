@@ -1,3 +1,4 @@
+pub mod access;
 pub mod admin_log;
 pub mod artwork;
 pub mod collections;

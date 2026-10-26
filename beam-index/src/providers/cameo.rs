@@ -430,6 +430,11 @@ fn map_movie_enrichment(details: &cameo::UnifiedMovieDetails) -> MovieEnrichment
         poster_url: movie.poster_url.clone(),
         backdrop_url: movie.backdrop_url.clone(),
         rating: movie.vote_average.map(|v| v as f32),
+        // cameo 0.2.0 exposes no certification: its unified details carry
+        // none, and TMDB's `release_dates` endpoint is not reachable through
+        // it (justin13888/cameo#59). Until a release does, no title is
+        // certified, and a user under a rating ceiling sees no movie.
+        content_rating: None,
         genres: movie.genres.iter().map(|g| g.name().to_string()).collect(),
         // Read by a lookup of their own: `CameoEnrichmentProvider::credits`.
         credits: None,
@@ -476,6 +481,8 @@ fn map_show_enrichment(details: &cameo::UnifiedTvShowDetails) -> ShowEnrichment 
         poster_url: show.poster_url.clone(),
         backdrop_url: show.backdrop_url.clone(),
         rating: show.vote_average.map(|v| v as f32),
+        // TMDB's `content_ratings`, as for a movie's: justin13888/cameo#59.
+        content_rating: None,
         genres: show.genres.iter().map(|g| g.name().to_string()).collect(),
         // Read by a lookup of their own: `CameoEnrichmentProvider::credits`.
         credits: None,

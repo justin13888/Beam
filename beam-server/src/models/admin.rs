@@ -8,6 +8,7 @@
 //! (`routes/conventions_tests.rs`). Where a wire type shares its name with the
 //! domain type it mirrors, the domain type is reached through its module.
 
+use beam_domain::models::access::{AccessPolicy, ContentRating, LibraryAccess};
 use beam_domain::models::admin_log::{self, AdminLog, AdminLogLevel};
 use beam_index::services::notification::{self, EventCategory, EventLevel};
 use beam_index::services::scan as index_scan;
@@ -477,6 +478,88 @@ pub struct AdminUserConnection {
 #[derive(Debug, Serialize, Deserialize, Schema)]
 pub struct UpdateAdminUserRequest {
     pub disabled: bool,
+}
+
+// ── Per-user access (issue #263) ─────────────────────────────────────────────
+
+/// An age band content ratings are grouped into, youngest first: the unit a
+/// user's maximum content rating is set in. Each takes the US film and TV
+/// certifications for that audience -- `all_ages` takes `G`, `TV-Y` and
+/// `TV-G`; `older_children` `TV-Y7`; `parental_guidance` `PG` and `TV-PG`;
+/// `teen` `PG-13` and `TV-14`; `mature` `R` and `TV-MA`; `adult` `NC-17`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Schema)]
+#[serde(rename_all = "snake_case")]
+pub enum ContentRatingBand {
+    AllAges,
+    OlderChildren,
+    ParentalGuidance,
+    Teen,
+    Mature,
+    Adult,
+}
+
+impl From<ContentRating> for ContentRatingBand {
+    fn from(band: ContentRating) -> Self {
+        match band {
+            ContentRating::AllAges => Self::AllAges,
+            ContentRating::OlderChildren => Self::OlderChildren,
+            ContentRating::ParentalGuidance => Self::ParentalGuidance,
+            ContentRating::Teen => Self::Teen,
+            ContentRating::Mature => Self::Mature,
+            ContentRating::Adult => Self::Adult,
+        }
+    }
+}
+
+impl From<ContentRatingBand> for ContentRating {
+    fn from(band: ContentRatingBand) -> Self {
+        match band {
+            ContentRatingBand::AllAges => Self::AllAges,
+            ContentRatingBand::OlderChildren => Self::OlderChildren,
+            ContentRatingBand::ParentalGuidance => Self::ParentalGuidance,
+            ContentRatingBand::Teen => Self::Teen,
+            ContentRatingBand::Mature => Self::Mature,
+            ContentRatingBand::Adult => Self::Adult,
+        }
+    }
+}
+
+/// What one user may see: the body of `PUT /v1/admin/users/{id}/access`,
+/// and what `GET` answers. A user nobody restricted sees every library with
+/// no maximum rating.
+///
+/// A title the user may not see answers every route as one that does not
+/// exist, and is never listed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Schema)]
+pub struct UserAccess {
+    /// Whether the user sees every library, those created later included.
+    /// When `true`, `library_ids` is empty.
+    pub all_libraries: bool,
+    /// The libraries the user sees when `all_libraries` is `false`, in no
+    /// particular order; empty sees none.
+    pub library_ids: Vec<Uuid>,
+    /// The highest band the user sees; absent for no maximum. Under a
+    /// maximum, a title whose certification is not one listed on
+    /// `ContentRatingBand` -- or that has none yet -- is hidden.
+    pub max_content_rating: Option<ContentRatingBand>,
+}
+
+impl From<AccessPolicy> for UserAccess {
+    fn from(policy: AccessPolicy) -> Self {
+        let AccessPolicy {
+            libraries,
+            max_rating,
+        } = policy;
+        let (all_libraries, library_ids) = match libraries {
+            LibraryAccess::All => (true, Vec::new()),
+            LibraryAccess::Only(granted) => (false, granted.into_iter().collect()),
+        };
+        Self {
+            all_libraries,
+            library_ids,
+            max_content_rating: max_rating.map(ContentRatingBand::from),
+        }
+    }
 }
 
 // ── Admin system status (issue #85) ──────────────────────────────────────────
