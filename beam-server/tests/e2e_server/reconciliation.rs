@@ -313,7 +313,8 @@ async fn renamed_moved_and_swapped_files_keep_their_ids_and_progress() {
 
 /// A root gone altogether, or emptied of every file, is refused rather than
 /// taken for a library whose every file was deleted: nothing is marked
-/// missing, and when the files come back they are the same rows.
+/// missing, the viewer's progress is kept throughout, and when the files come
+/// back they are the same rows and the viewer resumes where they were.
 #[tokio::test]
 async fn an_emptied_or_vanished_root_marks_nothing_missing() {
     let mut admin = Admin::start().await;
@@ -324,15 +325,25 @@ async fn an_emptied_or_vanished_root_marks_nothing_missing() {
     admin
         .stack
         .library
-        .add_video("films/Heat (1995).mp4", &Video::new(550));
+        .add_video("films/Heat (1995).mp4", &Video::new(550).seconds(10));
     let library = admin.add_library("Films", "films").await;
     admin.scan_ok(library).await;
     let ids: Vec<Uuid> = admin.files(library).await.iter().map(|f| f.id).collect();
+    let heat = id_at(&admin, library, "Heat (1995).mp4").await;
+    report(&admin.api, heat, 4.0, Some(10.0)).await;
 
     let present_rows = |rows: Vec<beam_entity::files::Model>| {
         rows.iter()
             .filter(|row| row.missing_since.is_none())
             .count()
+    };
+    // The viewer's one watch_state row, still on Heat at 4 seconds.
+    let assert_progress_kept = |rows: Vec<beam_entity::watch_state::Model>, when: &str| {
+        let kept: Vec<(Option<Uuid>, f64)> = rows
+            .iter()
+            .map(|row| (row.last_file_id, row.position_secs))
+            .collect();
+        assert_eq!(kept, [(Some(heat), 4.0)], "progress is kept {when}");
     };
 
     let last_job = admin
@@ -364,6 +375,7 @@ async fn an_emptied_or_vanished_root_marks_nothing_missing() {
     );
     assert_eq!(present_rows(file_rows(&admin.stack, library).await), 2);
     assert_eq!(listed(&admin, library).await.len(), 2);
+    assert_progress_kept(watch_rows(&admin.stack).await, "while the root is gone");
 
     // Mounted again, but empty: a job that refuses to reconcile.
     admin.stack.library.create_dir("films");
@@ -384,6 +396,7 @@ async fn an_emptied_or_vanished_root_marks_nothing_missing() {
     );
     assert_eq!(Counts::of(&failed.progress), Counts::default());
     assert_eq!(present_rows(file_rows(&admin.stack, library).await), 2);
+    assert_progress_kept(watch_rows(&admin.stack).await, "while the root is empty");
 
     // The files return.
     admin
@@ -403,6 +416,16 @@ async fn an_emptied_or_vanished_root_marks_nothing_missing() {
     );
     let back: Vec<Uuid> = admin.files(library).await.iter().map(|f| f.id).collect();
     assert_eq!(back, ids, "the same rows");
+    assert_progress_kept(watch_rows(&admin.stack).await, "once the files return");
+    let shelf = continue_watching(&admin.api).await;
+    assert_eq!(
+        shelf
+            .iter()
+            .map(|item| (item.file_id, item.position_secs))
+            .collect::<Vec<_>>(),
+        [(heat, 4.0)],
+        "the viewer resumes where they were"
+    );
 
     admin.finish().await;
 }
