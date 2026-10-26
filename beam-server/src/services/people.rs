@@ -133,9 +133,17 @@ impl PeopleService {
     }
 
     /// The stored person `id` names, portrait URL and all: what the artwork
-    /// route fetches a portrait by.
+    /// route fetches a portrait by. `Ok(None)` for a person no title credits
+    /// any more, whom search no longer lists either -- their row outlives
+    /// their last credit, but nothing of theirs is served once it has gone.
     pub async fn find_person(&self, id: Uuid) -> Result<Option<StoredPerson>, DbErr> {
-        self.people.find_by_id(id).await
+        let Some(person) = self.people.find_by_id(id).await? else {
+            return Ok(None);
+        };
+        if self.people.filmography(id).await?.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(person))
     }
 
     /// One page of the people credited in the library, by name: those whose
@@ -191,12 +199,16 @@ impl PeopleService {
     }
 
     /// One person with every credit they have, `Ok(None)` when no person has
-    /// that id. A credit on a title that has since gone is left out.
+    /// that id or no title credits them any more (as search no longer lists
+    /// them). A credit on a title that has since gone is left out.
     pub async fn detail(&self, id: Uuid) -> Result<Option<PersonDetail>, PeopleError> {
         let Some(person) = self.people.find_by_id(id).await.map_err(internal)? else {
             return Ok(None);
         };
         let credits = self.people.filmography(id).await.map_err(internal)?;
+        if credits.is_empty() {
+            return Ok(None);
+        }
         let titles = self.titles(&credits).await?;
 
         let mut cast = Vec::new();

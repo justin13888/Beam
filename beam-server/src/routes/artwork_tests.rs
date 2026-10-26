@@ -146,6 +146,20 @@ mod tests {
         let pictured = credited_person(&fixture, "1", Some(PORTRAIT_URL)).await;
         let unpictured = credited_person(&fixture, "2", None).await;
         let movie = movie_with_poster(&fixture, Some(POSTER_URL)).await;
+        // Pictured, then credited on nothing: their row stays, their
+        // portrait is no longer served.
+        let uncredited = credited_person(&fixture, "3", Some(PORTRAIT_URL)).await;
+        let last_title = fixture
+            .people
+            .filmography(uncredited)
+            .await
+            .expect("the filmography is read")[0]
+            .title_id;
+        fixture
+            .people
+            .set_movie_credits(last_title, &[])
+            .await
+            .expect("credits are cleared");
         let client = client(&fixture);
         let token = signed_in(&fixture).await;
 
@@ -161,6 +175,10 @@ mod tests {
             (
                 "a person with no portrait",
                 format!("/v1/artwork/person/{unpictured}/profile"),
+            ),
+            (
+                "a person no title credits any more",
+                format!("/v1/artwork/person/{uncredited}/profile"),
             ),
             (
                 "a person who does not exist",

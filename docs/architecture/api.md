@@ -28,7 +28,7 @@ role.
 | `/v1/media` | GET | Browse/search catalog (cursor pagination, filters, sort) |
 | `/v1/media/{id}` | GET | Full metadata for one movie or show, with its `cast` (billing order) and key `crew` (by department and job) from enrichment; both are absent in a browse result |
 | `/v1/people` | GET | People search: the cast and crew credited in the library whose name contains `query` (ignoring case; every credited person without it), by name. A `PersonConnection` paged by `first` (1-100, default 20) and `after`, with `total`; shares the `search` rate-limit class with `/v1/media` |
-| `/v1/people/{id}` | GET | One person (`PersonDetail`) and their filmography: `cast` and `crew` credits in the library, newest title first; `404` `person-not-found` |
+| `/v1/people/{id}` | GET | One person (`PersonDetail`) and their filmography: `cast` and `crew` credits in the library, newest title first; `404` `person-not-found` for an unknown id or a person no title credits any more |
 | `/v1/media/{id}/sources` | GET | Playable/downloadable source files for a movie or an episode, primary first, each with its video, audio and subtitle tracks |
 | `/v1/genres` | GET | Every genre in the catalog, for filter chips: a `GenreConnection`, never paged |
 | `/v1/artwork/{kind}/{id}/{variant}` | GET, HEAD | Poster, backdrop or thumbnail art, and people's portraits, fetched from the provider once and served from Beam's cache. `kind` is `movie`/`show`/`season`/`episode`/`person`; `variant` is `poster`/`backdrop`/`thumbnail`/`profile` (a person has only `profile`) |

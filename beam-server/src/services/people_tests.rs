@@ -309,6 +309,19 @@ async fn a_filmography_lists_cast_and_crew_newest_first() {
     assert_eq!(detail.crew[0].department.as_deref(), Some("Production"));
     assert_eq!(detail.crew[0].title.id, new);
 
+    // Credited on nothing any more: their row stays, but they are as gone
+    // as someone who never existed, as search treats them.
+    for title in [old, new, gone] {
+        fixture.people.set_movie_credits(title, &[]).await.unwrap();
+    }
+    fixture.people.set_show_credits(undated, &[]).await.unwrap();
+    assert!(
+        fixture.people.find_by_id(person).await.unwrap().is_some(),
+        "the row outlives the last credit"
+    );
+    assert!(fixture.service.detail(person).await.unwrap().is_none());
+    assert!(fixture.service.find_person(person).await.unwrap().is_none());
+
     assert!(
         fixture
             .service
