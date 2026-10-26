@@ -63,6 +63,12 @@ const CONTAINER_MIME_TYPES: &[ContainerMimeType] = &[
         extension: None,
         mime_type: "video/mpeg",
     },
+    // Ogg (Theora video); `video/ogg` is registered (RFC 5334) and browsers play it.
+    ContainerMimeType {
+        demuxer: "ogg",
+        extension: None,
+        mime_type: "video/ogg",
+    },
 ];
 
 /// The registered media type of a file whose container FFmpeg reported as
@@ -112,6 +118,8 @@ mod tests {
             ("mpegts", "00001.m2ts", "video/mp2t"),
             ("mpeg", "VTS_01_1.VOB", "video/mpeg"),
             ("mpeg", "film.mpg", "video/mpeg"),
+            ("ogg", "film.ogv", "video/ogg"),
+            ("ogg", "film.ogg", "video/ogg"),
             ("avi", "film.avi", UNKNOWN_CONTAINER_MIME_TYPE),
             ("flv", "film.flv", UNKNOWN_CONTAINER_MIME_TYPE),
             ("", "film.mp4", UNKNOWN_CONTAINER_MIME_TYPE),
