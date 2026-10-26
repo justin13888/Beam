@@ -46,6 +46,10 @@ pub(crate) mod test_support;
 mod contract_tests;
 
 #[cfg(test)]
+#[path = "access_tests.rs"]
+mod access_tests;
+
+#[cfg(test)]
 #[path = "taxonomy_tests.rs"]
 mod taxonomy_tests;
 
