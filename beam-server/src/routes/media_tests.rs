@@ -90,6 +90,13 @@ impl MetadataService for StubMetadataService {
     ) -> Result<Option<crate::models::SeasonDetail>, MetadataError> {
         Ok(None)
     }
+
+    async fn get_titles(
+        &self,
+        _titles: &[beam_domain::models::watch_state::TitleRef],
+    ) -> Result<Vec<crate::models::MediaMetadata>, MetadataError> {
+        Ok(vec![])
+    }
 }
 
 /// `test_support`'s state with the metadata service swapped for the one this
@@ -117,6 +124,8 @@ fn state_with_service(metadata: Arc<dyn MetadataService>) -> AppState {
         enrichment_repo: base.services.enrichment_repo.clone(),
         enrichment_control: base.services.enrichment_control.clone(),
         people: base.services.people.clone(),
+        lists: base.services.lists.clone(),
+        collections: base.services.collections.clone(),
         movie_repo: base.services.movie_repo.clone(),
         show_repo: base.services.show_repo.clone(),
         artwork: base.services.artwork.clone(),
@@ -200,6 +209,7 @@ fn movie_metadata(id: &str, title: &str) -> MediaMetadata {
         user_state: crate::models::UserTitleState::default(),
         cast: None,
         crew: None,
+        collection: None,
     })
 }
 
@@ -575,6 +585,10 @@ fn real_service_over(
         catalog,
         genres: library.genres.clone(),
         people: library.people.clone(),
+        collections: Arc::new(
+            beam_domain::repositories::collection::in_memory::InMemoryCollectionRepository::default(
+            ),
+        ),
     }))
 }
 

@@ -6,8 +6,9 @@
 use tracing::warn;
 
 use beam_domain::providers::enrichment::{
-    CreditEnrichment, CreditRole, EnrichmentError, EnrichmentProvider, ExternalMediaRef,
-    MediaQuery, MovieEnrichment, MovieSearchHit, SeasonEnrichment, ShowEnrichment, ShowSearchHit,
+    CollectionEnrichment, CreditEnrichment, CreditRole, EnrichmentError, EnrichmentProvider,
+    ExternalMediaRef, MediaQuery, MovieEnrichment, MovieSearchHit, SeasonEnrichment,
+    ShowEnrichment, ShowSearchHit,
 };
 
 /// Configuration for constructing the production `cameo` client. Absent TMDB
@@ -432,7 +433,28 @@ fn map_movie_enrichment(details: &cameo::UnifiedMovieDetails) -> MovieEnrichment
         genres: movie.genres.iter().map(|g| g.name().to_string()).collect(),
         // Read by a lookup of their own: `CameoEnrichmentProvider::credits`.
         credits: None,
+        collection: details
+            .belongs_to_collection
+            .as_ref()
+            .and_then(|collection| map_collection(movie.provider_id.provider(), collection)),
     }
+}
+
+/// A movie's collection as Beam stores it, keyed by the matching provider's
+/// id for it. One with no id, or no name, is not one Beam can key or show,
+/// and is dropped.
+fn map_collection(provider: &str, collection: &cameo::Collection) -> Option<CollectionEnrichment> {
+    let id = collection.id?;
+    let name = collection.name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    Some(CollectionEnrichment {
+        collection_ref: ExternalMediaRef::new(provider, &id.to_string()),
+        name: name.to_string(),
+        poster_url: collection.poster_url.clone(),
+        backdrop_url: collection.backdrop_url.clone(),
+    })
 }
 
 fn map_show_enrichment(details: &cameo::UnifiedTvShowDetails) -> ShowEnrichment {
@@ -532,6 +554,43 @@ mod tests {
         assert!(enrichment.release_date.is_some());
         assert_eq!(enrichment.runtime_mins, Some(136));
         assert_eq!(enrichment.rating, Some(8.7_f32));
+        assert_eq!(enrichment.collection, None, "a movie in no collection");
+    }
+
+    #[test]
+    fn maps_a_movies_collection_keyed_by_the_providers_id_for_it() {
+        let movie = UnifiedMovie::new(MediaId::tmdb(603), "The Matrix");
+        let details = UnifiedMovieDetails::new(movie).with_collection(
+            cameo::Collection::new("The Matrix Collection")
+                .with_id(2344)
+                .with_poster_url("https://image.tmdb.org/collection.jpg"),
+        );
+
+        assert_eq!(
+            map_movie_enrichment(&details).collection,
+            Some(CollectionEnrichment {
+                collection_ref: ExternalMediaRef::new("tmdb", "2344"),
+                name: "The Matrix Collection".to_string(),
+                poster_url: Some("https://image.tmdb.org/collection.jpg".to_string()),
+                backdrop_url: None,
+            })
+        );
+    }
+
+    #[test]
+    fn a_collection_with_no_id_or_no_name_is_dropped() {
+        for collection in [
+            cameo::Collection::new("Unkeyed Collection"),
+            cameo::Collection::new("  ").with_id(1),
+        ] {
+            let movie = UnifiedMovie::new(MediaId::tmdb(603), "The Matrix");
+            let details = UnifiedMovieDetails::new(movie).with_collection(collection.clone());
+            assert_eq!(
+                map_movie_enrichment(&details).collection,
+                None,
+                "{collection:?}"
+            );
+        }
     }
 
     #[test]

@@ -107,6 +107,13 @@ impl MetadataService for StubMetadataService {
     ) -> Result<Option<crate::models::SeasonDetail>, MetadataError> {
         Ok(None)
     }
+
+    async fn get_titles(
+        &self,
+        _titles: &[beam_domain::models::watch_state::TitleRef],
+    ) -> Result<Vec<crate::models::MediaMetadata>, MetadataError> {
+        Ok(vec![])
+    }
 }
 
 /// Stub library service backed by a fixed list of files.
@@ -227,6 +234,8 @@ fn make_test_state(files: Vec<LocatedFile>) -> TestFixture {
             Arc::new(beam_domain::repositories::movie::in_memory::InMemoryMovieRepository::default()),
             Arc::new(beam_domain::repositories::show::in_memory::InMemoryShowRepository::default()),
         ),
+        lists: crate::routes::test_support::unused_lists(),
+        collections: crate::routes::test_support::unused_collections(),
         movie_repo: Arc::new(
             beam_domain::repositories::movie::in_memory::InMemoryMovieRepository::default(),
         ),

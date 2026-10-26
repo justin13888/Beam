@@ -19,6 +19,8 @@
 mod applied_nfo;
 #[path = "pg_integration/catalog_repository.rs"]
 mod catalog_repository;
+#[path = "pg_integration/collection_repository.rs"]
+mod collection_repository;
 #[path = "pg_integration/enrichment_state.rs"]
 mod enrichment_state;
 #[path = "pg_integration/file_repository.rs"]
@@ -39,5 +41,7 @@ mod schema;
 mod show_repository;
 #[path = "pg_integration/sidecar_subtitle.rs"]
 mod sidecar_subtitle;
+#[path = "pg_integration/user_list.rs"]
+mod user_list;
 #[path = "pg_integration/watch_state.rs"]
 mod watch_state;

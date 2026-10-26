@@ -46,7 +46,8 @@ Each heading is the code exactly as it appears after the `#` in `type`.
 
 **404.** No movie or show has this id -- or, on the routes that take any of them, no movie, show,
 season or episode: `/v1/media/{id}/progress`, `/v1/media/{id}/watched`,
-`/v1/continue-watching/{id}`, `/v1/episodes/{id}` and `/v1/seasons/{id}`.
+`/v1/continue-watching/{id}`, `/v1/episodes/{id}`, `/v1/seasons/{id}`, `/v1/watchlist/{id}` and
+`/v1/favourites/{id}`.
 
 **What to do.** Check the id. A title can also disappear between a browse and a detail request if a
 rescan removed it, in which case reloading the list is the right response.
@@ -58,6 +59,22 @@ more. People are the cast and crew enrichment stored for the library's titles.
 
 **What to do.** Check the id. The ids a title's `cast` and `crew` and a people search list are the
 ones this route accepts.
+
+### collection-not-found
+
+**404.** No collection has this id on `/v1/collections/{id}`, or none of the library's movies is in
+it any more. Collections are the groupings -- a franchise, say -- that enrichment stored for the
+library's movies.
+
+**What to do.** Check the id. The ids a movie's `collection` and the collection listing
+(`GET /v1/collections`) name are the ones this route accepts.
+
+### not-a-title
+
+**400.** From `PUT` and `DELETE` on `/v1/watchlist/{id}` and `/v1/favourites/{id}`. The id is a
+season's or an episode's. The watchlist and favourites hold whole titles: movies and shows.
+
+**What to do.** Use the id of its show, which an episode's and a season's detail carry.
 
 ### sources-not-available-for-show
 
@@ -77,12 +94,13 @@ detail (`GET /v1/media/{id}`, `GET /v1/seasons/{id}`), and marking one watched i
 
 ### invalid-cursor
 
-**400.** From `GET /v1/media`, `GET /v1/history`, `GET /v1/libraries/{id}/files`,
+**400.** From `GET /v1/media`, `GET /v1/history`, `GET /v1/watchlist`, `GET /v1/favourites`,
+`GET /v1/people`, `GET /v1/collections`, `GET /v1/libraries/{id}/files`,
 `GET /v1/admin/enrichment`, `GET /v1/admin/users` and `GET /v1/admin/logs`. The `after` or
 `before` cursor is not one this server issued for that list: it was altered, it came from an older
-server whose cursors this one cannot read, it came from another list -- another library's files, or
-the user list's cursor handed to the log -- or, on `/v1/media`, it was issued under a different
-`sort_by` or `sort_order`.
+server whose cursors this one cannot read, it came from another list -- another library's files,
+the watchlist's cursor handed to favourites, or the user list's cursor handed to the log -- or, on
+`/v1/media`, it was issued under a different `sort_by` or `sort_order`.
 
 **What to do.** Start again from the first page without a cursor. A cursor names a place in *one*
 ordering, so a client that changes the sort must drop the cursor it holds. A cursor does not go

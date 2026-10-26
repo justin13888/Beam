@@ -97,6 +97,23 @@ pub struct MovieEnrichment {
     /// failed -- which leaves the credits already stored as they are;
     /// `Some` replaces them whole, an empty list included.
     pub credits: Option<Vec<CreditEnrichment>>,
+    /// The collection the provider puts the movie in, such as a franchise
+    /// (issue #262). Replaces the one stored on every enrichment: `None`
+    /// takes the movie out of any, as a provider reporting none means.
+    pub collection: Option<CollectionEnrichment>,
+}
+
+/// A movie's collection, as a provider reports it (issue #262).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CollectionEnrichment {
+    /// The provider's id for the collection, e.g. `tmdb:2344`. Two movies
+    /// reporting one id are in one collection.
+    pub collection_ref: ExternalMediaRef,
+    pub name: String,
+    /// The provider's poster for the collection.
+    pub poster_url: Option<String>,
+    /// The provider's backdrop for the collection.
+    pub backdrop_url: Option<String>,
 }
 
 /// One credit on a title, as a provider lists it (issue #261).

@@ -14,11 +14,16 @@ mod tests {
     use beam_domain::models::{CreateMovie, CreateShow};
     use beam_domain::providers::artwork::test_utils::InMemoryArtworkFetcher;
     use beam_domain::providers::artwork::{ArtworkFetchError, ImageFormat};
-    use beam_domain::providers::enrichment::{CreditEnrichment, ExternalMediaRef, MovieEnrichment};
+    use beam_domain::providers::enrichment::{
+        CollectionEnrichment, CreditEnrichment, ExternalMediaRef, MovieEnrichment,
+    };
+    use beam_domain::repositories::collection::in_memory::InMemoryCollectionRepository;
     use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
     use beam_domain::repositories::person::in_memory::InMemoryPersonRepository;
     use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
-    use beam_domain::repositories::{MovieRepository, PersonRepository, ShowRepository};
+    use beam_domain::repositories::{
+        CollectionRepository, MovieRepository, PersonRepository, ShowRepository,
+    };
     use beam_domain::services::RealClock;
     use kynos::http::StatusCode;
     use kynos::prelude::*;
@@ -39,6 +44,7 @@ mod tests {
         movies: Arc<InMemoryMovieRepository>,
         shows: Arc<InMemoryShowRepository>,
         people: Arc<InMemoryPersonRepository>,
+        collections: Arc<InMemoryCollectionRepository>,
         fetcher: Arc<InMemoryArtworkFetcher>,
         _root: TempDir,
     }
@@ -50,6 +56,7 @@ mod tests {
         let movies = Arc::new(InMemoryMovieRepository::default());
         let shows = Arc::new(InMemoryShowRepository::default());
         let people = Arc::new(InMemoryPersonRepository::default());
+        let collections = Arc::new(InMemoryCollectionRepository::default());
 
         let artwork = Arc::new(ArtworkCache::new(
             ArtworkCacheConfig {
@@ -80,6 +87,12 @@ mod tests {
                 movies.clone(),
                 shows.clone(),
             )),
+            lists: base.services.lists.clone(),
+            collections: Arc::new(crate::services::collections::CollectionService::new(
+                collections.clone(),
+                base.services.metadata.clone(),
+                base.services.playback.clone(),
+            )),
             movie_repo: movies.clone(),
             show_repo: shows.clone(),
             artwork,
@@ -98,6 +111,7 @@ mod tests {
             movies,
             shows,
             people,
+            collections,
             fetcher,
             _root: root,
         }
@@ -191,6 +205,92 @@ mod tests {
             (
                 "a movie's profile, which no title has",
                 format!("/v1/artwork/movie/{movie}/profile"),
+            ),
+        ] {
+            let response = client
+                .get(&path)
+                .cookie("beam_session", &token)
+                .send()
+                .await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{case}");
+        }
+    }
+
+    /// A collection holding one movie, with `poster` as its provider
+    /// poster, by its id.
+    async fn collection_of_one(fixture: &Fixture, native: &str, poster: Option<&str>) -> Uuid {
+        let movie = movie_with_poster(fixture, None).await;
+        fixture
+            .collections
+            .set_movie_collection(
+                movie,
+                Some(&CollectionEnrichment {
+                    collection_ref: ExternalMediaRef::new("tmdb", native),
+                    name: format!("Collection {native}"),
+                    poster_url: poster.map(str::to_string),
+                    backdrop_url: None,
+                }),
+            )
+            .await
+            .expect("the collection is stored");
+        fixture
+            .collections
+            .movie_collection(movie)
+            .await
+            .expect("the collection is read")
+            .expect("the movie is in it")
+            .id
+    }
+
+    #[tokio::test]
+    async fn a_collections_poster_is_served_by_beam_while_a_movie_is_in_it() {
+        const COLLECTION_POSTER_URL: &str = "https://image.tmdb.org/t/p/w500/collection.jpg";
+        let fixture = fixture(InMemoryArtworkFetcher::new().with_image(
+            COLLECTION_POSTER_URL,
+            ImageFormat::Jpeg,
+            POSTER_BYTES,
+        ));
+        let pictured = collection_of_one(&fixture, "1", Some(COLLECTION_POSTER_URL)).await;
+        let unpictured = collection_of_one(&fixture, "2", None).await;
+        // Pictured, then left by its only movie: no longer served.
+        let abandoned = collection_of_one(&fixture, "3", Some(COLLECTION_POSTER_URL)).await;
+        let leaver = fixture.collections.movie_ids(abandoned).await.unwrap()[0];
+        fixture
+            .collections
+            .set_movie_collection(leaver, None)
+            .await
+            .expect("the movie leaves");
+        let client = client(&fixture);
+        let token = signed_in(&fixture).await;
+
+        let response = client
+            .get(&format!("/v1/artwork/collection/{pictured}/poster"))
+            .cookie("beam_session", &token)
+            .send()
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.bytes().as_ref(), POSTER_BYTES);
+
+        for (case, path) in [
+            (
+                "a collection with no poster",
+                format!("/v1/artwork/collection/{unpictured}/poster"),
+            ),
+            (
+                "a collection with no backdrop",
+                format!("/v1/artwork/collection/{pictured}/backdrop"),
+            ),
+            (
+                "a collection no movie is in any more",
+                format!("/v1/artwork/collection/{abandoned}/poster"),
+            ),
+            (
+                "a collection that does not exist",
+                format!("/v1/artwork/collection/{}/poster", Uuid::new_v4()),
+            ),
+            (
+                "a collection's thumbnail, which Beam does not store",
+                format!("/v1/artwork/collection/{pictured}/thumbnail"),
             ),
         ] {
             let response = client
@@ -521,6 +621,7 @@ mod tests {
             people: Arc::new(
                 beam_domain::repositories::person::in_memory::InMemoryPersonRepository::default(),
             ),
+            collections: Arc::new(InMemoryCollectionRepository::default()),
         });
         let Some(MediaMetadata::Show(published)) = metadata
             .get_media_metadata(show.id)

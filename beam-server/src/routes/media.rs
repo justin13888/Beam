@@ -164,7 +164,9 @@ pub async fn browse_media(
 }
 
 /// Fetch a single media item's full metadata by id, with the caller's state
-/// for the movie, or for the show and each of its seasons and episodes.
+/// for the movie, or for the show and each of its seasons and episodes --
+/// whether the movie or show is on their watchlist and among their
+/// favourites included.
 #[kynos::get("/media/{id}", tag = Media, operation_id = "getMediaDetail")]
 pub async fn get_media_detail(
     auth: SessionAuth,
@@ -181,6 +183,13 @@ pub async fn get_media_detail(
             state
                 .services
                 .playback
+                .overlay_media(user_id, &mut metadata)
+                .await
+                .map_err(|err| MediaLookupError::Internal(err.to_string()))?;
+            // After the watched state, which replaces a movie's state whole.
+            state
+                .services
+                .lists
                 .overlay_media(user_id, &mut metadata)
                 .await
                 .map_err(|err| MediaLookupError::Internal(err.to_string()))?;

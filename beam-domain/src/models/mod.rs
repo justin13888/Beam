@@ -1,6 +1,7 @@
 pub mod admin_log;
 pub mod applied_nfo;
 pub mod catalog;
+pub mod collection;
 pub mod enrichment;
 pub mod file;
 pub mod genre;
@@ -14,11 +15,13 @@ pub mod search;
 pub mod show;
 pub mod sidecar;
 pub mod stream;
+pub mod user_list;
 pub mod watch_state;
 
 pub use admin_log::*;
 pub use applied_nfo::*;
 pub use catalog::*;
+pub use collection::*;
 pub use enrichment::*;
 pub use file::*;
 pub use genre::*;
@@ -32,4 +35,5 @@ pub use search::*;
 pub use show::*;
 pub use sidecar::*;
 pub use stream::*;
+pub use user_list::*;
 pub use watch_state::*;

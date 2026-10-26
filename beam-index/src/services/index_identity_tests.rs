@@ -41,6 +41,7 @@ struct Harness {
     admin_log_repo: Arc<InMemoryAdminLogRepository>,
     enrichment_repo: Arc<InMemoryEnrichmentStateRepository>,
     watch_state: Arc<InMemoryWatchStateRepository>,
+    lists: Arc<beam_domain::repositories::user_list::InMemoryUserListRepository>,
     service: LocalIndexService,
 }
 
@@ -98,6 +99,8 @@ impl Harness {
         let admin_log_repo = Arc::new(InMemoryAdminLogRepository::default());
         let enrichment_repo = Arc::new(InMemoryEnrichmentStateRepository::default());
         let watch_state = Arc::new(InMemoryWatchStateRepository::default());
+        let lists =
+            Arc::new(beam_domain::repositories::user_list::InMemoryUserListRepository::default());
         let library = library_repo
             .create(CreateLibrary {
                 name: "Identity".to_string(),
@@ -152,7 +155,8 @@ impl Harness {
             watch_state.clone(),
         )
         .with_missing_file_grace(grace)
-        .with_enrichment_repo(enrichment_repo.clone());
+        .with_enrichment_repo(enrichment_repo.clone())
+        .with_user_list_repo(lists.clone());
 
         Self {
             _dir: dir,
@@ -165,6 +169,7 @@ impl Harness {
             admin_log_repo,
             enrichment_repo,
             watch_state,
+            lists,
             service,
         }
     }
@@ -2004,6 +2009,87 @@ async fn a_rekey_never_merges_shows_matched_to_different_entries() {
     );
 }
 
+/// A merge moves each user's watchlist and favourites entries from the
+/// retired title onto the kept one (issue #262), as it moves watch state: the
+/// retired title goes, and its entries would go with it.
+#[tokio::test]
+async fn a_merge_carries_each_users_list_entries_to_the_kept_title() {
+    use beam_domain::models::user_list::UserList;
+    use beam_domain::models::watch_state::TitleRef;
+    use beam_domain::repositories::UserListRepository;
+
+    let h = Harness::keeping_missing_files().await;
+    let base = chrono::Utc::now() - chrono::Duration::days(30);
+    let scene = h
+        .keyed_show(
+            "Greys Anatomy",
+            "greys anatomy|",
+            &["Greys.Anatomy.S01E01.720p.mkv"],
+            base,
+        )
+        .await;
+    let folder = h
+        .keyed_show(
+            "Grey's Anatomy",
+            "grey s anatomy|",
+            &["Grey's Anatomy/Season 1/Greys.Anatomy.S01E01.mkv"],
+            base + chrono::Duration::days(1),
+        )
+        .await;
+    h.enrich_show(folder, 1416).await;
+    let older = h
+        .keyed_movie(
+            "Ocean's Eleven",
+            Some(2001),
+            "ocean s eleven|2001",
+            &["Ocean's Eleven (2001)/Ocean's Eleven (2001).mkv"],
+            base,
+        )
+        .await;
+    let newer = h
+        .keyed_movie(
+            "Oceans Eleven",
+            Some(2001),
+            "oceans eleven|2001",
+            &["Oceans.Eleven.2001.1080p.mkv"],
+            base + chrono::Duration::days(1),
+        )
+        .await;
+    let user = Uuid::new_v4();
+    h.lists
+        .add(user, UserList::Watchlist, TitleRef::Movie(newer))
+        .await
+        .unwrap();
+    h.lists
+        .add(user, UserList::Favourites, TitleRef::Show(scene))
+        .await
+        .unwrap();
+
+    h.service
+        .scan_all_libraries(ScanTrigger::Periodic)
+        .await
+        .unwrap();
+    assert_eq!(h.only_movie().id, older);
+    assert_eq!(h.only_show().id, folder);
+
+    assert_eq!(
+        h.lists
+            .lists_of(user, TitleRef::Movie(older))
+            .await
+            .unwrap(),
+        [UserList::Watchlist]
+    );
+    assert_eq!(
+        h.lists
+            .lists_of(user, TitleRef::Show(folder))
+            .await
+            .unwrap(),
+        [UserList::Favourites]
+    );
+    assert_eq!(h.lists.count(user, UserList::Watchlist).await.unwrap(), 1);
+    assert_eq!(h.lists.count(user, UserList::Favourites).await.unwrap(), 1);
+}
+
 /// A merge moves each viewer's watch state from the retired title onto the
 /// kept one (issue #188): the retired title goes, and its rows would go with
 /// it. A viewer with state on both keeps one row per title.
@@ -2475,6 +2561,83 @@ async fn reclassifying_a_titles_last_file_carries_its_watch_state() {
         (5, 1, 20.0),
         "on the episode the file now is"
     );
+}
+
+/// Reclassifying a title's last file carries its users' watchlist and
+/// favourites entries to the title the file joins, as it carries watch state
+/// (issue #262): orphan cleanup retires the emptied title, and would take the
+/// entries with it. Lists hold the show, so a husk show's entries follow its
+/// last episode's file to the series.
+#[tokio::test]
+async fn reclassifying_a_titles_last_file_carries_its_list_entries() {
+    use beam_domain::models::user_list::UserList;
+    use beam_domain::models::watch_state::TitleRef;
+    use beam_domain::repositories::UserListRepository;
+
+    let h = Harness::keeping_missing_files().await;
+    let base = chrono::Utc::now() - chrono::Duration::days(30);
+    let husk = h
+        .keyed_show(
+            "Season 05",
+            "season 05|",
+            &["Show X/Season 05/Show.X.S05E01.mkv"],
+            base,
+        )
+        .await;
+    // Its files name two films and neither is the one its key names.
+    let emptied = h
+        .keyed_movie(
+            "Dune",
+            None,
+            "dune|",
+            &["Dune.1984.mkv", "Dune.2021.mkv"],
+            base,
+        )
+        .await;
+    let user = Uuid::new_v4();
+    h.lists
+        .add(user, UserList::Favourites, TitleRef::Show(husk))
+        .await
+        .unwrap();
+    h.lists
+        .add(user, UserList::Watchlist, TitleRef::Movie(emptied))
+        .await
+        .unwrap();
+
+    h.service
+        .scan_all_libraries(ScanTrigger::Periodic)
+        .await
+        .unwrap();
+
+    let show = h.only_show();
+    assert_ne!(show.id, husk, "the husk is retired");
+    assert_eq!(
+        h.lists
+            .lists_of(user, TitleRef::Show(show.id))
+            .await
+            .unwrap(),
+        [UserList::Favourites],
+        "on the series the file now is"
+    );
+    let movies = h.movies();
+    assert_eq!(movies.len(), 2, "the files are two films: {movies:?}");
+    assert!(movies.iter().all(|movie| movie.id != emptied), "retired");
+    let mut kept = Vec::new();
+    for movie in &movies {
+        kept.extend(
+            h.lists
+                .lists_of(user, TitleRef::Movie(movie.id))
+                .await
+                .unwrap(),
+        );
+    }
+    assert_eq!(
+        kept,
+        [UserList::Watchlist],
+        "on the film the last file joined"
+    );
+    assert_eq!(h.lists.count(user, UserList::Favourites).await.unwrap(), 1);
+    assert_eq!(h.lists.count(user, UserList::Watchlist).await.unwrap(), 1);
 }
 
 /// A movie whose files the scan reclassifies to two other films, one after

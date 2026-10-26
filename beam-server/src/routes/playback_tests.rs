@@ -96,6 +96,10 @@ fn fixture() -> Fixture {
         people: Arc::new(
             beam_domain::repositories::person::in_memory::InMemoryPersonRepository::default(),
         ),
+        collections: Arc::new(
+            beam_domain::repositories::collection::in_memory::InMemoryCollectionRepository::default(
+            ),
+        ),
     }));
 
     let services = AppServices {
@@ -113,6 +117,8 @@ fn fixture() -> Fixture {
         enrichment_repo: base.services.enrichment_repo.clone(),
         enrichment_control: base.services.enrichment_control.clone(),
         people: crate::routes::test_support::idle_people(movies.clone(), shows.clone()),
+        lists: crate::routes::test_support::unused_lists(),
+        collections: crate::routes::test_support::unused_collections(),
         movie_repo: movies.clone(),
         show_repo: shows.clone(),
         artwork: base.services.artwork.clone(),

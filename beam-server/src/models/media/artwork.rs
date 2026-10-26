@@ -6,7 +6,7 @@
 use kynos::Schema;
 use serde::{Deserialize, Serialize};
 
-/// What the artwork belongs to: a kind of title, or a person.
+/// What the artwork belongs to: a kind of title, a person, or a collection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Schema)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtworkKind {
@@ -20,6 +20,8 @@ pub enum ArtworkKind {
     Episode,
     /// Someone credited on a title (issue #261).
     Person,
+    /// A provider collection of movies (issue #262).
+    Collection,
 }
 
 /// Which image of that title.
@@ -57,6 +59,7 @@ impl std::fmt::Display for ArtworkKind {
             Self::Season => "season",
             Self::Episode => "episode",
             Self::Person => "person",
+            Self::Collection => "collection",
         })
     }
 }
@@ -71,6 +74,7 @@ impl std::str::FromStr for ArtworkKind {
             "season" => Ok(Self::Season),
             "episode" => Ok(Self::Episode),
             "person" => Ok(Self::Person),
+            "collection" => Ok(Self::Collection),
             _ => Err(UnknownArtworkSegment),
         }
     }

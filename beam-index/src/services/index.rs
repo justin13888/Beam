@@ -38,12 +38,12 @@ use beam_domain::models::file::{
 };
 use beam_domain::models::movie::{CreateMovie, CreateMovieEntry, Movie, MovieEntry};
 use beam_domain::models::show::{CreateEpisode, CreateShow, Episode, Show};
-use beam_domain::models::watch_state::WatchTarget;
+use beam_domain::models::watch_state::{TitleRef, WatchTarget};
 use beam_domain::models::{PinSource, ProviderPin};
 use beam_domain::repositories::{
     AppliedNfoRepository, EnrichmentStateRepository, FileRepository, LibraryRepository,
     MediaStreamRepository, MovieRepository, ShowRepository, SidecarSubtitleRepository,
-    WatchStateRepository,
+    UserListRepository, WatchStateRepository,
 };
 use beam_domain::services::{Clock, IdGenerator, RealClock, UuidGenerator};
 use beam_domain::utils::classification::{Classification, ContainerTags, Hints, classify};
@@ -1285,6 +1285,9 @@ pub struct LocalIndexService {
     enrichment_repo: Option<Arc<dyn EnrichmentStateRepository>>,
     sidecar_repo: Option<Arc<dyn SidecarSubtitleRepository>>,
     applied_nfo_repo: Option<Arc<dyn AppliedNfoRepository>>,
+    /// Users' watchlists and favourites (issue #262), whose entries a title
+    /// merge carries onto the survivor. Unset, a merge carries none.
+    user_list_repo: Option<Arc<dyn UserListRepository>>,
     divergence_policy: DivergencePolicy,
     clock: Arc<dyn Clock>,
     id_generator: Arc<dyn IdGenerator>,
@@ -1334,6 +1337,7 @@ impl LocalIndexService {
             enrichment_repo: None,
             sidecar_repo: None,
             applied_nfo_repo: None,
+            user_list_repo: None,
             divergence_policy: DivergencePolicy::default(),
             clock: Arc::new(RealClock),
             id_generator: Arc::new(UuidGenerator),
@@ -1419,6 +1423,22 @@ impl LocalIndexService {
     pub fn with_sidecar_repo(mut self, repo: Arc<dyn SidecarSubtitleRepository>) -> Self {
         self.sidecar_repo = Some(repo);
         self
+    }
+
+    /// Wire up users' watchlists and favourites (issue #262): when set, a
+    /// title merge carries the retired title's entries onto the survivor
+    /// rather than letting them go with it.
+    pub fn with_user_list_repo(mut self, repo: Arc<dyn UserListRepository>) -> Self {
+        self.user_list_repo = Some(repo);
+        self
+    }
+
+    /// Carry users' list entries for `from` onto `to`, when lists are wired.
+    async fn carry_list_entries(&self, from: TitleRef, to: TitleRef) -> Result<(), DbErr> {
+        match &self.user_list_repo {
+            Some(lists) => lists.carry(from, to).await,
+            None => Ok(()),
+        }
     }
 
     /// Wire up what each NFO held when it was last applied (issue #184): when
@@ -1938,7 +1958,8 @@ impl LocalIndexService {
             (Some(_), status) => status,
         };
         // A title the move empties goes with orphan cleanup, and its viewers'
-        // state with it unless carried first (issue #246).
+        // state (issue #246) and users' list entries (issue #262) with it
+        // unless carried first.
         if let (Some(from), Some(to)) = (&existing.content, &content) {
             self.carry_from_emptied_title(existing.id, from, to).await?;
         }
@@ -3490,6 +3511,9 @@ impl LocalIndexService {
                     WatchTarget::Movie { movie_id: survivor },
                 )
                 .await?;
+            // So are their watchlists and favourites, for the same reason.
+            self.carry_list_entries(TitleRef::Movie(loser), TitleRef::Movie(survivor))
+                .await?;
             for entry in self.movie_repo.find_entries_by_movie_id(loser).await? {
                 let MovieEntry {
                     id: entry_id,
@@ -3641,6 +3665,10 @@ impl LocalIndexService {
                 settled.insert(loser);
                 continue;
             }
+            // Users' lists hold the show itself, not its episodes: carried
+            // once, before anything moves, as a movie merge carries them.
+            self.carry_list_entries(TitleRef::Show(loser), TitleRef::Show(survivor))
+                .await?;
             for season in self.show_repo.find_seasons_by_show_id(loser).await? {
                 let target_season = self
                     .show_repo
@@ -3971,6 +3999,11 @@ impl LocalIndexService {
     /// would otherwise retire it with its viewers' state (issue #246). A
     /// title another file still holds keeps its state; so does one moving to
     /// a title of the other kind, which no watch state can follow.
+    ///
+    /// Users' watchlist and favourites entries are carried the same way
+    /// (issue #262): a movie's with its watch state, and a show's when the
+    /// move leaves the show itself -- not only the episode -- with no other
+    /// file, since lists hold the show rather than its episodes.
     async fn carry_from_emptied_title(
         &self,
         file_id: Uuid,
@@ -4025,7 +4058,45 @@ impl LocalIndexService {
         if keeps_a_file {
             return Ok(());
         }
-        self.progress_repo.carry(from, to).await
+        self.progress_repo.carry(from, to).await?;
+        match (from, to) {
+            (WatchTarget::Movie { movie_id }, WatchTarget::Movie { movie_id: to_movie }) => {
+                self.carry_list_entries(TitleRef::Movie(movie_id), TitleRef::Movie(to_movie))
+                    .await
+            }
+            (
+                WatchTarget::Episode { show_id, .. },
+                WatchTarget::Episode {
+                    show_id: to_show, ..
+                },
+            ) => {
+                if show_id == to_show || self.show_keeps_a_file(show_id, file_id).await? {
+                    return Ok(());
+                }
+                self.carry_list_entries(TitleRef::Show(show_id), TitleRef::Show(to_show))
+                    .await
+            }
+            (WatchTarget::Movie { .. }, WatchTarget::Episode { .. })
+            | (WatchTarget::Episode { .. }, WatchTarget::Movie { .. }) => Ok(()),
+        }
+    }
+
+    /// Whether any episode of `show_id` holds a file other than `file_id`.
+    async fn show_keeps_a_file(&self, show_id: Uuid, file_id: Uuid) -> Result<bool, DbErr> {
+        for season in self.show_repo.find_seasons_by_show_id(show_id).await? {
+            for episode in self.show_repo.find_episodes_by_season_id(season.id).await? {
+                if self
+                    .file_repo
+                    .find_by_episode_id(episode.id)
+                    .await?
+                    .iter()
+                    .any(|file| file.id != file_id)
+                {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
     }
 
     /// Point `file` at `content`, keeping its status and classifier version.

@@ -575,6 +575,33 @@ exactly one set, `credits_one_title`), `kind` (`cast` or `crew`), `character` an
 `credits_cast_columns` / `credits_crew_columns` checks hold each kind to its own columns. Indexes on
 `person_id`, `movie_id` and `show_id`.
 
+### `collections` / `collection_movies`
+Populated by the enrichment worker from a matched movie's provider collection (issue #262): today
+TMDB's `belongs_to_collection`, such as a franchise. A movie's membership is replaced on each
+enrichment of it -- a match reporting no collection takes it out of the one it was in -- and one
+whose membership failed to store keeps the one it had.
+
+`collections`: `id` (PK), `external_ref` (TEXT, unique, not null -- the provider's id for the
+collection, e.g. `tmdb:2344`, so every movie the provider puts in it joins one row), `name` (TEXT,
+not null), `poster_url` / `backdrop_url` (TEXT, the provider's art, served through the artwork
+route), `created_at`, `updated_at`. A collection no movie is in any more keeps its row but is
+neither listed nor served.
+
+`collection_movies`: `movie_id` (PK, FK `movies`, cascade -- so a movie is in at most one
+collection), `collection_id` (FK `collections`, cascade). Index on `collection_id`.
+
+### `user_list_entries`
+Each user's watchlist and favourites (issue #262): one row per (user, list, title). `id` (PK),
+`user_id` (FK `users`, cascade), `list` (TEXT, `watchlist` or `favourites`,
+`user_list_entries_list`), `movie_id` / `show_id` (FKs, cascade; exactly one set,
+`user_list_entries_one_title`), `added_at` (TIMESTAMPTZ, from the injected clock). Unique indexes
+`idx_user_list_entries_user_movie` on `(user_id, list, movie_id)` and
+`idx_user_list_entries_user_show` on `(user_id, list, show_id)` keep a title on a list once, and are
+what an addition's `ON CONFLICT DO NOTHING` relies on; `idx_user_list_entries_page` on
+`(user_id, list, added_at DESC, id DESC)` serves a list's pages; `movie_id` and `show_id` are
+indexed for the cascades and for the carry a title merge makes, which moves the retired title's
+entries onto the survivor (a user with both keeps one, added when the earlier was).
+
 ### `metadata_enrichment`
 Per-title enrichment queue and status, mirroring `files`' dual-nullable-FK polymorphism (one row per
 movie *or* show, never both, never neither).

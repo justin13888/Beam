@@ -59,6 +59,21 @@ titles played most recently, and its `page_info.has_next_page` says whether it l
 episode; `GET /v1/episodes/{id}` and `GET /v1/seasons/{id}` describe one episode (with its show and
 the episodes either side) or one season.
 
+## Watchlist, favourites and collections
+
+`PUT /v1/watchlist/{id}` puts a movie or a show on the signed-in user's watchlist and
+`DELETE /v1/watchlist/{id}` takes it off; `/v1/favourites/{id}` does the same for favourites. Both
+answer `204`, and both are idempotent: a title already on the list keeps its place. A season or an
+episode is refused with `not-a-title` -- the lists hold whole titles. `GET /v1/watchlist` and
+`GET /v1/favourites` page through a list, newest addition first, with `first` and `after`; each
+item is the title as browse lists it, with when it was added. A movie's or show's detail says
+whether it is on each list, as `user_state.in_watchlist` and `user_state.in_favourites`.
+
+Collections are the groupings a metadata provider makes of movies, such as a franchise: TMDB's
+"collection". A movie's detail names the one it is in as `collection`; `GET /v1/collections` lists
+every collection one of the library's movies is in, by name, and `GET /v1/collections/{id}` lists
+its movies in release order. They fill in as movies are enriched.
+
 ## Real-time updates
 
 Administrative events — scan progress, enrichment outcomes — are delivered over **Server-Sent

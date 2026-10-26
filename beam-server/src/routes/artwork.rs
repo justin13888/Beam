@@ -111,6 +111,16 @@ async fn upstream_url(
             .await
             .map_err(lookup_failed)?
             .and_then(|person| person.profile_url),
+        (ArtworkKind::Collection, variant) => services
+            .collections
+            .find_collection(id)
+            .await
+            .map_err(lookup_failed)?
+            .and_then(|collection| match variant {
+                ArtworkVariant::Poster => collection.poster_url,
+                ArtworkVariant::Backdrop => collection.backdrop_url,
+                ArtworkVariant::Thumbnail | ArtworkVariant::Profile => None,
+            }),
         // A season backdrop, an episode poster or a person's poster is not a
         // thing Beam stores.
         (ArtworkKind::Season | ArtworkKind::Episode | ArtworkKind::Person, _) => None,

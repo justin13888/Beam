@@ -155,6 +155,13 @@ impl MetadataService for StubMetadataService {
     ) -> Result<Option<crate::models::SeasonDetail>, MetadataError> {
         Ok(None)
     }
+
+    async fn get_titles(
+        &self,
+        _titles: &[beam_domain::models::watch_state::TitleRef],
+    ) -> Result<Vec<crate::models::MediaMetadata>, MetadataError> {
+        Ok(vec![])
+    }
 }
 
 /// A defaults-shaped [`AppState`] over stub services and a healthy in-memory
@@ -402,6 +409,73 @@ pub(crate) fn idle_people(
     ))
 }
 
+/// Watchlists and favourites over an empty list store, resolving ids from
+/// `movies` and `shows` and reading a page's titles from `metadata`.
+pub(crate) fn idle_lists(
+    movies: Arc<dyn beam_domain::repositories::MovieRepository>,
+    shows: Arc<dyn beam_domain::repositories::ShowRepository>,
+    metadata: Arc<dyn MetadataService>,
+    playback: Arc<dyn PlaybackService>,
+) -> Arc<crate::services::lists::ListService> {
+    Arc::new(crate::services::lists::ListService::new(
+        crate::services::lists::ListDependencies {
+            lists: Arc::new(
+                beam_domain::repositories::user_list::InMemoryUserListRepository::default(),
+            ),
+            movies,
+            shows,
+            metadata,
+            playback,
+        },
+    ))
+}
+
+/// The real playback service over empty in-memory stores, for a test that
+/// needs one to build another service over and exercises neither.
+fn idle_playback() -> Arc<dyn PlaybackService> {
+    let files = Arc::new(InMemoryFileRepository::default());
+    let movies = Arc::new(InMemoryMovieRepository::with_files(files.clone()));
+    let shows = Arc::new(InMemoryShowRepository::with_files(files.clone()));
+    in_memory_playback(
+        Arc::new(beam_domain::services::RealClock),
+        files,
+        movies,
+        shows,
+    )
+}
+
+/// Watchlists and favourites over empty stores, for a test that exercises no
+/// list route.
+pub(crate) fn unused_lists() -> Arc<crate::services::lists::ListService> {
+    idle_lists(
+        Arc::new(InMemoryMovieRepository::default()),
+        Arc::new(InMemoryShowRepository::default()),
+        Arc::new(StubMetadataService),
+        idle_playback(),
+    )
+}
+
+/// Collections over empty stores, for a test that exercises no collection
+/// route.
+pub(crate) fn unused_collections() -> Arc<crate::services::collections::CollectionService> {
+    idle_collections(Arc::new(StubMetadataService), idle_playback())
+}
+
+/// Collections over an empty collection store.
+pub(crate) fn idle_collections(
+    metadata: Arc<dyn MetadataService>,
+    playback: Arc<dyn PlaybackService>,
+) -> Arc<crate::services::collections::CollectionService> {
+    Arc::new(crate::services::collections::CollectionService::new(
+        Arc::new(
+            beam_domain::repositories::collection::in_memory::InMemoryCollectionRepository::default(
+            ),
+        ),
+        metadata,
+        playback,
+    ))
+}
+
 /// Subtitle delivery over an empty index: every lookup is a miss.
 pub(crate) fn idle_subtitles() -> Arc<dyn crate::services::subtitle::SubtitleService> {
     Arc::new(crate::services::subtitle::DbSubtitleService::new(
@@ -456,10 +530,18 @@ fn make_app_state_with_services(
         admin_log.clone(),
     );
 
+    let metadata: Arc<dyn MetadataService> = Arc::new(StubMetadataService);
+    let lists = idle_lists(
+        movie_repo.clone(),
+        show_repo.clone(),
+        metadata.clone(),
+        playback.clone(),
+    );
+    let collections = idle_collections(metadata.clone(), playback.clone());
     let services = AppServices {
         hash: Arc::new(StubHashService),
         library: Arc::new(StubLibraryService),
-        metadata: Arc::new(StubMetadataService),
+        metadata,
         subtitles: idle_subtitles(),
         notification,
         admin_log,
@@ -473,6 +555,8 @@ fn make_app_state_with_services(
         enrichment_repo,
         enrichment_control,
         people: idle_people(movie_repo.clone(), show_repo.clone()),
+        lists,
+        collections,
         movie_repo,
         show_repo,
         artwork,

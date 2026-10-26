@@ -3,6 +3,7 @@ use std::path::Path;
 pub mod admin_log;
 pub mod applied_nfo;
 pub mod catalog;
+pub mod collection;
 pub mod enrichment;
 pub mod file;
 pub mod genre;
@@ -14,12 +15,14 @@ pub mod playback_telemetry;
 pub mod show;
 pub mod sidecar_subtitle;
 pub mod stream;
+pub mod user_list;
 pub mod watch_state;
 
 // SQL implementations
 pub use admin_log::SqlAdminLogRepository;
 pub use applied_nfo::SqlAppliedNfoRepository;
 pub use catalog::SqlCatalogRepository;
+pub use collection::SqlCollectionRepository;
 pub use enrichment::SqlEnrichmentStateRepository;
 pub use file::SqlFileRepository;
 pub use genre::SqlGenreRepository;
@@ -31,6 +34,7 @@ pub use playback_telemetry::SqlPlaybackTelemetryRepository;
 pub use show::SqlShowRepository;
 pub use sidecar_subtitle::SqlSidecarSubtitleRepository;
 pub use stream::SqlMediaStreamRepository;
+pub use user_list::SqlUserListRepository;
 pub use watch_state::SqlWatchStateRepository;
 
 /// The `LIKE` pattern, escaped with `\`, that matches a stored path strictly

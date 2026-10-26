@@ -32,9 +32,11 @@ use crate::{
     services::{
         admin_log::{AdminLogService, LocalAdminLogService},
         artwork::{ArtworkCache, ArtworkCacheConfig},
+        collections::CollectionService,
         hash::{HashConfig, HashService, LocalHashService},
         health::DependencyProbe,
         library::{LibraryService, LocalLibraryService, OsPathValidator, audit_existing_roots},
+        lists::{ListDependencies, ListService},
         metadata::{DbMetadataService, MetadataRepositories, MetadataService},
         notification::{LocalNotificationService, NotificationService},
         people::PeopleService,
@@ -165,6 +167,12 @@ pub struct AppServices {
     /// People search and filmographies (issue #261), and the portrait URL
     /// the artwork endpoint fetches a person's portrait from.
     pub people: Arc<PeopleService>,
+    /// Users' watchlists and favourites (issue #262), and the flags a
+    /// title's detail carries for them.
+    pub lists: Arc<ListService>,
+    /// Provider collections (issue #262), and the art URL the artwork
+    /// endpoint fetches a collection's art from.
+    pub collections: Arc<CollectionService>,
     /// Poster and backdrop art, served by Beam rather than by a provider CDN
     /// (ADR-0015). Concrete rather than a trait object: its two boundaries --
     /// the network and the database -- already have seams, and the repository
@@ -268,6 +276,12 @@ impl AppServices {
         let person_repo: Arc<dyn beam_domain::repositories::PersonRepository> = Arc::new(
             beam_index::repositories::SqlPersonRepository::new(db.clone()),
         );
+        let collection_repo: Arc<dyn beam_domain::repositories::CollectionRepository> = Arc::new(
+            beam_index::repositories::SqlCollectionRepository::new(db.clone()),
+        );
+        let user_list_repo: Arc<dyn beam_domain::repositories::UserListRepository> = Arc::new(
+            beam_index::repositories::SqlUserListRepository::with_clock(db.clone(), clock.clone()),
+        );
         let watch_state_repo: Arc<dyn beam_domain::repositories::WatchStateRepository> = Arc::new(
             beam_index::repositories::SqlWatchStateRepository::with_clock(
                 db.clone(),
@@ -365,7 +379,8 @@ impl AppServices {
             .with_sidecar_repo(sidecar_repo.clone())
             .with_applied_nfo_repo(Arc::new(
                 beam_index::repositories::SqlAppliedNfoRepository::new(db.clone()),
-            )),
+            ))
+            .with_user_list_repo(user_list_repo.clone()),
         );
 
         let enrichment_provider = build_enrichment_provider(config)?;
@@ -377,6 +392,7 @@ impl AppServices {
                 show_repo.clone(),
                 genre_repo.clone(),
                 person_repo.clone(),
+                collection_repo.clone(),
                 enrichment_provider.clone(),
                 admin_log_service.clone(),
                 notification_service.clone(),
@@ -414,6 +430,30 @@ impl AppServices {
             shows: show_repo.clone(),
             sources: sources.clone(),
         }));
+        let metadata: Arc<dyn MetadataService> =
+            Arc::new(DbMetadataService::new(MetadataRepositories {
+                movies: movie_repo.clone(),
+                shows: show_repo.clone(),
+                sources,
+                catalog: Arc::new(beam_index::repositories::SqlCatalogRepository::new(
+                    db.clone(),
+                )),
+                genres: genre_repo.clone(),
+                people: person_repo.clone(),
+                collections: collection_repo.clone(),
+            }));
+        let lists = Arc::new(ListService::new(ListDependencies {
+            lists: user_list_repo,
+            movies: movie_repo.clone(),
+            shows: show_repo.clone(),
+            metadata: metadata.clone(),
+            playback: playback_service.clone(),
+        }));
+        let collections = Arc::new(CollectionService::new(
+            collection_repo,
+            metadata.clone(),
+            playback_service.clone(),
+        ));
 
         // Artwork is served by Beam, not by a provider CDN (ADR-0015). The
         // cache lives beside the rest of the server's state and is restored
@@ -475,16 +515,7 @@ impl AppServices {
                 Arc::new(OsPathValidator),
                 library_watches.clone(),
             )),
-            metadata: Arc::new(DbMetadataService::new(MetadataRepositories {
-                movies: movie_repo.clone(),
-                shows: show_repo.clone(),
-                sources,
-                catalog: Arc::new(beam_index::repositories::SqlCatalogRepository::new(
-                    db.clone(),
-                )),
-                genres: genre_repo.clone(),
-                people: person_repo.clone(),
-            })),
+            metadata,
             subtitles: Arc::new(DbSubtitleService::new(
                 library_repo.clone(),
                 file_repo.clone(),
@@ -504,6 +535,8 @@ impl AppServices {
                 movie_repo.clone(),
                 show_repo.clone(),
             )),
+            lists,
+            collections,
             movie_repo,
             show_repo,
             artwork,

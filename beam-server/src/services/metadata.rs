@@ -6,9 +6,10 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::models::{
-    ArtworkKind, ArtworkVariant, CastCredit, CrewCredit, EpisodeDetail, EpisodeMetadata,
-    ExternalIdentifiers, MediaMetadata, MediaSource, MovieMetadata, Ratings, SeasonDetail,
-    SeasonMetadata, ShowDates, ShowMetadata, ShowRef, Title, UserTitleState, artwork_path,
+    ArtworkKind, ArtworkVariant, CastCredit, CollectionRef, CrewCredit, EpisodeDetail,
+    EpisodeMetadata, ExternalIdentifiers, MediaMetadata, MediaSource, MovieMetadata, Ratings,
+    SeasonDetail, SeasonMetadata, ShowDates, ShowMetadata, ShowRef, Title, UserTitleState,
+    artwork_path,
 };
 use crate::services::cursor;
 use crate::services::people::title_credits;
@@ -17,9 +18,11 @@ use beam_domain::models::catalog::{
     self, CatalogFilters, CatalogPosition, CatalogQuery, CatalogSort, CatalogSortField, Seek,
     ShowChildCounts, SortDirection,
 };
+use beam_domain::models::watch_state::TitleRef;
 use beam_domain::repositories::genre::slugify;
 use beam_domain::repositories::{
-    CatalogRepository, GenreRepository, MovieRepository, PersonRepository, ShowRepository,
+    CatalogRepository, CollectionRepository, GenreRepository, MovieRepository, PersonRepository,
+    ShowRepository,
 };
 use beam_domain::utils::next_up::{Neighbours, neighbours};
 
@@ -63,6 +66,11 @@ pub trait MetadataService: Send + Sync + std::fmt::Debug {
         &self,
         season_id: Uuid,
     ) -> Result<Option<SeasonDetail>, MetadataError>;
+
+    /// The titles `titles` names, each as a browse result lists it, in the
+    /// order named: a title that no longer exists is skipped (issue #262).
+    /// A fixed number of reads, however many titles are named.
+    async fn get_titles(&self, titles: &[TitleRef]) -> Result<Vec<MediaMetadata>, MetadataError>;
 }
 
 /// Everything one browse or search request asks, in the Relay vocabulary the
@@ -149,6 +157,7 @@ pub struct DbMetadataService {
     catalog_repo: Arc<dyn CatalogRepository>,
     genre_repo: Arc<dyn GenreRepository>,
     person_repo: Arc<dyn PersonRepository>,
+    collection_repo: Arc<dyn CollectionRepository>,
 }
 
 /// Every store [`DbMetadataService`] reads.
@@ -162,6 +171,8 @@ pub struct MetadataRepositories {
     pub genres: Arc<dyn GenreRepository>,
     /// A title's cast and crew, which its detail lists (issue #261).
     pub people: Arc<dyn PersonRepository>,
+    /// The collection a movie's detail names (issue #262).
+    pub collections: Arc<dyn CollectionRepository>,
 }
 
 fn internal(err: impl std::fmt::Display) -> MetadataError {
@@ -233,6 +244,7 @@ fn movie_metadata(
     genres: Vec<String>,
     files: MovieFiles,
     credits: Credits,
+    collection: Option<CollectionRef>,
 ) -> MediaMetadata {
     let beam_domain::models::Movie {
         id,
@@ -286,6 +298,7 @@ fn movie_metadata(
         user_state: UserTitleState::default(),
         cast,
         crew,
+        collection,
     })
 }
 
@@ -398,6 +411,7 @@ impl DbMetadataService {
             catalog,
             genres,
             people,
+            collections,
         } = repositories;
         Self {
             movie_repo: movies,
@@ -406,6 +420,7 @@ impl DbMetadataService {
             catalog_repo: catalog,
             genre_repo: genres,
             person_repo: people,
+            collection_repo: collections,
         }
     }
 
@@ -434,7 +449,22 @@ impl DbMetadataService {
                 .await
                 .map_err(internal)?,
         );
-        Ok(movie_metadata(movie, genres, files, Some(credits)))
+        let collection = self
+            .collection_repo
+            .movie_collection(movie.id)
+            .await
+            .map_err(internal)?
+            .map(|collection| CollectionRef {
+                id: collection.id,
+                name: collection.name,
+            });
+        Ok(movie_metadata(
+            movie,
+            genres,
+            files,
+            Some(credits),
+            collection,
+        ))
     }
 
     /// Build MediaMetadata for a show by its DB model
@@ -531,15 +561,21 @@ impl DbMetadataService {
     ///
     /// A fixed number of reads per page, however long it is: the titles of
     /// each kind, their genres, and the shows' season and episode counts.
-    async fn hydrate(&self, page: &[CatalogPosition]) -> Result<Vec<MediaMetadata>, MetadataError> {
-        let ids_of = |kind: catalog::TitleKind| -> Vec<Uuid> {
-            page.iter()
-                .filter(|p| p.kind == kind)
-                .map(|p| p.id)
-                .collect()
-        };
-        let movie_ids = ids_of(catalog::TitleKind::Movie);
-        let show_ids = ids_of(catalog::TitleKind::Show);
+    async fn hydrate(&self, page: &[TitleRef]) -> Result<Vec<MediaMetadata>, MetadataError> {
+        let movie_ids: Vec<Uuid> = page
+            .iter()
+            .filter_map(|title| match title {
+                TitleRef::Movie(id) => Some(*id),
+                TitleRef::Show(_) => None,
+            })
+            .collect();
+        let show_ids: Vec<Uuid> = page
+            .iter()
+            .filter_map(|title| match title {
+                TitleRef::Show(id) => Some(*id),
+                TitleRef::Movie(_) => None,
+            })
+            .collect();
 
         let mut movies: HashMap<Uuid, beam_domain::models::Movie> = self
             .movie_repo
@@ -575,12 +611,12 @@ impl DbMetadataService {
 
         Ok(page
             .iter()
-            .filter_map(|position| match position.kind {
-                catalog::TitleKind::Movie => movies.remove(&position.id).map(|movie| {
+            .filter_map(|title| match *title {
+                TitleRef::Movie(id) => movies.remove(&id).map(|movie| {
                     let genres = movie_genres.remove(&movie.id).unwrap_or_default();
-                    movie_metadata(movie, genres, MovieFiles::default(), None)
+                    movie_metadata(movie, genres, MovieFiles::default(), None, None)
                 }),
-                catalog::TitleKind::Show => shows.remove(&position.id).map(|show| {
+                TitleRef::Show(id) => shows.remove(&id).map(|show| {
                     let genres = show_genres.remove(&show.id).unwrap_or_default();
                     let counts = counts.get(&show.id).copied().unwrap_or_default();
                     show_metadata(show, genres, counts, vec![], None)
@@ -770,7 +806,14 @@ impl MetadataService for DbMetadataService {
             PageDirection::Backward => (has_cursor, more),
         };
 
-        let items = self.hydrate(&page).await?;
+        let titles: Vec<TitleRef> = page
+            .iter()
+            .map(|position| match position.kind {
+                catalog::TitleKind::Movie => TitleRef::Movie(position.id),
+                catalog::TitleKind::Show => TitleRef::Show(position.id),
+            })
+            .collect();
+        let items = self.hydrate(&titles).await?;
         let cursor_of = |position: &CatalogPosition| cursor::encode(sort_by, sort_order, position);
         Ok(MediaConnection {
             items,
@@ -915,6 +958,10 @@ impl MetadataService for DbMetadataService {
             season: season_metadata(season, episodes),
             show: show_ref(&show),
         }))
+    }
+
+    async fn get_titles(&self, titles: &[TitleRef]) -> Result<Vec<MediaMetadata>, MetadataError> {
+        self.hydrate(titles).await
     }
 }
 
