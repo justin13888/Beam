@@ -23,7 +23,7 @@ import type { components } from "@/api.gen";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useAuth } from "@/hooks/auth";
-import { apiClient, asConnection } from "@/lib/apiClient";
+import { apiClient } from "@/lib/apiClient";
 import { apiError } from "@/lib/problem";
 import { RouteError } from "../components/RouteError";
 
@@ -205,7 +205,7 @@ export function LibraryDetailPage({ libraryId: id }: { libraryId: string }) {
 					},
 				);
 				if (error) throw apiError(error, "Failed to load library files");
-				const page = asConnection(data);
+				const page = data;
 				all.push(...page.items);
 				const next = page.page_info.end_cursor;
 				if (!page.page_info.has_next_page || !next) return all;

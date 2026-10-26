@@ -28,32 +28,29 @@ type EpisodeMetadata = components["schemas"]["EpisodeMetadata"];
 type MediaSource = components["schemas"]["MediaSource"];
 type ShowMetadata = components["schemas"]["ShowMetadata"];
 
-const playableEpisode: EpisodeMetadata = {
+const playableEpisode: EpisodeMetadata = factory.episode({
 	id: "ep-1",
 	episode_number: 1,
 	title: "Pilot",
-	streams: [],
 	file_id: "file-1",
-};
+	source_count: 1,
+});
 
-const filelessEpisode: EpisodeMetadata = {
+const filelessEpisode: EpisodeMetadata = factory.episode({
 	id: "ep-2",
 	episode_number: 2,
 	title: "Lost Media",
-	streams: [],
 	file_id: null,
-};
+});
 
 const show: ShowMetadata = factory.show({
 	id: "show-1",
 	title: { original: "Test Show", localized: null, alternatives: [] },
 	seasons: [
-		{
+		factory.season({
 			season_number: 1,
-			dates: {},
-			genres: [],
 			episodes: [playableEpisode, filelessEpisode],
-		},
+		}),
 	],
 });
 
@@ -67,21 +64,21 @@ const movie = factory.movie({
 });
 
 function source(fileId: string, height: number, codec: string): MediaSource {
-	return {
+	return factory.mediaSource({
 		file_id: fileId,
-		stream_url: `/v1/files/${fileId}/stream`,
-		download_url: `/v1/files/${fileId}/download`,
-		mime_type: "video/mp4",
-		video: {
-			height,
-			codec,
-			width: height * 2,
-			bit_rate: null,
-			hdr_format: null,
-		},
 		size_bytes: 1024,
-		audio_tracks: [],
-	};
+		video_tracks: [
+			{
+				index: 0,
+				codec,
+				width: height * 2,
+				height,
+				frame_rate: null,
+				bit_rate: null,
+				hdr_format: null,
+			},
+		],
+	});
 }
 
 /** Serve the media document and its sources. */
@@ -96,7 +93,9 @@ function serveMedia(
 				: problem(404, "Not found", "#media-not-found"),
 		),
 		http.get(`${BASE_URL}/v1/media/:id/sources`, () =>
-			HttpResponse.json(sources),
+			HttpResponse.json<components["schemas"]["MediaSourceConnection"]>(
+				factory.connection(sources),
+			),
 		),
 	);
 }

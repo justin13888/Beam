@@ -40,7 +40,9 @@ function serveSessions(status = 200) {
 		),
 		http.get(`${BASE_URL}/v1/sessions`, () =>
 			status === 200
-				? HttpResponse.json([sessionA, sessionB])
+				? HttpResponse.json<components["schemas"]["SessionConnection"]>(
+						factory.connection([sessionA, sessionB]),
+					)
 				: problem(status, "boom", "#internal"),
 		),
 	);

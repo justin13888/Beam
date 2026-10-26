@@ -175,7 +175,7 @@ export function ProfilePage() {
 		}
 	};
 
-	const sessions = data ?? [];
+	const sessions = data?.items ?? [];
 
 	return (
 		<div className="container mx-auto max-w-2xl py-12 px-4">

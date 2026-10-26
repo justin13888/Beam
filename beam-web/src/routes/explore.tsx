@@ -183,7 +183,7 @@ export function ExplorePage({
 		},
 		staleTime: 5 * 60 * 1000,
 	});
-	const genreOptions = genresQuery.data?.genres ?? [];
+	const genreOptions = genresQuery.data?.items ?? [];
 
 	// Without an explicit sort, a text search ranks by relevance (no
 	// sort_by) while plain browsing stays alphabetical -- this page's
@@ -245,7 +245,7 @@ export function ExplorePage({
 				: undefined,
 	});
 
-	const edges = data?.pages.flatMap((page) => page.edges) ?? [];
+	const titles = data?.pages.flatMap((page) => page.items) ?? [];
 
 	const hasActiveFilters =
 		mediaType !== undefined ||
@@ -433,7 +433,7 @@ export function ExplorePage({
 				</div>
 			) : error ? (
 				<p className="text-red-400">{error.message}</p>
-			) : edges.length === 0 ? (
+			) : titles.length === 0 ? (
 				<p className="text-gray-500">
 					{debouncedQuery
 						? `No results for "${debouncedQuery}".`
@@ -444,19 +444,19 @@ export function ExplorePage({
 			) : (
 				<>
 					<ul className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
-						{edges.map((edge) => {
-							const node = edge.node;
+						{titles.map((node) => {
 							const isMovie = "Movie" in node;
 							const media = isMovie ? node.Movie : node.Show;
 							const title = media.title.original;
 							const year = media.year ?? null;
-							// A show's first season can lack art (specials,
-							// season-less shows), so take the first season that
-							// actually has a poster.
+							// A show without art of its own falls back to the first
+							// season that has a poster (a show's first season can
+							// lack art: specials, season-less shows).
 							const poster = artworkSrc(
 								isMovie
 									? node.Movie.poster_url
-									: (node.Show.seasons.find((s) => s.poster_url)?.poster_url ??
+									: (node.Show.poster_url ??
+											node.Show.seasons.find((s) => s.poster_url)?.poster_url ??
 											null),
 							);
 							const typeLabel = isMovie ? "Movie" : "Show";

@@ -49,8 +49,9 @@ export const Route = createFileRoute("/media/$id")({
 
 /** A short human label for a quality/edition option in the source picker. */
 function sourceLabel(source: MediaSource): string {
-	if (source.video) {
-		return `${source.video.height}p · ${source.video.codec}`;
+	const video = source.video_tracks[0];
+	if (video) {
+		return `${video.height}p · ${video.codec}`;
 	}
 	return "Original";
 }
@@ -142,7 +143,7 @@ export function MediaDetailPage({
 			);
 			if (response.status === 404 || response.status === 400) return [];
 			if (error) throw apiError(error, "Failed to load media sources");
-			return data ?? [];
+			return data.items;
 		},
 		enabled: !!playableId,
 	});
@@ -162,11 +163,13 @@ export function MediaDetailPage({
 		queryKey: ["continue-watching"],
 		queryFn: async () => {
 			const { data, error } = await apiClient.GET("/v1/continue-watching", {
-				params: { query: { limit: 100 } },
+				// The connection's maximum page: the list is the viewer's in-progress
+				// titles, and this looks up the one being played.
+				params: { query: { first: 50 } },
 				credentials: "include",
 			});
 			if (error) throw apiError(error, "Failed to load playback progress");
-			return data ?? [];
+			return data.items;
 		},
 	});
 
