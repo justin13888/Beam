@@ -1,19 +1,19 @@
-//! The cursor of a list paged by offset (issue #190): the admin user list and
-//! the admin log. An opaque token naming the list it was issued by and the
+//! The cursor of a list paged by offset (issue #190): the admin user list,
+//! the admin log, and people search (issue #261). An opaque token naming the list it was issued by and the
 //! position of the row a page ended on, as base64url JSON:
 //!
 //! ```json
 //! {"v":1,"list":"admin_users","at":49}
 //! ```
 //!
-//! Both lists are read by `LIMIT`/`OFFSET` underneath, so the position is an
+//! Each list is read by `LIMIT`/`OFFSET` underneath, so the position is an
 //! offset; putting it inside a cursor is what lets the wire speak
-//! `first`/`after` like every other `/v1` list, and lets either list move to a
-//! keyset later without a client noticing. Like the other cursors it is not
-//! signed: it holds nothing an administrator could not see, and a forged one
-//! only seeks to a place they could page to anyway. A cursor names its list,
-//! so one issued by the other list -- or by any other list, whose members are
-//! not these -- is refused rather than read as a position here. So is a
+//! `first`/`after` like every other `/v1` list, and lets any of them move to
+//! a keyset later without a client noticing. Like the other cursors it is not
+//! signed: it holds nothing its caller could not see, and a forged one only
+//! seeks to a place they could page to anyway. A cursor names its list, so
+//! one issued by another list -- an offset-paged one or any other, whose
+//! members are not these -- is refused rather than read as a position here. So is a
 //! position past [`MAX_AT`]: no list holds that many rows, and the page after
 //! it would start beyond the `bigint` Postgres reads `OFFSET` as, turning a
 //! forged cursor into a database error rather than a `400`.
@@ -37,6 +37,8 @@ pub enum OffsetList {
     AdminUsers,
     /// `GET /v1/admin/logs`.
     AdminLogs,
+    /// `GET /v1/people`.
+    People,
 }
 
 /// Why a cursor was refused: every case is the caller's to fix.
@@ -137,7 +139,7 @@ mod tests {
         /// would skip or repeat it at a page boundary.
         #[test]
         fn an_offset_round_trips(at in 0u64..=MAX_AT) {
-            for list in [OffsetList::AdminUsers, OffsetList::AdminLogs] {
+            for list in [OffsetList::AdminUsers, OffsetList::AdminLogs, OffsetList::People] {
                 let cursor = encode(list, at);
                 prop_assert_eq!(decode(list, &cursor), Ok(at));
                 prop_assert_eq!(start_after(list, Some(&cursor)), Ok(at + 1));
@@ -194,6 +196,7 @@ mod tests {
                 "an unknown list",
             ),
             (encode(OffsetList::AdminLogs, 3), "the admin log's cursor"),
+            (encode(OffsetList::People, 3), "people search's cursor"),
             (
                 encode(OffsetList::AdminUsers, MAX_AT + 1),
                 "a position whose next page is past Postgres's OFFSET",

@@ -1,4 +1,5 @@
 use super::{ExternalIdentifiers, Ratings, Title};
+use crate::models::people::{CastCredit, CrewCredit};
 use crate::models::playback::UserTitleState;
 use chrono::NaiveDate;
 use kynos::Schema;
@@ -41,6 +42,11 @@ pub struct MovieMetadata {
     pub source_count: Option<u32>,
     /// The signed-in viewer's state for the movie.
     pub user_state: UserTitleState,
-    //
-    // TODO: Add people involved (cast, crew, directors, writers, etc.)
+    /// The movie's cast, in billing order. Absent in a browse result, which
+    /// does not read credits; empty on a detail when none are known yet.
+    pub cast: Option<Vec<CastCredit>>,
+    /// The movie's key crew -- directors, writers, producers, composer,
+    /// cinematographer, editor -- by department and then job. Absent in a
+    /// browse result, as `cast` is.
+    pub crew: Option<Vec<CrewCredit>>,
 }

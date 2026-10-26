@@ -51,6 +51,14 @@ season or episode: `/v1/media/{id}/progress`, `/v1/media/{id}/watched`,
 **What to do.** Check the id. A title can also disappear between a browse and a detail request if a
 rescan removed it, in which case reloading the list is the right response.
 
+### person-not-found
+
+**404.** No person has this id on `/v1/people/{id}`, or no title in the library credits them any
+more. People are the cast and crew enrichment stored for the library's titles.
+
+**What to do.** Check the id. The ids a title's `cast` and `crew` and a people search list are the
+ones this route accepts.
+
 ### sources-not-available-for-show
 
 **400.** Sources were requested for a *show* id. A show has no files of its own.

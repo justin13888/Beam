@@ -696,6 +696,65 @@ pub enum MediaRefLookupError {
     Internal(String),
 }
 
+/// `GET /v1/people` (issue #261). A store failure is a 500, never an empty
+/// page, as on `GET /v1/media`.
+#[derive(Debug, thiserror::Error, ApiError)]
+pub enum PeopleSearchError {
+    /// `after` is not a cursor people search issued.
+    #[error("{0}")]
+    #[problem(
+        status = 400,
+        type = "https://beam.justinchung.net/reference/errors/#invalid-cursor",
+        title = "Invalid cursor"
+    )]
+    InvalidCursor(String),
+    /// `first` is outside 1-100. Kynos refuses that from the query's schema
+    /// bounds first, as a `400` with `about:blank`, so this is the handler's
+    /// second guard and no request answers it.
+    #[error("{0}")]
+    #[problem(
+        status = 400,
+        type = "https://beam.justinchung.net/reference/errors/#invalid-pagination",
+        title = "Invalid pagination"
+    )]
+    InvalidPagination(String),
+    /// `query` holds a NUL character, which no name can contain.
+    #[error("{0}")]
+    #[problem(
+        status = 400,
+        type = "https://beam.justinchung.net/reference/errors/#invalid-search-query",
+        title = "Invalid search query"
+    )]
+    InvalidSearchQuery(String),
+    #[error("{0}")]
+    #[problem(
+        status = 500,
+        type = "https://beam.justinchung.net/reference/errors/#internal",
+        title = "Internal server error"
+    )]
+    Internal(String),
+}
+
+/// `GET /v1/people/{id}` (issue #261): an id that names no person, or a store
+/// that failed.
+#[derive(Debug, thiserror::Error, ApiError)]
+pub enum PersonLookupError {
+    #[error("{0}")]
+    #[problem(
+        status = 404,
+        type = "https://beam.justinchung.net/reference/errors/#person-not-found",
+        title = "Person not found"
+    )]
+    PersonNotFound(String),
+    #[error("{0}")]
+    #[problem(
+        status = 500,
+        type = "https://beam.justinchung.net/reference/errors/#internal",
+        title = "Internal server error"
+    )]
+    Internal(String),
+}
+
 /// `GET /v1/continue-watching`.
 #[derive(Debug, thiserror::Error, ApiError)]
 pub enum ContinueWatchingError {

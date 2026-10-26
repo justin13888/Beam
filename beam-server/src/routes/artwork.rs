@@ -1,5 +1,6 @@
 //! `/v1/artwork/{kind}/{id}/{variant}` -- poster, backdrop and thumbnail art,
-//! served by Beam rather than by the provider's CDN (ADR-0015).
+//! and people's portraits, served by Beam rather than by the provider's CDN
+//! (ADR-0015).
 //!
 //! **Why the URL names the title rather than the image.** A content-addressed
 //! path would let every response be `immutable`, but it changes whenever
@@ -37,11 +38,11 @@ use crate::state::AppState;
 /// What the artwork endpoint captures.
 #[derive(Debug, Schema, PathParams)]
 pub struct ArtworkPath {
-    /// Which kind of title the artwork belongs to.
+    /// What the artwork belongs to: a kind of title, or a person.
     pub kind: ArtworkKind,
-    /// The title's ID.
+    /// The title's or the person's ID.
     pub id: Uuid,
-    /// Which image of that title.
+    /// Which image of it.
     pub variant: ArtworkVariant,
 }
 
@@ -80,7 +81,7 @@ async fn upstream_url(
             .and_then(|movie| match variant {
                 ArtworkVariant::Poster => movie.poster_url,
                 ArtworkVariant::Backdrop => movie.backdrop_url,
-                ArtworkVariant::Thumbnail => None,
+                ArtworkVariant::Thumbnail | ArtworkVariant::Profile => None,
             }),
         (ArtworkKind::Show, variant) => services
             .show_repo
@@ -90,7 +91,7 @@ async fn upstream_url(
             .and_then(|show| match variant {
                 ArtworkVariant::Poster => show.poster_url,
                 ArtworkVariant::Backdrop => show.backdrop_url,
-                ArtworkVariant::Thumbnail => None,
+                ArtworkVariant::Thumbnail | ArtworkVariant::Profile => None,
             }),
         (ArtworkKind::Season, ArtworkVariant::Poster) => services
             .show_repo
@@ -104,8 +105,15 @@ async fn upstream_url(
             .await
             .map_err(lookup_failed)?
             .and_then(|episode| episode.thumbnail_url),
-        // A season backdrop or an episode poster is not a thing Beam stores.
-        (ArtworkKind::Season | ArtworkKind::Episode, _) => None,
+        (ArtworkKind::Person, ArtworkVariant::Profile) => services
+            .people
+            .find_person(id)
+            .await
+            .map_err(lookup_failed)?
+            .and_then(|person| person.profile_url),
+        // A season backdrop, an episode poster or a person's poster is not a
+        // thing Beam stores.
+        (ArtworkKind::Season | ArtworkKind::Episode | ArtworkKind::Person, _) => None,
     };
 
     Ok(url)

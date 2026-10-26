@@ -116,6 +116,7 @@ fn state_with_service(metadata: Arc<dyn MetadataService>) -> AppState {
         file_repo: base.services.file_repo.clone(),
         enrichment_repo: base.services.enrichment_repo.clone(),
         enrichment_control: base.services.enrichment_control.clone(),
+        people: base.services.people.clone(),
         movie_repo: base.services.movie_repo.clone(),
         show_repo: base.services.show_repo.clone(),
         artwork: base.services.artwork.clone(),
@@ -197,6 +198,8 @@ fn movie_metadata(id: &str, title: &str) -> MediaMetadata {
         file_id: None,
         source_count: None,
         user_state: crate::models::UserTitleState::default(),
+        cast: None,
+        crew: None,
     })
 }
 
@@ -396,6 +399,7 @@ async fn browse_omits_a_title_whose_only_file_is_missing_but_its_detail_still_re
         movies: movies.clone(),
         shows: Arc::new(InMemoryShowRepository::with_files(files.clone())),
         genres: Arc::default(),
+        people: Arc::default(),
         streams: Arc::default(),
         sidecars: Arc::default(),
         files: files.clone(),
@@ -442,6 +446,7 @@ struct Library {
     movies: Arc<beam_domain::repositories::movie::in_memory::InMemoryMovieRepository>,
     shows: Arc<beam_domain::repositories::show::in_memory::InMemoryShowRepository>,
     genres: Arc<beam_domain::repositories::genre::in_memory::InMemoryGenreRepository>,
+    people: Arc<beam_domain::repositories::person::in_memory::InMemoryPersonRepository>,
     streams: Arc<beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository>,
     sidecars: Arc<
         beam_domain::repositories::sidecar_subtitle::in_memory::InMemorySidecarSubtitleRepository,
@@ -464,6 +469,7 @@ impl Library {
                 ),
             ),
             genres: Arc::default(),
+            people: Arc::default(),
             streams: Arc::default(),
             sidecars: Arc::default(),
             files,
@@ -568,6 +574,7 @@ fn real_service_over(
         shows: library.shows.clone(),
         catalog,
         genres: library.genres.clone(),
+        people: library.people.clone(),
     }))
 }
 

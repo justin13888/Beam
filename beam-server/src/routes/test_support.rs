@@ -389,6 +389,19 @@ pub(crate) fn make_app_state_with_enrichment(provider: Arc<dyn EnrichmentProvide
     )
 }
 
+/// People search and filmographies over an empty people store, reading the
+/// titles a credit names from `movies` and `shows`.
+pub(crate) fn idle_people(
+    movies: Arc<dyn beam_domain::repositories::MovieRepository>,
+    shows: Arc<dyn beam_domain::repositories::ShowRepository>,
+) -> Arc<crate::services::people::PeopleService> {
+    Arc::new(crate::services::people::PeopleService::new(
+        Arc::new(beam_domain::repositories::person::in_memory::InMemoryPersonRepository::default()),
+        movies,
+        shows,
+    ))
+}
+
 /// Subtitle delivery over an empty index: every lookup is a miss.
 pub(crate) fn idle_subtitles() -> Arc<dyn crate::services::subtitle::SubtitleService> {
     Arc::new(crate::services::subtitle::DbSubtitleService::new(
@@ -459,6 +472,7 @@ fn make_app_state_with_services(
         file_repo: Arc::new(InMemoryFileRepository::default()),
         enrichment_repo,
         enrichment_control,
+        people: idle_people(movie_repo.clone(), show_repo.clone()),
         movie_repo,
         show_repo,
         artwork,

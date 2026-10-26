@@ -29,6 +29,8 @@ mod genre_repository;
 mod library_shape;
 #[path = "pg_integration/movie_repository.rs"]
 mod movie_repository;
+#[path = "pg_integration/person_repository.rs"]
+mod person_repository;
 #[path = "pg_integration/playback_telemetry.rs"]
 mod playback_telemetry;
 #[path = "pg_integration/schema.rs"]

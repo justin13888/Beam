@@ -22,6 +22,7 @@ use beam_domain::repositories::enrichment::in_memory::InMemoryEnrichmentStateRep
 use beam_domain::repositories::genre::in_memory::InMemoryGenreRepository;
 use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
 use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
+use beam_domain::repositories::person::in_memory::InMemoryPersonRepository;
 use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
 use beam_domain::services::TestClock;
 
@@ -155,6 +156,7 @@ impl Harness {
             self.movies.clone(),
             self.shows.clone(),
             Arc::new(InMemoryGenreRepository::default()),
+            Arc::new(InMemoryPersonRepository::default()),
             self.provider.clone(),
             Arc::new(LocalAdminLogService::new(Arc::new(
                 InMemoryAdminLogRepository::default(),
@@ -528,6 +530,7 @@ async fn locks_are_set_whole_and_the_sweep_leaves_them_alone() {
         h.movies.clone(),
         h.shows.clone(),
         genres.clone(),
+        Arc::new(InMemoryPersonRepository::default()),
         h.provider.clone(),
         Arc::new(LocalAdminLogService::new(Arc::new(
             InMemoryAdminLogRepository::default(),
@@ -587,6 +590,7 @@ async fn a_shows_locks_hold_through_the_sweep() {
         h.movies.clone(),
         h.shows.clone(),
         genres.clone(),
+        Arc::new(InMemoryPersonRepository::default()),
         h.provider.clone(),
         Arc::new(LocalAdminLogService::new(Arc::new(
             InMemoryAdminLogRepository::default(),

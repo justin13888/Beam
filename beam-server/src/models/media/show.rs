@@ -1,6 +1,7 @@
 use super::{ExternalIdentifiers, Ratings};
 
 use super::Title;
+use crate::models::people::{CastCredit, CrewCredit};
 use crate::models::playback::{UserGroupState, UserTitleState};
 use chrono::NaiveDate;
 use kynos::Schema;
@@ -39,6 +40,13 @@ pub struct ShowMetadata {
     /// How much of the show the signed-in viewer has watched. Absent in a
     /// browse result; the detail route fills it.
     pub user_state: Option<UserGroupState>,
+    /// The show's cast across its seasons, in billing order. Absent in a
+    /// browse result, which does not read credits; empty on a detail when
+    /// none are known yet.
+    pub cast: Option<Vec<CastCredit>>,
+    /// The show's key crew, by department and then job. Absent in a browse
+    /// result, as `cast` is.
+    pub crew: Option<Vec<CrewCredit>>,
 }
 
 #[derive(Clone, Debug, Serialize, serde::Deserialize, Schema)]

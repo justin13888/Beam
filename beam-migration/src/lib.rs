@@ -32,6 +32,7 @@ mod m20261009_000001_enrichment_locks;
 mod m20261011_000001_watch_state;
 mod m20261012_000001_movie_parts;
 mod m20261022_000001_browse_filter_indexes;
+mod m20261026_000001_people_credits;
 
 pub use m20261008_000001_tracks_subtitles::RENAMED_FFMPEG_CODECS;
 
@@ -70,6 +71,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20261011_000001_watch_state::Migration),
             Box::new(m20261012_000001_movie_parts::Migration),
             Box::new(m20261022_000001_browse_filter_indexes::Migration),
+            Box::new(m20261026_000001_people_credits::Migration),
         ]
     }
 }
