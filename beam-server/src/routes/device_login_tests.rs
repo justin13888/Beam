@@ -153,6 +153,7 @@ fn build(
         watch_status: base.services.watch_status.clone(),
         telemetry: base.services.telemetry.clone(),
         playback_telemetry: base.services.playback_telemetry.clone(),
+        trickplay: base.services.trickplay.clone(),
     };
     let state = AppState::with_clock(
         base.config.clone(),

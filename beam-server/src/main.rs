@@ -137,6 +137,12 @@ async fn main() -> Result<()> {
         let playback_telemetry = services.playback_telemetry.clone();
         tokio::spawn(async move { playback_telemetry.run_retention().await });
     }
+    // Trickplay sheets are made in the background for every file that needs
+    // them, one file at a time (issue #265).
+    {
+        let trickplay = services.trickplay.clone();
+        tokio::spawn(async move { trickplay.run().await });
+    }
     if config.playback_telemetry_enabled {
         info!(
             "Playback telemetry enabled -- counts kept {} days, read at /v1/admin/telemetry/playback",

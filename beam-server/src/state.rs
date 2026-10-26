@@ -44,9 +44,10 @@ use crate::{
         people::PeopleService,
         playback::{DbPlaybackService, PlaybackRepositories, PlaybackService},
         playback_telemetry::PlaybackTelemetryService,
-        sources::SourceCatalog,
+        sources::{SourceCatalog, SourceRepositories},
         subtitle::{DbSubtitleService, SubtitleService},
         telemetry::LibraryReportService,
+        trickplay::{TrickplayDependencies, TrickplayService},
     },
 };
 
@@ -207,6 +208,10 @@ pub struct AppServices {
     /// is on, read by `GET /v1/admin/telemetry/playback`, and pruned daily by
     /// the retention loop `main` always runs.
     pub playback_telemetry: Arc<PlaybackTelemetryService>,
+    /// Scrub-preview sheets (issue #265): made in the background by the
+    /// pass loop `main` always runs, located by
+    /// `GET /v1/files/{file_id}/trickplay/{sheet}`.
+    pub trickplay: Arc<TrickplayService>,
 }
 
 /// What [`AppServices::build`] builds: the services, and what the process
@@ -365,6 +370,15 @@ impl AppServices {
         let sidecar_repo: Arc<dyn beam_domain::repositories::SidecarSubtitleRepository> = Arc::new(
             beam_index::repositories::SqlSidecarSubtitleRepository::new(db.clone()),
         );
+        // Written by the indexer at each probe, read by the sources route.
+        let chapter_repo: Arc<dyn beam_domain::repositories::ChapterRepository> = Arc::new(
+            beam_index::repositories::SqlChapterRepository::new(db.clone()),
+        );
+        // Written by the trickplay worker, read by the sources and trickplay
+        // routes.
+        let trickplay_repo: Arc<dyn beam_domain::repositories::TrickplayRepository> = Arc::new(
+            beam_index::repositories::SqlTrickplayRepository::new(db.clone()),
+        );
 
         let index_service = Arc::new(
             LocalIndexService::new(
@@ -385,6 +399,7 @@ impl AppServices {
             .with_settle_window(Duration::from_secs(config.scan_settle_secs))
             .with_enrichment_repo(enrichment_repo.clone())
             .with_sidecar_repo(sidecar_repo.clone())
+            .with_chapter_repo(chapter_repo.clone())
             .with_applied_nfo_repo(Arc::new(
                 beam_index::repositories::SqlAppliedNfoRepository::new(db.clone()),
             ))
@@ -425,12 +440,14 @@ impl AppServices {
 
         // One catalogue of a title's ranked files, so the detail's primary
         // source and the source continue-watching falls back to are one.
-        let sources = Arc::new(SourceCatalog::new(
-            movie_repo.clone(),
-            file_repo.clone(),
-            stream_repo.clone(),
-            sidecar_repo.clone(),
-        ));
+        let sources = Arc::new(SourceCatalog::new(SourceRepositories {
+            movies: movie_repo.clone(),
+            files: file_repo.clone(),
+            streams: stream_repo.clone(),
+            sidecars: sidecar_repo.clone(),
+            chapters: chapter_repo,
+            trickplay: trickplay_repo.clone(),
+        }));
         let playback_service = Arc::new(DbPlaybackService::new(PlaybackRepositories {
             watch_state: watch_state_repo,
             files: file_repo.clone(),
@@ -486,6 +503,19 @@ impl AppServices {
             )
             .await?,
         );
+
+        // Beside the artwork cache, under the data directory the audit above
+        // proved is inside no library (FR-202).
+        let trickplay = Arc::new(TrickplayService::new(
+            config.data_dir.join("trickplay"),
+            TrickplayDependencies {
+                libraries: library_repo.clone(),
+                files: file_repo.clone(),
+                records: trickplay_repo,
+                generator: Arc::new(beam_index::services::LocalTrickplayGenerator),
+                clock: clock.clone(),
+            },
+        ));
 
         let telemetry = Arc::new(LibraryReportService::new(
             config.library_report_config(),
@@ -575,6 +605,7 @@ impl AppServices {
             watch_status,
             telemetry,
             playback_telemetry,
+            trickplay,
         };
 
         Ok(BuiltServices {

@@ -18,11 +18,16 @@ use std::sync::Arc;
 use sea_orm::DbErr;
 use uuid::Uuid;
 
+use beam_domain::models::chapter::{
+    Chapter as StoredChapter, MarkerKind, PlaybackMarker as StoredMarker, markers_from_chapters,
+};
 use beam_domain::models::language_preferences::LanguagePreferences;
 use beam_domain::models::sidecar::{SidecarSubtitle, SubtitleFormat};
+use beam_domain::models::trickplay::TrickplayRecord;
 use beam_domain::models::{Episode, MediaFile, MediaFileContent, MediaStream, StreamMetadata};
 use beam_domain::repositories::{
-    FileRepository, MediaStreamRepository, MovieRepository, SidecarSubtitleRepository,
+    ChapterRepository, FileRepository, MediaStreamRepository, MovieRepository,
+    SidecarSubtitleRepository, TrickplayRepository,
 };
 use beam_domain::utils::path_policy::{DiscKind, disc_stream_kind};
 use beam_domain::utils::source_rank::{
@@ -34,9 +39,10 @@ use beam_domain::utils::track_selection::{
 };
 
 use crate::models::{
-    AudioTrack, DiscStructure, EpisodeSpan, MediaSource, SourcePart, SubtitleOrigin, SubtitleTrack,
-    VideoTrack,
+    AudioTrack, Chapter, DiscStructure, EpisodeSpan, MediaSource, PlaybackMarker,
+    PlaybackMarkerKind, SourcePart, SubtitleOrigin, SubtitleTrack, Trickplay, VideoTrack,
 };
+use crate::services::trickplay::current_layout;
 
 /// The largest subtitle file Beam converts to WebVTT: 8 MiB, about a hundred
 /// times a feature film's SubRip. A larger file is served as stored only, so
@@ -47,6 +53,11 @@ pub const SUBTITLE_CONVERT_MAX_BYTES: u64 = 8 * 1024 * 1024;
 /// The path a sidecar subtitle is served from, as stored.
 pub fn subtitle_path(file_id: Uuid, subtitle_id: Uuid) -> String {
     format!("/v1/files/{file_id}/subtitles/{subtitle_id}")
+}
+
+/// The path one trickplay sheet of a file is served from (issue #265).
+pub fn trickplay_sheet_path(file_id: Uuid, sheet: u32) -> String {
+    format!("/v1/files/{file_id}/trickplay/{sheet}")
 }
 
 /// The path a sidecar subtitle is served from as WebVTT.
@@ -141,6 +152,19 @@ pub struct PrimarySource {
     pub source_count: u32,
 }
 
+/// What a [`SourceCatalog`] reads from.
+#[derive(Debug, Clone)]
+pub struct SourceRepositories {
+    pub movies: Arc<dyn MovieRepository>,
+    pub files: Arc<dyn FileRepository>,
+    pub streams: Arc<dyn MediaStreamRepository>,
+    pub sidecars: Arc<dyn SidecarSubtitleRepository>,
+    /// Each file's chapters, and the markers read from them (issue #265).
+    pub chapters: Arc<dyn ChapterRepository>,
+    /// Each file's trickplay record (issue #265).
+    pub trickplay: Arc<dyn TrickplayRepository>,
+}
+
 /// Reads a title's sources from the index.
 #[derive(Debug)]
 pub struct SourceCatalog {
@@ -148,20 +172,27 @@ pub struct SourceCatalog {
     files: Arc<dyn FileRepository>,
     streams: Arc<dyn MediaStreamRepository>,
     sidecars: Arc<dyn SidecarSubtitleRepository>,
+    chapters: Arc<dyn ChapterRepository>,
+    trickplay: Arc<dyn TrickplayRepository>,
 }
 
 impl SourceCatalog {
-    pub fn new(
-        movies: Arc<dyn MovieRepository>,
-        files: Arc<dyn FileRepository>,
-        streams: Arc<dyn MediaStreamRepository>,
-        sidecars: Arc<dyn SidecarSubtitleRepository>,
-    ) -> Self {
+    pub fn new(repositories: SourceRepositories) -> Self {
+        let SourceRepositories {
+            movies,
+            files,
+            streams,
+            sidecars,
+            chapters,
+            trickplay,
+        } = repositories;
         Self {
             movies,
             files,
             streams,
             sidecars,
+            chapters,
+            trickplay,
         }
     }
 
@@ -276,11 +307,16 @@ impl SourceCatalog {
     ) -> Result<Vec<MediaSource>, DbErr> {
         let mut sources = Vec::with_capacity(ranked.len());
         for (rank, source) in ranked.into_iter().enumerate() {
-            let mut sidecars = Vec::with_capacity(source.parts.len());
+            let mut extras = Vec::with_capacity(source.parts.len());
             for part in &source.parts {
-                sidecars.push(self.sidecars.find_by_file_id(part.file.id).await?);
+                let file_id = part.file.id;
+                extras.push(PartExtras {
+                    sidecars: self.sidecars.find_by_file_id(file_id).await?,
+                    chapters: self.chapters.find_by_file_id(file_id).await?,
+                    trickplay: self.trickplay.find(file_id).await?,
+                });
             }
-            sources.push(build_source(source, rank == 0, episode_number, sidecars));
+            sources.push(build_source(source, rank == 0, episode_number, extras));
         }
         Ok(sources)
     }
@@ -368,12 +404,76 @@ fn disc_structure_of(parts: &[PartFile]) -> Option<DiscStructure> {
         })
 }
 
-/// `sidecars` holds each part's subtitle files, in `ranked.parts`' order.
+/// What a source shows of each of its files beyond the file and its
+/// streams.
+#[derive(Debug)]
+struct PartExtras {
+    /// The subtitle files beside it.
+    sidecars: Vec<SidecarSubtitle>,
+    /// Its chapters, by index.
+    chapters: Vec<StoredChapter>,
+    /// Its trickplay record, for whichever content it was made from.
+    trickplay: Option<TrickplayRecord>,
+}
+
+/// The chapters and markers of one file, as the wire carries them.
+fn chapters_and_markers(chapters: &[StoredChapter]) -> (Vec<Chapter>, Vec<PlaybackMarker>) {
+    let markers = markers_from_chapters(chapters)
+        .into_iter()
+        .map(|marker| {
+            let StoredMarker {
+                kind,
+                start_ms,
+                end_ms,
+            } = marker;
+            PlaybackMarker {
+                kind: match kind {
+                    MarkerKind::Recap => PlaybackMarkerKind::Recap,
+                    MarkerKind::Intro => PlaybackMarkerKind::Intro,
+                    MarkerKind::Credits => PlaybackMarkerKind::Credits,
+                    MarkerKind::Preview => PlaybackMarkerKind::Preview,
+                },
+                start_ms,
+                end_ms,
+            }
+        })
+        .collect();
+    let chapters = chapters
+        .iter()
+        .map(|chapter| Chapter {
+            start_ms: chapter.start_ms,
+            end_ms: chapter.end_ms,
+            title: chapter.title.clone(),
+        })
+        .collect();
+    (chapters, markers)
+}
+
+/// `file`'s trickplay as the wire carries it: its sheets' layout and where
+/// to fetch each, when `record` was made from the file as it is now and gave
+/// any.
+fn trickplay_of(file: &MediaFile, record: Option<&TrickplayRecord>) -> Option<Trickplay> {
+    let layout = current_layout(file, record)?;
+    Some(Trickplay {
+        interval_ms: layout.interval_ms,
+        tile_width: layout.tile_width,
+        tile_height: layout.tile_height,
+        columns: layout.columns,
+        rows: layout.rows,
+        tile_count: layout.tile_count,
+        sheet_urls: (0..layout.sheet_count())
+            .map(|sheet| trickplay_sheet_path(file.id, sheet))
+            .collect(),
+    })
+}
+
+/// `extras` holds what each part shows beyond its file, in `ranked.parts`'
+/// order.
 fn build_source(
     ranked: RankedSource,
     is_primary: bool,
     episode_number: Option<u32>,
-    sidecars: Vec<Vec<SidecarSubtitle>>,
+    extras: Vec<PartExtras>,
 ) -> MediaSource {
     let size_bytes = ranked.size_bytes();
     let duration_secs = ranked.duration_secs();
@@ -385,9 +485,16 @@ fn build_source(
 
     let mut lead = None;
     let mut source_parts = Vec::with_capacity(parts.len());
-    for (part, sidecars) in parts.into_iter().zip(sidecars) {
+    for (part, extras) in parts.into_iter().zip(extras) {
         let part_number = part.part_number();
         let PartFile { file, streams } = part;
+        let PartExtras {
+            sidecars,
+            chapters,
+            trickplay,
+        } = extras;
+        let (chapters, markers) = chapters_and_markers(&chapters);
+        let trickplay = trickplay_of(&file, trickplay.as_ref());
         let MediaFile {
             id: file_id,
             size_bytes,
@@ -404,15 +511,33 @@ fn build_source(
             duration_secs: duration.map(|d| d.as_secs_f64()),
             subtitle_tracks: tracks.subtitle.clone(),
             default_subtitle_track_index: None,
+            chapters: chapters.clone(),
+            markers: markers.clone(),
+            trickplay: trickplay.clone(),
             stream_url: stream_path(file_id),
             download_url: download_path(file_id),
         });
         if lead.is_none() {
-            lead = Some((file_id, mime_type, container_format, tracks));
+            lead = Some(Lead {
+                file_id,
+                mime_type,
+                container_format,
+                tracks,
+                chapters,
+                markers,
+                trickplay,
+            });
         }
     }
-    let (file_id, mime_type, container_format, tracks) =
-        lead.expect("a source has at least one file");
+    let Lead {
+        file_id,
+        mime_type,
+        container_format,
+        tracks,
+        chapters,
+        markers,
+        trickplay,
+    } = lead.expect("a source has at least one file");
     let Tracks {
         video: video_tracks,
         audio: audio_tracks,
@@ -435,9 +560,23 @@ fn build_source(
         subtitle_tracks,
         default_audio_track_index: None,
         default_subtitle_track_index: None,
+        chapters,
+        markers,
+        trickplay,
         stream_url: stream_path(file_id),
         download_url: download_path(file_id),
     }
+}
+
+/// What a source names of its first file.
+struct Lead {
+    file_id: Uuid,
+    mime_type: Option<String>,
+    container_format: Option<String>,
+    tracks: Tracks,
+    chapters: Vec<Chapter>,
+    markers: Vec<PlaybackMarker>,
+    trickplay: Option<Trickplay>,
 }
 
 /// Name, on each of `sources` and each of its parts, the audio and subtitle

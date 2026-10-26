@@ -20,6 +20,7 @@ pub mod playback_telemetry;
 pub mod sources;
 pub mod subtitle;
 pub mod telemetry;
+pub mod trickplay;
 pub mod user_list_cursor;
 
 // Re-export IndexService from beam-index (LocalIndexService now runs

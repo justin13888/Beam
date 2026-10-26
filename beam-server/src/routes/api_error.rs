@@ -1256,6 +1256,40 @@ pub enum SubtitleDeliveryError {
     Internal(String),
 }
 
+/// What `/v1/files/{file_id}/trickplay/{sheet}` can fail with (issue #265).
+///
+/// The two 404s share one declared response. `file-not-found` means what it
+/// means for the video itself; `trickplay-not-found` is its own code because
+/// the file exists and has no such sheet -- not yet made for the file as it
+/// is now, never made because the file gives none, or past its last sheet --
+/// which a client renders as a scrub bar with no previews.
+#[derive(Debug, thiserror::Error, ApiError)]
+pub enum TrickplayDeliveryError {
+    #[error("{0}")]
+    #[problem(
+        status = 404,
+        type = "https://beam.justinchung.net/reference/errors/#file-not-found",
+        title = "File not found"
+    )]
+    FileNotFound(String),
+
+    #[error("{0}")]
+    #[problem(
+        status = 404,
+        type = "https://beam.justinchung.net/reference/errors/#trickplay-not-found",
+        title = "Trickplay sheet not found"
+    )]
+    TrickplayNotFound(String),
+
+    #[error("{0}")]
+    #[problem(
+        status = 500,
+        type = "https://beam.justinchung.net/reference/errors/#internal",
+        title = "Internal server error"
+    )]
+    Internal(String),
+}
+
 /// What `/v1/artwork/{kind}/{id}/{variant}` can fail with.
 ///
 /// Separate from [`DeliveryError`] even though both deliver bytes through

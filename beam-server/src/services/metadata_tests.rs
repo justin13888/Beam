@@ -12,12 +12,7 @@ fn empty_sources() -> std::sync::Arc<crate::services::sources::SourceCatalog> {
     use beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository;
     use std::sync::Arc;
 
-    Arc::new(crate::services::sources::SourceCatalog::new(
-        Arc::new(InMemoryMovieRepository::default()),
-        Arc::new(InMemoryFileRepository::default()),
-        Arc::new(InMemoryMediaStreamRepository::default()),
-        Arc::new(InMemorySidecarSubtitleRepository::default()),
-    ))
+    Arc::new(crate::services::sources::SourceCatalog::new(crate::services::sources::SourceRepositories {movies: Arc::new(InMemoryMovieRepository::default()), files: Arc::new(InMemoryFileRepository::default()), streams: Arc::new(InMemoryMediaStreamRepository::default()), sidecars: Arc::new(InMemorySidecarSubtitleRepository::default()), chapters: Arc::new(beam_domain::repositories::chapter::in_memory::InMemoryChapterRepository::default()), trickplay: Arc::new(beam_domain::repositories::trickplay::in_memory::InMemoryTrickplayRepository::default()),}))
 }
 
 #[cfg(test)]
@@ -131,7 +126,7 @@ mod tests {
                 shows.clone(),
                 genres.clone(),
             )),
-            sources: Arc::new(SourceCatalog::new(movies.clone(), files, streams, sidecars)),
+            sources: Arc::new(SourceCatalog::new(crate::services::sources::SourceRepositories {movies: movies.clone(), files: files, streams: streams, sidecars: sidecars, chapters: Arc::new(beam_domain::repositories::chapter::in_memory::InMemoryChapterRepository::default()), trickplay: Arc::new(beam_domain::repositories::trickplay::in_memory::InMemoryTrickplayRepository::default()),})),
             movies,
             shows,
             genres,

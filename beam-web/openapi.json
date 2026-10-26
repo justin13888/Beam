@@ -7632,6 +7632,654 @@
         ]
       }
     },
+    "/v1/files/{file_id}/trickplay/{sheet}": {
+      "get": {
+        "tags": [
+          "playback"
+        ],
+        "summary": "One trickplay sheet: a JPEG grid of tiles, laid out as the source's `trickplay` says. Range-capable, like every delivery.",
+        "operationId": "getTrickplaySheet",
+        "parameters": [
+          {
+            "name": "file_id",
+            "in": "path",
+            "description": "The video file the sheet belongs to.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "sheet",
+            "in": "path",
+            "description": "The sheet's position in the source's `trickplay.sheet_urls`, from 0.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 4294967295.0,
+              "minimum": 0.0,
+              "format": "uint32"
+            }
+          },
+          {
+            "name": "Range",
+            "in": "header",
+            "description": "The part of the representation to transfer, per RFC 9110 section 14.2. A field this operation cannot apply is ignored and the whole representation is sent.",
+            "schema": {
+              "type": "string",
+              "pattern": "^bytes=(?:\\d+-\\d*|-\\d+)(?:\\s*,\\s*(?:\\d+-\\d*|-\\d+)){0,7}$"
+            },
+            "example": "bytes=0-1023"
+          },
+          {
+            "name": "If-Range",
+            "in": "header",
+            "description": "The entity tag the client's partial copy came from, per RFC 9110 section 13.1.5. The `Range` is honoured only if it matches this representation under the strong comparison; otherwise the whole representation is sent.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "description": "The entity tag the client's copy was taken from, per RFC 9110 section 13.1.1",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "If-Unmodified-Since",
+            "in": "header",
+            "description": "The date the client's copy carries, refused if the representation changed since, per RFC 9110 section 13.1.4",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "If-None-Match",
+            "in": "header",
+            "description": "The entity tag the client already holds, per RFC 9110 section 13.1.2",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "If-Modified-Since",
+            "in": "header",
+            "description": "The date the client's copy carries, per RFC 9110 section 13.1.3",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden; Cross-origin request rejected; Malformed Origin/Referer header",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "the whole representation",
+            "headers": {
+              "Accept-Ranges": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Last-Modified": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "image/jpeg": {
+                "schema": {}
+              }
+            }
+          },
+          "206": {
+            "description": "the part the request asked for",
+            "headers": {
+              "Accept-Ranges": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Last-Modified": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Range": {
+                "description": "The part of the representation enclosed, and its complete length, per RFC 9110 section 14.4.",
+                "required": true,
+                "content": {
+                  "text/plain": {
+                    "schema": {
+                      "type": "string",
+                      "pattern": "^bytes \\d+-\\d+/\\d+$"
+                    }
+                  }
+                }
+              }
+            },
+            "content": {
+              "image/jpeg": {
+                "schema": {}
+              }
+            }
+          },
+          "304": {
+            "description": "the client's copy is current",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Last-Modified": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "412": {
+            "description": "the representation is not the one the client's copy came from"
+          },
+          "416": {
+            "description": "Range Not Satisfiable",
+            "headers": {
+              "Content-Range": {
+                "description": "The complete length of the selected representation, per RFC 9110 section 15.5.17.",
+                "required": true,
+                "content": {
+                  "text/plain": {
+                    "schema": {
+                      "type": "string",
+                      "pattern": "^bytes \\*/\\d+$"
+                    }
+                  }
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "File not found; Trickplay sheet not found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#file-not-found"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "File not found"
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#trickplay-not-found"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Trickplay sheet not found"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#internal"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BeamSession": []
+          }
+        ]
+      },
+      "head": {
+        "tags": [
+          "playback"
+        ],
+        "summary": "The same fields with no body, for a client checking a sheet's validator before it fetches it.",
+        "operationId": "headTrickplaySheet",
+        "parameters": [
+          {
+            "name": "file_id",
+            "in": "path",
+            "description": "The video file the sheet belongs to.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "sheet",
+            "in": "path",
+            "description": "The sheet's position in the source's `trickplay.sheet_urls`, from 0.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "maximum": 4294967295.0,
+              "minimum": 0.0,
+              "format": "uint32"
+            }
+          },
+          {
+            "name": "Range",
+            "in": "header",
+            "description": "The part of the representation to transfer, per RFC 9110 section 14.2. A field this operation cannot apply is ignored and the whole representation is sent.",
+            "schema": {
+              "type": "string",
+              "pattern": "^bytes=(?:\\d+-\\d*|-\\d+)(?:\\s*,\\s*(?:\\d+-\\d*|-\\d+)){0,7}$"
+            },
+            "example": "bytes=0-1023"
+          },
+          {
+            "name": "If-Range",
+            "in": "header",
+            "description": "The entity tag the client's partial copy came from, per RFC 9110 section 13.1.5. The `Range` is honoured only if it matches this representation under the strong comparison; otherwise the whole representation is sent.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "description": "The entity tag the client's copy was taken from, per RFC 9110 section 13.1.1",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "If-Unmodified-Since",
+            "in": "header",
+            "description": "The date the client's copy carries, refused if the representation changed since, per RFC 9110 section 13.1.4",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "If-None-Match",
+            "in": "header",
+            "description": "The entity tag the client already holds, per RFC 9110 section 13.1.2",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "If-Modified-Since",
+            "in": "header",
+            "description": "The date the client's copy carries, per RFC 9110 section 13.1.3",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden; Cross-origin request rejected; Malformed Origin/Referer header",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "the whole representation",
+            "headers": {
+              "Accept-Ranges": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Last-Modified": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "image/jpeg": {
+                "schema": {}
+              }
+            }
+          },
+          "206": {
+            "description": "the part the request asked for",
+            "headers": {
+              "Accept-Ranges": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Last-Modified": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Range": {
+                "description": "The part of the representation enclosed, and its complete length, per RFC 9110 section 14.4.",
+                "required": true,
+                "content": {
+                  "text/plain": {
+                    "schema": {
+                      "type": "string",
+                      "pattern": "^bytes \\d+-\\d+/\\d+$"
+                    }
+                  }
+                }
+              }
+            },
+            "content": {
+              "image/jpeg": {
+                "schema": {}
+              }
+            }
+          },
+          "304": {
+            "description": "the client's copy is current",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Last-Modified": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "412": {
+            "description": "the representation is not the one the client's copy came from"
+          },
+          "416": {
+            "description": "Range Not Satisfiable",
+            "headers": {
+              "Content-Range": {
+                "description": "The complete length of the selected representation, per RFC 9110 section 15.5.17.",
+                "required": true,
+                "content": {
+                  "text/plain": {
+                    "schema": {
+                      "type": "string",
+                      "pattern": "^bytes \\*/\\d+$"
+                    }
+                  }
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "File not found; Trickplay sheet not found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#file-not-found"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "File not found"
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#trickplay-not-found"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Trickplay sheet not found"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#internal"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BeamSession": []
+          }
+        ]
+      }
+    },
     "/v1/libraries": {
       "get": {
         "tags": [
@@ -16443,6 +17091,135 @@
         ],
         "description": "A subtitle track of a source file."
       },
+      "Chapter": {
+        "properties": {
+          "start_ms": {
+            "type": "integer",
+            "minimum": 0.0,
+            "format": "uint64",
+            "description": "Where the chapter starts, in milliseconds from the file's start."
+          },
+          "end_ms": {
+            "type": "integer",
+            "minimum": 0.0,
+            "format": "uint64",
+            "description": "Where it ends, in milliseconds from the file's start; never before\n`start_ms`."
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The chapter's own title; absent when the file names none."
+          }
+        },
+        "type": "object",
+        "required": [
+          "start_ms",
+          "end_ms"
+        ],
+        "description": "One chapter of a file, on that file's timeline (issue #265)."
+      },
+      "PlaybackMarkerKind": {
+        "type": "string",
+        "enum": [
+          "recap",
+          "intro",
+          "credits",
+          "preview"
+        ],
+        "description": "What a [`PlaybackMarker`] marks."
+      },
+      "PlaybackMarker": {
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/PlaybackMarkerKind"
+          },
+          "start_ms": {
+            "type": "integer",
+            "minimum": 0.0,
+            "format": "uint64",
+            "description": "Where the span starts, in milliseconds from the file's start."
+          },
+          "end_ms": {
+            "type": "integer",
+            "minimum": 0.0,
+            "format": "uint64",
+            "description": "Where it ends; always after `start_ms`."
+          }
+        },
+        "type": "object",
+        "required": [
+          "kind",
+          "start_ms",
+          "end_ms"
+        ],
+        "description": "A span of a file a client offers to skip (issue #265), read from the\nfile's chapter titled for it (`Previously On`, `Opening`, `Intro`,\n`Ending`, `End Credits`, `Next Episode`). At most one of each kind per\nfile."
+      },
+      "Trickplay": {
+        "properties": {
+          "interval_ms": {
+            "type": "integer",
+            "maximum": 4294967295.0,
+            "minimum": 1.0,
+            "format": "uint32",
+            "description": "The time between two tiles, in milliseconds."
+          },
+          "tile_width": {
+            "type": "integer",
+            "maximum": 4294967295.0,
+            "minimum": 1.0,
+            "format": "uint32",
+            "description": "One tile's width in pixels."
+          },
+          "tile_height": {
+            "type": "integer",
+            "maximum": 4294967295.0,
+            "minimum": 1.0,
+            "format": "uint32",
+            "description": "One tile's height in pixels."
+          },
+          "columns": {
+            "type": "integer",
+            "maximum": 4294967295.0,
+            "minimum": 1.0,
+            "format": "uint32",
+            "description": "Tiles across one sheet."
+          },
+          "rows": {
+            "type": "integer",
+            "maximum": 4294967295.0,
+            "minimum": 1.0,
+            "format": "uint32",
+            "description": "Tiles down one sheet."
+          },
+          "tile_count": {
+            "type": "integer",
+            "maximum": 4294967295.0,
+            "minimum": 1.0,
+            "format": "uint32",
+            "description": "Tiles in every sheet together."
+          },
+          "sheet_urls": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "description": "Where to fetch each sheet, in order (`image/jpeg`)."
+          }
+        },
+        "type": "object",
+        "required": [
+          "interval_ms",
+          "tile_width",
+          "tile_height",
+          "columns",
+          "rows",
+          "tile_count",
+          "sheet_urls"
+        ],
+        "description": "A file's scrub-preview thumbnails (issue #265): JPEG sheets of tiles, tile\n`n` the frame at `n * interval_ms` (the keyframe at or before it), laid\nleft to right and then top to bottom, `columns` by `rows` to a sheet.\nTile `n` is on sheet `n / (columns * rows)`, at column\n`n % (columns * rows) % columns` and row `n % (columns * rows) / columns`;\nthe last sheet is part-filled when `tile_count` is not a multiple of a\nsheet's tiles."
+      },
       "SourcePart": {
         "properties": {
           "file_id": {
@@ -16487,6 +17264,31 @@
             "minimum": 0.0,
             "format": "uint32",
             "description": "Which of this part's `subtitle_tracks` (from 0) to start it on for\nthe caller, chosen as the source's `default_subtitle_track_index` is,\nbeside the source's default audio track; absent for none."
+          },
+          "chapters": {
+            "items": {
+              "$ref": "#/components/schemas/Chapter"
+            },
+            "type": "array",
+            "description": "This file's chapters, in order (issue #265)."
+          },
+          "markers": {
+            "items": {
+              "$ref": "#/components/schemas/PlaybackMarker"
+            },
+            "type": "array",
+            "description": "This file's skippable spans, on its own timeline."
+          },
+          "trickplay": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Trickplay"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "This file's scrub-preview sheets, when Beam has made them."
           },
           "stream_url": {
             "type": "string",
@@ -16757,6 +17559,31 @@
             "format": "uint32",
             "description": "Which of `subtitle_tracks` (from 0) to start on for the caller, by\ntheir subtitle mode and languages (`GET /v1/me/language-preferences`)\nbeside the default audio track; absent to start without subtitles."
           },
+          "chapters": {
+            "items": {
+              "$ref": "#/components/schemas/Chapter"
+            },
+            "type": "array",
+            "description": "The file's chapters, in order, as its container lists them (issue\n#265); empty for a file with none."
+          },
+          "markers": {
+            "items": {
+              "$ref": "#/components/schemas/PlaybackMarker"
+            },
+            "type": "array",
+            "description": "The spans of the file a client offers to skip -- its intro, its\ncredits, a recap, a preview -- read from the chapters titled for\nthem, in the order they start; empty when no chapter is."
+          },
+          "trickplay": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Trickplay"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The file's scrub-preview sheets; absent until Beam has made them for\nthe file as it is now, and for a file that gives none."
+          },
           "stream_url": {
             "type": "string",
             "description": "Direct-play stream URL for this file (Range-request capable, inline)."
@@ -16778,7 +17605,7 @@
           "stream_url",
           "download_url"
         ],
-        "description": "One playable/downloadable version of a media item. Beam models multiple\ndeliverable qualities/editions as distinct source files rather than\ntranscoding on demand (see ADR-0004: never live-transcode); this is how a\nclient picks among them for constrained-bandwidth playback.\n\nThe one track model Beam has (issue #189): every video, audio and\nsubtitle track here is tied to this file, addressed by its stream index,\nand names its codec as FFmpeg does (`h264`, `eac3`, `subrip`).\n\nA movie split across files (`Movie (2019) - CD1.avi`, `- CD2.avi`) is one\nsource whose `parts` play in sequence (issue #233): a client is expected\nto play each part's `stream_url` in turn -- a concatenated playlist -- and\nBeam never joins them (ADR-0004). A whole file is a source of one part. The fields\nthat name one file -- `file_id`, the tracks, `stream_url`,\n`download_url`, `mime_type` and `container_format` -- are the first\npart's; `size_bytes` and `duration_secs` are the whole source's."
+        "description": "One playable/downloadable version of a media item. Beam models multiple\ndeliverable qualities/editions as distinct source files rather than\ntranscoding on demand (see ADR-0004: never live-transcode); this is how a\nclient picks among them for constrained-bandwidth playback.\n\nThe one track model Beam has (issue #189): every video, audio and\nsubtitle track here is tied to this file, addressed by its stream index,\nand names its codec as FFmpeg does (`h264`, `eac3`, `subrip`).\n\nA movie split across files (`Movie (2019) - CD1.avi`, `- CD2.avi`) is one\nsource whose `parts` play in sequence (issue #233): a client is expected\nto play each part's `stream_url` in turn -- a concatenated playlist -- and\nBeam never joins them (ADR-0004). A whole file is a source of one part. The fields\nthat name one file -- `file_id`, the tracks, the chapters, markers and\ntrickplay, `stream_url`, `download_url`, `mime_type` and\n`container_format` -- are the first part's; `size_bytes` and\n`duration_secs` are the whole source's."
       },
       "MediaSourceConnection": {
         "properties": {

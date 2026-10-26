@@ -176,14 +176,9 @@ pub(crate) fn in_memory_playback(
     movies: Arc<InMemoryMovieRepository>,
     shows: Arc<InMemoryShowRepository>,
 ) -> Arc<dyn PlaybackService> {
-    let sources = Arc::new(SourceCatalog::new(
-        movies.clone(),
-        files.clone(),
-        Arc::new(InMemoryMediaStreamRepository::default()),
-        Arc::new(
+    let sources = Arc::new(SourceCatalog::new(crate::services::sources::SourceRepositories {movies: movies.clone(), files: files.clone(), streams: Arc::new(InMemoryMediaStreamRepository::default()), sidecars: Arc::new(
             beam_domain::repositories::sidecar_subtitle::in_memory::InMemorySidecarSubtitleRepository::default(),
-        ),
-    ));
+        ), chapters: Arc::new(beam_domain::repositories::chapter::in_memory::InMemoryChapterRepository::default()), trickplay: Arc::new(beam_domain::repositories::trickplay::in_memory::InMemoryTrickplayRepository::default()),}));
     Arc::new(DbPlaybackService::new(PlaybackRepositories {
         watch_state: Arc::new(InMemoryWatchStateRepository::new(clock)),
         files,
@@ -331,6 +326,25 @@ pub(crate) fn idle_playback_telemetry() -> Arc<PlaybackTelemetryService> {
         Arc::new(InMemoryFileRepository::default()),
         Arc::new(InMemoryMediaStreamRepository::default()),
         Arc::new(beam_domain::services::RealClock),
+    ))
+}
+
+/// Trickplay over empty in-memory stores, its sheets under a folder that
+/// does not exist: every sheet is a miss, and no pass is ever run.
+pub(crate) fn idle_trickplay() -> Arc<crate::services::trickplay::TrickplayService> {
+    Arc::new(crate::services::trickplay::TrickplayService::new(
+        PathBuf::from("/nonexistent/beam-test/trickplay"),
+        crate::services::trickplay::TrickplayDependencies {
+            libraries: Arc::new(
+                beam_domain::repositories::library::in_memory::InMemoryLibraryRepository::default(),
+            ),
+            files: Arc::new(InMemoryFileRepository::default()),
+            records: Arc::new(
+                beam_domain::repositories::trickplay::in_memory::InMemoryTrickplayRepository::default(),
+            ),
+            generator: Arc::new(beam_index::services::trickplay::MockTrickplayGenerator::new()),
+            clock: Arc::new(beam_domain::services::RealClock),
+        },
     ))
 }
 
@@ -550,6 +564,7 @@ pub(crate) fn state_with_language_preferences(
         watch_status: base.services.watch_status.clone(),
         telemetry: base.services.telemetry.clone(),
         playback_telemetry: base.services.playback_telemetry.clone(),
+        trickplay: base.services.trickplay.clone(),
     };
     AppState::new(base.config.clone(), services, base.probe.clone(), None)
 }
@@ -657,6 +672,7 @@ fn make_app_state_with_services(
         watch_status: Arc::new(beam_index::services::watch_status::WatchStatus::new()),
         telemetry,
         playback_telemetry,
+        trickplay: idle_trickplay(),
     };
 
     let config = crate::config::ServerConfig {

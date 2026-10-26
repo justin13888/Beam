@@ -143,6 +143,7 @@ fn state_over(base: AppState, metadata: Arc<dyn MetadataService>) -> AppState {
         watch_status: Arc::new(beam_index::services::watch_status::WatchStatus::new()),
         telemetry: crate::routes::test_support::idle_library_report(),
         playback_telemetry: crate::routes::test_support::idle_playback_telemetry(),
+        trickplay: crate::routes::test_support::idle_trickplay(),
     };
 
     AppState::new(base.config.clone(), services, base.probe.clone(), None)
@@ -239,6 +240,9 @@ fn movie_source(file_id: &str) -> MediaSource {
             duration_secs: Some(8160.0),
             subtitle_tracks: vec![],
             default_subtitle_track_index: None,
+            chapters: vec![],
+            markers: vec![],
+            trickplay: None,
             stream_url: format!("/v1/files/{file_id}/stream"),
             download_url: format!("/v1/files/{file_id}/download"),
         }],
@@ -251,6 +255,9 @@ fn movie_source(file_id: &str) -> MediaSource {
         subtitle_tracks: vec![],
         default_audio_track_index: None,
         default_subtitle_track_index: None,
+        chapters: vec![],
+        markers: vec![],
+        trickplay: None,
         stream_url: format!("/v1/files/{file_id}/stream"),
         download_url: format!("/v1/files/{file_id}/download"),
     }
@@ -427,6 +434,8 @@ async fn browse_omits_a_title_whose_only_file_is_missing_but_its_detail_still_re
         people: Arc::default(),
         streams: Arc::default(),
         sidecars: Arc::default(),
+        chapters: Arc::default(),
+        trickplay: Arc::default(),
         files: files.clone(),
     }));
     let token = seed_session(&state).await;
@@ -476,6 +485,8 @@ struct Library {
     sidecars: Arc<
         beam_domain::repositories::sidecar_subtitle::in_memory::InMemorySidecarSubtitleRepository,
     >,
+    chapters: Arc<beam_domain::repositories::chapter::in_memory::InMemoryChapterRepository>,
+    trickplay: Arc<beam_domain::repositories::trickplay::in_memory::InMemoryTrickplayRepository>,
 }
 
 impl Library {
@@ -497,6 +508,8 @@ impl Library {
             people: Arc::default(),
             streams: Arc::default(),
             sidecars: Arc::default(),
+            chapters: Arc::default(),
+            trickplay: Arc::default(),
             files,
         }
     }
@@ -590,10 +603,14 @@ fn real_service_over(
 ) -> Arc<dyn MetadataService> {
     Arc::new(DbMetadataService::new(MetadataRepositories {
         sources: Arc::new(crate::services::sources::SourceCatalog::new(
-            movies.clone(),
-            library.files.clone(),
-            library.streams.clone(),
-            library.sidecars.clone(),
+            crate::services::sources::SourceRepositories {
+                movies: movies.clone(),
+                files: library.files.clone(),
+                streams: library.streams.clone(),
+                sidecars: library.sidecars.clone(),
+                chapters: library.chapters.clone(),
+                trickplay: library.trickplay.clone(),
+            },
         )),
         movies,
         shows: library.shows.clone(),
@@ -1082,6 +1099,178 @@ async fn sources_carry_their_tracks_and_the_subtitle_files_beside_them() {
     );
 }
 
+/// A source carries its file's chapters, the intro and credits spans the
+/// chapters titled for them mark, and -- once Beam has made them for the
+/// file as it is -- its trickplay sheets, with where to fetch each (issue
+/// #265). The first part's on the source, and each part's on the part.
+#[tokio::test]
+async fn sources_carry_their_chapters_markers_and_trickplay_sheets() {
+    use beam_domain::models::chapter::Chapter as StoredChapter;
+    use beam_domain::models::trickplay::{TrickplayLayout, TrickplayRecord};
+    use beam_domain::repositories::{ChapterRepository, FileRepository, TrickplayRepository};
+
+    let library = Library::new();
+    let (movie, file) = indexed_movie(&library.movies, &library.files, "Arrival").await;
+    let hash = library.files.find_by_id(file).await.unwrap().unwrap().hash;
+    library
+        .chapters
+        .replace_for_file(
+            file,
+            [
+                (0, 20_000, Some("Previously On")),
+                (20_000, 95_000, Some("Opening Credits")),
+                (95_000, 6_900_000, None),
+                (6_900_000, 7_000_000, Some("End Credits")),
+                (7_000_000, 7_030_000, Some("Next Episode")),
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(index, (start_ms, end_ms, title))| StoredChapter {
+                index: index as u32,
+                start_ms,
+                end_ms,
+                title: title.map(str::to_owned),
+            })
+            .collect(),
+        )
+        .await
+        .unwrap();
+    library
+        .trickplay
+        .upsert(TrickplayRecord {
+            file_id: file,
+            file_hash: hash,
+            layout: Some(TrickplayLayout {
+                interval_ms: 10_000,
+                tile_width: 320,
+                tile_height: 134,
+                columns: 10,
+                rows: 10,
+                tile_count: 150,
+            }),
+            generated_at: chrono::Utc::now(),
+        })
+        .await
+        .unwrap();
+    let (client, token) = signed_in_to(real_service(library)).await;
+
+    let body: serde_json::Value = client
+        .get(&format!("/v1/media/{movie}/sources"))
+        .cookie("beam_session", &token)
+        .send()
+        .await
+        .assert_status(StatusCode::OK)
+        .json();
+
+    let source = &body["items"][0];
+    assert_eq!(
+        source["chapters"],
+        serde_json::json!([
+            {"start_ms": 0, "end_ms": 20_000, "title": "Previously On"},
+            {"start_ms": 20_000, "end_ms": 95_000, "title": "Opening Credits"},
+            {"start_ms": 95_000, "end_ms": 6_900_000, "title": null},
+            {"start_ms": 6_900_000, "end_ms": 7_000_000, "title": "End Credits"},
+            {"start_ms": 7_000_000, "end_ms": 7_030_000, "title": "Next Episode"},
+        ])
+    );
+    assert_eq!(
+        source["markers"],
+        serde_json::json!([
+            {"kind": "recap", "start_ms": 0, "end_ms": 20_000},
+            {"kind": "intro", "start_ms": 20_000, "end_ms": 95_000},
+            {"kind": "credits", "start_ms": 6_900_000, "end_ms": 7_000_000},
+            {"kind": "preview", "start_ms": 7_000_000, "end_ms": 7_030_000},
+        ])
+    );
+    assert_eq!(
+        source["trickplay"],
+        serde_json::json!({
+            "interval_ms": 10_000,
+            "tile_width": 320,
+            "tile_height": 134,
+            "columns": 10,
+            "rows": 10,
+            "tile_count": 150,
+            "sheet_urls": [
+                format!("/v1/files/{file}/trickplay/0"),
+                format!("/v1/files/{file}/trickplay/1"),
+            ],
+        })
+    );
+    let part = &source["parts"][0];
+    for field in ["chapters", "markers", "trickplay"] {
+        assert_eq!(part[field], source[field], "the part's own {field}");
+    }
+}
+
+/// Sheets made from a file's earlier content describe a picture that is no
+/// longer there, and a file that gave none has none: neither is offered.
+#[tokio::test]
+async fn sources_offer_no_trickplay_made_from_other_content_or_none_at_all() {
+    use beam_domain::models::trickplay::{TrickplayLayout, TrickplayRecord};
+    use beam_domain::repositories::{FileRepository, TrickplayRepository};
+
+    let library = Library::new();
+    let (stale_movie, stale_file) = indexed_movie(&library.movies, &library.files, "Blade").await;
+    let (empty_movie, empty_file) = indexed_movie(&library.movies, &library.files, "Contact").await;
+    let stale_hash = library
+        .files
+        .find_by_id(stale_file)
+        .await
+        .unwrap()
+        .unwrap()
+        .hash;
+    let empty_hash = library
+        .files
+        .find_by_id(empty_file)
+        .await
+        .unwrap()
+        .unwrap()
+        .hash;
+    for (file_id, file_hash, layout) in [
+        (
+            stale_file,
+            stale_hash.wrapping_add(1),
+            Some(TrickplayLayout {
+                interval_ms: 10_000,
+                tile_width: 320,
+                tile_height: 180,
+                columns: 10,
+                rows: 10,
+                tile_count: 5,
+            }),
+        ),
+        (empty_file, empty_hash, None),
+    ] {
+        library
+            .trickplay
+            .upsert(TrickplayRecord {
+                file_id,
+                file_hash,
+                layout,
+                generated_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+    }
+    let (client, token) = signed_in_to(real_service(library)).await;
+
+    for movie in [stale_movie, empty_movie] {
+        let body: serde_json::Value = client
+            .get(&format!("/v1/media/{movie}/sources"))
+            .cookie("beam_session", &token)
+            .send()
+            .await
+            .assert_status(StatusCode::OK)
+            .json();
+        let source = &body["items"][0];
+        assert_eq!(source["trickplay"], serde_json::Value::Null);
+        assert_eq!(source["parts"][0]["trickplay"], serde_json::Value::Null);
+        assert_eq!(source["chapters"], serde_json::json!([]));
+        assert_eq!(source["markers"], serde_json::json!([]));
+    }
+}
+
 /// Each source names the tracks to start on for the caller (issue #264):
 /// the file's own choices for a caller who set nothing, their languages
 /// once they have, and someone else's preferences never.
@@ -1297,6 +1486,23 @@ async fn each_part_names_its_default_subtitle_from_its_own_tracks() {
             english.push(row.id.to_string());
         }
     }
+    // Only the second disc has chapters (issue #265).
+    {
+        use beam_domain::repositories::ChapterRepository;
+        library
+            .chapters
+            .replace_for_file(
+                parts[1],
+                vec![beam_domain::models::chapter::Chapter {
+                    index: 0,
+                    start_ms: 3_000_000,
+                    end_ms: 3_090_000,
+                    title: Some("End Credits".into()),
+                }],
+            )
+            .await
+            .unwrap();
+    }
     let state = state_with_service(real_service(library));
     let viewer = uuid::Uuid::new_v4();
     let token = session_for(&state, viewer).await;
@@ -1340,6 +1546,14 @@ async fn each_part_names_its_default_subtitle_from_its_own_tracks() {
         "the second disc's English file follows its Danish one"
     );
     assert_eq!(named(&source["parts"][1]), serde_json::json!(english[1]));
+    // Each part's chapters and markers are its own, on its own timeline; the
+    // source's are the first part's.
+    assert_eq!(source["chapters"], serde_json::json!([]));
+    assert_eq!(source["parts"][0]["markers"], serde_json::json!([]));
+    assert_eq!(
+        source["parts"][1]["markers"],
+        serde_json::json!([{"kind": "credits", "start_ms": 3_000_000, "end_ms": 3_090_000}])
+    );
 }
 
 /// The preferences cannot be read: a 500, never sources whose defaults are

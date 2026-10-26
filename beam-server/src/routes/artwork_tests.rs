@@ -106,6 +106,7 @@ mod tests {
             watch_status: Arc::new(beam_index::services::watch_status::WatchStatus::new()),
             telemetry: crate::routes::test_support::idle_library_report(),
             playback_telemetry: crate::routes::test_support::idle_playback_telemetry(),
+            trickplay: crate::routes::test_support::idle_trickplay(),
         };
 
         Fixture {
@@ -604,14 +605,9 @@ mod tests {
         let metadata = DbMetadataService::new(crate::services::metadata::MetadataRepositories {
             movies: fixture.movies.clone(),
             shows: fixture.shows.clone(),
-            sources: Arc::new(crate::services::sources::SourceCatalog::new(
-                fixture.movies.clone(),
-                Arc::new(InMemoryFileRepository::default()),
-                Arc::new(InMemoryMediaStreamRepository::default()),
-                Arc::new(
+            sources: Arc::new(crate::services::sources::SourceCatalog::new(crate::services::sources::SourceRepositories {movies: fixture.movies.clone(), files: Arc::new(InMemoryFileRepository::default()), streams: Arc::new(InMemoryMediaStreamRepository::default()), sidecars: Arc::new(
                     beam_domain::repositories::sidecar_subtitle::in_memory::InMemorySidecarSubtitleRepository::default(),
-                ),
-            )),
+                ), chapters: Arc::new(beam_domain::repositories::chapter::in_memory::InMemoryChapterRepository::default()), trickplay: Arc::new(beam_domain::repositories::trickplay::in_memory::InMemoryTrickplayRepository::default()),})),
             catalog: Arc::new(
                 beam_domain::repositories::catalog::in_memory::InMemoryCatalogRepository::new(
                     fixture.movies.clone(),

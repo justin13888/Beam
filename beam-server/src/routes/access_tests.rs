@@ -167,12 +167,7 @@ fn fixture() -> Fixture {
     let sidecars = Arc::new(
         beam_domain::repositories::sidecar_subtitle::in_memory::InMemorySidecarSubtitleRepository::default(),
     );
-    let sources = Arc::new(SourceCatalog::new(
-        movies.clone(),
-        files.clone(),
-        Arc::new(InMemoryMediaStreamRepository::default()),
-        sidecars.clone(),
-    ));
+    let sources = Arc::new(SourceCatalog::new(crate::services::sources::SourceRepositories {movies: movies.clone(), files: files.clone(), streams: Arc::new(InMemoryMediaStreamRepository::default()), sidecars: sidecars.clone(), chapters: Arc::new(beam_domain::repositories::chapter::in_memory::InMemoryChapterRepository::default()), trickplay: Arc::new(beam_domain::repositories::trickplay::in_memory::InMemoryTrickplayRepository::default()),}));
     let playback = Arc::new(DbPlaybackService::new(PlaybackRepositories {
         watch_state: Arc::new(
             beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::new(
@@ -253,6 +248,7 @@ fn fixture() -> Fixture {
         watch_status: Arc::new(beam_index::services::watch_status::WatchStatus::new()),
         telemetry: crate::routes::test_support::idle_library_report(),
         playback_telemetry: crate::routes::test_support::idle_playback_telemetry(),
+        trickplay: crate::routes::test_support::idle_trickplay(),
     };
 
     Fixture {
@@ -286,6 +282,10 @@ fn client(fixture: &Fixture) -> TestClient<AppState> {
                     head_download_file,
                     get_subtitle,
                     get_subtitle_webvtt,
+                ])
+                .mount(kynos::routes![
+                    crate::routes::trickplay::get_trickplay_sheet,
+                    crate::routes::trickplay::head_trickplay_sheet,
                 ])
                 .mount(kynos::routes![
                     report_playback_progress,
@@ -675,6 +675,7 @@ async fn a_hidden_titles_files_are_not_found_to_stream_download_or_subtitle() {
             format!("/v1/files/{file}/download"),
             format!("/v1/files/{file}/subtitles/{}", Uuid::new_v4()),
             format!("/v1/files/{file}/subtitles/{}/webvtt", Uuid::new_v4()),
+            format!("/v1/files/{file}/trickplay/0"),
         ] {
             client
                 .get(&path)
@@ -717,6 +718,14 @@ async fn a_hidden_titles_files_are_not_found_to_stream_download_or_subtitle() {
         .await
         .assert_status(StatusCode::NOT_FOUND)
         .assert_problem_type("https://beam.justinchung.net/reference/errors/#subtitle-not-found");
+    // Nor any trickplay sheet yet (issue #265): the file's own 404.
+    client
+        .get(&format!("/v1/files/{}/trickplay/0", titles.kids_file))
+        .cookie("beam_session", &restricted)
+        .send()
+        .await
+        .assert_status(StatusCode::NOT_FOUND)
+        .assert_problem_type("https://beam.justinchung.net/reference/errors/#trickplay-not-found");
 }
 
 #[tokio::test]
