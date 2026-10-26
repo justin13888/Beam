@@ -6,16 +6,18 @@ use std::sync::Arc;
 
 use uuid::Uuid as FixtureUuid;
 
-use beam_domain::repositories::UserListRepository;
 use beam_domain::repositories::contract::fixture::UserListFixture;
+use beam_domain::repositories::{MovieRepository, ShowRepository, UserListRepository};
 use beam_domain::services::TestClock;
-use beam_index::repositories::SqlUserListRepository;
+use beam_index::repositories::{SqlMovieRepository, SqlShowRepository, SqlUserListRepository};
 use beam_test_support::{postgres, seed};
 
 struct PgFixture {
     repo: SqlUserListRepository,
     clock: Arc<TestClock>,
     db: Arc<sea_orm::DatabaseConnection>,
+    movies: SqlMovieRepository,
+    shows: SqlShowRepository,
 }
 
 #[async_trait::async_trait]
@@ -26,6 +28,18 @@ impl UserListFixture for PgFixture {
 
     fn clock(&self) -> &TestClock {
         &self.clock
+    }
+
+    fn movies(&self) -> &dyn MovieRepository {
+        &self.movies
+    }
+
+    fn shows(&self) -> &dyn ShowRepository {
+        &self.shows
+    }
+
+    async fn new_library(&self) -> FixtureUuid {
+        seed::library(&self.db).await.expect("seed a library")
     }
 
     async fn new_user(&self) -> FixtureUuid {
@@ -51,6 +65,8 @@ async fn setup() -> PgFixture {
     PgFixture {
         repo: SqlUserListRepository::with_clock(db.clone(), clock.clone()),
         clock,
+        movies: SqlMovieRepository::new(db.clone()),
+        shows: SqlShowRepository::new(db.clone()),
         db,
     }
 }
@@ -93,5 +109,14 @@ async fn concurrent_additions_of_one_title_all_succeed_and_leave_one_entry() {
 
     ids.dedup();
     assert_eq!(ids.len(), 1, "every addition answers the one entry");
-    assert_eq!(repo.count(user, UserList::Watchlist).await.unwrap(), 1);
+    assert_eq!(
+        repo.count(
+            user,
+            UserList::Watchlist,
+            &beam_domain::models::access::AccessPolicy::unrestricted()
+        )
+        .await
+        .unwrap(),
+        1
+    );
 }

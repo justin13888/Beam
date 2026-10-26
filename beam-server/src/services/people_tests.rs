@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use sea_orm::DbErr;
 use uuid::Uuid;
 
+use beam_domain::models::access::AccessPolicy;
 use beam_domain::models::enrichment::FieldLocks;
 use beam_domain::models::person::{CreditRole, Person, PersonCredit, TitleCredit};
 use beam_domain::models::{CreateMovie, CreateShow};
@@ -18,6 +19,11 @@ use beam_domain::repositories::{MovieRepository, PersonRepository, ShowRepositor
 
 use super::{PeopleError, PeopleService, title_credits};
 use crate::models::search::TitleKind;
+
+/// A policy nobody restricted.
+fn open() -> AccessPolicy {
+    AccessPolicy::unrestricted()
+}
 
 struct Fixture {
     movies: Arc<InMemoryMovieRepository>,
@@ -156,7 +162,11 @@ async fn search_pages_through_every_match_by_cursor() {
         .await
         .unwrap();
 
-    let first = fixture.service.search(None, Some(3), None).await.unwrap();
+    let first = fixture
+        .service
+        .search(None, &open(), Some(3), None)
+        .await
+        .unwrap();
     let names: Vec<&str> = first.items.iter().map(|p| p.name.as_str()).collect();
     assert_eq!(names, ["Carrie-Anne Moss", "Hugo Weaving", "Keanu Reeves"]);
     assert_eq!(first.total, 4);
@@ -165,7 +175,7 @@ async fn search_pages_through_every_match_by_cursor() {
 
     let second = fixture
         .service
-        .search(None, Some(3), first.page_info.end_cursor.clone())
+        .search(None, &open(), Some(3), first.page_info.end_cursor.clone())
         .await
         .unwrap();
     let names: Vec<&str> = second.items.iter().map(|p| p.name.as_str()).collect();
@@ -175,7 +185,7 @@ async fn search_pages_through_every_match_by_cursor() {
 
     let found = fixture
         .service
-        .search(Some("  WACH ".to_string()), None, None)
+        .search(Some("  WACH ".to_string()), &open(), None, None)
         .await
         .unwrap();
     assert_eq!(
@@ -186,7 +196,7 @@ async fn search_pages_through_every_match_by_cursor() {
 
     let blank = fixture
         .service
-        .search(Some("   ".to_string()), None, None)
+        .search(Some("   ".to_string()), &open(), None, None)
         .await
         .unwrap();
     assert_eq!(blank.total, 4, "a blank query is no query");
@@ -198,14 +208,17 @@ async fn search_refuses_what_it_cannot_answer() {
     assert!(matches!(
         fixture
             .service
-            .search(Some("nul\0byte".to_string()), None, None)
+            .search(Some("nul\0byte".to_string()), &open(), None, None)
             .await,
         Err(PeopleError::InvalidSearchQuery(_))
     ));
     for size in [0, super::MAX_PAGE_SIZE + 1] {
         assert!(
             matches!(
-                fixture.service.search(None, Some(size), None).await,
+                fixture
+                    .service
+                    .search(None, &open(), Some(size), None)
+                    .await,
                 Err(PeopleError::InvalidPagination(_))
             ),
             "a page of {size}"
@@ -216,7 +229,10 @@ async fn search_refuses_what_it_cannot_answer() {
         0,
     );
     assert!(matches!(
-        fixture.service.search(None, None, Some(foreign)).await,
+        fixture
+            .service
+            .search(None, &open(), None, Some(foreign))
+            .await,
         Err(PeopleError::InvalidCursor(_))
     ));
 }
@@ -275,7 +291,7 @@ async fn a_filmography_lists_cast_and_crew_newest_first() {
         .id;
     let detail = fixture
         .service
-        .detail(person)
+        .detail(person, &open())
         .await
         .unwrap()
         .expect("the person exists");
@@ -319,13 +335,27 @@ async fn a_filmography_lists_cast_and_crew_newest_first() {
         fixture.people.find_by_id(person).await.unwrap().is_some(),
         "the row outlives the last credit"
     );
-    assert!(fixture.service.detail(person).await.unwrap().is_none());
-    assert!(fixture.service.find_person(person).await.unwrap().is_none());
+    assert!(
+        fixture
+            .service
+            .detail(person, &open())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        fixture
+            .service
+            .find_person(person, &open())
+            .await
+            .unwrap()
+            .is_none()
+    );
 
     assert!(
         fixture
             .service
-            .detail(Uuid::new_v4())
+            .detail(Uuid::new_v4(), &open())
             .await
             .unwrap()
             .is_none()
@@ -353,13 +383,19 @@ impl PersonRepository for FailingPeople {
     async fn find_by_id(&self, _: Uuid) -> Result<Option<Person>, DbErr> {
         Err(DbErr::Custom("down".to_string()))
     }
-    async fn filmography(&self, _: Uuid) -> Result<Vec<PersonCredit>, DbErr> {
+    async fn filmography(&self, _: Uuid, _: &AccessPolicy) -> Result<Vec<PersonCredit>, DbErr> {
         Err(DbErr::Custom("down".to_string()))
     }
-    async fn search(&self, _: Option<&str>, _: u64, _: u64) -> Result<Vec<Person>, DbErr> {
+    async fn search(
+        &self,
+        _: Option<&str>,
+        _: &AccessPolicy,
+        _: u64,
+        _: u64,
+    ) -> Result<Vec<Person>, DbErr> {
         Err(DbErr::Custom("down".to_string()))
     }
-    async fn count(&self, _: Option<&str>) -> Result<u64, DbErr> {
+    async fn count(&self, _: Option<&str>, _: &AccessPolicy) -> Result<u64, DbErr> {
         Err(DbErr::Custom("down".to_string()))
     }
 }
@@ -376,11 +412,11 @@ pub(crate) fn failing_people_service() -> PeopleService {
 async fn a_failed_read_is_an_error_never_an_empty_answer() {
     let service = failing_people_service();
     assert!(matches!(
-        service.search(None, None, None).await,
+        service.search(None, &open(), None, None).await,
         Err(PeopleError::Internal(_))
     ));
     assert!(matches!(
-        service.detail(Uuid::new_v4()).await,
+        service.detail(Uuid::new_v4(), &open()).await,
         Err(PeopleError::Internal(_))
     ));
 }

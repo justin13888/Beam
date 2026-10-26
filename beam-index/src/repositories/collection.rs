@@ -6,14 +6,18 @@ use async_trait::async_trait;
 use chrono::Utc;
 use sea_orm::{
     ColumnTrait, DatabaseConnection, DbBackend, DbErr, EntityTrait, FromQueryResult, QueryFilter,
-    Set, Statement, TransactionTrait,
+    Set, Statement, TransactionTrait, Value,
 };
 use uuid::Uuid;
 
+use beam_domain::models::access::AccessPolicy;
+use beam_domain::models::catalog::TitleKind;
 use beam_domain::models::collection::{Collection, CollectionSummary};
 use beam_domain::providers::enrichment::CollectionEnrichment;
 use beam_domain::repositories::CollectionRepository;
 use beam_entity::{collection, collection_movie};
+
+use crate::repositories::access_sql::AccessConditions;
 
 /// SQL-based implementation of the CollectionRepository trait.
 #[derive(Debug, Clone)]
@@ -25,6 +29,18 @@ impl SqlCollectionRepository {
     pub fn new(db: Arc<DatabaseConnection>) -> Self {
         Self { db }
     }
+}
+
+/// That a membership `collection_movies cm` is of a movie `access` admits
+/// (issue #328), binding its values after those already in `values`; `TRUE`
+/// for an unrestricted policy.
+fn visible_members(access: &AccessPolicy, values: &mut Vec<Value>) -> String {
+    AccessConditions::bind(access, |value| {
+        values.push(value);
+        format!("${}", values.len())
+    })
+    .on_id(TitleKind::Movie, "cm.movie_id")
+    .unwrap_or_else(|| "TRUE".to_string())
 }
 
 #[async_trait]
@@ -100,17 +116,39 @@ impl CollectionRepository for SqlCollectionRepository {
             .map(Collection::from))
     }
 
-    async fn movie_ids(&self, collection_id: Uuid) -> Result<Vec<Uuid>, DbErr> {
-        Ok(collection_movie::Entity::find()
-            .filter(collection_movie::Column::CollectionId.eq(collection_id))
-            .all(self.db.as_ref())
-            .await?
-            .into_iter()
-            .map(|member| member.movie_id)
-            .collect())
+    async fn movie_ids(
+        &self,
+        collection_id: Uuid,
+        access: &AccessPolicy,
+    ) -> Result<Vec<Uuid>, DbErr> {
+        #[derive(Debug, FromQueryResult)]
+        struct Member {
+            movie_id: Uuid,
+        }
+
+        let mut values: Vec<Value> = vec![collection_id.into()];
+        let visible = visible_members(access, &mut values);
+        Ok(Member::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            format!(
+                "SELECT cm.movie_id FROM collection_movies cm \
+                 WHERE cm.collection_id = $1 AND {visible}"
+            ),
+            values,
+        ))
+        .all(self.db.as_ref())
+        .await?
+        .into_iter()
+        .map(|member| member.movie_id)
+        .collect())
     }
 
-    async fn list(&self, limit: u64, offset: u64) -> Result<Vec<CollectionSummary>, DbErr> {
+    async fn list(
+        &self,
+        access: &AccessPolicy,
+        limit: u64,
+        offset: u64,
+    ) -> Result<Vec<CollectionSummary>, DbErr> {
         #[derive(Debug, FromQueryResult)]
         struct Listed {
             id: Uuid,
@@ -124,20 +162,26 @@ impl CollectionRepository for SqlCollectionRepository {
         // `COLLATE "C"` makes `lower` fold ASCII letters only and orders by
         // code point, whatever the database's locale: the in-memory store's
         // order, as people search's.
+        let mut values: Vec<Value> = Vec::new();
+        let visible = visible_members(access, &mut values);
+        values.push(i64::try_from(limit).unwrap_or(i64::MAX).into());
+        values.push(i64::try_from(offset).unwrap_or(i64::MAX).into());
         let listed = Listed::find_by_statement(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT c.id, c.external_ref, c.name, c.poster_url, c.backdrop_url, \
-                    m.movie_count \
-             FROM collections c \
-             JOIN (SELECT collection_id, count(*) AS movie_count \
-                   FROM collection_movies GROUP BY collection_id) m \
-               ON m.collection_id = c.id \
-             ORDER BY lower(c.name COLLATE \"C\"), c.id \
-             LIMIT $1 OFFSET $2",
-            [
-                i64::try_from(limit).unwrap_or(i64::MAX).into(),
-                i64::try_from(offset).unwrap_or(i64::MAX).into(),
-            ],
+            format!(
+                "SELECT c.id, c.external_ref, c.name, c.poster_url, c.backdrop_url, \
+                        m.movie_count \
+                 FROM collections c \
+                 JOIN (SELECT cm.collection_id, count(*) AS movie_count \
+                       FROM collection_movies cm WHERE {visible} \
+                       GROUP BY cm.collection_id) m \
+                   ON m.collection_id = c.id \
+                 ORDER BY lower(c.name COLLATE \"C\"), c.id \
+                 LIMIT ${} OFFSET ${}",
+                values.len() - 1,
+                values.len()
+            ),
+            values,
         ))
         .all(self.db.as_ref())
         .await?;
@@ -166,15 +210,21 @@ impl CollectionRepository for SqlCollectionRepository {
             .collect())
     }
 
-    async fn count(&self) -> Result<u64, DbErr> {
+    async fn count(&self, access: &AccessPolicy) -> Result<u64, DbErr> {
         #[derive(Debug, FromQueryResult)]
         struct Counted {
             count: i64,
         }
 
-        let counted = Counted::find_by_statement(Statement::from_string(
+        let mut values: Vec<Value> = Vec::new();
+        let visible = visible_members(access, &mut values);
+        let counted = Counted::find_by_statement(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT count(DISTINCT collection_id) AS count FROM collection_movies",
+            format!(
+                "SELECT count(DISTINCT cm.collection_id) AS count \
+                 FROM collection_movies cm WHERE {visible}"
+            ),
+            values,
         ))
         .one(self.db.as_ref())
         .await?;

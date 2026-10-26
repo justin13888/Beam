@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use beam_auth::utils::session_store::SessionData;
+use beam_domain::models::access::AccessPolicy;
 use beam_domain::models::movie::CreateMovie;
 use beam_domain::models::show::{CreateEpisode, CreateShow};
 use beam_domain::models::user_list::{UserList, UserListEntry, UserListPosition};
@@ -577,12 +578,13 @@ impl UserListRepository for FailingLists {
         &self,
         _: Uuid,
         _: UserList,
+        _: &AccessPolicy,
         _: Option<UserListPosition>,
         _: u64,
     ) -> Result<Vec<UserListEntry>, DbErr> {
         Err(outage())
     }
-    async fn count(&self, _: Uuid, _: UserList) -> Result<u64, DbErr> {
+    async fn count(&self, _: Uuid, _: UserList, _: &AccessPolicy) -> Result<u64, DbErr> {
         Err(outage())
     }
     async fn carry(&self, _: TitleRef, _: TitleRef) -> Result<(), DbErr> {

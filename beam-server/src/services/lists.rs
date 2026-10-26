@@ -10,6 +10,7 @@ use std::sync::Arc;
 use sea_orm::DbErr;
 use uuid::Uuid;
 
+use beam_domain::models::access::AccessPolicy;
 use beam_domain::models::user_list::{UserList, UserListEntry, UserListPosition};
 use beam_domain::models::watch_state::TitleRef;
 use beam_domain::repositories::{MovieRepository, ShowRepository, UserListRepository};
@@ -144,10 +145,13 @@ impl ListService {
     }
 
     /// One page of the user's `list`, newest addition first, each title as
-    /// browse lists it with the user's state for a movie.
+    /// browse lists it with the user's state for a movie. Only the titles
+    /// `access` admits are listed or counted (issue #328): one it hides
+    /// keeps its entry, listed again once the policy admits it.
     pub async fn page(
         &self,
         user_id: Uuid,
+        access: &AccessPolicy,
         list: UserList,
         first: Option<u32>,
         after: Option<String>,
@@ -171,11 +175,11 @@ impl ListService {
         let size = size.get() as usize;
         let mut entries: Vec<UserListEntry> = self
             .lists
-            .find_page(user_id, list, after, size as u64 + 1)
+            .find_page(user_id, list, access, after, size as u64 + 1)
             .await?;
         let has_next_page = entries.len() > size;
         entries.truncate(size);
-        let total = self.lists.count(user_id, list).await?;
+        let total = self.lists.count(user_id, list, access).await?;
 
         let titles: Vec<TitleRef> = entries.iter().map(|entry| entry.title).collect();
         let mut media = self.metadata.get_titles(&titles).await.map_err(internal)?;

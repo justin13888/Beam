@@ -86,7 +86,7 @@
           "media"
         ],
         "summary": "List the distinct genres in the library, sorted for stable presentation.",
-        "description": "Taking `SessionAuth` is what puts `BeamSession` in this operation's\n`security` and its 401 in `responses`; the previous `require_auth(req,\nstate)` call did the same work where no describer could see it.",
+        "description": "Only the genres of titles the caller may see are listed: one carried only\nby titles their access policy hides, or by no title any more, is not.\n\nTaking `SessionAuth` is what puts `BeamSession` in this operation's\n`security` and its 401 in `responses`; the previous `require_auth(req,\nstate)` call did the same work where no describer could see it.",
         "operationId": "listGenres",
         "responses": {
           "401": {
@@ -1427,6 +1427,7 @@
           "media"
         ],
         "summary": "One person and their filmography: every title in the library they are in the cast or crew of.",
+        "description": "Titles the caller's access policy hides are left out, and a person\ncredited only on such titles answers `404`, as an unknown id does.",
         "operationId": "getPerson",
         "parameters": [
           {
@@ -1563,7 +1564,7 @@
           "media"
         ],
         "summary": "The collections the library's movies are in, by name, ignoring case.",
-        "description": "Collections come from provider enrichment: TMDB groups a franchise's\nmovies into one. A collection none of the library's movies is in is not\nlisted.",
+        "description": "Collections come from provider enrichment: TMDB groups a franchise's\nmovies into one. A collection none of the library's movies is in is not\nlisted, and neither is one whose every movie the caller's access policy\nhides; `movie_count` and `total` count only what the caller may see.",
         "operationId": "listCollections",
         "parameters": [
           {
@@ -1731,6 +1732,7 @@
           "media"
         ],
         "summary": "One collection and every movie of the library in it, in release order, with the caller's state for each.",
+        "description": "Movies the caller's access policy hides are left out, and a collection\nwhose every movie it hides answers `404`, as an unknown id does.",
         "operationId": "getCollection",
         "parameters": [
           {
@@ -2294,7 +2296,7 @@
           "media"
         ],
         "summary": "Search the people credited on the library's titles, by name.",
-        "description": "People come from provider enrichment: the cast and key crew of each\nmatched title. The list is ordered by name, ignoring case.",
+        "description": "People come from provider enrichment: the cast and key crew of each\nmatched title. The list is ordered by name, ignoring case. A person\ncredited only on titles the caller's access policy hides is not listed.",
         "operationId": "searchPeople",
         "parameters": [
           {
@@ -3997,7 +3999,7 @@
           "playback"
         ],
         "summary": "Put a movie or a show on the caller's watchlist.",
-        "description": "One already there keeps its place. A season or an episode is refused:\nput its show on the list instead.",
+        "description": "One already there keeps its place. A season or an episode is refused:\nput its show on the list instead. A title the caller's access policy\nhides answers `404`, as an id naming nothing does.",
         "operationId": "addToWatchlist",
         "parameters": [
           {
@@ -4144,6 +4146,7 @@
           "playback"
         ],
         "summary": "Take a movie or a show off the caller's watchlist. One not on it changes nothing.",
+        "description": "A title the caller's access policy hides answers `404`, as an id naming\nnothing does.",
         "operationId": "removeFromWatchlist",
         "parameters": [
           {
@@ -4292,6 +4295,7 @@
           "playback"
         ],
         "summary": "The caller's watchlist, most recently added first, a page at a time.",
+        "description": "Titles the caller's access policy hides are left out of every page and\nof `total`; they stay on the list, and appear again once the policy\nadmits them.",
         "operationId": "getWatchlist",
         "parameters": [
           {
@@ -4459,7 +4463,7 @@
           "playback"
         ],
         "summary": "Mark a movie or a show as one of the caller's favourites.",
-        "description": "One already a favourite keeps its place. A season or an episode is\nrefused: favourite its show instead.",
+        "description": "One already a favourite keeps its place. A season or an episode is\nrefused: favourite its show instead. A title the caller's access policy\nhides answers `404`, as an id naming nothing does.",
         "operationId": "addToFavourites",
         "parameters": [
           {
@@ -4606,6 +4610,7 @@
           "playback"
         ],
         "summary": "Take a movie or a show out of the caller's favourites. One not among them changes nothing.",
+        "description": "A title the caller's access policy hides answers `404`, as an id naming\nnothing does.",
         "operationId": "removeFromFavourites",
         "parameters": [
           {
@@ -4754,6 +4759,7 @@
           "playback"
         ],
         "summary": "The caller's favourites, most recently added first, a page at a time.",
+        "description": "Titles the caller's access policy hides are left out of every page and\nof `total`; they stay among the favourites, and appear again once the\npolicy admits them.",
         "operationId": "getFavourites",
         "parameters": [
           {

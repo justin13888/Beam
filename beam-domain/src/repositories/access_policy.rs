@@ -28,6 +28,7 @@ pub trait AccessPolicyRepository: Send + Sync + std::fmt::Debug {
 #[cfg(any(test, feature = "test-utils"))]
 pub mod in_memory {
     use super::*;
+    use crate::models::watch_state::TitleRef;
     use parking_lot::RwLock;
     use std::collections::{HashMap, HashSet};
 
@@ -99,6 +100,78 @@ pub mod in_memory {
             }
             self.policies.write().insert(user_id, policy.clone());
             Ok(())
+        }
+    }
+
+    /// Where the in-memory list, collection, people and genre doubles read
+    /// a title's libraries and certification from, to apply an
+    /// [`AccessPolicy`] as their SQL counterparts' queries do (issue #328).
+    ///
+    /// The `Default` reads empty title doubles: an unrestricted policy still
+    /// admits every title, and a restricted one admits none, since a title
+    /// the doubles do not hold is in no library and certified nothing.
+    #[derive(Debug, Clone, Default)]
+    pub struct InMemoryTitleAccess {
+        movies: std::sync::Arc<crate::repositories::movie::in_memory::InMemoryMovieRepository>,
+        shows: std::sync::Arc<crate::repositories::show::in_memory::InMemoryShowRepository>,
+    }
+
+    impl InMemoryTitleAccess {
+        /// Read titles from the doubles a test writes them through.
+        pub fn new(
+            movies: std::sync::Arc<crate::repositories::movie::in_memory::InMemoryMovieRepository>,
+            shows: std::sync::Arc<crate::repositories::show::in_memory::InMemoryShowRepository>,
+        ) -> Self {
+            Self { movies, shows }
+        }
+
+        /// Whether `access` admits `title`.
+        pub fn admits(&self, access: &AccessPolicy, title: TitleRef) -> bool {
+            if access.is_unrestricted() {
+                return true;
+            }
+            match title {
+                TitleRef::Movie(id) => {
+                    let certification = self
+                        .movies
+                        .movies
+                        .lock()
+                        .unwrap()
+                        .get(&id)
+                        .map(|movie| movie.content_rating.clone());
+                    certification.is_some_and(|certification| {
+                        access.admits_title(&self.movies.libraries_of(id), certification.as_deref())
+                    })
+                }
+                TitleRef::Show(id) => {
+                    let certification = self
+                        .shows
+                        .shows
+                        .lock()
+                        .unwrap()
+                        .get(&id)
+                        .map(|show| show.content_rating.clone());
+                    certification.is_some_and(|certification| {
+                        access.admits_title(&self.shows.libraries_of(id), certification.as_deref())
+                    })
+                }
+            }
+        }
+
+        /// Whether `access` admits the title of `kind` with id `id`.
+        pub fn admits_kind(
+            &self,
+            access: &AccessPolicy,
+            kind: crate::models::catalog::TitleKind,
+            id: Uuid,
+        ) -> bool {
+            self.admits(
+                access,
+                match kind {
+                    crate::models::catalog::TitleKind::Movie => TitleRef::Movie(id),
+                    crate::models::catalog::TitleKind::Show => TitleRef::Show(id),
+                },
+            )
         }
     }
 }

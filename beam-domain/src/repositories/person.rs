@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use sea_orm::DbErr;
 use uuid::Uuid;
 
+use crate::models::access::AccessPolicy;
 use crate::models::person::{CreditRole, Person, PersonCredit, TitleCredit};
 use crate::providers::enrichment::CreditEnrichment;
 
@@ -31,24 +32,29 @@ pub trait PersonRepository: Send + Sync + std::fmt::Debug {
     /// Same as `movie_credits`, for shows.
     async fn show_credits(&self, show_id: Uuid) -> Result<Vec<TitleCredit>, DbErr>;
     async fn find_by_id(&self, id: Uuid) -> Result<Option<Person>, DbErr>;
-    /// Every credit the person has, on movies and shows alike, in no
-    /// particular order. Empty for an unknown id.
-    async fn filmography(&self, person_id: Uuid) -> Result<Vec<PersonCredit>, DbErr>;
-    /// One page of the people credited on at least one title, ordered by name
-    /// ignoring ASCII case -- by code point once `A`-`Z` are folded to
-    /// `a`-`z`, and nothing else is folded, so the order cannot depend on a
-    /// store's locale -- and then by id: those whose name contains `query`,
-    /// ignoring case, or everyone without one. `query`'s `%` and `_` are
-    /// themselves, not wildcards.
+    /// Every credit the person has on a movie or show `access` admits
+    /// (issue #328), in no particular order. Empty for an unknown id.
+    async fn filmography(
+        &self,
+        person_id: Uuid,
+        access: &AccessPolicy,
+    ) -> Result<Vec<PersonCredit>, DbErr>;
+    /// One page of the people credited on at least one title `access`
+    /// admits, ordered by name ignoring ASCII case -- by code point once
+    /// `A`-`Z` are folded to `a`-`z`, and nothing else is folded, so the
+    /// order cannot depend on a store's locale -- and then by id: those whose
+    /// name contains `query`, ignoring case, or everyone without one.
+    /// `query`'s `%` and `_` are themselves, not wildcards.
     async fn search(
         &self,
         query: Option<&str>,
+        access: &AccessPolicy,
         limit: u64,
         offset: u64,
     ) -> Result<Vec<Person>, DbErr>;
-    /// How many people [`Self::search`] would list for `query` across every
-    /// page.
-    async fn count(&self, query: Option<&str>) -> Result<u64, DbErr>;
+    /// How many people [`Self::search`] would list for `query` and `access`
+    /// across every page.
+    async fn count(&self, query: Option<&str>, access: &AccessPolicy) -> Result<u64, DbErr>;
 }
 
 /// The credits a set is stored as: each distinct `(person, role)` once, in
@@ -67,6 +73,7 @@ pub fn distinct_credits(credits: &[CreditEnrichment]) -> Vec<&CreditEnrichment> 
 pub mod in_memory {
     use super::*;
     use crate::models::catalog::TitleKind;
+    use crate::repositories::access_policy::in_memory::InMemoryTitleAccess;
     use parking_lot::RwLock;
     use std::collections::HashMap;
 
@@ -78,13 +85,24 @@ pub mod in_memory {
         role: CreditRole,
     }
 
+    /// The in-memory double. The `Default` applies access policies over no
+    /// titles; see [`InMemoryTitleAccess`].
     #[derive(Debug, Default)]
     pub struct InMemoryPersonRepository {
         people: RwLock<HashMap<Uuid, Person>>,
         credits: RwLock<Vec<StoredCredit>>,
+        titles: InMemoryTitleAccess,
     }
 
     impl InMemoryPersonRepository {
+        /// A double applying access policies over the titles `titles` reads.
+        pub fn with_titles(titles: InMemoryTitleAccess) -> Self {
+            Self {
+                titles,
+                ..Self::default()
+            }
+        }
+
         fn upsert_person(&self, credit: &CreditEnrichment) -> Uuid {
             let mut people = self.people.write();
             let existing = people
@@ -142,9 +160,14 @@ pub mod in_memory {
                 .collect()
         }
 
-        fn matching(&self, query: Option<&str>) -> Vec<Person> {
-            let credited: std::collections::HashSet<Uuid> =
-                self.credits.read().iter().map(|c| c.person_id).collect();
+        fn matching(&self, query: Option<&str>, access: &AccessPolicy) -> Vec<Person> {
+            let credited: std::collections::HashSet<Uuid> = self
+                .credits
+                .read()
+                .iter()
+                .filter(|c| self.titles.admits_kind(access, c.title_kind, c.title_id))
+                .map(|c| c.person_id)
+                .collect();
             let needle = query.map(str::to_lowercase);
             let mut people: Vec<Person> = self
                 .people
@@ -200,12 +223,17 @@ pub mod in_memory {
             Ok(self.people.read().get(&id).cloned())
         }
 
-        async fn filmography(&self, person_id: Uuid) -> Result<Vec<PersonCredit>, DbErr> {
+        async fn filmography(
+            &self,
+            person_id: Uuid,
+            access: &AccessPolicy,
+        ) -> Result<Vec<PersonCredit>, DbErr> {
             Ok(self
                 .credits
                 .read()
                 .iter()
                 .filter(|c| c.person_id == person_id)
+                .filter(|c| self.titles.admits_kind(access, c.title_kind, c.title_id))
                 .map(|c| PersonCredit {
                     title_kind: c.title_kind,
                     title_id: c.title_id,
@@ -217,19 +245,20 @@ pub mod in_memory {
         async fn search(
             &self,
             query: Option<&str>,
+            access: &AccessPolicy,
             limit: u64,
             offset: u64,
         ) -> Result<Vec<Person>, DbErr> {
             Ok(self
-                .matching(query)
+                .matching(query, access)
                 .into_iter()
                 .skip(usize::try_from(offset).unwrap_or(usize::MAX))
                 .take(usize::try_from(limit).unwrap_or(usize::MAX))
                 .collect())
         }
 
-        async fn count(&self, query: Option<&str>) -> Result<u64, DbErr> {
-            Ok(self.matching(query).len() as u64)
+        async fn count(&self, query: Option<&str>, access: &AccessPolicy) -> Result<u64, DbErr> {
+            Ok(self.matching(query, access).len() as u64)
         }
     }
 }
@@ -237,32 +266,58 @@ pub mod in_memory {
 #[mutants::skip]
 #[cfg(any(test, feature = "test-utils"))]
 pub mod in_memory_fixture {
+    use std::sync::Arc;
+
+    use uuid::Uuid;
+
     use super::PersonRepository;
     use super::in_memory::InMemoryPersonRepository;
+    use crate::repositories::access_policy::in_memory::InMemoryTitleAccess;
     use crate::repositories::contract::fixture::PersonRepositoryFixture;
     use crate::repositories::movie::in_memory::InMemoryMovieRepository;
     use crate::repositories::show::in_memory::InMemoryShowRepository;
     use crate::repositories::{MovieRepository, ShowRepository};
 
-    /// The hermetic instantiation of the person contract.
-    #[derive(Debug, Default)]
+    /// The hermetic instantiation of the person contract, the person double
+    /// reading the title doubles to apply a policy.
+    #[derive(Debug)]
     pub struct InMemoryFixture {
         repo: InMemoryPersonRepository,
-        movies: InMemoryMovieRepository,
-        shows: InMemoryShowRepository,
+        movies: Arc<InMemoryMovieRepository>,
+        shows: Arc<InMemoryShowRepository>,
     }
 
+    impl Default for InMemoryFixture {
+        fn default() -> Self {
+            let movies = Arc::new(InMemoryMovieRepository::default());
+            let shows = Arc::new(InMemoryShowRepository::default());
+            Self {
+                repo: InMemoryPersonRepository::with_titles(InMemoryTitleAccess::new(
+                    movies.clone(),
+                    shows.clone(),
+                )),
+                movies,
+                shows,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
     impl PersonRepositoryFixture for InMemoryFixture {
         fn repo(&self) -> &dyn PersonRepository {
             &self.repo
         }
 
         fn movies(&self) -> &dyn MovieRepository {
-            &self.movies
+            self.movies.as_ref()
         }
 
         fn shows(&self) -> &dyn ShowRepository {
-            &self.shows
+            self.shows.as_ref()
+        }
+
+        async fn new_library(&self) -> Uuid {
+            Uuid::new_v4()
         }
     }
 }

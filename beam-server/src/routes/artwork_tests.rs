@@ -168,7 +168,10 @@ mod tests {
         let uncredited = credited_person(&fixture, "3", Some(PORTRAIT_URL)).await;
         let last_title = fixture
             .people
-            .filmography(uncredited)
+            .filmography(
+                uncredited,
+                &beam_domain::models::access::AccessPolicy::unrestricted(),
+            )
             .await
             .expect("the filmography is read")[0]
             .title_id;
@@ -257,7 +260,14 @@ mod tests {
         let unpictured = collection_of_one(&fixture, "2", None).await;
         // Pictured, then left by its only movie: no longer served.
         let abandoned = collection_of_one(&fixture, "3", Some(COLLECTION_POSTER_URL)).await;
-        let leaver = fixture.collections.movie_ids(abandoned).await.unwrap()[0];
+        let leaver = fixture
+            .collections
+            .movie_ids(
+                abandoned,
+                &beam_domain::models::access::AccessPolicy::unrestricted(),
+            )
+            .await
+            .unwrap()[0];
         fixture
             .collections
             .set_movie_collection(leaver, None)

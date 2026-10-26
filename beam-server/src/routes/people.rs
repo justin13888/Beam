@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 use crate::models::{PersonConnection, PersonDetail};
 use crate::routes::api_error::{PeopleSearchError, PersonLookupError, SessionAuth};
+use crate::routes::playback::caller_access;
 use crate::routes::tags::Media;
 use crate::services::people::PeopleError;
 use crate::state::AppState;
@@ -37,10 +38,11 @@ pub struct PersonPath {
 /// Search the people credited on the library's titles, by name.
 ///
 /// People come from provider enrichment: the cast and key crew of each
-/// matched title. The list is ordered by name, ignoring case.
+/// matched title. The list is ordered by name, ignoring case. A person
+/// credited only on titles the caller's access policy hides is not listed.
 #[kynos::get("/people", tag = Media, operation_id = "searchPeople")]
 pub async fn search_people(
-    _auth: SessionAuth,
+    auth: SessionAuth,
     Query(params): Query<PeopleQuery>,
     Inject(state): Inject<AppState>,
 ) -> Result<Json<PersonConnection>, PeopleSearchError> {
@@ -49,7 +51,15 @@ pub async fn search_people(
         first,
         after,
     } = params;
-    match state.services.people.search(query, first, after).await {
+    let (_, policy) = caller_access(&state, &auth)
+        .await
+        .map_err(|err| PeopleSearchError::Internal(err.to_string()))?;
+    match state
+        .services
+        .people
+        .search(query, &policy, first, after)
+        .await
+    {
         Ok(connection) => Ok(Json(connection)),
         Err(PeopleError::InvalidCursor(detail)) => Err(PeopleSearchError::InvalidCursor(detail)),
         Err(PeopleError::InvalidPagination(detail)) => {
@@ -64,15 +74,21 @@ pub async fn search_people(
 
 /// One person and their filmography: every title in the library they are in
 /// the cast or crew of.
+///
+/// Titles the caller's access policy hides are left out, and a person
+/// credited only on such titles answers `404`, as an unknown id does.
 #[kynos::get("/people/{id}", tag = Media, operation_id = "getPerson")]
 pub async fn get_person(
-    _auth: SessionAuth,
+    auth: SessionAuth,
     Path(path): Path<PersonPath>,
     Inject(state): Inject<AppState>,
 ) -> Result<Json<PersonDetail>, PersonLookupError> {
+    let (_, policy) = caller_access(&state, &auth)
+        .await
+        .map_err(|err| PersonLookupError::Internal(err.to_string()))?;
     // A failed read is a 500: answering 404 would tell the client the person
     // is gone when the server only failed to read them.
-    match state.services.people.detail(path.id).await {
+    match state.services.people.detail(path.id, &policy).await {
         Ok(Some(detail)) => Ok(Json(detail)),
         Ok(None) => Err(PersonLookupError::PersonNotFound(format!(
             "person {} not found",

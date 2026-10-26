@@ -6,8 +6,12 @@ use sea_orm::{DatabaseConnection, DbErr};
 use uuid::Uuid;
 
 use beam_domain::models::Genre;
+use beam_domain::models::access::AccessPolicy;
+use beam_domain::models::catalog::TitleKind;
 use beam_domain::repositories::GenreRepository;
 use beam_domain::repositories::genre::{slugify, sort_genre_names};
+
+use crate::repositories::access_sql::AccessConditions;
 
 /// SQL-based implementation of the GenreRepository trait.
 #[derive(Debug, Clone)]
@@ -145,6 +149,37 @@ impl GenreRepository for SqlGenreRepository {
         use sea_orm::EntityTrait;
 
         let models = genre::Entity::find().all(self.db.as_ref()).await?;
+        Ok(models.into_iter().map(Genre::from).collect())
+    }
+
+    async fn find_carried(&self, access: &AccessPolicy) -> Result<Vec<Genre>, DbErr> {
+        use beam_entity::genre;
+        use sea_orm::{DbBackend, FromQueryResult, Statement, Value};
+
+        let mut values: Vec<Value> = Vec::new();
+        let conditions = AccessConditions::bind(access, |value| {
+            values.push(value);
+            format!("${}", values.len())
+        });
+        let carried_by = |junction: &str, kind: TitleKind, owner: &str| {
+            let visible = conditions
+                .on_id(kind, &format!("j.{owner}"))
+                .map(|visible| format!(" AND {visible}"))
+                .unwrap_or_default();
+            format!("EXISTS (SELECT 1 FROM {junction} j WHERE j.genre_id = g.id{visible})")
+        };
+        let sql = format!(
+            "SELECT g.id, g.name, g.slug FROM genres g WHERE {} OR {}",
+            carried_by("movie_genres", TitleKind::Movie, "movie_id"),
+            carried_by("show_genres", TitleKind::Show, "show_id"),
+        );
+        let models = genre::Model::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            sql,
+            values,
+        ))
+        .all(self.db.as_ref())
+        .await?;
         Ok(models.into_iter().map(Genre::from).collect())
     }
 
