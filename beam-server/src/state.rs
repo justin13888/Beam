@@ -13,6 +13,7 @@ use beam_auth::utils::{
 };
 use beam_domain::providers::artwork::ArtworkFetcher;
 use beam_domain::providers::enrichment::{EnrichmentProvider, NoopEnrichmentProvider};
+use beam_domain::repositories::LanguagePreferenceRepository;
 use beam_domain::services::{Clock, RealClock};
 use beam_index::providers::artwork::{ArtworkFetchLimits, ReqwestArtworkFetcher};
 use beam_index::providers::cameo::{CameoEnrichmentProvider, CameoWiringConfig};
@@ -150,6 +151,9 @@ pub struct AppServices {
     pub notification: Arc<dyn NotificationService>,
     pub admin_log: Arc<dyn AdminLogService>,
     pub user_repo: Arc<dyn UserRepository>,
+    /// Each user's audio and subtitle languages (issue #264), read by the
+    /// sources route to name each source's default tracks.
+    pub language_preferences: Arc<dyn LanguagePreferenceRepository>,
     pub playback: Arc<dyn PlaybackService>,
     /// Distinct genre catalog, backing `GET /v1/genres`. Shared with the
     /// enrichment service, which populates it as titles are enriched.
@@ -541,6 +545,12 @@ impl AppServices {
             notification: notification_service,
             admin_log: admin_log_service,
             user_repo,
+            language_preferences: Arc::new(
+                beam_index::repositories::SqlLanguagePreferenceRepository::with_clock(
+                    db.clone(),
+                    clock.clone(),
+                ),
+            ),
             playback: playback_service,
             genre_repo,
             library_repo,

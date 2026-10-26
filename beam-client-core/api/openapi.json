@@ -967,7 +967,7 @@
           "media"
         ],
         "summary": "List the playable/downloadable source files for a playable media id.",
-        "description": "Accepts a movie id or an episode id (both are \"playable\" ids). A show id is\nrejected with 400 -- shows have no files of their own, so callers request\nsources for the show's individual episode ids instead. An episode with no\nfiles yet returns an empty list (a valid, \"not yet playable\" response).\nThe list is a connection, but never paged: `items` is\nevery source, primary first.",
+        "description": "Accepts a movie id or an episode id (both are \"playable\" ids). A show id is\nrejected with 400 -- shows have no files of their own, so callers request\nsources for the show's individual episode ids instead. An episode with no\nfiles yet returns an empty list (a valid, \"not yet playable\" response).\nThe list is a connection, but never paged: `items` is\nevery source, primary first. Each source names the audio and subtitle\ntrack to start on for the caller, by their language preferences\n(`PUT /v1/me/language-preferences`).",
         "operationId": "getMediaSources",
         "parameters": [
           {
@@ -13851,6 +13851,283 @@
         ]
       }
     },
+    "/v1/me/language-preferences": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "The caller's audio and subtitle language preferences.",
+        "description": "A caller who never set any has none listed and forced subtitles only.",
+        "operationId": "getLanguagePreferences",
+        "responses": {
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden; Cross-origin request rejected; Malformed Origin/Referer header",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LanguagePreferenceSettings"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#internal"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BeamSession": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Replace the caller's audio and subtitle language preferences.",
+        "description": "One whole: what is not in the body is not kept. Answers what is now\nstored, each language as its ISO 639-2/B code. Takes effect on the caller's next `GET /v1/media/{id}/sources`, on every\ndevice they are signed in on.",
+        "operationId": "setLanguagePreferences",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LanguagePreferenceSettings"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden; Cross-origin request rejected; Malformed Origin/Referer header",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Payload Too Large",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Unsupported Media Type",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Entity; Validation failed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "about:blank"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#validation-failed"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LanguagePreferenceSettings"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#internal"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BeamSession": []
+          }
+        ]
+      }
+    },
     "/v1/auth/login": {
       "get": {
         "tags": [
@@ -16201,6 +16478,16 @@
             "type": "array",
             "description": "This file's subtitle tracks, as the source's `subtitle_tracks` lists\nthe first part's: a subtitle file beside a part times that part."
           },
+          "default_subtitle_track_index": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "maximum": 4294967295.0,
+            "minimum": 0.0,
+            "format": "uint32",
+            "description": "Which of this part's `subtitle_tracks` (from 0) to start it on for\nthe caller, chosen as the source's `default_subtitle_track_index` is,\nbeside the source's default audio track; absent for none."
+          },
           "stream_url": {
             "type": "string",
             "description": "Direct-play stream URL for this file."
@@ -16449,6 +16736,26 @@
             },
             "type": "array",
             "description": "Subtitle tracks: the file's own, by stream index, then the subtitle\nfiles beside it."
+          },
+          "default_audio_track_index": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "maximum": 4294967295.0,
+            "minimum": 0.0,
+            "format": "uint32",
+            "description": "Which of `audio_tracks` (from 0) to start on for the caller: the\nfirst of their preferred audio languages this source carries, else\nthe track the file marks default, else the first (issue #264).\nAbsent only for a source with no audio track."
+          },
+          "default_subtitle_track_index": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "maximum": 4294967295.0,
+            "minimum": 0.0,
+            "format": "uint32",
+            "description": "Which of `subtitle_tracks` (from 0) to start on for the caller, by\ntheir subtitle mode and languages (`GET /v1/me/language-preferences`)\nbeside the default audio track; absent to start without subtitles."
           },
           "stream_url": {
             "type": "string",
@@ -19367,6 +19674,45 @@
           "page_info"
         ],
         "description": "Every active session of the current user: what `GET /v1/sessions`\nreturns.\n\nA connection, as every `/v1` list is, though a user has few enough\nsessions that it is never paged: `items` is the whole list, both of\n`page_info`'s `has_*_page` flags are `false`, and it carries no cursors."
+      },
+      "SubtitleMode": {
+        "type": "string",
+        "enum": [
+          "off",
+          "forced_only",
+          "on"
+        ],
+        "description": "Whether the caller wants subtitles."
+      },
+      "LanguagePreferenceSettings": {
+        "properties": {
+          "audio_languages": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 16,
+            "description": "Audio languages, most preferred first. Empty: the file's default\ntrack."
+          },
+          "subtitle_languages": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 16,
+            "description": "Subtitle languages, most preferred first."
+          },
+          "subtitle_mode": {
+            "$ref": "#/components/schemas/SubtitleMode"
+          }
+        },
+        "type": "object",
+        "required": [
+          "audio_languages",
+          "subtitle_languages",
+          "subtitle_mode"
+        ],
+        "description": "The audio and subtitle languages the caller prefers, and whether they\nwant subtitles: what `GET /v1/media/{id}/sources` reads to name each\nsource's default audio and subtitle track.\n\nA language is sent as an ISO 639-1 or 639-2 code (`en`, `eng`), an\nEnglish name (`English`) or a BCP 47 tag (`en-GB`), and is answered as\nthe ISO 639-2/B code a track is tagged with (`eng`; `ger` for German,\nwhether sent as `de`, `deu` or `ger`). A language listed twice keeps its\nfirst place. Each list holds at most 16 languages."
       },
       "DeviceLoginStart": {
         "properties": {

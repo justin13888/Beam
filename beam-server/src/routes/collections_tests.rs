@@ -97,6 +97,7 @@ fn fixture_over(collections: Arc<dyn CollectionRepository>) -> Fixture {
         notification: base.services.notification.clone(),
         admin_log: base.services.admin_log.clone(),
         user_repo: base.services.user_repo.clone(),
+        language_preferences: base.services.language_preferences.clone(),
         playback: playback.clone(),
         genre_repo: genres,
         library_repo: base.services.library_repo.clone(),

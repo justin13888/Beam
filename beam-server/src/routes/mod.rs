@@ -10,6 +10,7 @@ pub mod enrichment;
 pub mod genres;
 pub mod health;
 pub mod lists;
+pub mod me;
 pub mod media;
 pub mod metrics_mw;
 pub mod middleware;
@@ -173,6 +174,10 @@ pub fn rest_routes() -> Router<AppState, Propagate, (), RestScopes> {
             auth::oidc_logout_all,
             auth::oidc_list_sessions,
             auth::oidc_delete_session,
+        ])
+        .mount(kynos::routes![
+            me::get_language_preferences,
+            me::set_language_preferences,
         ])
         // The operations that begin an OIDC flow, sharing one budget -- which
         // is what makes the auth class a class. Keyed by client only, so

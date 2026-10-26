@@ -18,6 +18,7 @@ use std::sync::Arc;
 use sea_orm::DbErr;
 use uuid::Uuid;
 
+use beam_domain::models::language_preferences::LanguagePreferences;
 use beam_domain::models::sidecar::{SidecarSubtitle, SubtitleFormat};
 use beam_domain::models::{Episode, MediaFile, MediaFileContent, MediaStream, StreamMetadata};
 use beam_domain::repositories::{
@@ -28,6 +29,9 @@ use beam_domain::utils::source_rank::{
     SourceRankKey, StackKey, rank_sources, stack_keys, stack_parts,
 };
 use beam_domain::utils::subtitle::is_text_subtitle_codec;
+use beam_domain::utils::track_selection::{
+    AudioCandidate, SubtitleCandidate, default_audio, default_subtitle,
+};
 
 use crate::models::{
     AudioTrack, DiscStructure, EpisodeSpan, MediaSource, SourcePart, SubtitleOrigin, SubtitleTrack,
@@ -399,6 +403,7 @@ fn build_source(
             size_bytes,
             duration_secs: duration.map(|d| d.as_secs_f64()),
             subtitle_tracks: tracks.subtitle.clone(),
+            default_subtitle_track_index: None,
             stream_url: stream_path(file_id),
             download_url: download_path(file_id),
         });
@@ -428,9 +433,58 @@ fn build_source(
         video_tracks,
         audio_tracks,
         subtitle_tracks,
+        default_audio_track_index: None,
+        default_subtitle_track_index: None,
         stream_url: stream_path(file_id),
         download_url: download_path(file_id),
     }
+}
+
+/// Name, on each of `sources` and each of its parts, the audio and subtitle
+/// track to start on for a viewer with `preferences` (issue #264).
+///
+/// Every part is started on a subtitle track beside the source's default
+/// audio track: the parts of one source share their audio, read from the
+/// first part, while each carries subtitle files of its own.
+pub fn apply_language_preferences(preferences: &LanguagePreferences, sources: &mut [MediaSource]) {
+    for source in sources {
+        let audio: Vec<AudioCandidate<'_>> = source
+            .audio_tracks
+            .iter()
+            .map(|track| AudioCandidate {
+                language: track.language.as_deref(),
+                is_default: track.is_default,
+            })
+            .collect();
+        let audio_position = default_audio(preferences, &audio);
+        let audio_language =
+            audio_position.and_then(|position| source.audio_tracks[position].language.clone());
+
+        let subtitle_index = |subtitles: &[SubtitleTrack]| {
+            let candidates: Vec<SubtitleCandidate<'_>> = subtitles
+                .iter()
+                .map(|track| SubtitleCandidate {
+                    language: track.language.as_deref(),
+                    is_default: track.is_default,
+                    is_forced: track.is_forced,
+                    is_hearing_impaired: track.is_hearing_impaired,
+                    is_text: track.is_text,
+                })
+                .collect();
+            default_subtitle(preferences, audio_language.as_deref(), &candidates).map(list_index)
+        };
+        source.default_audio_track_index = audio_position.map(list_index);
+        source.default_subtitle_track_index = subtitle_index(&source.subtitle_tracks);
+        for part in &mut source.parts {
+            part.default_subtitle_track_index = subtitle_index(&part.subtitle_tracks);
+        }
+    }
+}
+
+/// A position in a track list, as the wire carries it. A file holds far
+/// fewer than `u32::MAX` streams, so the saturation is never reached.
+fn list_index(position: usize) -> u32 {
+    u32::try_from(position).unwrap_or(u32::MAX)
 }
 
 fn stream_path(file_id: Uuid) -> String {

@@ -132,6 +132,7 @@ fn build(
         notification: base.services.notification.clone(),
         admin_log: base.services.admin_log.clone(),
         user_repo: users_dyn,
+        language_preferences: crate::routes::test_support::idle_language_preferences(),
         playback: base.services.playback.clone(),
         genre_repo: base.services.genre_repo.clone(),
         library_repo: base.services.library_repo.clone(),

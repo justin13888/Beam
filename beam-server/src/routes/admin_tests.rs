@@ -360,6 +360,7 @@ fn build_fixture(
         notification: notification.clone(),
         admin_log,
         user_repo: user_repo.clone(),
+        language_preferences: crate::routes::test_support::idle_language_preferences(),
         playback: crate::routes::test_support::in_memory_playback(
             Arc::new(beam_domain::services::TestClock::new()),
             Arc::new(beam_domain::repositories::file::in_memory::InMemoryFileRepository::default()),

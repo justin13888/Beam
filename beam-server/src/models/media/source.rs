@@ -56,6 +56,15 @@ pub struct MediaSource {
     /// Subtitle tracks: the file's own, by stream index, then the subtitle
     /// files beside it.
     pub subtitle_tracks: Vec<SubtitleTrack>,
+    /// Which of `audio_tracks` (from 0) to start on for the caller: the
+    /// first of their preferred audio languages this source carries, else
+    /// the track the file marks default, else the first (issue #264).
+    /// Absent only for a source with no audio track.
+    pub default_audio_track_index: Option<u32>,
+    /// Which of `subtitle_tracks` (from 0) to start on for the caller, by
+    /// their subtitle mode and languages (`GET /v1/me/language-preferences`)
+    /// beside the default audio track; absent to start without subtitles.
+    pub default_subtitle_track_index: Option<u32>,
     /// Direct-play stream URL for this file (Range-request capable, inline).
     pub stream_url: String,
     /// Download URL for this file (Range-request capable, `Content-Disposition: attachment`).
@@ -100,6 +109,10 @@ pub struct SourcePart {
     /// This file's subtitle tracks, as the source's `subtitle_tracks` lists
     /// the first part's: a subtitle file beside a part times that part.
     pub subtitle_tracks: Vec<SubtitleTrack>,
+    /// Which of this part's `subtitle_tracks` (from 0) to start it on for
+    /// the caller, chosen as the source's `default_subtitle_track_index` is,
+    /// beside the source's default audio track; absent for none.
+    pub default_subtitle_track_index: Option<u32>,
     /// Direct-play stream URL for this file.
     pub stream_url: String,
     /// Download URL for this file.

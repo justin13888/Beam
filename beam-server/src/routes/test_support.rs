@@ -505,6 +505,55 @@ pub(crate) fn open_access() -> Arc<crate::services::access::AccessService> {
     )
 }
 
+/// Language preferences nobody has set: every user has the defaults until a
+/// test replaces theirs.
+pub(crate) fn idle_language_preferences()
+-> Arc<dyn beam_domain::repositories::LanguagePreferenceRepository> {
+    Arc::new(
+        beam_domain::repositories::language_preferences::in_memory::InMemoryLanguagePreferenceRepository::default(),
+    )
+}
+
+/// [`make_app_state`] with `preferences` as its language preference store,
+/// every other seam shared.
+pub(crate) fn state_with_language_preferences(
+    preferences: Arc<dyn beam_domain::repositories::LanguagePreferenceRepository>,
+) -> AppState {
+    let base = make_app_state();
+    let services = AppServices {
+        hash: base.services.hash.clone(),
+        access: base.services.access.clone(),
+        library: base.services.library.clone(),
+        metadata: base.services.metadata.clone(),
+        subtitles: base.services.subtitles.clone(),
+        notification: base.services.notification.clone(),
+        admin_log: base.services.admin_log.clone(),
+        user_repo: base.services.user_repo.clone(),
+        language_preferences: preferences,
+        playback: base.services.playback.clone(),
+        genre_repo: base.services.genre_repo.clone(),
+        library_repo: base.services.library_repo.clone(),
+        file_repo: base.services.file_repo.clone(),
+        enrichment_repo: base.services.enrichment_repo.clone(),
+        enrichment_control: base.services.enrichment_control.clone(),
+        people: base.services.people.clone(),
+        lists: base.services.lists.clone(),
+        collections: base.services.collections.clone(),
+        movie_repo: base.services.movie_repo.clone(),
+        show_repo: base.services.show_repo.clone(),
+        artwork: base.services.artwork.clone(),
+        session_store: base.services.session_store.clone(),
+        oidc_client: base.services.oidc_client.clone(),
+        pending_auth_store: base.services.pending_auth_store.clone(),
+        device_auth_store: base.services.device_auth_store.clone(),
+        oidc_config: base.services.oidc_config.clone(),
+        watch_status: base.services.watch_status.clone(),
+        telemetry: base.services.telemetry.clone(),
+        playback_telemetry: base.services.playback_telemetry.clone(),
+    };
+    AppState::new(base.config.clone(), services, base.probe.clone(), None)
+}
+
 /// Subtitle delivery over an empty index: every lookup is a miss.
 pub(crate) fn idle_subtitles() -> Arc<dyn crate::services::subtitle::SubtitleService> {
     Arc::new(crate::services::subtitle::DbSubtitleService::new(
@@ -576,6 +625,7 @@ fn make_app_state_with_services(
         notification,
         admin_log,
         user_repo: Arc::new(InMemoryUserRepository::default()),
+        language_preferences: idle_language_preferences(),
         playback,
         genre_repo: Arc::new(
             beam_domain::repositories::genre::in_memory::InMemoryGenreRepository::default(),
