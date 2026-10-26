@@ -185,6 +185,18 @@ pub mod fixture {
         fn shows(&self) -> &dyn crate::repositories::ShowRepository;
     }
 
+    /// Everything the [`crate::person_repository_contract`] suite needs: the
+    /// repository under contract and the title repositories over the same
+    /// store, since a real Postgres holds a credit to its title by a foreign
+    /// key. Search and count are global, so a Postgres fixture must give each
+    /// test a store of its own.
+    pub trait PersonRepositoryFixture: Send + Sync {
+        /// The repository under contract, empty.
+        fn repo(&self) -> &dyn crate::repositories::PersonRepository;
+        fn movies(&self) -> &dyn crate::repositories::MovieRepository;
+        fn shows(&self) -> &dyn crate::repositories::ShowRepository;
+    }
+
     /// Everything the [`crate::playback_telemetry_repository_contract`] suite
     /// needs from a backing store. The counters reference nothing, so the
     /// repository is all there is -- but `summarize` and `prune_before` are
@@ -3534,6 +3546,7 @@ macro_rules! show_repository_contract {
                     backdrop_url: Some("https://img/b.jpg".to_string()),
                     rating: Some(9.5),
                     genres: Vec::new(),
+                    credits: None,
                 },
                 &locks,
             )
@@ -4546,6 +4559,7 @@ macro_rules! movie_repository_contract {
                 backdrop_url: Some("https://img/backdrop.jpg".to_string()),
                 rating: Some(8.2),
                 genres: Vec::new(),
+                credits: None,
             };
             // Each field locked alone: that one keeps the value it had before
             // enrichment, and every other takes the provider's.
@@ -6876,6 +6890,309 @@ macro_rules! genre_repository_contract {
                     .count(),
                 1
             );
+        }
+    };
+}
+
+/// Behavioural contract for [`crate::repositories::PersonRepository`]: a
+/// person is one row per provider id however many titles credit them, a
+/// title's credits are replaced whole, a filmography spans movies and shows,
+/// and search lists credited people by name, a page at a time.
+///
+/// `$setup` names an `async fn() -> impl PersonRepositoryFixture`.
+#[macro_export]
+macro_rules! person_repository_contract {
+    ($setup:path) => {
+        use ::uuid::Uuid;
+        use $crate::models::catalog::TitleKind;
+        use $crate::models::movie::CreateMovie;
+        use $crate::models::person::CreditRole;
+        use $crate::models::show::CreateShow;
+        use $crate::providers::enrichment::{CreditEnrichment, ExternalMediaRef};
+        use $crate::repositories::contract::fixture::PersonRepositoryFixture;
+
+        async fn new_movie(fixture: &impl PersonRepositoryFixture) -> Uuid {
+            fixture
+                .movies()
+                .find_or_create_by_identity(CreateMovie::new(
+                    format!("credited movie {}", Uuid::new_v4()),
+                    None,
+                    None,
+                ))
+                .await
+                .unwrap()
+                .id
+        }
+
+        async fn new_show(fixture: &impl PersonRepositoryFixture) -> Uuid {
+            fixture
+                .shows()
+                .find_or_create_by_identity(CreateShow::new(
+                    format!("credited show {}", Uuid::new_v4()),
+                    None,
+                ))
+                .await
+                .unwrap()
+                .id
+        }
+
+        fn cast(native: &str, name: &str, character: &str, billing_order: u32) -> CreditEnrichment {
+            CreditEnrichment {
+                person_ref: ExternalMediaRef::new("tmdb", native),
+                name: name.to_string(),
+                profile_url: Some(format!("https://image.example/{native}.jpg")),
+                role: CreditRole::Cast {
+                    character: Some(character.to_string()),
+                    billing_order,
+                },
+            }
+        }
+
+        fn crew(native: &str, name: &str, job: &str) -> CreditEnrichment {
+            CreditEnrichment {
+                person_ref: ExternalMediaRef::new("tmdb", native),
+                name: name.to_string(),
+                profile_url: None,
+                role: CreditRole::Crew {
+                    job: job.to_string(),
+                    department: Some("Directing".to_string()),
+                },
+            }
+        }
+
+        /// `(provider id, role)` of each credit, sorted, for comparing sets.
+        fn roles(credits: &[$crate::models::person::TitleCredit]) -> Vec<(String, String)> {
+            let mut roles: Vec<(String, String)> = credits
+                .iter()
+                .map(|c| (c.person.external_ref.clone(), format!("{:?}", c.role)))
+                .collect();
+            roles.sort();
+            roles
+        }
+
+        #[tokio::test]
+        async fn a_titles_credits_read_back_with_their_people() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let movie = new_movie(&fixture).await;
+            let series = new_show(&fixture).await;
+            repo.set_movie_credits(
+                movie,
+                &[
+                    cast("1", "Keanu Reeves", "Neo", 0),
+                    crew("2", "Lana Wachowski", "Director"),
+                ],
+            )
+            .await
+            .unwrap();
+            repo.set_show_credits(series, &[cast("3", "Bryan Cranston", "Walter White", 0)])
+                .await
+                .unwrap();
+
+            let credits = repo.movie_credits(movie).await.unwrap();
+            assert_eq!(credits.len(), 2);
+            let neo = credits
+                .iter()
+                .find(|c| c.person.external_ref == "tmdb:1")
+                .expect("the cast credit");
+            assert_eq!(neo.person.name, "Keanu Reeves");
+            assert_eq!(
+                neo.person.profile_url.as_deref(),
+                Some("https://image.example/1.jpg")
+            );
+            assert_eq!(
+                neo.role,
+                CreditRole::Cast {
+                    character: Some("Neo".to_string()),
+                    billing_order: 0,
+                }
+            );
+            let director = credits
+                .iter()
+                .find(|c| c.person.external_ref == "tmdb:2")
+                .expect("the crew credit");
+            assert_eq!(
+                director.role,
+                CreditRole::Crew {
+                    job: "Director".to_string(),
+                    department: Some("Directing".to_string()),
+                }
+            );
+            assert_eq!(director.person.profile_url, None);
+
+            let show_credits = repo.show_credits(series).await.unwrap();
+            assert_eq!(roles(&show_credits).len(), 1);
+            assert_eq!(show_credits[0].person.name, "Bryan Cranston");
+            assert!(
+                repo.show_credits(movie).await.unwrap().is_empty(),
+                "a movie's credits are not read as a show's"
+            );
+            assert!(repo.movie_credits(series).await.unwrap().is_empty());
+
+            let person = repo
+                .find_by_id(neo.person.id)
+                .await
+                .unwrap()
+                .expect("the person is stored");
+            assert_eq!(person, neo.person);
+            assert_eq!(repo.find_by_id(Uuid::new_v4()).await.unwrap(), None);
+        }
+
+        #[tokio::test]
+        async fn setting_credits_replaces_the_set_and_keeps_one_person_per_provider_id() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let first = new_movie(&fixture).await;
+            let second = new_movie(&fixture).await;
+
+            repo.set_movie_credits(
+                first,
+                &[
+                    cast("10", "Carrie-Anne Moss", "Trinity", 1),
+                    crew("11", "Old Crew", "Director"),
+                ],
+            )
+            .await
+            .unwrap();
+            // The second set replaces the first, and a credit listed twice is
+            // stored once.
+            repo.set_movie_credits(
+                first,
+                &[
+                    cast("10", "Carrie-Anne Moss", "Trinity", 1),
+                    cast("10", "Carrie-Anne Moss", "Trinity", 1),
+                ],
+            )
+            .await
+            .unwrap();
+            // The same person on another title, under a refreshed name and
+            // portrait, is the person already stored.
+            let mut renamed = cast("10", "Carrie Anne Moss", "Trinity", 0);
+            renamed.profile_url = Some("https://image.example/new.jpg".to_string());
+            repo.set_movie_credits(second, &[renamed]).await.unwrap();
+
+            let first_credits = repo.movie_credits(first).await.unwrap();
+            assert_eq!(first_credits.len(), 1, "{first_credits:?}");
+            let second_credits = repo.movie_credits(second).await.unwrap();
+            assert_eq!(second_credits.len(), 1);
+            assert_eq!(first_credits[0].person.id, second_credits[0].person.id);
+            assert_eq!(second_credits[0].person.name, "Carrie Anne Moss");
+            assert_eq!(
+                first_credits[0].person.name, "Carrie Anne Moss",
+                "a person has one name, the latest a provider gave"
+            );
+            assert_eq!(
+                first_credits[0].person.profile_url.as_deref(),
+                Some("https://image.example/new.jpg")
+            );
+
+            repo.set_movie_credits(first, &[]).await.unwrap();
+            assert!(repo.movie_credits(first).await.unwrap().is_empty());
+            assert_eq!(repo.movie_credits(second).await.unwrap().len(), 1);
+        }
+
+        #[tokio::test]
+        async fn a_filmography_spans_movies_and_shows() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let movie = new_movie(&fixture).await;
+            let series = new_show(&fixture).await;
+            repo.set_movie_credits(
+                movie,
+                &[
+                    cast("20", "Actor", "Hero", 0),
+                    crew("20", "Actor", "Director"),
+                ],
+            )
+            .await
+            .unwrap();
+            repo.set_show_credits(series, &[cast("20", "Actor", "Narrator", 4)])
+                .await
+                .unwrap();
+
+            let person = repo.movie_credits(movie).await.unwrap()[0].person.id;
+            let mut filmography: Vec<(TitleKind, Uuid, String)> = repo
+                .filmography(person)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|c| (c.title_kind, c.title_id, format!("{:?}", c.role)))
+                .collect();
+            filmography.sort_by(|a, b| a.2.cmp(&b.2));
+            assert_eq!(filmography.len(), 3, "{filmography:?}");
+            assert!(
+                filmography
+                    .iter()
+                    .any(|(kind, id, role)| *kind == TitleKind::Movie
+                        && *id == movie
+                        && role.contains("Hero"))
+            );
+            assert!(
+                filmography
+                    .iter()
+                    .any(|(kind, id, role)| *kind == TitleKind::Movie
+                        && *id == movie
+                        && role.contains("Director"))
+            );
+            assert!(
+                filmography
+                    .iter()
+                    .any(|(kind, id, role)| *kind == TitleKind::Show
+                        && *id == series
+                        && role.contains("Narrator"))
+            );
+            assert!(repo.filmography(Uuid::new_v4()).await.unwrap().is_empty());
+        }
+
+        #[tokio::test]
+        async fn search_lists_credited_people_by_name_a_page_at_a_time() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let movie = new_movie(&fixture).await;
+            let other = new_movie(&fixture).await;
+            repo.set_movie_credits(
+                movie,
+                &[
+                    cast("30", "zoe Smith", "A", 0),
+                    cast("31", "Adam Smithers", "B", 1),
+                    cast("32", "Mia Jones", "C", 2),
+                    cast("33", "100%_Real", "D", 3),
+                ],
+            )
+            .await
+            .unwrap();
+            // Credited once, then no more: no longer listed.
+            repo.set_movie_credits(other, &[cast("34", "Gone Smith", "E", 0)])
+                .await
+                .unwrap();
+            repo.set_movie_credits(other, &[]).await.unwrap();
+
+            let names = |people: Vec<$crate::models::person::Person>| -> Vec<String> {
+                people.into_iter().map(|p| p.name).collect()
+            };
+            assert_eq!(
+                names(repo.search(Some("SMITH"), 10, 0).await.unwrap()),
+                ["Adam Smithers", "zoe Smith"],
+                "a case-insensitive substring, ordered by name ignoring case"
+            );
+            assert_eq!(repo.count(Some("smith")).await.unwrap(), 2);
+            assert_eq!(
+                names(repo.search(None, 2, 0).await.unwrap()),
+                ["100%_Real", "Adam Smithers"]
+            );
+            assert_eq!(
+                names(repo.search(None, 2, 2).await.unwrap()),
+                ["Mia Jones", "zoe Smith"]
+            );
+            assert!(repo.search(None, 2, 4).await.unwrap().is_empty());
+            assert_eq!(repo.count(None).await.unwrap(), 4);
+            assert_eq!(
+                names(repo.search(Some("%_"), 10, 0).await.unwrap()),
+                ["100%_Real"],
+                "`%` and `_` match only themselves"
+            );
+            assert_eq!(repo.count(Some("_")).await.unwrap(), 1);
+            assert!(repo.search(Some("nobody"), 10, 0).await.unwrap().is_empty());
         }
     };
 }

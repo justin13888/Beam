@@ -6,11 +6,12 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::models::{
-    ArtworkKind, ArtworkVariant, EpisodeDetail, EpisodeMetadata, ExternalIdentifiers,
-    MediaMetadata, MediaSource, MovieMetadata, Ratings, SeasonDetail, SeasonMetadata, ShowDates,
-    ShowMetadata, ShowRef, Title, UserTitleState, artwork_path,
+    ArtworkKind, ArtworkVariant, CastCredit, CrewCredit, EpisodeDetail, EpisodeMetadata,
+    ExternalIdentifiers, MediaMetadata, MediaSource, MovieMetadata, Ratings, SeasonDetail,
+    SeasonMetadata, ShowDates, ShowMetadata, ShowRef, Title, UserTitleState, artwork_path,
 };
 use crate::services::cursor;
+use crate::services::people::title_credits;
 use crate::services::sources::{PrimarySource, SourceCatalog};
 use beam_domain::models::catalog::{
     self, CatalogFilters, CatalogPosition, CatalogQuery, CatalogSort, CatalogSortField, Seek,
@@ -18,7 +19,7 @@ use beam_domain::models::catalog::{
 };
 use beam_domain::repositories::genre::slugify;
 use beam_domain::repositories::{
-    CatalogRepository, GenreRepository, MovieRepository, ShowRepository,
+    CatalogRepository, GenreRepository, MovieRepository, PersonRepository, ShowRepository,
 };
 use beam_domain::utils::next_up::{Neighbours, neighbours};
 
@@ -147,6 +148,7 @@ pub struct DbMetadataService {
     sources: Arc<SourceCatalog>,
     catalog_repo: Arc<dyn CatalogRepository>,
     genre_repo: Arc<dyn GenreRepository>,
+    person_repo: Arc<dyn PersonRepository>,
 }
 
 /// Every store [`DbMetadataService`] reads.
@@ -158,6 +160,8 @@ pub struct MetadataRepositories {
     pub sources: Arc<SourceCatalog>,
     pub catalog: Arc<dyn CatalogRepository>,
     pub genres: Arc<dyn GenreRepository>,
+    /// A title's cast and crew, which its detail lists (issue #261).
+    pub people: Arc<dyn PersonRepository>,
 }
 
 fn internal(err: impl std::fmt::Display) -> MetadataError {
@@ -220,10 +224,15 @@ impl From<PrimarySource> for MovieFiles {
     }
 }
 
+/// A title's cast and crew, as its detail lists them; `None` in a browse
+/// result, which does not read them.
+type Credits = Option<(Vec<CastCredit>, Vec<CrewCredit>)>;
+
 fn movie_metadata(
     movie: beam_domain::models::Movie,
     genres: Vec<String>,
     files: MovieFiles,
+    credits: Credits,
 ) -> MediaMetadata {
     let beam_domain::models::Movie {
         id,
@@ -252,6 +261,7 @@ fn movie_metadata(
         file_id,
         source_count,
     } = files;
+    let (cast, crew) = credits.unzip();
     MediaMetadata::Movie(MovieMetadata {
         id,
         title: Title {
@@ -274,6 +284,8 @@ fn movie_metadata(
         file_id,
         source_count,
         user_state: UserTitleState::default(),
+        cast,
+        crew,
     })
 }
 
@@ -282,6 +294,7 @@ fn show_metadata(
     genres: Vec<String>,
     counts: ShowChildCounts,
     seasons: Vec<SeasonMetadata>,
+    credits: Credits,
 ) -> MediaMetadata {
     let beam_domain::models::Show {
         id,
@@ -306,6 +319,7 @@ fn show_metadata(
         seasons: season_count,
         episodes: episode_count,
     } = counts;
+    let (cast, crew) = credits.unzip();
     MediaMetadata::Show(ShowMetadata {
         id,
         title: Title {
@@ -325,6 +339,8 @@ fn show_metadata(
         episode_count,
         seasons,
         user_state: None,
+        cast,
+        crew,
     })
 }
 
@@ -381,6 +397,7 @@ impl DbMetadataService {
             sources,
             catalog,
             genres,
+            people,
         } = repositories;
         Self {
             movie_repo: movies,
@@ -388,6 +405,7 @@ impl DbMetadataService {
             sources,
             catalog_repo: catalog,
             genre_repo: genres,
+            person_repo: people,
         }
     }
 
@@ -410,7 +428,13 @@ impl DbMetadataService {
             .map_err(internal)?
             .remove(&movie.id)
             .unwrap_or_default();
-        Ok(movie_metadata(movie, genres, files))
+        let credits = title_credits(
+            self.person_repo
+                .movie_credits(movie.id)
+                .await
+                .map_err(internal)?,
+        );
+        Ok(movie_metadata(movie, genres, files, Some(credits)))
     }
 
     /// Build MediaMetadata for a show by its DB model
@@ -452,7 +476,13 @@ impl DbMetadataService {
             seasons: seasons.len() as u32,
             episodes: episode_count,
         };
-        Ok(show_metadata(show, genres, counts, seasons))
+        let credits = title_credits(
+            self.person_repo
+                .show_credits(show.id)
+                .await
+                .map_err(internal)?,
+        );
+        Ok(show_metadata(show, genres, counts, seasons, Some(credits)))
     }
 
     /// One episode's metadata, its primary source read from its files.
@@ -548,12 +578,12 @@ impl DbMetadataService {
             .filter_map(|position| match position.kind {
                 catalog::TitleKind::Movie => movies.remove(&position.id).map(|movie| {
                     let genres = movie_genres.remove(&movie.id).unwrap_or_default();
-                    movie_metadata(movie, genres, MovieFiles::default())
+                    movie_metadata(movie, genres, MovieFiles::default(), None)
                 }),
                 catalog::TitleKind::Show => shows.remove(&position.id).map(|show| {
                     let genres = show_genres.remove(&show.id).unwrap_or_default();
                     let counts = counts.get(&show.id).copied().unwrap_or_default();
-                    show_metadata(show, genres, counts, vec![])
+                    show_metadata(show, genres, counts, vec![], None)
                 }),
             })
             .collect())

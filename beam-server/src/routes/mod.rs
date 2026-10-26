@@ -11,6 +11,7 @@ pub mod health;
 pub mod media;
 pub mod metrics_mw;
 pub mod middleware;
+pub mod people;
 pub mod playback;
 pub mod rate_limit;
 pub mod stream;
@@ -82,13 +83,15 @@ pub fn rest_routes() -> Router<AppState, Propagate, (), RestScopes> {
             media::get_episode_detail,
             media::get_season_detail,
         ])
+        .mount(kynos::routes![people::get_person])
         // `browse_media` fans out into metadata queries, so it is the most
-        // expensive read path and the one worth a budget. Its own group: two
-        // `RateLimit`s on one operation would both declare a 429 and both add
-        // `X-RateLimit-*`, which Kynos refuses at build time.
+        // expensive read path and the one worth a budget; people search is a
+        // search too, and shares it. Their own group: two `RateLimit`s on one
+        // operation would both declare a 429 and both add `X-RateLimit-*`,
+        // which Kynos refuses at build time.
         .group(
             Group::new("/")
-                .mount(kynos::routes![media::browse_media])
+                .mount(kynos::routes![media::browse_media, people::search_people])
                 .intercept(BeamRateLimit::interceptor(Class::Search)),
         )
         .mount(kynos::routes![

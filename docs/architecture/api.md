@@ -26,10 +26,12 @@ role.
 |---|---|---|
 | `/v1/health` | GET | Deep health check (public): probes the database and returns `200` `{status:"healthy"}` or `503` `{status:"degraded"}` with per-dependency `checks` (each `{status: "ok" \| "error", detail}`, `detail` the failure reason), `checked_at` and process `uptime_secs` |
 | `/v1/media` | GET | Browse/search catalog (cursor pagination, filters, sort) |
-| `/v1/media/{id}` | GET | Full metadata for one movie or show |
+| `/v1/media/{id}` | GET | Full metadata for one movie or show, with its `cast` (billing order) and key `crew` (by department and job) from enrichment; both are absent in a browse result |
+| `/v1/people` | GET | People search: the cast and crew credited in the library whose name contains `query` (ignoring case; every credited person without it), by name. A `PersonConnection` paged by `first` (1-100, default 20) and `after`, with `total`; shares the `search` rate-limit class with `/v1/media` |
+| `/v1/people/{id}` | GET | One person (`PersonDetail`) and their filmography: `cast` and `crew` credits in the library, newest title first; `404` `person-not-found` |
 | `/v1/media/{id}/sources` | GET | Playable/downloadable source files for a movie or an episode, primary first, each with its video, audio and subtitle tracks |
 | `/v1/genres` | GET | Every genre in the catalog, for filter chips: a `GenreConnection`, never paged |
-| `/v1/artwork/{kind}/{id}/{variant}` | GET, HEAD | Poster, backdrop or thumbnail art, fetched from the provider once and served from Beam's cache. `kind` is `movie`/`show`/`season`/`episode`; `variant` is `poster`/`backdrop`/`thumbnail` |
+| `/v1/artwork/{kind}/{id}/{variant}` | GET, HEAD | Poster, backdrop or thumbnail art, and people's portraits, fetched from the provider once and served from Beam's cache. `kind` is `movie`/`show`/`season`/`episode`/`person`; `variant` is `poster`/`backdrop`/`thumbnail`/`profile` (a person has only `profile`) |
 | `/v1/libraries`, `/v1/libraries/{id}`, `/v1/libraries/{id}/files` | GET | Library listing (a `LibraryConnection`, never paged) and contents: a `LibraryFileConnection` paged by `first` (1-500, default 100) and `after`, by stored path then id. File paths are relative to the library root, in the listing and inside its cursor (NFR-108); another library's cursor is `400 #invalid-cursor` |
 | `/v1/files/{fileId}/stream` | GET, HEAD | Direct-play byte-range streaming (see `streaming.md`) |
 | `/v1/files/{fileId}/download` | GET, HEAD | Full-file download (attachment) |

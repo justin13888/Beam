@@ -4,6 +4,7 @@
 
 pub mod admin_log;
 pub mod applied_nfo;
+pub mod credit;
 pub mod device_auth;
 pub mod episode;
 pub mod files;
@@ -17,6 +18,7 @@ pub mod movie;
 pub mod movie_entry;
 pub mod movie_genre;
 pub mod pending_auth;
+pub mod person;
 pub mod playback_rebuffer_count;
 pub mod playback_start_count;
 pub mod playback_switch_count;
@@ -30,6 +32,7 @@ pub mod watch_state;
 
 pub use admin_log::Entity as AdminLog;
 pub use applied_nfo::Entity as AppliedNfo;
+pub use credit::Entity as Credit;
 pub use device_auth::Entity as DeviceAuth;
 pub use episode::Entity as Episode;
 pub use files::Entity as Files;
@@ -43,6 +46,7 @@ pub use movie::Entity as Movie;
 pub use movie_entry::Entity as MovieEntry;
 pub use movie_genre::Entity as MovieGenre;
 pub use pending_auth::Entity as PendingAuth;
+pub use person::Entity as Person;
 pub use playback_rebuffer_count::Entity as PlaybackRebufferCount;
 pub use playback_start_count::Entity as PlaybackStartCount;
 pub use playback_switch_count::Entity as PlaybackSwitchCount;

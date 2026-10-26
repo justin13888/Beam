@@ -223,6 +223,10 @@ fn make_test_state(files: Vec<LocatedFile>) -> TestFixture {
             .services
             .enrichment_control
             .clone(),
+        people: crate::routes::test_support::idle_people(
+            Arc::new(beam_domain::repositories::movie::in_memory::InMemoryMovieRepository::default()),
+            Arc::new(beam_domain::repositories::show::in_memory::InMemoryShowRepository::default()),
+        ),
         movie_repo: Arc::new(
             beam_domain::repositories::movie::in_memory::InMemoryMovieRepository::default(),
         ),

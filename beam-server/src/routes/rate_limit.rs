@@ -83,7 +83,7 @@ struct Bucket {
 pub enum Class {
     /// `/v1/auth/login`, `/v1/auth/callback` and `/v1/auth/device`.
     Auth,
-    /// `GET /v1/media`.
+    /// `GET /v1/media` and `GET /v1/people`, one budget between them.
     Search,
     /// `POST /v1/auth/device/token`.
     DevicePoll,

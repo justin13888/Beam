@@ -71,6 +71,7 @@ mod tests {
             file_repo: base.services.file_repo.clone(),
             enrichment_repo: base.services.enrichment_repo.clone(),
             enrichment_control: base.services.enrichment_control.clone(),
+            people: crate::routes::test_support::idle_people(movies.clone(), shows.clone()),
             movie_repo: movies.clone(),
             show_repo: shows.clone(),
             artwork,
@@ -409,6 +410,9 @@ mod tests {
                 ),
             ),
             genres,
+            people: Arc::new(
+                beam_domain::repositories::person::in_memory::InMemoryPersonRepository::default(),
+            ),
         });
         let Some(MediaMetadata::Show(published)) = metadata
             .get_media_metadata(show.id)

@@ -11,6 +11,7 @@ pub mod media_info;
 pub mod metadata;
 pub mod notification;
 pub mod offset_cursor;
+pub mod people;
 pub mod playback;
 pub mod playback_telemetry;
 pub mod sources;

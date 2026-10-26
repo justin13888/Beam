@@ -134,6 +134,9 @@ mod tests {
             movies,
             shows,
             genres,
+            people: Arc::new(
+                beam_domain::repositories::person::in_memory::InMemoryPersonRepository::default(),
+            ),
         })
     }
 
@@ -1758,6 +1761,7 @@ mod browse {
         movies: Arc<InMemoryMovieRepository>,
         shows: Arc<InMemoryShowRepository>,
         genres: Arc<InMemoryGenreRepository>,
+        people: Arc<beam_domain::repositories::person::in_memory::InMemoryPersonRepository>,
     }
 
     impl Library {
@@ -1766,6 +1770,7 @@ mod browse {
                 movies: Arc::default(),
                 shows: Arc::default(),
                 genres: Arc::default(),
+                people: Arc::default(),
             }
         }
 
@@ -1784,6 +1789,7 @@ mod browse {
                 sources: super::empty_sources(),
                 catalog,
                 genres: self.genres.clone(),
+                people: self.people.clone(),
             })
         }
 
@@ -1984,6 +1990,87 @@ mod browse {
         }
     }
 
+    /// A detail lists the title's cast in billing order and its crew by
+    /// department (issue #261); a browse result, which reads no credits,
+    /// carries neither.
+    #[tokio::test]
+    async fn a_detail_lists_cast_and_crew_and_a_browse_result_does_not() {
+        use beam_domain::models::person::CreditRole;
+        use beam_domain::providers::enrichment::{CreditEnrichment, ExternalMediaRef};
+        use beam_domain::repositories::PersonRepository;
+
+        let credit = |native: &str, name: &str, role: CreditRole| CreditEnrichment {
+            person_ref: ExternalMediaRef::new("tmdb", native),
+            name: name.to_string(),
+            profile_url: None,
+            role,
+        };
+        let cast = |billing_order: u32, character: &str| CreditRole::Cast {
+            character: Some(character.to_string()),
+            billing_order,
+        };
+        let library = Library::new();
+        let movie = library.movie("Heat").await;
+        let show = library.full_show("Severance").await;
+        library
+            .people
+            .set_movie_credits(
+                movie,
+                &[
+                    credit(
+                        "1",
+                        "Michael Mann",
+                        CreditRole::Crew {
+                            job: "Director".to_string(),
+                            department: Some("Directing".to_string()),
+                        },
+                    ),
+                    credit("2", "Robert De Niro", cast(1, "Neil McCauley")),
+                    credit("3", "Al Pacino", cast(0, "Vincent Hanna")),
+                ],
+            )
+            .await
+            .unwrap();
+        library
+            .people
+            .set_show_credits(show, &[credit("4", "Adam Scott", cast(0, "Mark Scout"))])
+            .await
+            .unwrap();
+        let service = library.service();
+
+        let Some(MediaMetadata::Movie(detail)) = service.get_media_metadata(movie).await.unwrap()
+        else {
+            panic!("the movie resolves");
+        };
+        let cast_list = detail.cast.expect("a detail carries its cast");
+        let names: Vec<&str> = cast_list.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["Al Pacino", "Robert De Niro"]);
+        assert_eq!(cast_list[0].character.as_deref(), Some("Vincent Hanna"));
+        let crew = detail.crew.expect("a detail carries its crew");
+        assert_eq!(crew.len(), 1);
+        assert_eq!(crew[0].name, "Michael Mann");
+        assert_eq!(crew[0].job, "Director");
+
+        let Some(MediaMetadata::Show(detail)) = service.get_media_metadata(show).await.unwrap()
+        else {
+            panic!("the show resolves");
+        };
+        let show_cast = detail.cast.expect("a show's detail carries its cast");
+        assert_eq!(show_cast.len(), 1);
+        assert_eq!(show_cast[0].name, "Adam Scott");
+        assert_eq!(detail.crew.map(|crew| crew.len()), Some(0));
+
+        let page = service.search_media(request(None, None)).await.unwrap();
+        assert_eq!(page.items.len(), 2);
+        for item in &page.items {
+            let (cast, crew) = match item {
+                MediaMetadata::Movie(m) => (&m.cast, &m.crew),
+                MediaMetadata::Show(s) => (&s.cast, &s.crew),
+            };
+            assert!(cast.is_none() && crew.is_none(), "browse reads no credits");
+        }
+    }
+
     #[tokio::test]
     async fn pages_forward_and_back_carry_their_neighbours_and_their_cursors() {
         let library = Library::new();
@@ -2174,6 +2261,7 @@ mod browse {
                 sources: super::empty_sources(),
                 catalog: Arc::new(MockCatalogRepository::new()),
                 genres: library.genres.clone(),
+                people: library.people.clone(),
             })
         };
         let id = Uuid::new_v4();
@@ -2308,6 +2396,10 @@ mod browse {
                 sources: super::empty_sources(),
                 catalog: Arc::new(catalog),
                 genres: Arc::new(genres),
+                people: Arc::new(
+                    beam_domain::repositories::person::in_memory::InMemoryPersonRepository::default(
+                    ),
+                ),
             })
             .search_media(request(None, None))
             .await;

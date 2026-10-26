@@ -37,6 +37,7 @@ use crate::{
         library::{LibraryService, LocalLibraryService, OsPathValidator, audit_existing_roots},
         metadata::{DbMetadataService, MetadataRepositories, MetadataService},
         notification::{LocalNotificationService, NotificationService},
+        people::PeopleService,
         playback::{DbPlaybackService, PlaybackRepositories, PlaybackService},
         playback_telemetry::PlaybackTelemetryService,
         sources::SourceCatalog,
@@ -161,6 +162,9 @@ pub struct AppServices {
     /// above; shared with the metadata and playback services.
     pub movie_repo: Arc<dyn beam_domain::repositories::MovieRepository>,
     pub show_repo: Arc<dyn beam_domain::repositories::ShowRepository>,
+    /// People search and filmographies (issue #261), and the portrait URL
+    /// the artwork endpoint fetches a person's portrait from.
+    pub people: Arc<PeopleService>,
     /// Poster and backdrop art, served by Beam rather than by a provider CDN
     /// (ADR-0015). Concrete rather than a trait object: its two boundaries --
     /// the network and the database -- already have seams, and the repository
@@ -260,6 +264,9 @@ impl AppServices {
             ));
         let genre_repo: Arc<dyn beam_domain::repositories::GenreRepository> = Arc::new(
             beam_index::repositories::SqlGenreRepository::new(db.clone()),
+        );
+        let person_repo: Arc<dyn beam_domain::repositories::PersonRepository> = Arc::new(
+            beam_index::repositories::SqlPersonRepository::new(db.clone()),
         );
         let watch_state_repo: Arc<dyn beam_domain::repositories::WatchStateRepository> = Arc::new(
             beam_index::repositories::SqlWatchStateRepository::with_clock(
@@ -369,6 +376,7 @@ impl AppServices {
                 movie_repo.clone(),
                 show_repo.clone(),
                 genre_repo.clone(),
+                person_repo.clone(),
                 enrichment_provider.clone(),
                 admin_log_service.clone(),
                 notification_service.clone(),
@@ -475,6 +483,7 @@ impl AppServices {
                     db.clone(),
                 )),
                 genres: genre_repo.clone(),
+                people: person_repo.clone(),
             })),
             subtitles: Arc::new(DbSubtitleService::new(
                 library_repo.clone(),
@@ -490,6 +499,11 @@ impl AppServices {
             file_repo,
             enrichment_repo,
             enrichment_control,
+            people: Arc::new(PeopleService::new(
+                person_repo,
+                movie_repo.clone(),
+                show_repo.clone(),
+            )),
             movie_repo,
             show_repo,
             artwork,
@@ -548,11 +562,11 @@ pub(crate) fn build_enrichment_provider(
 /// one function the two cases were indistinguishable to any test, so nothing
 /// could tell the fail-fast path from the warn-and-continue one.
 pub(crate) fn provider_from_build(
-    built: Result<Option<cameo::CameoClient>, cameo::CameoClientError>,
+    built: Result<Option<CameoEnrichmentProvider>, cameo::CameoClientError>,
     metadata_language: Option<&str>,
 ) -> eyre::Result<Arc<dyn EnrichmentProvider>> {
     match built {
-        Ok(Some(client)) => Ok(Arc::new(CameoEnrichmentProvider::new(client))),
+        Ok(Some(provider)) => Ok(Arc::new(provider)),
         Ok(None) => Ok(Arc::new(NoopEnrichmentProvider)),
         Err(e) if metadata_language.is_some() => Err(eyre::eyre!(
             "failed to build cameo client with BEAM_METADATA_LANGUAGE={:?}: {e}",

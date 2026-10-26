@@ -10,6 +10,8 @@ use std::time::Duration;
 use chrono::NaiveDate;
 use thiserror::Error;
 
+pub use crate::models::person::CreditRole;
+
 /// A canonical, provider-qualified external media identifier, e.g.
 /// `"tmdb:603"` or `"anilist:5114"`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -90,6 +92,23 @@ pub struct MovieEnrichment {
     pub backdrop_url: Option<String>,
     pub rating: Option<f32>,
     pub genres: Vec<String>,
+    /// The title's cast and crew. `None` when the provider did not report
+    /// them -- it has no credits for this title kind, or fetching them
+    /// failed -- which leaves the credits already stored as they are;
+    /// `Some` replaces them whole, an empty list included.
+    pub credits: Option<Vec<CreditEnrichment>>,
+}
+
+/// One credit on a title, as a provider lists it (issue #261).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreditEnrichment {
+    /// The provider's id for the person, e.g. `tmdb:287`. Two credits with
+    /// one id are one person, on one title or across many.
+    pub person_ref: ExternalMediaRef,
+    pub name: String,
+    /// The provider's portrait of the person.
+    pub profile_url: Option<String>,
+    pub role: CreditRole,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -106,6 +125,9 @@ pub struct ShowEnrichment {
     /// The provider's rating on its 0-10 scale, as `MovieEnrichment::rating`.
     pub rating: Option<f32>,
     pub genres: Vec<String>,
+    /// As `MovieEnrichment::credits`: the show's cast and crew across its
+    /// seasons, or `None` to leave the stored ones alone.
+    pub credits: Option<Vec<CreditEnrichment>>,
 }
 
 #[derive(Debug, Clone, Default)]

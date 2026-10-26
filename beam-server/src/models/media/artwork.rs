@@ -6,7 +6,7 @@
 use kynos::Schema;
 use serde::{Deserialize, Serialize};
 
-/// Which kind of title the artwork belongs to.
+/// What the artwork belongs to: a kind of title, or a person.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Schema)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtworkKind {
@@ -18,6 +18,8 @@ pub enum ArtworkKind {
     Season,
     /// One episode of a season.
     Episode,
+    /// Someone credited on a title (issue #261).
+    Person,
 }
 
 /// Which image of that title.
@@ -34,6 +36,8 @@ pub enum ArtworkVariant {
     Backdrop,
     /// An episode still.
     Thumbnail,
+    /// A person's portrait.
+    Profile,
 }
 
 /// A path segment that names no artwork Beam serves.
@@ -52,6 +56,7 @@ impl std::fmt::Display for ArtworkKind {
             Self::Show => "show",
             Self::Season => "season",
             Self::Episode => "episode",
+            Self::Person => "person",
         })
     }
 }
@@ -65,6 +70,7 @@ impl std::str::FromStr for ArtworkKind {
             "show" => Ok(Self::Show),
             "season" => Ok(Self::Season),
             "episode" => Ok(Self::Episode),
+            "person" => Ok(Self::Person),
             _ => Err(UnknownArtworkSegment),
         }
     }
@@ -76,6 +82,7 @@ impl std::fmt::Display for ArtworkVariant {
             Self::Poster => "poster",
             Self::Backdrop => "backdrop",
             Self::Thumbnail => "thumbnail",
+            Self::Profile => "profile",
         })
     }
 }
@@ -88,6 +95,7 @@ impl std::str::FromStr for ArtworkVariant {
             "poster" => Ok(Self::Poster),
             "backdrop" => Ok(Self::Backdrop),
             "thumbnail" => Ok(Self::Thumbnail),
+            "profile" => Ok(Self::Profile),
             _ => Err(UnknownArtworkSegment),
         }
     }

@@ -6,8 +6,8 @@
 use tracing::warn;
 
 use beam_domain::providers::enrichment::{
-    EnrichmentError, EnrichmentProvider, ExternalMediaRef, MediaQuery, MovieEnrichment,
-    MovieSearchHit, SeasonEnrichment, ShowEnrichment, ShowSearchHit,
+    CreditEnrichment, CreditRole, EnrichmentError, EnrichmentProvider, ExternalMediaRef,
+    MediaQuery, MovieEnrichment, MovieSearchHit, SeasonEnrichment, ShowEnrichment, ShowSearchHit,
 };
 
 /// Configuration for constructing the production `cameo` client. Absent TMDB
@@ -42,12 +42,19 @@ pub struct CameoWiringConfig {
     pub metadata_language: Option<String>,
 }
 
-/// Build a `cameo` client from config, or `None` if no provider is
-/// configured (absent TMDB token and AniList disabled).
+/// Build the `cameo`-backed provider from config, or `None` if no provider
+/// is configured (absent TMDB token and AniList disabled).
+///
+/// The TMDB client is built here rather than by the facade's `with_tmdb`, and
+/// registered with the facade for every capability it has, so the credits
+/// lookups -- which cameo 0.2.0 offers on `TmdbClient` only, not on the
+/// facade (justin13888/cameo#58) -- share one connection pool and one
+/// rate-limit budget with every other TMDB request.
 pub fn build_client(
     config: CameoWiringConfig,
-) -> Result<Option<cameo::CameoClient>, cameo::CameoClientError> {
+) -> Result<Option<CameoEnrichmentProvider>, cameo::CameoClientError> {
     let mut builder = cameo::CameoClient::builder();
+    let mut tmdb = None;
     let mut any = false;
 
     if let Some(token) = config.tmdb_api_token.filter(|t| !t.is_empty()) {
@@ -60,7 +67,16 @@ pub fn build_client(
         {
             tmdb_config = tmdb_config.with_language(language);
         }
-        builder = builder.with_tmdb(tmdb_config);
+        let client = cameo::TmdbClient::new(tmdb_config).map_err(cameo::ProviderError::from)?;
+        let shared = std::sync::Arc::new(client.clone());
+        builder = builder
+            .register_search_provider(shared.clone())
+            .register_detail_provider(shared.clone())
+            .register_discovery_provider(shared.clone())
+            .register_recommendation_provider(shared.clone())
+            .register_season_provider(shared.clone())
+            .register_watch_provider(shared);
+        tmdb = Some(client);
         any = true;
     }
     if config.anilist_enabled {
@@ -72,26 +88,137 @@ pub fn build_client(
     }
 
     builder = builder.with_priority(["tmdb", "anilist"]);
-    Ok(Some(builder.build()?))
+    Ok(Some(CameoEnrichmentProvider {
+        client: builder.build()?,
+        tmdb,
+    }))
 }
 
 /// [`EnrichmentProvider`] backed by a configured `cameo::CameoClient`.
 #[derive(Debug)]
 pub struct CameoEnrichmentProvider {
     client: cameo::CameoClient,
+    /// The TMDB client the facade dispatches to, kept for the credits the
+    /// facade cannot ask for; `None` when no TMDB token is configured.
+    tmdb: Option<cameo::TmdbClient>,
 }
 
 impl CameoEnrichmentProvider {
-    pub fn new(client: cameo::CameoClient) -> Self {
-        Self { client }
+    /// The ids of the providers this dispatches to, in priority order.
+    pub fn provider_ids(&self) -> Vec<&str> {
+        self.client.provider_ids()
     }
+
+    /// A title's credits, when the provider that matched it reports them:
+    /// `None` -- leave the stored credits alone -- for a title whose provider
+    /// has no credits lookup, and when the lookup fails. A credits failure
+    /// never fails the enrichment it belongs to: the title's own metadata is
+    /// still worth applying.
+    ///
+    /// AniList titles get none: cameo 0.2.0 exposes no AniList characters or
+    /// staff (justin13888/cameo#58).
+    async fn credits(
+        &self,
+        id: &ExternalMediaRef,
+        kind: CreditsOf,
+    ) -> Option<Vec<CreditEnrichment>> {
+        let tmdb = self.tmdb.as_ref().filter(|_| id.provider() == "tmdb")?;
+        let Ok(native) = id.native().parse::<i32>() else {
+            warn!(id = %id, "not a numeric TMDB id; its credits are not fetched");
+            return None;
+        };
+        let fetched = match kind {
+            CreditsOf::Movie => tmdb.movie_credits(native).await,
+            CreditsOf::Show => tmdb.tv_series_credits(native).await,
+        };
+        match fetched {
+            Ok(credits) => Some(map_credits(&credits)),
+            Err(err) => {
+                warn!(id = %id, error = %err, "fetching a title's credits failed; its stored credits are kept");
+                None
+            }
+        }
+    }
+}
+
+/// Which TMDB credits endpoint a title's credits are read from.
+#[derive(Debug, Clone, Copy)]
+enum CreditsOf {
+    Movie,
+    Show,
+}
+
+/// The most cast credits stored per title: the top of the billing, which is
+/// what a detail page shows, rather than every extra a provider lists.
+pub const MAX_CAST: usize = 50;
+
+/// The crew jobs stored: those a title is known by. TMDB lists hundreds of
+/// crew on a feature; the rest are not what anyone browses by.
+pub const KEY_CREW_JOBS: [&str; 11] = [
+    "Director",
+    "Screenplay",
+    "Writer",
+    "Story",
+    "Novel",
+    "Characters",
+    "Producer",
+    "Executive Producer",
+    "Original Music Composer",
+    "Director of Photography",
+    "Editor",
+];
+
+/// A title's credits as Beam stores them: the first [`MAX_CAST`] cast by
+/// billing order, and the crew whose job is one of [`KEY_CREW_JOBS`]. A
+/// credit with no person id or no name names no one and is dropped.
+fn map_credits(credits: &cameo::providers::tmdb::TmdbCredits) -> Vec<CreditEnrichment> {
+    let person = |id: u64| ExternalMediaRef::new("tmdb", &id.to_string());
+    let mut cast: Vec<&cameo::providers::tmdb::CastMember> = credits
+        .cast
+        .iter()
+        .filter(|member| member.id != 0 && !member.name.trim().is_empty())
+        .collect();
+    cast.sort_by_key(|member| member.order);
+    let cast = cast
+        .into_iter()
+        .take(MAX_CAST)
+        .map(|member| CreditEnrichment {
+            person_ref: person(member.id),
+            name: member.name.clone(),
+            profile_url: member.profile_url.clone(),
+            role: CreditRole::Cast {
+                character: member
+                    .character
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|character| !character.is_empty())
+                    .map(str::to_string),
+                billing_order: member.order,
+            },
+        });
+    let crew = credits
+        .crew
+        .iter()
+        .filter(|member| member.id != 0 && !member.name.trim().is_empty())
+        .filter_map(|member| {
+            let job = member.job.as_deref()?;
+            KEY_CREW_JOBS.contains(&job).then(|| CreditEnrichment {
+                person_ref: person(member.id),
+                name: member.name.clone(),
+                profile_url: member.profile_url.clone(),
+                role: CreditRole::Crew {
+                    job: job.to_string(),
+                    department: member.department.clone(),
+                },
+            })
+        });
+    cast.chain(crew).collect()
 }
 
 #[async_trait::async_trait]
 impl EnrichmentProvider for CameoEnrichmentProvider {
     fn available_providers(&self) -> Vec<String> {
-        self.client
-            .provider_ids()
+        self.provider_ids()
             .into_iter()
             .map(|s| s.to_string())
             .collect()
@@ -171,7 +298,9 @@ impl EnrichmentProvider for CameoEnrichmentProvider {
             .movie_details(&media_id)
             .await
             .map_err(map_client_error)?;
-        Ok(map_movie_enrichment(&details))
+        let mut enrichment = map_movie_enrichment(&details);
+        enrichment.credits = self.credits(id, CreditsOf::Movie).await;
+        Ok(enrichment)
     }
 
     async fn show_enrichment(
@@ -184,7 +313,9 @@ impl EnrichmentProvider for CameoEnrichmentProvider {
             .tv_show_details(&media_id)
             .await
             .map_err(map_client_error)?;
-        Ok(map_show_enrichment(&details))
+        let mut enrichment = map_show_enrichment(&details);
+        enrichment.credits = self.credits(id, CreditsOf::Show).await;
+        Ok(enrichment)
     }
 
     async fn season_enrichment(
@@ -299,6 +430,8 @@ fn map_movie_enrichment(details: &cameo::UnifiedMovieDetails) -> MovieEnrichment
         backdrop_url: movie.backdrop_url.clone(),
         rating: movie.vote_average.map(|v| v as f32),
         genres: movie.genres.iter().map(|g| g.name().to_string()).collect(),
+        // Read by a lookup of their own: `CameoEnrichmentProvider::credits`.
+        credits: None,
     }
 }
 
@@ -322,6 +455,8 @@ fn map_show_enrichment(details: &cameo::UnifiedTvShowDetails) -> ShowEnrichment 
         backdrop_url: show.backdrop_url.clone(),
         rating: show.vote_average.map(|v| v as f32),
         genres: show.genres.iter().map(|g| g.name().to_string()).collect(),
+        // Read by a lookup of their own: `CameoEnrichmentProvider::credits`.
+        credits: None,
     }
 }
 
@@ -422,6 +557,137 @@ mod tests {
         let details = UnifiedTvShowDetails::new(show);
 
         assert_eq!(map_show_enrichment(&details).rating, Some(8.4_f32));
+    }
+
+    /// TMDB's credits as its credits endpoint answers them. Built through
+    /// serde because cameo marks the credit types `#[non_exhaustive]`.
+    fn tmdb_credits(
+        cast: serde_json::Value,
+        crew: serde_json::Value,
+    ) -> cameo::providers::tmdb::TmdbCredits {
+        serde_json::from_value(serde_json::json!({ "cast": cast, "crew": crew }))
+            .expect("a credits document")
+    }
+
+    #[test]
+    fn maps_the_billed_cast_and_the_key_crew() {
+        let credits = tmdb_credits(
+            serde_json::json!([
+                {"id": 6384, "name": "Keanu Reeves", "character": "Neo", "order": 0,
+                 "profile_url": "https://image.tmdb.org/t/p/h632/neo.jpg"},
+                {"id": 2975, "name": "Laurence Fishburne", "character": " ", "order": 1},
+                {"id": 0, "name": "No One", "character": "Ghost", "order": 2},
+                {"id": 530, "name": "  ", "character": "Blank", "order": 3}
+            ]),
+            serde_json::json!([
+                {"id": 9339, "name": "Lana Wachowski", "job": "Director", "department": "Directing"},
+                {"id": 1091, "name": "Key Grip", "job": "Key Grip", "department": "Crew"},
+                {"id": 9340, "name": "Lilly Wachowski", "job": "Screenplay", "department": "Writing"},
+                {"id": 1092, "name": "No Job"}
+            ]),
+        );
+
+        let mapped = map_credits(&credits);
+        let summary: Vec<(&str, &str, &CreditRole)> = mapped
+            .iter()
+            .map(|c| (c.person_ref.as_str(), c.name.as_str(), &c.role))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                (
+                    "tmdb:6384",
+                    "Keanu Reeves",
+                    &CreditRole::Cast {
+                        character: Some("Neo".to_string()),
+                        billing_order: 0,
+                    }
+                ),
+                (
+                    "tmdb:2975",
+                    "Laurence Fishburne",
+                    // A blank character is no character.
+                    &CreditRole::Cast {
+                        character: None,
+                        billing_order: 1,
+                    }
+                ),
+                (
+                    "tmdb:9339",
+                    "Lana Wachowski",
+                    &CreditRole::Crew {
+                        job: "Director".to_string(),
+                        department: Some("Directing".to_string()),
+                    }
+                ),
+                (
+                    "tmdb:9340",
+                    "Lilly Wachowski",
+                    &CreditRole::Crew {
+                        job: "Screenplay".to_string(),
+                        department: Some("Writing".to_string()),
+                    }
+                ),
+            ],
+            "nameless and id-less credits are dropped, and only the key crew jobs kept"
+        );
+        assert_eq!(
+            mapped[0].profile_url.as_deref(),
+            Some("https://image.tmdb.org/t/p/h632/neo.jpg")
+        );
+    }
+
+    #[test]
+    fn keeps_only_the_top_of_the_billing() {
+        let cast: Vec<serde_json::Value> = (0..(MAX_CAST as u32 + 10))
+            .rev()
+            .map(|order| {
+                serde_json::json!({"id": 1000 + order, "name": format!("Actor {order}"), "order": order})
+            })
+            .collect();
+        let mapped = map_credits(&tmdb_credits(
+            serde_json::Value::from(cast),
+            serde_json::json!([]),
+        ));
+        assert_eq!(mapped.len(), MAX_CAST);
+        let orders: Vec<u32> = mapped
+            .iter()
+            .map(|c| match &c.role {
+                CreditRole::Cast { billing_order, .. } => *billing_order,
+                CreditRole::Crew { .. } => panic!("no crew was listed"),
+            })
+            .collect();
+        let expected: Vec<u32> = (0..MAX_CAST as u32).collect();
+        assert_eq!(orders, expected, "the lowest billing orders, in order");
+    }
+
+    #[tokio::test]
+    async fn an_anilist_title_has_no_credits_to_fetch() {
+        let provider = build_client(CameoWiringConfig {
+            tmdb_api_token: Some("test-token".to_string()),
+            anilist_enabled: true,
+            metadata_language: None,
+        })
+        .unwrap()
+        .expect("both providers configured");
+        // `None` leaves stored credits alone; no request is made for it.
+        let reference = ExternalMediaRef::new("anilist", "5114");
+        assert_eq!(provider.credits(&reference, CreditsOf::Show).await, None);
+        // Nor for a TMDB reference that is not a TMDB id.
+        let malformed = ExternalMediaRef::new("tmdb", "not-a-number");
+        assert_eq!(provider.credits(&malformed, CreditsOf::Movie).await, None);
+    }
+
+    #[test]
+    fn tmdb_keeps_priority_over_anilist() {
+        let provider = build_client(CameoWiringConfig {
+            tmdb_api_token: Some("test-token".to_string()),
+            anilist_enabled: true,
+            metadata_language: None,
+        })
+        .unwrap()
+        .expect("both providers configured");
+        assert_eq!(provider.provider_ids(), ["tmdb", "anilist"]);
     }
 
     #[test]

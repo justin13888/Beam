@@ -372,6 +372,7 @@ fn build_fixture(
             Arc::new(beam_domain::providers::enrichment::NoopEnrichmentProvider),
             admin_log_for_control,
         ),
+        people: crate::routes::test_support::idle_people(movie_repo.clone(), show_repo.clone()),
         movie_repo: movie_repo.clone(),
         show_repo,
         artwork: crate::routes::test_support::cold_artwork_cache(),

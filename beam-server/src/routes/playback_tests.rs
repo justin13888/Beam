@@ -93,6 +93,9 @@ fn fixture() -> Fixture {
             genres.clone(),
         )),
         genres: genres.clone(),
+        people: Arc::new(
+            beam_domain::repositories::person::in_memory::InMemoryPersonRepository::default(),
+        ),
     }));
 
     let services = AppServices {
@@ -109,6 +112,7 @@ fn fixture() -> Fixture {
         file_repo: files.clone(),
         enrichment_repo: base.services.enrichment_repo.clone(),
         enrichment_control: base.services.enrichment_control.clone(),
+        people: crate::routes::test_support::idle_people(movies.clone(), shows.clone()),
         movie_repo: movies.clone(),
         show_repo: shows.clone(),
         artwork: base.services.artwork.clone(),

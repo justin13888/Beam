@@ -173,7 +173,7 @@
           {
             "name": "kind",
             "in": "path",
-            "description": "Which kind of title the artwork belongs to.",
+            "description": "What the artwork belongs to: a kind of title, or a person.",
             "required": true,
             "schema": {
               "$ref": "#/components/schemas/ArtworkKind"
@@ -182,7 +182,7 @@
           {
             "name": "id",
             "in": "path",
-            "description": "The title's ID.",
+            "description": "The title's or the person's ID.",
             "required": true,
             "schema": {
               "type": "string",
@@ -192,7 +192,7 @@
           {
             "name": "variant",
             "in": "path",
-            "description": "Which image of that title.",
+            "description": "Which image of it.",
             "required": true,
             "schema": {
               "$ref": "#/components/schemas/ArtworkVariant"
@@ -504,7 +504,7 @@
           {
             "name": "kind",
             "in": "path",
-            "description": "Which kind of title the artwork belongs to.",
+            "description": "What the artwork belongs to: a kind of title, or a person.",
             "required": true,
             "schema": {
               "$ref": "#/components/schemas/ArtworkKind"
@@ -513,7 +513,7 @@
           {
             "name": "id",
             "in": "path",
-            "description": "The title's ID.",
+            "description": "The title's or the person's ID.",
             "required": true,
             "schema": {
               "type": "string",
@@ -523,7 +523,7 @@
           {
             "name": "variant",
             "in": "path",
-            "description": "Which image of that title.",
+            "description": "Which image of it.",
             "required": true,
             "schema": {
               "$ref": "#/components/schemas/ArtworkVariant"
@@ -1389,6 +1389,142 @@
         ]
       }
     },
+    "/v1/people/{id}": {
+      "get": {
+        "tags": [
+          "media"
+        ],
+        "summary": "One person and their filmography: every title in the library they are in the cast or crew of.",
+        "operationId": "getPerson",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Person id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden; Cross-origin request rejected; Malformed Origin/Referer header",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Person not found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#person-not-found"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#internal"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BeamSession": []
+          }
+        ]
+      }
+    },
     "/v1/media": {
       "get": {
         "tags": [
@@ -1734,6 +1870,270 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/MediaConnection"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#internal"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "the client has exceeded its request rate",
+            "headers": {
+              "Retry-After": {
+                "description": "How long to wait before retrying, in seconds or as an HTTP-date",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-RateLimit-Limit": {
+                "description": "Requests permitted per window",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "X-RateLimit-Remaining": {
+                "description": "Requests remaining in the current window",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "X-RateLimit-Reset": {
+                "description": "Seconds until the current window resets",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#rate-limited"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BeamSession": []
+          }
+        ]
+      }
+    },
+    "/v1/people": {
+      "get": {
+        "tags": [
+          "media"
+        ],
+        "summary": "Search the people credited on the library's titles, by name.",
+        "description": "People come from provider enrichment: the cast and key crew of each\nmatched title. The list is ordered by name, ignoring case.",
+        "operationId": "searchPeople",
+        "parameters": [
+          {
+            "name": "query",
+            "in": "query",
+            "description": "Search the people credited in the library: those whose name contains\nthis text, ignoring case. Without it -- or with only spaces -- every\ncredited person is listed.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "first",
+            "in": "query",
+            "description": "This many people (1-100, default 20), after `after` or from the start.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "maximum": 100.0,
+              "minimum": 1.0,
+              "format": "uint32"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "description": "An opaque cursor -- a page's `end_cursor` -- to page on from.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden; Cross-origin request rejected; Malformed Origin/Referer header",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request; Invalid cursor; Invalid pagination; Invalid search query",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "about:blank"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#invalid-cursor"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Invalid cursor"
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#invalid-pagination"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Invalid pagination"
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#invalid-search-query"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Invalid search query"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "headers": {
+              "X-RateLimit-Limit": {
+                "description": "Requests permitted per window",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "X-RateLimit-Remaining": {
+                "description": "Requests remaining in the current window",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "X-RateLimit-Reset": {
+                "description": "Seconds until the current window resets",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonConnection"
                 }
               }
             }
@@ -13097,16 +13497,18 @@
           "movie",
           "show",
           "season",
-          "episode"
+          "episode",
+          "person"
         ],
-        "description": "Which kind of title the artwork belongs to."
+        "description": "What the artwork belongs to: a kind of title, or a person."
       },
       "ArtworkVariant": {
         "type": "string",
         "enum": [
           "poster",
           "backdrop",
-          "thumbnail"
+          "thumbnail",
+          "profile"
         ],
         "description": "Which image of that title.\n\nNot every pairing exists -- an episode has a thumbnail and no poster, a\nseason has a poster and no backdrop -- and the ones that do not are a 404,\nthe same answer as a title that simply has no art yet."
       },
@@ -13456,6 +13858,85 @@
           "genres"
         ]
       },
+      "CastCredit": {
+        "properties": {
+          "person_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The credited person: `GET /v1/people/{id}` lists their filmography."
+          },
+          "name": {
+            "type": "string",
+            "description": "The person's name."
+          },
+          "profile_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Path of the person's portrait, served by the artwork route; absent\nwhen the provider has none."
+          },
+          "character": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The character played, when the provider names one."
+          },
+          "billing_order": {
+            "type": "integer",
+            "maximum": 4294967295.0,
+            "minimum": 0.0,
+            "format": "uint32",
+            "description": "Billing position, from 0 for the top-billed; the list is in this\norder."
+          }
+        },
+        "type": "object",
+        "required": [
+          "person_id",
+          "name",
+          "billing_order"
+        ],
+        "description": "One cast credit on a title."
+      },
+      "CrewCredit": {
+        "properties": {
+          "person_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The credited person: `GET /v1/people/{id}` lists their filmography."
+          },
+          "name": {
+            "type": "string",
+            "description": "The person's name."
+          },
+          "profile_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Path of the person's portrait, served by the artwork route; absent\nwhen the provider has none."
+          },
+          "job": {
+            "type": "string",
+            "description": "The job, as the provider names it: `Director`, `Screenplay`,\n`Original Music Composer`."
+          },
+          "department": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The department the job belongs to (`Directing`, `Writing`), when the\nprovider names one."
+          }
+        },
+        "type": "object",
+        "required": [
+          "person_id",
+          "name",
+          "job"
+        ],
+        "description": "One crew credit on a title."
+      },
       "ShowMetadata": {
         "properties": {
           "id": {
@@ -13558,6 +14039,26 @@
               }
             ],
             "description": "How much of the show the signed-in viewer has watched. Absent in a\nbrowse result; the detail route fills it."
+          },
+          "cast": {
+            "items": {
+              "$ref": "#/components/schemas/CastCredit"
+            },
+            "type": [
+              "array",
+              "null"
+            ],
+            "description": "The show's cast across its seasons, in billing order. Absent in a\nbrowse result, which does not read credits; empty on a detail when\nnone are known yet."
+          },
+          "crew": {
+            "items": {
+              "$ref": "#/components/schemas/CrewCredit"
+            },
+            "type": [
+              "array",
+              "null"
+            ],
+            "description": "The show's key crew, by department and then job. Absent in a browse\nresult, as `cast` is."
           }
         },
         "type": "object",
@@ -13688,6 +14189,26 @@
           "user_state": {
             "$ref": "#/components/schemas/UserTitleState",
             "description": "The signed-in viewer's state for the movie."
+          },
+          "cast": {
+            "items": {
+              "$ref": "#/components/schemas/CastCredit"
+            },
+            "type": [
+              "array",
+              "null"
+            ],
+            "description": "The movie's cast, in billing order. Absent in a browse result, which\ndoes not read credits; empty on a detail when none are known yet."
+          },
+          "crew": {
+            "items": {
+              "$ref": "#/components/schemas/CrewCredit"
+            },
+            "type": [
+              "array",
+              "null"
+            ],
+            "description": "The movie's key crew -- directors, writers, producers, composer,\ncinematographer, editor -- by department and then job. Absent in a\nbrowse result, as `cast` is."
           }
         },
         "type": "object",
@@ -14264,6 +14785,150 @@
         ],
         "description": "What `GET /v1/seasons/{id}` returns: one season with its episodes."
       },
+      "TitleKind": {
+        "type": "string",
+        "enum": [
+          "movie",
+          "show"
+        ],
+        "description": "Which kind of title something is: a movie, or a show. The one enum for it on\nthe wire -- the `media_type` browse filter, a continue-watching or history\nitem's `media_type`, and an enrichment row's `kind` all use it."
+      },
+      "CreditedTitle": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The movie or show id: `GET /v1/media/{id}` is its detail."
+          },
+          "media_type": {
+            "$ref": "#/components/schemas/TitleKind",
+            "description": "Whether it is a movie or a show."
+          },
+          "title": {
+            "$ref": "#/components/schemas/Title",
+            "description": "The title's title."
+          },
+          "year": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "maximum": 4294967295.0,
+            "minimum": 0.0,
+            "format": "uint32",
+            "description": "The year it was released or first aired."
+          },
+          "poster_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Path of the title's poster, served by the artwork route; absent when\nit has none."
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "media_type",
+          "title"
+        ],
+        "description": "The title a filmography credit is on."
+      },
+      "FilmographyCastCredit": {
+        "properties": {
+          "title": {
+            "$ref": "#/components/schemas/CreditedTitle",
+            "description": "The title the person is credited on."
+          },
+          "character": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The character played, when the provider names one."
+          },
+          "billing_order": {
+            "type": "integer",
+            "maximum": 4294967295.0,
+            "minimum": 0.0,
+            "format": "uint32",
+            "description": "Billing position on the title, from 0 for the top-billed."
+          }
+        },
+        "type": "object",
+        "required": [
+          "title",
+          "billing_order"
+        ],
+        "description": "One cast credit in a person's filmography."
+      },
+      "FilmographyCrewCredit": {
+        "properties": {
+          "title": {
+            "$ref": "#/components/schemas/CreditedTitle",
+            "description": "The title the person is credited on."
+          },
+          "job": {
+            "type": "string",
+            "description": "The job, as the provider names it."
+          },
+          "department": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The department the job belongs to, when the provider names one."
+          }
+        },
+        "type": "object",
+        "required": [
+          "title",
+          "job"
+        ],
+        "description": "One crew credit in a person's filmography."
+      },
+      "PersonDetail": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Stable identifier for this person."
+          },
+          "name": {
+            "type": "string",
+            "description": "The person's name."
+          },
+          "profile_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Path of the person's portrait, served by the artwork route; absent\nwhen the provider has none."
+          },
+          "cast": {
+            "items": {
+              "$ref": "#/components/schemas/FilmographyCastCredit"
+            },
+            "type": "array",
+            "description": "The titles the person is in the cast of."
+          },
+          "crew": {
+            "items": {
+              "$ref": "#/components/schemas/FilmographyCrewCredit"
+            },
+            "type": "array",
+            "description": "The titles the person is in the crew of, one entry per job."
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "cast",
+          "crew"
+        ],
+        "description": "One person, with every credit they have in the library.\n\nBoth lists are newest first -- by the title's year, a title with none\nlast -- and then by title."
+      },
       "MediaSortField": {
         "type": "string",
         "enum": [
@@ -14283,14 +14948,6 @@
           "desc"
         ],
         "description": "Sort order."
-      },
-      "TitleKind": {
-        "type": "string",
-        "enum": [
-          "movie",
-          "show"
-        ],
-        "description": "Which kind of title something is: a movie, or a show. The one enum for it on\nthe wire -- the `media_type` browse filter, a continue-watching or history\nitem's `media_type`, and an enrichment row's `kind` all use it."
       },
       "MediaConnection": {
         "properties": {
@@ -14312,6 +14969,60 @@
           "page_info"
         ],
         "description": "One page of browse or search results.\n\n`items` are in the requested order. `page_info`'s cursors are opaque: pass\n`end_cursor` as `after` for the next page, `start_cursor` as `before` for\nthe previous one, with the same `sort_by` and `sort_order`."
+      },
+      "Person": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Stable identifier for this person."
+          },
+          "name": {
+            "type": "string",
+            "description": "The person's name."
+          },
+          "profile_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Path of the person's portrait, served by the artwork route; absent\nwhen the provider has none."
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name"
+        ],
+        "description": "Someone credited on at least one title in the library."
+      },
+      "PersonConnection": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/Person"
+            },
+            "type": "array",
+            "description": "The people on this page, by name."
+          },
+          "page_info": {
+            "$ref": "#/components/schemas/PageInfo",
+            "description": "Where this page sits in the whole listing."
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0.0,
+            "format": "uint64",
+            "description": "How many people match, across every page."
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "page_info",
+          "total"
+        ],
+        "description": "One page of people search."
       },
       "ReportProgressRequest": {
         "properties": {

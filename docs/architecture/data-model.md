@@ -557,6 +557,24 @@ Populated by the enrichment worker.
 
 `show_genres`: composite PK `(show_id, genre_id)`, both FKs cascade; index on `genre_id`.
 
+### `people` / `credits`
+Populated by the enrichment worker from the matched provider's credits (issue #261): today TMDB's,
+the top 50 of the cast by billing order and the crew in a fixed set of key jobs (director, writers,
+producers, composer, cinematographer, editor). AniList titles get none until cameo exposes AniList
+credits (justin13888/cameo#58). A title's credits are replaced whole on each enrichment that reports
+them; one whose credits lookup failed keeps the ones it had.
+
+`people`: `id` (PK), `external_ref` (TEXT, unique, not null -- the provider's id for the person,
+e.g. `tmdb:287`, so one person is one row however many titles credit them), `name` (TEXT, not null),
+`profile_url` (TEXT, the provider's portrait, served through the artwork route), `created_at`,
+`updated_at`. GIN trigram index `idx_people_name_trgm` on `name`, for people search's `ILIKE`.
+
+`credits`: `id` (PK), `person_id` (FK `people`, cascade), `movie_id` / `show_id` (FKs, cascade;
+exactly one set, `credits_one_title`), `kind` (`cast` or `crew`), `character` and `billing_order`
+(cast only, `billing_order >= 0`), `job` (not null for crew) and `department` (crew only); the
+`credits_cast_columns` / `credits_crew_columns` checks hold each kind to its own columns. Indexes on
+`person_id`, `movie_id` and `show_id`.
+
 ### `metadata_enrichment`
 Per-title enrichment queue and status, mirroring `files`' dual-nullable-FK polymorphism (one row per
 movie *or* show, never both, never neither).

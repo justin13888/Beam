@@ -137,6 +137,7 @@ fn build(
         file_repo: base.services.file_repo.clone(),
         enrichment_repo: base.services.enrichment_repo.clone(),
         enrichment_control: base.services.enrichment_control.clone(),
+        people: base.services.people.clone(),
         movie_repo: base.services.movie_repo.clone(),
         show_repo: base.services.show_repo.clone(),
         artwork: base.services.artwork.clone(),
