@@ -85,14 +85,7 @@ test("the admin adds a library and a scan indexes the fixture", async () => {
 	}).toPass({ timeout: 60_000 });
 });
 
-// The next two steps are held as `fixme` until #297: the SPA they drive is
-// stale against the current /v1 contract (#146). Explore reads `edges[].node`
-// where GET /v1/media now answers `{ items, page_info }`, and the media page
-// treats GET /v1/media/{id}/sources as an array where it is now a connection,
-// so both pages throw before there is anything to assert on. They stay in the
-// file so that #297 turns them on, rather than writing them anew, once the
-// SPA is current.
-test.fixme("the scanned title is found by browsing and by search", async () => {
+test("the scanned title is found by browsing and by search", async () => {
 	await page.goto("/explore");
 	await expect(
 		page.getByRole("link", { name: new RegExp(FIXTURE_TITLE) }),
@@ -120,7 +113,7 @@ test.fixme("the scanned title is found by browsing and by search", async () => {
 	).toBeVisible();
 });
 
-test.fixme("the title direct-plays from the original file", async () => {
+test("the title direct-plays from the original file", async () => {
 	const stream = page.waitForResponse(
 		(response) =>
 			/\/v1\/files\/[^/]+\/stream$/.test(new URL(response.url()).pathname) &&
