@@ -1,5 +1,21 @@
+import { VIDEO_TYPES } from "@vidstack/react";
 import { describe, expect, it, vi } from "vitest";
-import { type PlayerLike, playerHandlers } from "./VideoPlayer";
+import { type PlayerLike, playerHandlers, providerType } from "./VideoPlayer";
+
+describe("providerType", () => {
+	it("passes on a type Vidstack routes to its video provider", () => {
+		expect(providerType("video/webm")).toBe("video/webm");
+	});
+
+	it.each([
+		["Matroska", "video/x-matroska"],
+		["no type", undefined],
+		["FFmpeg's demuxer list", "video/mov,mp4,m4a,3gp,3g2,mj2"],
+	])("replaces %s with a type Vidstack routes", (_, type) => {
+		// A type outside the set loads no provider, so nothing would play.
+		expect(VIDEO_TYPES.has(providerType(type))).toBe(true);
+	});
+});
 
 function player(currentTime = 0, duration = 100): PlayerLike {
 	return { currentTime, duration };

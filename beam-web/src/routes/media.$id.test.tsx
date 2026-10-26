@@ -1,7 +1,7 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { components } from "@/api.gen";
 import * as factory from "@/test/factories";
 import { BASE_URL } from "@/test/handlers";
@@ -13,14 +13,64 @@ import { server } from "@/test/server";
 // Vidstack needs a real media element, which jsdom does not provide. This is a
 // stand-in for a *collaborator*, not for the subject: `VideoPlayer`'s own
 // behaviour is tested directly in `src/components/VideoPlayer.test.ts`. The
-// stub records the `src` so these tests can assert which stream the page chose.
+// stub records the `src` so these tests can assert which stream the page chose,
+// and offers the end of playback as a button, which is the event the page
+// reacts to.
 vi.mock("@/components/VideoPlayer", () => ({
 	VideoPlayer: (props: Record<string, unknown>) => (
-		<div data-testid="video-player" data-src={props.src as string}>
+		<div
+			data-testid="video-player"
+			data-src={props.src as string}
+			data-autoplay={String(props.autoPlay)}
+			data-start={String(props.startTime)}
+		>
 			{props.title as string}
+			<button
+				type="button"
+				onClick={() => (props.onEnded as (duration: number) => void)(100)}
+			>
+				Finish playback
+			</button>
 		</div>
 	),
 }));
+
+/**
+ * What this "browser" decodes. jsdom's `canPlayType` answers "" for every
+ * type, so a page that asks the browser would find nothing playable; this
+ * fills the same environment gap `setup.ts` fills for `matchMedia`, answering
+ * for the containers and codec-string prefixes given.
+ */
+function browserDecodes({
+	containers,
+	codecs,
+}: {
+	containers: string[];
+	codecs: string[];
+}) {
+	vi.spyOn(HTMLMediaElement.prototype, "canPlayType").mockImplementation(
+		(type: string) => {
+			const [mime, params = ""] = type.split(";");
+			const listed =
+				/codecs="([^"]*)"/
+					.exec(params)?.[1]
+					.split(",")
+					.map((c) => c.trim()) ?? [];
+			const decodes =
+				containers.includes(mime.trim()) &&
+				listed.every((c) => codecs.some((prefix) => c.startsWith(prefix)));
+			return decodes ? "probably" : "";
+		},
+	);
+}
+
+beforeEach(() => {
+	browserDecodes({ containers: ["video/mp4"], codecs: ["avc1", "mp4a"] });
+});
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 const { EpisodeList } = await import("./media.$id");
 
@@ -252,6 +302,151 @@ describe("/media/$id (movie)", () => {
 			expect(currentStreamSrc()).toBe(
 				"http://localhost:8000/v1/files/file-hd/stream",
 			),
+		);
+	});
+});
+
+describe("/media/$id (browser capability)", () => {
+	it("plays the best source this browser decodes, not the first one listed", async () => {
+		// The server lists the 4K HEVC primary first; this browser has no HEVC.
+		serveMedia({ Movie: movie }, [
+			source("file-4k", 2160, "hevc"),
+			source("file-hd", 1080, "h264"),
+			source("file-sd", 480, "h264"),
+		]);
+		renderRoute("/media/movie-1");
+
+		await waitFor(() =>
+			expect(currentStreamSrc()).toBe(
+				"http://localhost:8000/v1/files/file-hd/stream",
+			),
+		);
+		// The unplayable source stays in the picker, disabled, with its reason.
+		const select = await screen.findByRole("combobox");
+		expect(select).toHaveValue("file-hd");
+		const hevc = screen.getByRole("option", { name: /2160p · hevc/ });
+		expect(hevc).toBeDisabled();
+		expect(hevc).toHaveTextContent("This browser cannot decode HEVC video");
+		expect(screen.getByRole("option", { name: "480p · h264" })).toBeEnabled();
+	});
+
+	it("does not follow a deep link to a source this browser cannot play", async () => {
+		serveMedia({ Movie: movie }, [
+			source("file-4k", 2160, "hevc"),
+			source("file-hd", 1080, "h264"),
+		]);
+		renderRoute("/media/movie-1?fileId=file-4k");
+
+		await waitFor(() =>
+			expect(currentStreamSrc()).toBe(
+				"http://localhost:8000/v1/files/file-hd/stream",
+			),
+		);
+	});
+
+	it("passes over a transport-stream source for one the browser opens", async () => {
+		serveMedia({ Movie: movie }, [
+			{ ...source("file-m2ts", 1080, "h264"), container_format: "mpegts" },
+			source("file-mp4", 720, "h264"),
+		]);
+		renderRoute("/media/movie-1");
+
+		await waitFor(() => expect(currentStreamSrc()).toContain("file-mp4"));
+		expect(
+			screen.getByRole("option", { name: /1080p · h264/ }),
+		).toHaveTextContent("Browsers cannot open MPEG transport streams");
+	});
+
+	it("says a disc-only title cannot play here, with the reason, and offers the download", async () => {
+		serveMedia({ Movie: movie }, [
+			{
+				...source("file-vob", 480, "mpeg2video"),
+				container_format: "mpeg",
+				disc_structure: "dvd",
+			},
+		]);
+		renderRoute("/media/movie-1");
+
+		expect(
+			await screen.findByRole("heading", {
+				name: "This title can't play in this browser",
+			}),
+		).toBeInTheDocument();
+		expect(screen.queryByTestId("video-player")).not.toBeInTheDocument();
+		expect(screen.getByText(/a DVD folder rip/)).toBeInTheDocument();
+		expect(
+			screen.getByRole("link", { name: /Download to play it/ }),
+		).toHaveAttribute(
+			"href",
+			"http://localhost:8000/v1/files/file-vob/download",
+		);
+	});
+});
+
+describe("/media/$id (multi-part)", () => {
+	function part(fileId: string, partNumber: number) {
+		return {
+			file_id: fileId,
+			part_number: partNumber,
+			size_bytes: 512,
+			duration_secs: 100,
+			subtitle_tracks: [],
+			stream_url: `/v1/files/${fileId}/stream`,
+			download_url: `/v1/files/${fileId}/download`,
+		};
+	}
+
+	const twoParts: MediaSource = {
+		...source("cd1", 480, "h264"),
+		parts: [part("cd1", 1), part("cd2", 2)],
+	};
+
+	it("plays the parts in order, advancing when one ends", async () => {
+		const requests = recordRequests();
+		serveMedia({ Movie: movie }, [twoParts]);
+		const user = userEvent.setup();
+		renderRoute("/media/movie-1");
+
+		await waitFor(() => expect(currentStreamSrc()).toContain("/cd1/stream"));
+		expect(screen.getByText("Part 1 of 2")).toBeInTheDocument();
+
+		await user.click(screen.getByRole("button", { name: "Finish playback" }));
+
+		await waitFor(() => expect(currentStreamSrc()).toContain("/cd2/stream"));
+		const player = screen.getByTestId("video-player");
+		expect(player).toHaveAttribute("data-autoplay", "true");
+		expect(player).toHaveAttribute("data-start", "0");
+		expect(screen.getByText("Part 2 of 2")).toBeInTheDocument();
+		// The end of an earlier part marks nothing played.
+		expect(requests.matching("PUT", "/v1/files/cd1/progress")).toHaveLength(0);
+
+		// The end of the last part is reported, against the last part's file.
+		await user.click(screen.getByRole("button", { name: "Finish playback" }));
+		await waitFor(() =>
+			expect(requests.matching("PUT", "/v1/files/cd2/progress")).toHaveLength(
+				1,
+			),
+		);
+		expect(currentStreamSrc()).toContain("/cd2/stream");
+	});
+
+	it("resumes the part that was playing, at its position", async () => {
+		serveMedia({ Movie: movie }, [twoParts]);
+		server.use(
+			http.get(`${BASE_URL}/v1/continue-watching`, () =>
+				HttpResponse.json<components["schemas"]["ContinueWatchingConnection"]>(
+					factory.connection([
+						factory.continueWatchingItem({ file_id: "cd2", position_secs: 42 }),
+					]),
+				),
+			),
+		);
+		renderRoute("/media/movie-1");
+
+		await waitFor(() => expect(currentStreamSrc()).toContain("/cd2/stream"));
+		expect(screen.getByTestId("video-player")).toHaveAttribute(
+			"data-start",
+			"42",
 		);
 	});
 });

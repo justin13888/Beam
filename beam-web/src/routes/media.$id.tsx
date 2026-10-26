@@ -1,7 +1,7 @@
 import { queryOptions, useMutation, useQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { Download, RefreshCw } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useMemo, useState } from "react";
 import { toast } from "sonner";
 import type { components } from "@/api.gen";
 import { RouteError } from "@/components/RouteError";
@@ -11,6 +11,11 @@ import { useAuth } from "@/hooks/auth";
 import { usePlaybackBeacon } from "@/hooks/usePlaybackBeacon";
 import { apiClient } from "@/lib/apiClient";
 import { artworkSrc } from "@/lib/artwork";
+import {
+	browserTypeSupport,
+	chooseSource,
+	type SourceVerdict,
+} from "@/lib/playback-capability";
 import { apiError } from "@/lib/problem";
 import { nextPlayableEpisode } from "@/lib/upNext";
 import { formatDuration } from "@/lib/utils";
@@ -19,6 +24,7 @@ type MediaMetadata = components["schemas"]["MediaMetadata"];
 type ShowMetadata = components["schemas"]["ShowMetadata"];
 type EpisodeMetadata = components["schemas"]["EpisodeMetadata"];
 type MediaSource = components["schemas"]["MediaSource"];
+type SourcePart = components["schemas"]["SourcePart"];
 
 const mediaQueryOptions = (mediaId: string) =>
 	queryOptions({
@@ -110,12 +116,16 @@ export function MediaDetailPage({
 		},
 	});
 
-	// For a movie the file is (by default) its primary file; for a show the
-	// user picks an episode. A `fileId` search param (set by continue-watching
-	// links) overrides both, deep-linking straight to the in-progress file.
+	// The file the viewer asked for: a pick in the source picker, an episode's
+	// file, or a `fileId` search param (set by continue-watching links, and
+	// possibly naming a later part of a source). Absent, the best source this
+	// browser can play is chosen; present but unplayable here, the same.
 	const [selectedFileId, setSelectedFileId] = useState<string | null>(
-		fileIdParam ?? movie?.file_id ?? null,
+		fileIdParam ?? null,
 	);
+	// The part of a multi-part source being played, once playback has moved
+	// on from the part it started at; null until then.
+	const [partOverride, setPartOverride] = useState<number | null>(null);
 	const [selectedEpisodeId, setSelectedEpisodeId] = useState<string | null>(
 		null,
 	);
@@ -148,16 +158,31 @@ export function MediaDetailPage({
 		enabled: !!playableId,
 	});
 
-	useEffect(() => {
-		if (!sources || sources.length === 0) return;
-		if (selectedFileId && sources.some((s) => s.file_id === selectedFileId)) {
-			return;
-		}
-		setSelectedFileId(sources[0].file_id);
-	}, [sources, selectedFileId]);
-
-	const selectedSource =
-		sources?.find((s) => s.file_id === selectedFileId) ?? null;
+	const canPlay = useMemo(() => browserTypeSupport(), []);
+	const choice = useMemo(
+		() => chooseSource(sources ?? [], canPlay, selectedFileId),
+		[sources, canPlay, selectedFileId],
+	);
+	const selectedSource = choice.chosen;
+	// Sources came back and not one of them plays in this browser.
+	const nothingPlayable =
+		!!sources && sources.length > 0 && selectedSource === null;
+	// `parts` is never empty on the wire; a source without them is its own
+	// single part.
+	const parts: SourcePart[] = selectedSource
+		? selectedSource.parts.length > 0
+			? selectedSource.parts
+			: [
+					{
+						file_id: selectedSource.file_id,
+						size_bytes: selectedSource.size_bytes,
+						duration_secs: selectedSource.duration_secs,
+						subtitle_tracks: selectedSource.subtitle_tracks,
+						stream_url: selectedSource.stream_url,
+						download_url: selectedSource.download_url,
+					},
+				]
+		: [];
 
 	const { data: continueWatching } = useQuery({
 		queryKey: ["continue-watching"],
@@ -173,12 +198,35 @@ export function MediaDetailPage({
 		},
 	});
 
+	// A show deep-linked by `?fileId=` has no episode picked, so no sources to
+	// judge: that file is played as it is, the one case nothing is chosen for.
+	const unjudgedFileId = playableId ? null : selectedFileId;
+	// Watch state is per title, with the part last played (streaming.md), so
+	// a multi-part movie resumes the part that was playing.
 	const savedProgress =
-		continueWatching?.find((item) => item.file_id === selectedFileId) ?? null;
+		continueWatching?.find(
+			(item) =>
+				item.file_id === unjudgedFileId ||
+				parts.some((part) => part.file_id === item.file_id),
+		) ?? null;
+	const resumePartIndex =
+		savedProgress && !startOver
+			? Math.max(
+					0,
+					parts.findIndex((part) => part.file_id === savedProgress.file_id),
+				)
+			: 0;
+	const partIndex = partOverride ?? resumePartIndex;
+	const currentPart = parts[partIndex] ?? null;
+	// The saved position is within the part it was saved for; a part reached
+	// by advancing starts from its beginning.
 	const resumePosition =
-		!startOver && savedProgress ? savedProgress.position_secs : 0;
+		partOverride === null && !startOver && savedProgress
+			? savedProgress.position_secs
+			: 0;
+	const playingFileId = currentPart?.file_id ?? unjudgedFileId;
 
-	const { report, reset: resetBeacon } = usePlaybackBeacon(selectedFileId);
+	const { report, reset: resetBeacon } = usePlaybackBeacon(playingFileId);
 
 	if (!metadata || (!movie && !show)) {
 		return (
@@ -203,16 +251,20 @@ export function MediaDetailPage({
 		movie ? movie.poster_url : (show?.seasons[0]?.poster_url ?? null),
 	);
 
-	const streamUrl = selectedSource
-		? absoluteUrl(selectedSource.stream_url)
-		: selectedFileId
-			? `${env.C_STREAM_SERVER_URL}/v1/files/${selectedFileId}/stream`
+	const streamUrl = currentPart
+		? absoluteUrl(currentPart.stream_url)
+		: unjudgedFileId
+			? `${env.C_STREAM_SERVER_URL}/v1/files/${unjudgedFileId}/stream`
 			: null;
-	const downloadUrl = selectedSource
-		? absoluteUrl(selectedSource.download_url)
-		: selectedFileId
-			? `${env.C_STREAM_SERVER_URL}/v1/files/${selectedFileId}/download`
+	const downloadUrl = currentPart
+		? absoluteUrl(currentPart.download_url)
+		: unjudgedFileId
+			? `${env.C_STREAM_SERVER_URL}/v1/files/${unjudgedFileId}/download`
 			: null;
+	const selectedVerdict = selectedSource
+		? choice.verdicts.get(selectedSource.file_id)
+		: undefined;
+	const hasNextPart = partIndex < parts.length - 1;
 
 	// The episode to auto-advance to when the current one ends (null for
 	// movies, for the last playable episode, and before an episode is picked).
@@ -224,6 +276,7 @@ export function MediaDetailPage({
 		setAutoPlayNext(false);
 		setPlaybackError(null);
 		setStartOver(false);
+		setPartOverride(null);
 		resetBeacon();
 		setSelectedFileId(fileId);
 	}
@@ -233,12 +286,24 @@ export function MediaDetailPage({
 		setAutoPlayNext(false);
 		setPlaybackError(null);
 		setStartOver(false);
+		setPartOverride(null);
 		resetBeacon();
 		setSelectedEpisodeId(episode.id);
 		setSelectedFileId(episode.file_id);
 	}
 
 	function handleEnded(duration: number) {
+		// A multi-part source plays its parts as a playlist (issue #233): the
+		// end of any part but the last moves on to the next one. Nothing is
+		// reported for the part that ended -- only the last part can mark the
+		// title played, and the next part's first report records the position.
+		if (hasNextPart) {
+			setAutoPlayNext(true);
+			setPlaybackError(null);
+			resetBeacon();
+			setPartOverride(partIndex + 1);
+			return;
+		}
 		report(duration, duration, true);
 		// Up-next auto-advance: keep playing the next playable episode
 		// instead of stopping at the end of the current one.
@@ -246,6 +311,7 @@ export function MediaDetailPage({
 			setAutoPlayNext(true);
 			setPlaybackError(null);
 			setStartOver(false);
+			setPartOverride(null);
 			resetBeacon();
 			setSelectedEpisodeId(upNextEpisode.id);
 			setSelectedFileId(upNextEpisode.file_id);
@@ -302,6 +368,7 @@ export function MediaDetailPage({
 						className="text-cyan-400 hover:underline"
 						onClick={() => {
 							setStartOver(true);
+							setPartOverride(null);
 							resetBeacon();
 						}}
 					>
@@ -316,7 +383,9 @@ export function MediaDetailPage({
 						key={`${streamUrl}-${startOver}`}
 						title={title}
 						src={streamUrl}
-						type={selectedSource?.mime_type ?? undefined}
+						type={
+							selectedVerdict?.playable ? selectedVerdict.mimeType : undefined
+						}
 						poster={posterUrl}
 						startTime={resumePosition}
 						autoPlay={autoPlayNext}
@@ -335,16 +404,34 @@ export function MediaDetailPage({
 					<div className="mb-6 flex flex-wrap items-center gap-3">
 						{sources && sources.length > 1 && (
 							<select
-								value={selectedFileId ?? ""}
+								value={selectedSource?.file_id ?? ""}
 								onChange={(e) => selectFile(e.target.value)}
 								className="rounded-md border border-gray-700 bg-gray-800 px-3 py-1.5 text-sm text-white"
 							>
-								{sources.map((s) => (
-									<option key={s.file_id} value={s.file_id}>
-										{sourceLabel(s)}
-									</option>
-								))}
+								{sources.map((s) => {
+									// An unplayable source is listed with its reason, not
+									// hidden: it is a property of the file worth knowing.
+									const verdict = choice.verdicts.get(s.file_id);
+									const unplayable =
+										verdict && !verdict.playable ? verdict : null;
+									return (
+										<option
+											key={s.file_id}
+											value={s.file_id}
+											disabled={!!unplayable}
+										>
+											{unplayable
+												? `${sourceLabel(s)} — ${unplayable.detail}`
+												: sourceLabel(s)}
+										</option>
+									);
+								})}
 							</select>
+						)}
+						{parts.length > 1 && (
+							<span className="text-sm text-gray-500">
+								Part {partIndex + 1} of {parts.length}
+							</span>
 						)}
 						{upNextEpisode && (
 							<span className="text-sm text-gray-500">
@@ -362,9 +449,13 @@ export function MediaDetailPage({
 						)}
 					</div>
 				</>
-			) : (
+			) : nothingPlayable ? (
+				<UnplayableSources sources={sources} verdicts={choice.verdicts} />
+			) : playableId && !sources ? null : (
 				<p className="mb-6 text-gray-500">
-					{show ? "Select an episode to play." : "No streamable file."}
+					{show && !selectedEpisodeId
+						? "Select an episode to play."
+						: "No streamable file."}
 				</p>
 			)}
 
@@ -377,6 +468,45 @@ export function MediaDetailPage({
 				/>
 			)}
 		</div>
+	);
+}
+
+/** The title is in the library, but not in a form this browser can play: each
+ * source with its reason, and the primary's download, which still works. */
+function UnplayableSources({
+	sources,
+	verdicts,
+}: {
+	sources: MediaSource[];
+	verdicts: Map<string, SourceVerdict>;
+}) {
+	const primary = sources.find((s) => s.is_primary) ?? sources[0];
+	return (
+		<section className="mb-6 max-w-4xl rounded-md border border-gray-700 bg-gray-800 p-4">
+			<h2 className="mb-2 text-lg font-semibold">
+				This title can't play in this browser
+			</h2>
+			<ul className="mb-3 space-y-1 text-sm text-gray-300">
+				{sources.map((s) => {
+					const verdict = verdicts.get(s.file_id);
+					return (
+						<li key={s.file_id}>
+							<span className="font-medium">{sourceLabel(s)}</span>
+							{verdict && !verdict.playable && `: ${verdict.detail}`}
+						</li>
+					);
+				})}
+			</ul>
+			{primary && (
+				<a
+					href={absoluteUrl(primary.download_url)}
+					className="inline-flex items-center gap-2 rounded-md border border-gray-700 px-3 py-1.5 text-sm text-gray-300 hover:bg-gray-700 hover:text-white"
+				>
+					<Download size={16} />
+					Download to play it in a desktop player
+				</a>
+			)}
+		</section>
 	);
 }
 
