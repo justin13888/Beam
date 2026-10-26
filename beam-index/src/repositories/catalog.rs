@@ -2,7 +2,7 @@
 //! movies and shows together (issue #187).
 //!
 //! ```text
-//! SELECT kind, id, title_key, year, rating, created_at, runtime
+//! SELECT kind, id, title_key, year, rating, created_at, runtime, relevance
 //!   FROM ((SELECT .. FROM movies WHERE <filters> AND <seek> ORDER BY <tuple> LIMIT $n)
 //!         UNION ALL
 //!         (SELECT .. FROM shows  WHERE <filters> AND <seek> ORDER BY <tuple> LIMIT $n)) AS t
@@ -31,13 +31,23 @@
 //! `idx_movies_title_sort` / `idx_shows_title_sort` (`lower(title), id`) and
 //! `idx_movies_added_sort` / `idx_shows_added_sort` (`created_at, id`), so the
 //! seek is an index condition and the order an index scan, with liveness a
-//! nested-loop `EXISTS` per row read under the limit. The filters are checked
-//! per row the same way, so an unfiltered or kind-only page stops at the page
-//! size, while a selective genre, search or rating filter may walk the whole
-//! index before its page fills (NFR-301). A kind in the middle of
+//! nested-loop `EXISTS` per row read under the limit. A kind in the middle of
 //! the tuple, as it once was, made every page a sequential scan and a sort of
-//! every live title. Year, rating and runtime have no index: their pages are
-//! sorted per branch and still read every matching title.
+//! every live title. The year, rating and runtime sorts have no index: their
+//! pages are sorted per branch and still read every matching title.
+//!
+//! **Filtering** (issue #247). An unfiltered or kind-only page stops at the
+//! page size. A filter checked per row the same way does too while most
+//! titles pass it -- but one that admits fewer titles than a page walks the
+//! whole sort index before it knows. So every filter is also one an index
+//! can answer, and the planner, reading how many titles that filter admits,
+//! starts from those titles and sorts them instead: a search through
+//! `idx_*_title_trgm` (as `%` and `ILIKE`, which it indexes, under
+//! [`SIMILARITY_THRESHOLD`]), a genre through `idx_*_genres_genre_id` (by the
+//! id its slug resolves to, so the statistics are that genre's), a year
+//! through `idx_*_year`, a minimum rating through `idx_*_rating_floor`.
+//! Which plan is cheaper depends on the value, so each page is planned with
+//! its own.
 //!
 //! **Seeking.** A page after a position keeps the rows whose tuple compares
 //! past it in the display direction; a page before one flips both the
@@ -157,11 +167,12 @@ struct BranchFilters {
 }
 
 impl BranchFilters {
-    fn bind(filters: &CatalogFilters, binds: &mut Binds) -> Self {
+    /// `genre` is the id `filters.genre_slug` names, resolved beforehand.
+    fn bind(filters: &CatalogFilters, genre: Option<Uuid>, binds: &mut Binds) -> Self {
         let CatalogFilters {
             kind: _,
             query,
-            genre_slug,
+            genre_slug: _,
             year,
             year_from,
             year_to,
@@ -169,7 +180,7 @@ impl BranchFilters {
         } = filters;
         Self {
             query: query.clone().map(|q| binds.push(q)),
-            genre: genre_slug.clone().map(|slug| binds.push(slug)),
+            genre: genre.map(|id| binds.push(id)),
             year: year.map(|y| binds.push(y)),
             year_from: year_from.map(|y| binds.push(y)),
             year_to: year_to.map(|y| binds.push(y)),
@@ -182,12 +193,12 @@ impl BranchFilters {
             TitleKind::Movie => (
                 "movies",
                 LIVE_MOVIE,
-                "movie_genres j JOIN genres g ON g.id = j.genre_id WHERE j.movie_id = movies.id",
+                "movie_genres j WHERE j.movie_id = movies.id",
             ),
             TitleKind::Show => (
                 "shows",
                 LIVE_SHOW,
-                "show_genres j JOIN genres g ON g.id = j.genre_id WHERE j.show_id = shows.id",
+                "show_genres j WHERE j.show_id = shows.id",
             ),
         };
         let mut conditions = vec![live.to_string()];
@@ -201,9 +212,14 @@ impl BranchFilters {
                 "({table}.title % {q} OR {table}.title ILIKE '%' || {q} || '%')"
             ));
         }
-        if let Some(slug) = &self.genre {
+        if let Some(genre) = &self.genre {
+            // By the genre's id, bound, never joined from its slug: the
+            // planner then reads how many titles carry *this* genre from the
+            // junction's statistics, where a join through `genres` leaves it
+            // to assume every genre is as common as the average one -- and a
+            // rare genre then walks the whole sort index for its page.
             conditions.push(format!(
-                "EXISTS (SELECT 1 FROM {genre_join} AND g.slug = {slug})"
+                "EXISTS (SELECT 1 FROM {genre_join} AND j.genre_id = {genre})"
             ));
         }
         if let Some(y) = &self.year {
@@ -433,13 +449,19 @@ fn keyset(sort: CatalogSort, seek: &Seek, binds: &mut Binds) -> Result<Keyset, D
     })
 }
 
-/// The whole statement for `query`.
-fn browse_statement(query: &CatalogQuery) -> Result<Statement, DbErr> {
+/// The whole statement for `query`, its genre filter -- if it has one --
+/// already resolved to `genre`, the genre's id.
+fn browse_statement(query: &CatalogQuery, genre: Option<Uuid>) -> Result<Statement, DbErr> {
     if let Some(err) = mismatched_position(query).or_else(|| unranked_relevance(query)) {
         return Err(err);
     }
+    if query.filters.genre_slug.is_some() != genre.is_some() {
+        return Err(DbErr::Custom(
+            "a genre filter is read by the id its slug resolves to".to_string(),
+        ));
+    }
     let mut binds = Binds::default();
-    let filters = BranchFilters::bind(&query.filters, &mut binds);
+    let filters = BranchFilters::bind(&query.filters, genre, &mut binds);
     let keyset = keyset(query.sort, &query.seek, &mut binds)?;
     let limit = binds.push(i64::from(query.limit.get()));
     let branches: Vec<String> = [TitleKind::Movie, TitleKind::Show]
@@ -468,33 +490,96 @@ fn browse_statement(query: &CatalogQuery) -> Result<Statement, DbErr> {
 /// pooled connection goes back with.
 pub const SIMILARITY_THRESHOLD: &str = "SET LOCAL pg_trgm.similarity_threshold = 0.2";
 
+/// That a filtered page is planned for its own values every time it runs.
+///
+/// The statement is prepared once per connection and its text is the same
+/// for every value of a filter; after a few executions Postgres may settle
+/// on one generic plan for all of them, costed for an average genre, year or
+/// search. For a filter that admits few titles that plan is the one that
+/// walks the whole sort index -- the plan an index on the filter is there to
+/// avoid -- so a page is never left to it. Planning a page costs well under
+/// what that walk does.
+pub const CUSTOM_PLAN: &str = "SET LOCAL plan_cache_mode = force_custom_plan";
+
+/// The id of the genre a page's filter names.
+#[derive(Debug, FromQueryResult)]
+struct GenreId {
+    id: Uuid,
+}
+
 impl SqlCatalogRepository {
-    /// The one statement [`CatalogRepository::browse`] runs for `query`,
-    /// exposed so the `pg-integration` tier can `EXPLAIN` exactly it.
-    pub fn statement(query: &CatalogQuery) -> Result<Statement, DbErr> {
-        browse_statement(query)
+    /// The genre `slug` names, if any does.
+    async fn genre_id(&self, slug: &str) -> Result<Option<Uuid>, DbErr> {
+        let genre = GenreId::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT id FROM genres WHERE slug = $1",
+            [Value::from(slug)],
+        ))
+        .one(self.db.as_ref())
+        .await?;
+        Ok(genre.map(|genre| genre.id))
     }
 
-    /// The setting `browse` runs [`Self::statement`] under, in a transaction
-    /// of its own, when `query` searches: [`SIMILARITY_THRESHOLD`].
+    /// The one statement [`CatalogRepository::browse`] runs for `query`,
+    /// exposed so the `pg-integration` tier can `EXPLAIN` exactly it -- or
+    /// `None` when its genre filter names no genre, so nothing is listed and
+    /// nothing is run.
+    pub async fn statement(&self, query: &CatalogQuery) -> Result<Option<Statement>, DbErr> {
+        let genre = match &query.filters.genre_slug {
+            Some(slug) => match self.genre_id(slug).await? {
+                Some(id) => Some(id),
+                None => return Ok(None),
+            },
+            None => None,
+        };
+        browse_statement(query, genre).map(Some)
+    }
+
+    /// The settings `browse` runs [`Self::statement`] under, in a
+    /// transaction of its own, as one command: [`CUSTOM_PLAN`] for any page
+    /// an index filters, and [`SIMILARITY_THRESHOLD`] too for a search. An
+    /// unfiltered or kind-only page has one plan whatever it asks, and runs
+    /// alone.
     #[must_use]
-    pub fn setting(query: &CatalogQuery) -> Option<&'static str> {
-        query
-            .filters
-            .query
-            .is_some()
-            .then_some(SIMILARITY_THRESHOLD)
+    pub fn setting(query: &CatalogQuery) -> Option<String> {
+        let CatalogFilters {
+            kind: _,
+            query: search,
+            genre_slug,
+            year,
+            year_from,
+            year_to,
+            min_rating,
+        } = &query.filters;
+        let filtered = search.is_some()
+            || genre_slug.is_some()
+            || year.is_some()
+            || year_from.is_some()
+            || year_to.is_some()
+            || min_rating.is_some();
+        match (filtered, search.is_some()) {
+            (false, _) => None,
+            (true, false) => Some(CUSTOM_PLAN.to_string()),
+            (true, true) => Some(format!("{CUSTOM_PLAN}; {SIMILARITY_THRESHOLD}")),
+        }
     }
 }
 
 #[async_trait]
 impl CatalogRepository for SqlCatalogRepository {
     async fn browse(&self, query: &CatalogQuery) -> Result<Vec<CatalogPosition>, DbErr> {
-        let statement = browse_statement(query)?;
+        // Refused before the genre is looked up, so a bad request reads
+        // nothing.
+        if let Some(err) = mismatched_position(query).or_else(|| unranked_relevance(query)) {
+            return Err(err);
+        }
+        let Some(statement) = self.statement(query).await? else {
+            return Ok(Vec::new());
+        };
         let rows = match Self::setting(query) {
             Some(setting) => {
                 let txn = self.db.begin().await?;
-                txn.execute_unprepared(setting).await?;
+                txn.execute_unprepared(&setting).await?;
                 let rows = CatalogRow::find_by_statement(statement).all(&txn).await?;
                 txn.commit().await?;
                 rows

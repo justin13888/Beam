@@ -120,10 +120,15 @@ requirements (referenced below as FR-xxx).
   number of reads by id. An unfiltered or kind-only page in the default `title` order or in
   `date_added` order, first or after a cursor, MUST be read through an ordered index scan that
   stops at the page size, never a read of every title; the `pg-integration` tier pins this with
-  `EXPLAIN` on a seeded catalogue. A page with a selective `genre`, `query`, `min_rating`, `year`,
-  `year_from` or `year_to` filter walks the same index but may read up to all of it before it
-  fills, so its cost is bounded by the catalogue rather than the page. The `year`, `rating` and `runtime` sorts are deliberately
-  unindexed and do sort every matching title in the database
+  `EXPLAIN` on a seeded catalogue. A `genre`, `query`, `min_rating`, `year`, `year_from` or
+  `year_to` filter MUST also be answerable through an index on what it compares, and each such
+  page MUST be planned for its own filter values, so a filter that admits fewer titles than a page
+  starts from those titles rather than walking the sort index to its end; the same tier pins it
+  with `EXPLAIN ANALYZE`, counting the title rows such a page reads
+  ([#247](https://github.com/justin13888/beam/issues/247)). A filter most titles pass still walks
+  the sort index, stopping once the page fills. The `year`, `rating` and `runtime` sorts are
+  deliberately unindexed and do sort every matching title in the database; a `relevance` sort
+  sorts every title its `query` matches
   ([#187](https://github.com/justin13888/beam/issues/187)).
 - **NFR-302**: Metadata enrichment (FR-301–FR-309) MUST run asynchronously relative to request
   handling and library scanning, and MUST NOT hold a scan or an HTTP request open while waiting on an
