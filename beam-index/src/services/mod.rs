@@ -4,6 +4,7 @@ pub mod filesystem_probe;
 pub mod hash;
 pub mod index;
 pub mod media_info;
+pub mod mime;
 pub mod notification;
 pub mod scan;
 pub mod watch_status;
