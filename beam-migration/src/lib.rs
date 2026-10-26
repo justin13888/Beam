@@ -35,6 +35,7 @@ mod m20261022_000001_browse_filter_indexes;
 mod m20261026_000001_people_credits;
 mod m20261027_000001_watchlist_favourites_collections;
 mod m20261028_000001_user_library_access;
+mod m20261029_000001_user_language_preferences;
 
 pub use m20261008_000001_tracks_subtitles::RENAMED_FFMPEG_CODECS;
 
@@ -76,6 +77,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20261026_000001_people_credits::Migration),
             Box::new(m20261027_000001_watchlist_favourites_collections::Migration),
             Box::new(m20261028_000001_user_library_access::Migration),
+            Box::new(m20261029_000001_user_language_preferences::Migration),
         ]
     }
 }
