@@ -12,3 +12,4 @@ pub mod sidecar;
 pub mod source_rank;
 pub mod subtitle;
 pub mod telemetry;
+pub mod track_selection;
