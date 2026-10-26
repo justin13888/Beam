@@ -468,8 +468,10 @@ description = "Run the beam-web Playwright suite against the composed stack (nee
 # `check:compose-invariants` guards.
 #
 # The SPA is served by Playwright (`vite build` and `vite preview`), not by the
-# `web` image: that image runs `codegen:openapi` and `tsc`, neither of which can
-# pass until beam-web is regenerated against the OpenAPI 3.2 contract (#146).
+# `web` image. The choice dates from when that image could not build -- its
+# `codegen:openapi` and `tsc` steps failed until #146 regenerated beam-web
+# against the OpenAPI 3.2 contract -- and serving the bundle directly still
+# spares the suite a second image build.
 #
 # BEAM_CONTAINER_CACHE_DIR turns on a buildx local layer cache for the server
 # image, as it does for `check:ffmpeg-build`; it needs docker with a
@@ -594,6 +596,9 @@ run = [
 
 [tasks."codegen:openapi"]
 description = "Export openapi.json from the Rust types and regenerate api.gen.ts"
+# The last step runs openapi-typescript, so a job that never installed the JS
+# workspace (release.yml's lockfile-sync) still gets it.
+depends = ["deps:js"]
 run = [
     'cargo run --quiet --example export_openapi -p beam-server ${BEAM_CARGO_FEATURES:+--features "$BEAM_CARGO_FEATURES"} > beam-web/openapi.json',
     # Both consumers regenerate from one export. They were byte-identical by
@@ -2290,23 +2295,10 @@ depends = [
     "codegen:openapi:check",
     "ts:check",
     "ts:test",
-    # TODO(#146): restore "ts:typecheck".
-    #
-    # beam-web is generated from `api.gen.ts`, which cannot be regenerated
-    # until the TypeScript toolchain reads OpenAPI 3.2 (see codegen:openapi).
-    # Every schema key it names was renamed by the Kynos port, so the gate
-    # fails on ~55 references across 20 files -- all of them
-    # `Cannot find module '@/api.gen'` in a fresh checkout. beam-web is being
-    # rewritten shortly, so it is off rather than mechanically renamed twice.
-    #
-    # `ts:check` stays: biome excludes api.gen.ts and does not type-check.
-    # `ts:test` is back: it was switched off alongside `ts:typecheck` rather
-    # than for a reason of its own. vitest resolves through Vite, which does
-    # not need the generated types to exist, so the suite runs on a fresh
-    # checkout. It was off while over half of its suites were silently not
-    # running at all (the Node >= 26 `localStorage` shadowing fixed in
-    # `src/test/setup.ts`), which is exactly the state a gate exists to catch.
-    # ci.yml's ts-test job and the pre-push hook in hk.pkl enforce the same.
+    # Regenerates api.gen.ts from the committed openapi.json first (it is
+    # gitignored), so it passes on a fresh checkout; ci.yml's ts-typecheck job
+    # and the pre-push hook in hk.pkl enforce the same.
+    "ts:typecheck",
     "docs:build",
     "android:lint",
     "android:test",

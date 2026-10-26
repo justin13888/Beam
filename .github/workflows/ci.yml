@@ -62,8 +62,8 @@ jobs:
               - '**/*.mjs'
               - '**/*.cjs'
               # Scoped to beam-web so that editing only beam-docs' .astro templates does not
-              # drag the whole ts chain -- including the Rust/FFmpeg OpenAPI build that
-              # ts-typecheck depends on -- into a docs-only change. beam-docs is covered by
+              # drag the whole ts chain -- including the Rust/FFmpeg OpenAPI build the ts
+              # filter also starts -- into a docs-only change. beam-docs is covered by
               # the docs filter and the docs-build job. Its other files (.ts, .mjs,
               # package.json) still match the patterns above and still trigger ts, which is
               # correct: Biome lints beam-docs' .ts sources. beam-web has no .astro files
@@ -75,6 +75,7 @@ jobs:
               - 'bun.lock'
               # The typed client is generated from the server's OpenAPI spec, so
               # changes to the API surface can break the TypeScript build.
+              - 'beam-web/openapi.json'
               - 'beam-auth/src/**/*.rs'
               - 'beam-server/src/**/*.rs'
             docs:
@@ -438,21 +439,17 @@ jobs:
       - uses: ./.github/actions/setup-ffmpeg
       - uses: ./.github/actions/bun-install
 
-      - run: mise run codegen:openapi
-
       # `beam-web/openapi.json` is committed, and it is the contract every
       # client is generated from. Fail when it no longer matches what the
       # server serves.
+      #
+      # Only the check runs. `codegen:openapi` used to run first, to build an
+      # artifact for ts-typecheck and ts-build -- but it rewrites the committed
+      # file from the same export the check compares it with, so the check
+      # could never fail. Those jobs now regenerate api.gen.ts from the
+      # committed document themselves (codegen:openapi:web), which is exactly
+      # what this check pins.
       - run: mise run codegen:openapi:check
-
-      - name: Upload OpenAPI artifacts
-        uses: actions/upload-artifact@v7
-        with:
-          name: openapi-artifacts
-          path: |
-            beam-web/openapi.json
-            beam-web/src/api.gen.ts
-          retention-days: 7
 
   ts-check:
     name: Biome check
@@ -468,32 +465,26 @@ jobs:
 
   ts-typecheck:
     name: TypeScript type check
-    needs: [changes, openapi]
-    # TODO(#146): re-enable once beam-web is regenerated against the
-    # Kynos contract. `api.gen.ts` cannot be regenerated until the TypeScript
-    # toolchain reads OpenAPI 3.2 (see the codegen:openapi task), and every
-    # schema key it names was renamed by the port. A skipped job still
-    # satisfies ci-ok, which passes on success-or-skipped.
-    if: false
+    needs: [changes]
+    # ts:typecheck regenerates api.gen.ts from the committed openapi.json
+    # (codegen:openapi:web), so this needs no Rust build and does not wait on
+    # the openapi job; that job's check is what pins the committed document to
+    # the server.
+    if: needs.changes.outputs.ts == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
       - uses: ./.github/actions/bun-install
-      - uses: actions/download-artifact@v8
-        with:
-          name: openapi-artifacts
-          path: beam-web
       - run: mise run ts:typecheck
 
   ts-test:
     name: Web tests
     needs: [changes]
-    # TODO(#146): only ts-typecheck and ts-build stay off. This job does not
-    # need `api.gen.ts` to exist -- vitest resolves through Vite, which never
-    # type-checks -- so it neither waits on the openapi job nor downloads its
-    # artifact. It runs the same set `ts:test` in the `ci` mise task and the
-    # pre-push hook enforce, plus the coverage thresholds in vitest.config.ts.
+    # vitest resolves through Vite, which never type-checks, so this does not
+    # need api.gen.ts at all. It runs the same set `ts:test` in the `ci` mise
+    # task and the pre-push hook enforce, plus the coverage thresholds in
+    # vitest.config.ts.
     if: needs.changes.outputs.ts == 'true'
     runs-on: ubuntu-latest
     steps:
@@ -512,22 +503,15 @@ jobs:
 
   ts-build:
     name: Web build
-    needs: [changes, openapi]
-    # TODO(#146): re-enable once beam-web is regenerated against the
-    # Kynos contract. `api.gen.ts` cannot be regenerated until the TypeScript
-    # toolchain reads OpenAPI 3.2 (see the codegen:openapi task), and every
-    # schema key it names was renamed by the port. A skipped job still
-    # satisfies ci-ok, which passes on success-or-skipped.
-    if: false
+    needs: [changes]
+    # Like ts-typecheck, ts:build:web regenerates api.gen.ts from the
+    # committed openapi.json before `vite build && tsc`.
+    if: needs.changes.outputs.ts == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
       - uses: ./.github/actions/bun-install
-      - uses: actions/download-artifact@v8
-        with:
-          name: openapi-artifacts
-          path: beam-web
       # beam-docs is built by the docs-build job, under its own path filter.
       - run: mise run ts:build:web
 
