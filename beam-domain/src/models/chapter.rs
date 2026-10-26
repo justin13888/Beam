@@ -6,10 +6,12 @@
 //! two files of one title can be cut differently, so a chapter is always on
 //! one file's timeline.
 //!
-//! An intro or credits marker is a span a client offers to skip. Beam reads
-//! them from the chapters a file carries ([`markers_from_chapters`]): a
-//! chapter titled `Opening` or `Intro` is the intro, one titled `Ending` or
-//! `End Credits` the credits. A file without such chapters has no markers.
+//! A marker is a span a client offers to skip: the intro, the credits, a
+//! recap of earlier episodes, a preview of the next. Beam reads them from the
+//! chapters a file carries ([`markers_from_chapters`]): a chapter titled
+//! `Opening` or `Intro` is the intro, one titled `Ending` or `End Credits`
+//! the credits, `Recap` or `Previously` a recap, `Preview` or `Next Episode`
+//! a preview. A file without such chapters has no markers.
 
 /// One chapter of a file, on that file's timeline.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,10 +32,35 @@ pub struct Chapter {
 /// What a [`PlaybackMarker`] marks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MarkerKind {
+    /// A recap of earlier episodes (`Previously on...`).
+    Recap,
     /// The opening titles or theme, which a viewer skips into the episode.
     Intro,
     /// The closing credits, which a viewer skips to the next episode.
     Credits,
+    /// A preview of the next episode, after the credits.
+    Preview,
+}
+
+impl MarkerKind {
+    /// Every kind, in the order a file usually plays them.
+    pub const ALL: [MarkerKind; 4] = [
+        MarkerKind::Recap,
+        MarkerKind::Intro,
+        MarkerKind::Credits,
+        MarkerKind::Preview,
+    ];
+
+    /// The chapter titles that name this kind, compared after
+    /// [`normalised_title`].
+    fn titles(self) -> &'static [&'static str] {
+        match self {
+            MarkerKind::Recap => RECAP_TITLES,
+            MarkerKind::Intro => INTRO_TITLES,
+            MarkerKind::Credits => CREDITS_TITLES,
+            MarkerKind::Preview => PREVIEW_TITLES,
+        }
+    }
 }
 
 /// A span of a file a client offers to skip.
@@ -45,6 +72,20 @@ pub struct PlaybackMarker {
     /// Where it ends; always after `start_ms`.
     pub end_ms: u64,
 }
+
+/// The chapter titles that name a recap, compared after
+/// [`normalised_title`].
+const RECAP_TITLES: &[&str] = &["recap", "previously", "previously on", "last time"];
+
+/// The chapter titles that name a preview, compared after
+/// [`normalised_title`].
+const PREVIEW_TITLES: &[&str] = &[
+    "preview",
+    "next episode",
+    "next episode preview",
+    "next time",
+    "next time on",
+];
 
 /// The chapter titles that name an intro, compared after
 /// [`normalised_title`].
@@ -93,20 +134,16 @@ fn normalised_title(title: &str) -> String {
 /// The kind of span a chapter titled `title` marks, if any.
 pub fn marker_kind_of_title(title: &str) -> Option<MarkerKind> {
     let title = normalised_title(title);
-    if INTRO_TITLES.contains(&title.as_str()) {
-        Some(MarkerKind::Intro)
-    } else if CREDITS_TITLES.contains(&title.as_str()) {
-        Some(MarkerKind::Credits)
-    } else {
-        None
-    }
+    MarkerKind::ALL
+        .into_iter()
+        .find(|kind| kind.titles().contains(&title.as_str()))
 }
 
-/// The intro and credits markers `chapters` name: for each kind, the first
-/// chapter -- in the file's order -- whose title names it and which lasts
-/// longer than nothing. At most one marker of each kind, the intro first.
+/// The markers `chapters` name: for each kind, the first chapter -- in the
+/// file's order -- whose title names it and which lasts longer than nothing.
+/// At most one marker of each kind, in the order they start.
 pub fn markers_from_chapters(chapters: &[Chapter]) -> Vec<PlaybackMarker> {
-    [MarkerKind::Intro, MarkerKind::Credits]
+    let mut markers: Vec<PlaybackMarker> = MarkerKind::ALL
         .into_iter()
         .filter_map(|kind| {
             chapters
@@ -125,7 +162,9 @@ pub fn markers_from_chapters(chapters: &[Chapter]) -> Vec<PlaybackMarker> {
                     end_ms: chapter.end_ms,
                 })
         })
-        .collect()
+        .collect();
+    markers.sort_by_key(|marker| (marker.start_ms, marker.end_ms));
+    markers
 }
 
 #[cfg(test)]
@@ -158,7 +197,11 @@ mod tests {
             ("Prologue", None),
             ("Opening Scene of the Battle", None),
             ("Credits Roll Over the Finale", None),
-            ("Preview", None),
+            ("Previously On", Some(MarkerKind::Recap)),
+            ("Recap", Some(MarkerKind::Recap)),
+            ("Next Episode Preview", Some(MarkerKind::Preview)),
+            ("Preview", Some(MarkerKind::Preview)),
+            ("Previews of Coming Attractions", None),
             ("", None),
         ];
         for (title, expected) in cases {
@@ -167,28 +210,44 @@ mod tests {
     }
 
     #[test]
-    fn the_intro_and_credits_chapters_become_markers_on_the_files_timeline() {
+    fn the_chapters_titled_for_a_span_become_markers_in_the_order_they_start() {
         let chapters = [
-            chapter(0, 0, 90_000, Some("Cold Open")),
-            chapter(1, 90_000, 180_000, Some("Opening")),
-            chapter(2, 180_000, 1_200_000, Some("Part A")),
-            chapter(3, 1_200_000, 1_290_000, Some("Ending")),
-            chapter(4, 1_290_000, 1_320_000, Some("Preview")),
+            chapter(0, 0, 30_000, Some("Previously On")),
+            chapter(1, 30_000, 90_000, Some("Cold Open")),
+            chapter(2, 90_000, 180_000, Some("Opening")),
+            chapter(3, 180_000, 1_200_000, Some("Part A")),
+            chapter(4, 1_200_000, 1_290_000, Some("Ending")),
+            chapter(5, 1_290_000, 1_320_000, Some("Preview")),
         ];
+        let marker = |kind, start_ms, end_ms| PlaybackMarker {
+            kind,
+            start_ms,
+            end_ms,
+        };
         assert_eq!(
             markers_from_chapters(&chapters),
             vec![
-                PlaybackMarker {
-                    kind: MarkerKind::Intro,
-                    start_ms: 90_000,
-                    end_ms: 180_000,
-                },
-                PlaybackMarker {
-                    kind: MarkerKind::Credits,
-                    start_ms: 1_200_000,
-                    end_ms: 1_290_000,
-                },
+                marker(MarkerKind::Recap, 0, 30_000),
+                marker(MarkerKind::Intro, 90_000, 180_000),
+                marker(MarkerKind::Credits, 1_200_000, 1_290_000),
+                marker(MarkerKind::Preview, 1_290_000, 1_320_000),
             ]
+        );
+    }
+
+    #[test]
+    fn markers_follow_the_files_order_not_the_usual_one() {
+        // A preview before the intro, as some broadcasts air it.
+        let chapters = [
+            chapter(0, 0, 20_000, Some("Next Time")),
+            chapter(1, 20_000, 60_000, Some("OP")),
+        ];
+        assert_eq!(
+            markers_from_chapters(&chapters)
+                .iter()
+                .map(|marker| marker.kind)
+                .collect::<Vec<_>>(),
+            vec![MarkerKind::Preview, MarkerKind::Intro]
         );
     }
 
