@@ -90,6 +90,22 @@ fn with_database(url: &str, name: &str) -> String {
     parsed.to_string()
 }
 
+/// Whether the administrative Postgres accepts a connection now; the error
+/// is why not.
+pub async fn probe() -> Result<(), String> {
+    let mut options = ConnectOptions::new(admin_url());
+    options
+        .max_connections(1)
+        .min_connections(0)
+        .connect_timeout(CONNECT_TIMEOUT)
+        .acquire_timeout(CONNECT_TIMEOUT)
+        .sqlx_logging(false);
+    let connection = Database::connect(options)
+        .await
+        .map_err(|e| e.to_string())?;
+    connection.close().await.map_err(|e| e.to_string())
+}
+
 async fn connect(url: &str) -> DatabaseConnection {
     let mut options = ConnectOptions::new(url.to_owned());
     options

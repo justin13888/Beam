@@ -48,6 +48,20 @@ pub fn issuer() -> String {
     std::env::var(ISSUER_ENV).unwrap_or_else(|_| DEFAULT_ISSUER.to_owned())
 }
 
+/// Whether the issuer serves its discovery document now -- what
+/// `beam-server` reads once at startup; the error is why not.
+pub async fn probe() -> Result<(), String> {
+    let discovery = format!(
+        "{}/.well-known/openid-configuration",
+        issuer().trim_end_matches('/')
+    );
+    match reqwest::get(&discovery).await {
+        Ok(response) if response.status().is_success() => Ok(()),
+        Ok(response) => Err(format!("{discovery} answered {}", response.status())),
+        Err(error) => Err(format!("{discovery}: {error}")),
+    }
+}
+
 /// A browser that only ever talks to Dex and to one Beam server.
 #[derive(Debug, Clone)]
 pub struct Browser {

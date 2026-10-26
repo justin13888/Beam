@@ -37,7 +37,7 @@ async fn a_scanned_library_is_browsed_searched_and_streamed() {
     // The MIME type is deliberately not asserted: the indexer stores
     // `video/<FFmpeg's demuxer list>` (`video/mov,mp4,m4a,3gp,3g2,mj2`), which
     // the stream endpoint then serves as its Content-Type. That is a defect
-    // of its own, to be fixed with this assertion added here.
+    // of its own (#311), to be fixed with this assertion added here.
     let stored: Vec<(String, bool, bool)> = rows
         .iter()
         .map(|row| {

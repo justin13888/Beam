@@ -2,13 +2,14 @@
 //! and a `beam-server` process over both, signed in to through Dex.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use sea_orm::DatabaseConnection;
 use tempfile::TempDir;
 
 use super::client::{self, api};
-use super::database::EphemeralDatabase;
+use super::database::{self, EphemeralDatabase};
 use super::idp::{self, Account, Browser};
 use super::library::FixtureLibrary;
 use super::server::{self, ServerProcess};
@@ -16,6 +17,11 @@ use super::wait;
 
 /// How long a device sign-in may take once approved.
 const DEVICE_SIGN_IN_BOUND: Duration = Duration::from_secs(60);
+
+/// How long the composed Postgres and Dex have to come up. Generous: a
+/// container runtime that has just started them may still be initialising
+/// the database.
+const DEPENDENCY_BOUND: Duration = Duration::from_secs(120);
 
 /// What a test changes about the stack it starts.
 #[derive(Debug, Default, Clone)]
@@ -63,6 +69,7 @@ impl Stack {
     /// over a new database and an empty library.
     pub async fn start(binary: &Path, options: StackOptions) -> Self {
         let StackOptions { port, env } = options;
+        dependencies_ready_once();
         let library = FixtureLibrary::new();
         let database = EphemeralDatabase::create().await;
         let work = tempfile::Builder::new()
@@ -175,6 +182,46 @@ impl Stack {
         drop(db);
         database.drop_database().await;
     }
+}
+
+/// Wait, the first time this is called in the process, until Postgres accepts
+/// a connection and Dex serves its discovery document.
+///
+/// Not every compose provider waits for a service's health check (podman
+/// compose's `up --wait` returns at once), and `beam-server` reads the
+/// issuer's discovery document only at startup, so the suite asks both
+/// services itself rather than trusting whoever started them. On a thread and
+/// runtime of its own, for the reason `database::sweep_once` gives.
+fn dependencies_ready_once() {
+    static READY: OnceLock<bool> = OnceLock::new();
+    let ready = READY.get_or_init(|| {
+        std::thread::spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build the readiness runtime")
+                .block_on(async {
+                    wait::until(
+                        "Postgres to accept connections",
+                        DEPENDENCY_BOUND,
+                        database::probe,
+                    )
+                    .await;
+                    wait::until(
+                        "Dex to serve its discovery document",
+                        DEPENDENCY_BOUND,
+                        idp::probe,
+                    )
+                    .await;
+                });
+        })
+        .join()
+        .is_ok()
+    });
+    assert!(
+        *ready,
+        "the tier's Postgres and Dex did not come up; the first failure says which"
+    );
 }
 
 /// The server's configuration in this tier, before a test's own options.
