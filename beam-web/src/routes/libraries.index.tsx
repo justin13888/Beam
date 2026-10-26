@@ -18,11 +18,11 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useAuth } from "@/hooks/auth";
-import { apiClient, asConnection } from "@/lib/apiClient";
+import { apiClient } from "@/lib/apiClient";
 import { apiError } from "@/lib/problem";
 import { RouteError } from "../components/RouteError";
 
-type Library = components["schemas"]["beam_server.models.library.Library"];
+type Library = components["schemas"]["Library"];
 
 // `/libraries/` -- an index route, not a layout.
 //
@@ -99,7 +99,7 @@ export function LibrariesPage() {
 				credentials: "include",
 			});
 			if (error) throw apiError(error, "Failed to load libraries");
-			return asConnection(data).items;
+			return data.items;
 		},
 		enabled: isAuthenticated,
 	});

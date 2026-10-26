@@ -19,6 +19,7 @@ import { toast } from "sonner";
 import type { components } from "@/api.gen";
 import { Button } from "@/components/ui/button";
 import { apiClient } from "@/lib/apiClient";
+import { useCursorPages } from "@/lib/cursorPages";
 import { apiError } from "@/lib/problem";
 import { RouteError } from "../components/RouteError";
 import { useAuth } from "../hooks/auth";
@@ -34,13 +35,10 @@ import {
 	usePlaybackTelemetry,
 } from "../hooks/usePlaybackTelemetry";
 
-type AdminLogEntry =
-	components["schemas"]["beam_server.models.admin.AdminLogEntryDto"];
-type AdminUser = components["schemas"]["beam_server.models.admin.AdminUserDto"];
-type AdminStatus =
-	components["schemas"]["beam_server.models.admin.AdminStatusResponse"];
-type RecentScan =
-	components["schemas"]["beam_server.models.admin.RecentScanDto"];
+type AdminLogEntry = components["schemas"]["AdminLogEntry"];
+type AdminUser = components["schemas"]["AdminUser"];
+type AdminStatus = components["schemas"]["AdminStatus"];
+type RecentScan = components["schemas"]["RecentScan"];
 
 const PAGE_SIZE = 50;
 
@@ -209,18 +207,17 @@ function TabBar({ tab, navigate }: { tab: AdminTab; navigate: AdminNavigate }) {
 function UsersTab() {
 	const { user: currentUser } = useAuth();
 	const queryClient = useQueryClient();
-	const [page, setPage] = useState(0);
-	const offset = page * PAGE_SIZE;
+	const pages = useCursorPages();
 
 	const {
 		data,
 		isLoading: loading,
 		error,
 	} = useQuery({
-		queryKey: ["admin", "users", offset],
+		queryKey: ["admin", "users", pages.after ?? null],
 		queryFn: async () => {
 			const { data, error } = await apiClient.GET("/v1/admin/users", {
-				params: { query: { limit: PAGE_SIZE, offset } },
+				params: { query: { first: PAGE_SIZE, after: pages.after } },
 				credentials: "include",
 			});
 			if (error) throw apiError(error, "Failed to load users");
@@ -275,6 +272,9 @@ function UsersTab() {
 	const users = data?.items ?? [];
 	const total = data?.total ?? 0;
 	const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+	const endCursor = data?.page_info.has_next_page
+		? data.page_info.end_cursor
+		: null;
 
 	return (
 		<div className="rounded-xl bg-gray-800/30 border border-gray-700/50 overflow-hidden">
@@ -394,25 +394,25 @@ function UsersTab() {
 				</ul>
 			)}
 
-			{totalPages > 1 && (
+			{(pages.page > 0 || endCursor != null) && (
 				<div className="px-6 py-4 border-t border-gray-700/50 flex items-center justify-between">
 					<Button
 						variant="outline"
 						size="sm"
-						onClick={() => setPage((p) => Math.max(0, p - 1))}
-						disabled={page === 0 || loading}
+						onClick={pages.prev}
+						disabled={pages.page === 0 || loading}
 						className="border-gray-600 text-gray-300 hover:text-white hover:bg-gray-700"
 					>
 						Previous
 					</Button>
 					<span className="text-sm text-gray-500">
-						{page + 1} / {totalPages}
+						{pages.page + 1} / {totalPages}
 					</span>
 					<Button
 						variant="outline"
 						size="sm"
-						onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
-						disabled={page >= totalPages - 1 || loading}
+						onClick={() => endCursor != null && pages.next(endCursor)}
+						disabled={endCursor == null || loading}
 						className="border-gray-600 text-gray-300 hover:text-white hover:bg-gray-700"
 					>
 						Next
@@ -884,19 +884,18 @@ function LogsTab() {
 	const { isAuthenticated } = useAuth();
 	const { events: liveEvents, connected: liveConnected } =
 		useAdminEventStream(isAuthenticated);
-	const [page, setPage] = useState(0);
-	const offset = page * PAGE_SIZE;
+	const pages = useCursorPages();
 
 	const {
-		data: logs,
+		data,
 		isLoading: loading,
 		error,
-		refetch: refetchLogs,
+		refetch,
 	} = useQuery({
-		queryKey: ["admin", "logs", offset],
+		queryKey: ["admin", "logs", pages.after ?? null],
 		queryFn: async () => {
 			const { data, error } = await apiClient.GET("/v1/admin/logs", {
-				params: { query: { limit: PAGE_SIZE, offset } },
+				params: { query: { first: PAGE_SIZE, after: pages.after } },
 				credentials: "include",
 			});
 			if (error) throw apiError(error, "Failed to load admin logs");
@@ -905,25 +904,14 @@ function LogsTab() {
 		enabled: isAuthenticated,
 	});
 
-	const { data: countData, refetch: refetchCount } = useQuery({
-		queryKey: ["admin", "logs", "count"],
-		queryFn: async () => {
-			const { data, error } = await apiClient.GET("/v1/admin/logs/count", {
-				credentials: "include",
-			});
-			if (error) throw apiError(error, "Failed to load admin log count");
-			return data;
-		},
-		enabled: isAuthenticated,
-	});
-
-	const refetch = () => {
-		refetchLogs();
-		refetchCount();
-	};
-
-	const totalCount = countData?.count ?? 0;
+	// The connection carries the whole log's size, so the count the stats card
+	// shows arrives with the page rather than from a request of its own.
+	const logs = data?.items;
+	const totalCount = data?.total ?? 0;
 	const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
+	const endCursor = data?.page_info.has_next_page
+		? data.page_info.end_cursor
+		: null;
 
 	return (
 		<div className="space-y-8">
@@ -1008,7 +996,7 @@ function LogsTab() {
 				<div className="px-6 py-4 border-b border-gray-700/50 flex items-center justify-between">
 					<h2 className="text-lg font-semibold text-white">System Logs</h2>
 					<span className="text-sm text-gray-500">
-						Page {page + 1} of {totalPages} ({totalCount} total)
+						Page {pages.page + 1} of {totalPages} ({totalCount} total)
 					</span>
 				</div>
 
@@ -1071,25 +1059,25 @@ function LogsTab() {
 				)}
 
 				{/* Pagination */}
-				{totalPages > 1 && (
+				{(pages.page > 0 || endCursor != null) && (
 					<div className="px-6 py-4 border-t border-gray-700/50 flex items-center justify-between">
 						<Button
 							variant="outline"
 							size="sm"
-							onClick={() => setPage((p) => Math.max(0, p - 1))}
-							disabled={page === 0 || loading}
+							onClick={pages.prev}
+							disabled={pages.page === 0 || loading}
 							className="border-gray-600 text-gray-300 hover:text-white hover:bg-gray-700"
 						>
 							Previous
 						</Button>
 						<span className="text-sm text-gray-500">
-							{page + 1} / {totalPages}
+							{pages.page + 1} / {totalPages}
 						</span>
 						<Button
 							variant="outline"
 							size="sm"
-							onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
-							disabled={page >= totalPages - 1 || loading}
+							onClick={() => endCursor != null && pages.next(endCursor)}
+							disabled={endCursor == null || loading}
 							className="border-gray-600 text-gray-300 hover:text-white hover:bg-gray-700"
 						>
 							Next

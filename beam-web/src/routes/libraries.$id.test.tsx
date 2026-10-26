@@ -10,10 +10,13 @@ import { problem } from "@/test/problem";
 import { recordRequests } from "@/test/requests";
 import { server } from "@/test/server";
 
-type LibraryFile =
-	components["schemas"]["beam_server.models.library.file.LibraryFile"];
+type LibraryFile = components["schemas"]["LibraryFile"];
 
-const testLibrary = factory.library({ id: "lib-1", name: "Movies", size: 3 });
+const testLibrary = factory.library({
+	id: "lib-1",
+	name: "Movies",
+	file_count: 3,
+});
 
 function libraryFile(overrides: Partial<LibraryFile> = {}): LibraryFile {
 	return {

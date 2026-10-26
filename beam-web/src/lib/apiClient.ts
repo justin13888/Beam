@@ -1,27 +1,13 @@
 import createClient from "openapi-fetch";
-import type { paths } from "@/api.gen";
+import type { components, paths } from "@/api.gen";
 import { env } from "@/env";
 
 /**
  * Typed HTTP client generated from the OpenAPI specification.
  *
- * Regenerate types with: `bun run codegen:openapi:full`
- * (exports openapi.json from the backend, then generates src/api.gen.ts)
- *
- * TODO(#146): `src/api.gen.ts` is STALE and does not describe the
- * server.
- *
- * The Kynos migration moved the contract to OpenAPI 3.2 and renamed every
- * generated identifier -- `beam_server.models.media.MediaMetadata` is now
- * `MediaMetadata`, and so on for ~55 schema keys across ~20 files here.
- * `api.gen.ts` cannot be regenerated yet: `openapi-typescript` 7.13.0 delegates
- * to @redocly/openapi-core 1.34.8, whose `detectSpec` throws
- * `Unsupported OpenAPI version: 3.2.0`. Redocly 2.x reads 3.2; openapi-typescript
- * has not bumped to it.
- *
- * beam-web is being rewritten shortly, so it is deliberately NOT being renamed
- * in the meantime. `ts:typecheck` and `ts:test` are switched off in CI until
- * then -- see the codegen:openapi task in mise.toml.
+ * Regenerate types with: `mise run codegen:openapi` (exports openapi.json from
+ * the backend, then generates src/api.gen.ts), or `mise run
+ * codegen:openapi:web` to regenerate from the committed document alone.
  */
 export const apiClient = createClient<paths>({
 	baseUrl: env.C_STREAM_SERVER_URL,
@@ -42,26 +28,13 @@ export const apiClient = createClient<paths>({
 });
 
 /** A `/v1` connection's paging state (`PageInfo` in the OpenAPI document). */
-export interface PageInfo {
-	has_next_page: boolean;
-	has_previous_page: boolean;
-	start_cursor?: string | null;
-	end_cursor?: string | null;
-}
+export type PageInfo = components["schemas"]["PageInfo"];
 
-/** The one `/v1` list envelope (ADR-0021): `{ items, page_info }`. */
+/**
+ * The one `/v1` list envelope (ADR-0021): `{ items, page_info }`. Every
+ * `*Connection` schema the document declares is this shape over its own item.
+ */
 export interface Connection<T> {
 	items: T[];
 	page_info: PageInfo;
-}
-
-/**
- * Reads a list response as the connection the server sends.
- *
- * TODO(#146): the stale `api.gen.ts` still types every list as a bare array.
- * The parameter takes that stale type on purpose, so regenerating it turns each
- * call site into a type error that says this shim can go.
- */
-export function asConnection<T>(data: T[]): Connection<T> {
-	return data as unknown as Connection<T>;
 }

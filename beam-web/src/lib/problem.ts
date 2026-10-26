@@ -1,3 +1,5 @@
+import type { components } from "@/api.gen";
+
 /**
  * Reading the server's RFC 9457 problem documents.
  *
@@ -11,23 +13,21 @@
  * viewer saw the same seven words whether their session had expired, the title
  * had been removed, or the database was down.
  *
- * TODO(#146): this reads the body at runtime rather than through `api.gen.ts`,
- * which still describes every error as `text/plain: string` because it cannot
- * be regenerated from an OpenAPI 3.2 document yet. `openapi-fetch` parses the
- * body regardless of its declared type, so `error` really is the parsed
- * document at runtime; once the client is regenerated, `Problem` below should
- * come from `components["schemas"]["Problem"]` instead of being written out.
+ * `api.gen.ts` declares every error response as `application/problem+json`,
+ * but only some of them name the `Problem` schema, so `error` is still read
+ * defensively at runtime: a proxy or gateway in front of the server can answer
+ * with any body at all.
  */
 
-/** The members of a problem document this app acts on. */
-export interface Problem {
-	/** The stable, machine-readable identifier. */
-	type: string;
-	/** The HTTP status, which the document repeats. */
-	status: number;
-	/** The occurrence-specific explanation, where the server sent one. */
-	detail?: string;
-}
+/**
+ * The members of a problem document this app acts on: `type` (the stable,
+ * machine-readable identifier), `status` (which the document repeats), and
+ * `detail` (the occurrence-specific explanation, where the server sent one).
+ */
+export type Problem = Pick<
+	components["schemas"]["Problem"],
+	"type" | "status" | "detail"
+>;
 
 /** RFC 9457's "the status code is the whole story". */
 const ABOUT_BLANK = "about:blank";

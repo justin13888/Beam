@@ -17,10 +17,8 @@ vi.mock("../hooks/useAdminEventStream", () => ({
 	useAdminEventStream: () => ({ events: [], connected: false }),
 }));
 
-type AdminLogEntry =
-	components["schemas"]["beam_server.models.admin.AdminLogEntryDto"];
-type AdminStatus =
-	components["schemas"]["beam_server.models.admin.AdminStatusResponse"];
+type AdminLogEntry = components["schemas"]["AdminLogEntry"];
+type AdminStatus = components["schemas"]["AdminStatus"];
 
 /** The operator running these tests. Their own row must not offer a disable. */
 const operator = factory.user({
@@ -30,7 +28,7 @@ const operator = factory.user({
 	is_admin: true,
 });
 
-const statusResponse: AdminStatus = {
+const statusResponse: AdminStatus = factory.adminStatus({
 	// 3d 4h 12m exactly: 3*86400 + 4*3600 + 12*60 = 274320
 	uptime_secs: 274320,
 	version: "1.2.3",
@@ -48,7 +46,7 @@ const statusResponse: AdminStatus = {
 			created_at: "2024-06-01T11:00:00Z",
 		},
 	],
-};
+});
 
 const serverStartedLog: AdminLogEntry = {
 	id: "log-1",
@@ -58,6 +56,25 @@ const serverStartedLog: AdminLogEntry = {
 	created_at: "2024-06-01T00:00:00Z",
 	details: null,
 };
+
+/**
+ * A page of a counted connection. The first page (no `after`) reports a next
+ * page after `cursor-1` whenever `total` is more than it holds; any later page
+ * is the last, so a two-page list ends after one Next.
+ */
+function counted<T>(request: Request, items: T[], total: number) {
+	const isFirst = !new URL(request.url).searchParams.has("after");
+	const more = isFirst && total > items.length;
+	return factory.countedConnection(
+		items,
+		{
+			has_previous_page: !isFirst,
+			has_next_page: more,
+			end_cursor: more ? "cursor-1" : null,
+		},
+		total,
+	);
+}
 
 function serveAdmin({
 	users = [factory.adminUser({ id: "user-2", display_name: "Grace Hopper" })],
@@ -71,13 +88,18 @@ function serveAdmin({
 		http.get(`${BASE_URL}/v1/me`, () =>
 			HttpResponse.json(factory.user({ ...operator, is_admin: admin })),
 		),
-		http.get(`${BASE_URL}/v1/admin/users`, () =>
-			HttpResponse.json({ items: users, total }),
+		http.get(`${BASE_URL}/v1/admin/users`, ({ request }) =>
+			HttpResponse.json<components["schemas"]["AdminUserConnection"]>(
+				counted(request, users, total),
+			),
 		),
-		http.get(`${BASE_URL}/v1/admin/status`, () => HttpResponse.json(status)),
-		http.get(`${BASE_URL}/v1/admin/logs`, () => HttpResponse.json(logs)),
-		http.get(`${BASE_URL}/v1/admin/logs/count`, () =>
-			HttpResponse.json({ count: logCount }),
+		http.get(`${BASE_URL}/v1/admin/status`, () =>
+			HttpResponse.json<AdminStatus>(status),
+		),
+		http.get(`${BASE_URL}/v1/admin/logs`, ({ request }) =>
+			HttpResponse.json<components["schemas"]["AdminLogConnection"]>(
+				counted(request, logs, logCount),
+			),
 		),
 	);
 }
@@ -242,20 +264,24 @@ describe("/admin users tab", () => {
 		expect(screen.getByText("You")).toBeInTheDocument();
 	});
 
-	it("requests the next page at offset 50", async () => {
+	it("requests the next page after the first page's end cursor", async () => {
 		const requests = recordRequests();
 		serveAdmin({ total: 60 });
 		const user = userEvent.setup();
 		renderRoute("/admin?tab=users");
 
 		await screen.findByText("Grace Hopper");
+		const [first] = requests.matching("GET", "/v1/admin/users");
+		expect(first.query.get("first")).toBe("50");
+		expect(first.query.has("after")).toBe(false);
+
 		await user.click(screen.getByRole("button", { name: "Next" }));
 
 		await waitFor(() => {
 			const gets = requests.matching("GET", "/v1/admin/users");
 			const last = gets[gets.length - 1];
-			expect(last.query.get("limit")).toBe("50");
-			expect(last.query.get("offset")).toBe("50");
+			expect(last.query.get("first")).toBe("50");
+			expect(last.query.get("after")).toBe("cursor-1");
 		});
 	});
 });
@@ -429,7 +455,7 @@ describe("/admin logs tab", () => {
 		expect(await screen.findByText("Server started")).toBeInTheDocument();
 	});
 
-	it("pages the log list, requesting offset 50 on Next and disabling it on the last page", async () => {
+	it("pages the log list after the end cursor, disabling Next on the last page", async () => {
 		const requests = recordRequests();
 		// 60 entries at PAGE_SIZE 50 => two pages, so the pager renders.
 		serveAdmin({ logs: [serverStartedLog], logCount: 60 });
@@ -444,12 +470,19 @@ describe("/admin logs tab", () => {
 		await waitFor(() => {
 			const gets = requests.matching("GET", "/v1/admin/logs");
 			const last = gets[gets.length - 1];
-			expect(last.query.get("limit")).toBe("50");
-			expect(last.query.get("offset")).toBe("50");
+			expect(last.query.get("first")).toBe("50");
+			expect(last.query.get("after")).toBe("cursor-1");
 		});
-		// Page 2 of 2 is the last page: Next disables (count-driven).
+		// Page 2 of 2 is the last page: the server reports no page after it.
 		await waitFor(() =>
 			expect(screen.getByRole("button", { name: "Next" })).toBeDisabled(),
 		);
+		expect(screen.getByText("Page 2 of 2 (60 total)")).toBeInTheDocument();
+
+		await user.click(screen.getByRole("button", { name: "Previous" }));
+
+		expect(
+			await screen.findByText("Page 1 of 2 (60 total)"),
+		).toBeInTheDocument();
 	});
 });

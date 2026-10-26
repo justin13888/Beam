@@ -16,7 +16,7 @@ and the outcomes section listing what shipped differently from the plan.
 | Server-Sent Events | Met |
 | Ranged media delivery | Met |
 | Cookies, rate limiting, and testing | Met, differently: Beam supplies the token bucket through Kynos's policy seam, and the route/document conformance test is obsolete by construction |
-| Browser toolchain | **Not met.** `openapi-typescript` cannot read a 3.2 document, and the fix upstream is a dependency bump rather than the fork this page mandated |
+| Browser toolchain | Met for the document, not for SSE: `openapi-typescript` reads 3.2 once `@redocly/openapi-core` is at 1.34.22, with no fork; it does not model `itemSchema`, so there is no typed subscription |
 | `spargen` | Met at 0.4.0 |
 | Coupling boundary | Met |
 
@@ -213,21 +213,19 @@ The later migration MUST pin an immutable fork revision. Only after Beam validat
 production-shaped tests will the changes be proposed upstream. Beam MUST NOT return to upstream
 packages until a release contains the required behavior.
 
-**Status: not met, and superseded in shape.** `openapi-typescript` 7.13.0 cannot read the document
-at all — not the SSE model, the whole file. Its own version gate accepts 3.2, but it delegates to
-`@redocly/openapi-core` 1.34.8, whose `detectSpec` knows only 3.0 and 3.1 and throws
-`Unsupported OpenAPI version: 3.2.0` from both `lint` and `bundle`; no ruleset or severity override
-reaches it. Redocly 2.x speaks 3.2 natively and `openapi-typescript` has not bumped to it, so the
-work upstream is a dependency bump plus whatever the 3.2 SSE model needs on top — far smaller than
-the fork this section mandated. Fork only if that bump is refused; the mandate stands as a fallback,
-not as the plan.
+**Status: met for the document without a fork; the SSE capabilities are not.** At the migration,
+`openapi-typescript` 7.13.0 could not read the document at all: it delegates to
+`@redocly/openapi-core`, and 1.34.8's `detectSpec` knew only 3.0 and 3.1. Redocly 1.34.22 accepts
+3.2 (reading it as 3.1), and it is inside the `^1.34.6` range 7.13.0 declares, so the root
+`package.json` raises the floor with an `overrides` entry and no fork is needed to read the file
+([#146](https://github.com/justin13888/beam/issues/146)). `beam-web` is regenerated against the
+contract, and `ts:typecheck`, `ts:test` and the web build are back in `mise run ci`, the pre-push
+hook and CI.
 
-`beam-web` is therefore **not regenerated**. `api.gen.ts` is stale — every schema key it names still
-carries the old dotted prefix — and `codegen:openapi`'s client step, plus the `ts:typecheck` and
-`ts:test` gates, are switched off with a [#146](https://github.com/justin13888/beam/issues/146)
-TODO. That is a deliberate stand-down rather than a mechanical rename, because `beam-web` is being
-rewritten shortly and renaming ~55 references across 20 files twice buys nothing. `ts:check` stays on:
-`biome.json` excludes the generated file and does not type-check.
+What 3.1-as-read does not give is the SSE half of the list above: `itemSchema` is not modelled, so
+the stream's body is typed `unknown` and there is no typed subscription API; `useAdminEventStream`
+parses each event as `AdminEvent` by name over a raw `EventSource`. The fork mandate stands for that
+capability alone, should a typed stream ever be worth one.
 
 ### `spargen`
 
@@ -320,5 +318,5 @@ rewritten, would have kept the document and the router two artifacts for longer 
 warranted. `/v1` is preserved in path and method; the generated-client contract is not, because
 operation IDs and schema keys were renamed, and regenerating is the accepted cost.
 
-What that trade-off owes: `beam-web` is regenerated, and `ts:typecheck` and `ts:test` come back on,
-before the rewrite can claim to consume this contract.
+What that trade-off owed -- `beam-web` regenerated, and `ts:typecheck` and `ts:test` back on -- was
+paid in [#146](https://github.com/justin13888/beam/issues/146).

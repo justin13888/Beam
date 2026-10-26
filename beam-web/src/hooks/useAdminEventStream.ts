@@ -2,8 +2,7 @@ import { useEffect, useState } from "react";
 import type { components } from "@/api.gen";
 import { env } from "@/env";
 
-type AdminEventDto =
-	components["schemas"]["beam_server.models.admin.AdminEventDto"];
+type AdminEventDto = components["schemas"]["AdminEvent"];
 
 const MAX_EVENTS = 50;
 

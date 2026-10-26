@@ -228,21 +228,16 @@ hooks {
                 depends = List("js-deps")
                 check = "mise run ts:check"
             }
-            // TODO(#146): restore `ts-typecheck`.
-            //
-            // Disabled in step with the `ci` task in mise.toml, which is the point of
-            // routing both through `mise run`: the hook and CI must not disagree about
-            // what is enforced. beam-web is generated from `api.gen.ts`, which cannot be
-            // regenerated until the TypeScript toolchain reads OpenAPI 3.2, and every
-            // schema key it names was renamed by the Kynos port. See the codegen:openapi
-            // task for the whole story.
-            //
-            // ["ts-typecheck"] {
-            //     glob = List("*.ts", "*.tsx", "*.json")
-            //     check = "mise run ts:typecheck"
-            // }
-            // Not gated on #146: vitest resolves through Vite and never needs the
-            // generated types to exist, so the suite runs on a fresh checkout.
+            // `*.json` includes beam-web/openapi.json: a contract change re-checks the
+            // client generated from it. ts:typecheck regenerates the gitignored
+            // api.gen.ts from that file first, so this runs on a fresh checkout.
+            ["ts-typecheck"] {
+                glob = List("*.ts", "*.tsx", "*.json")
+                depends = List("js-deps")
+                check = "mise run ts:typecheck"
+            }
+            // vitest resolves through Vite and never needs the generated types to
+            // exist, so the suite runs on a fresh checkout.
             ["ts-test"] {
                 glob = List("*.ts", "*.tsx")
                 depends = List("js-deps")

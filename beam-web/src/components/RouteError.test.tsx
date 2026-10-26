@@ -125,7 +125,9 @@ describe("RouteError", () => {
 							}),
 						});
 			}),
-			http.get(`${BASE_URL}/v1/media/:id/sources`, () => HttpResponse.json([])),
+			http.get(`${BASE_URL}/v1/media/:id/sources`, () =>
+				HttpResponse.json(factory.connection([])),
+			),
 		);
 		const requests = recordRequests();
 		const user = userEvent.setup();

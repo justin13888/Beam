@@ -10,8 +10,7 @@ import { problem } from "@/test/problem";
 import { recordRequests } from "@/test/requests";
 import { server } from "@/test/server";
 
-type SessionSummary =
-	components["schemas"]["beam_auth.server.oidc_routes.SessionSummary"];
+type SessionSummary = components["schemas"]["SessionSummary"];
 
 const sessionA: SessionSummary = {
 	id: "sess-a",
@@ -41,7 +40,9 @@ function serveSessions(status = 200) {
 		),
 		http.get(`${BASE_URL}/v1/sessions`, () =>
 			status === 200
-				? HttpResponse.json([sessionA, sessionB])
+				? HttpResponse.json<components["schemas"]["SessionConnection"]>(
+						factory.connection([sessionA, sessionB]),
+					)
 				: problem(status, "boom", "#internal"),
 		),
 	);

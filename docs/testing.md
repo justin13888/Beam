@@ -110,15 +110,11 @@ when the module is first imported, which is before any test interceptor installs
 could never see a request the app made, and that is *why* every test had mocked the client away.
 `apiClient` now resolves `fetch` per call.
 
-**This suite is currently not run.** `ts:typecheck` and `ts:test` are switched off in `mise.toml`
-and in `.github/workflows/ci.yml` with a [#146](https://github.com/justin13888/beam/issues/146)
-TODO: `api.gen.ts` is generated from the server's OpenAPI document, `openapi-typescript` cannot
-read the 3.2 document Kynos emits (see
-[architecture/api.md](architecture/api.md#openapi-docs-and-codegen)), and every schema key the file
-names was renamed by the migration. `beam-web` is being rewritten shortly, so the gates are off
-rather than the references renamed twice. `ts:check` stays on — Biome excludes the generated file
-and does not type-check. Restoring both gates is what the rewrite owes; until then the web coverage
-threshold below is not being enforced by anything.
+`ts:typecheck` and `ts:test` both run in `mise run ci`, in the pre-push hook, and in CI's
+`ts-typecheck` and `ts-test` jobs; `ts-test` runs `ts:coverage`, which enforces the threshold below.
+`ts:typecheck` regenerates the gitignored `api.gen.ts` from the committed `openapi.json` first (see
+[architecture/api.md](architecture/api.md#openapi-docs-and-codegen)), so the doubles are checked
+against the contract the server serves. Biome (`ts:check`) excludes the generated file.
 
 ## What a real test asserts
 
@@ -300,10 +296,10 @@ loop, serially, against the composed Postgres, Dex and beam-server stack:
    `<video>` element's clock advances, which only a decoded stream does.
 
 Steps 3 and 4 are written but held as `test.fixme` until
-[#297](https://github.com/justin13888/beam/issues/297). The SPA they drive breaks at runtime against
-the current `/v1` contract: Explore and the media page still read the pre-#190 response shapes. That
-is the stale-client debt [#146](https://github.com/justin13888/beam/issues/146) tracks. Steps 1
-and 2 run today.
+[#297](https://github.com/justin13888/beam/issues/297). They were written while the SPA still read
+the pre-#190 response shapes; [#146](https://github.com/justin13888/beam/issues/146) brought
+Explore and the media page onto the `/v1` connections, and turning the two steps on is #297's.
+Steps 1 and 2 run today.
 
 The fixture is generated per run, not committed: ten seconds of H.264/AAC in an MP4, written into
 the library volume by a one-shot service in `beam-web/e2e/compose.e2e.yaml` that runs the server's
@@ -319,10 +315,10 @@ hook (NFR-201); CI runs it in the `web-e2e` job, which `ci-ok` requires.
 Two gaps are deliberate:
 
 - **The SPA is served by Vite, not the `web` image.** That image's build runs `codegen:openapi` and
-  `tsc`, which cannot pass until beam-web is regenerated against the OpenAPI 3.2 contract
-  ([#146](https://github.com/justin13888/beam/issues/146)). The bundle is the same `vite build`
+  `tsc`, which could not pass until [#146](https://github.com/justin13888/beam/issues/146)
+  regenerated beam-web against the OpenAPI 3.2 contract. The bundle is the same `vite build`
   output; what the suite does not exercise is the image's Caddy configuration, including its
-  Content-Security-Policy. Switching to the `web` service is part of restoring that build.
+  Content-Security-Policy. Switching to the `web` service is now possible and not yet done.
 - **One browser engine.** Chromium only. Whether a title direct-plays is decided by the browser's
   decoders, and the cross-browser matrix is a separate question
   ([#139](https://github.com/justin13888/beam/issues/139)).
@@ -349,9 +345,9 @@ the first one by construction rather than by test:
 - **Test doubles can drift from the spec.** Mocked responses written as bare object literals are
   checked by nothing. The web suite's MSW handlers and factories are typed against
   `components["schemas"]` from the generated client, so a response shape that no longer matches the
-  spec fails type-checking. This caught a stale field the first time it was applied — but see the
-  stand-down above: while `ts:typecheck` is off and `api.gen.ts` is stale, this check is not
-  running.
+  spec fails type-checking. This caught a stale field the first time it was applied. A status code
+  is not a type, so `tsc` cannot check it: the default handlers' statuses are read off the
+  document instead.
 - **The spec itself can change without anyone noticing.** `beam-web/openapi.json` was gitignored
   and regenerated on every CI run, so a breaking wire change left no trace in review. Both committed
   copies — `beam-web/openapi.json` and `beam-client-core/api/openapi.json` — are diffed by

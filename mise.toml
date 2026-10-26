@@ -427,7 +427,9 @@ run = "bun biome check --write --no-errors-on-unmatched"
 
 [tasks."ts:typecheck"]
 description = "Type-check the beam-web SPA"
-depends = ["deps:js"]
+# api.gen.ts is gitignored, so it is regenerated from the committed
+# openapi.json first; a stale or missing client would fail every route file.
+depends = ["deps:js", "codegen:openapi:web"]
 # Scoped to beam-web, not `bun run typecheck` (which fans out to every
 # workspace): beam-docs is type-checked by docs:build instead. Overlapping the
 # two runs two Astro processes over beam-docs/node_modules/.vite, which race and
@@ -466,8 +468,10 @@ description = "Run the beam-web Playwright suite against the composed stack (nee
 # `check:compose-invariants` guards.
 #
 # The SPA is served by Playwright (`vite build` and `vite preview`), not by the
-# `web` image: that image runs `codegen:openapi` and `tsc`, neither of which can
-# pass until beam-web is regenerated against the OpenAPI 3.2 contract (#146).
+# `web` image. The choice dates from when that image could not build -- its
+# `codegen:openapi` and `tsc` steps failed until #146 regenerated beam-web
+# against the OpenAPI 3.2 contract -- and serving the bundle directly still
+# spares the suite a second image build.
 #
 # BEAM_CONTAINER_CACHE_DIR turns on a buildx local layer cache for the server
 # image, as it does for `check:ffmpeg-build`; it needs docker with a
@@ -565,12 +569,12 @@ run = "bun run test:coverage"
 
 [tasks."ts:build"]
 description = "Build every JS/TS workspace"
-depends = ["deps:js"]
+depends = ["deps:js", "codegen:openapi:web"]
 run = "bun run build"
 
 [tasks."ts:build:web"]
 description = "Build only the beam-web SPA (release asset)"
-depends = ["deps:js"]
+depends = ["deps:js", "codegen:openapi:web"]
 run = "bun run --filter beam-web build"
 
 [tasks."docs:og"]
@@ -592,6 +596,9 @@ run = [
 
 [tasks."codegen:openapi"]
 description = "Export openapi.json from the Rust types and regenerate api.gen.ts"
+# The last step runs openapi-typescript, so a job that never installed the JS
+# workspace (release.yml's lockfile-sync) still gets it.
+depends = ["deps:js"]
 run = [
     'cargo run --quiet --example export_openapi -p beam-server ${BEAM_CARGO_FEATURES:+--features "$BEAM_CARGO_FEATURES"} > beam-web/openapi.json',
     # Both consumers regenerate from one export. They were byte-identical by
@@ -599,24 +606,22 @@ run = [
     # checked -- so beam-client-core could silently keep generating a client
     # for a server that no longer existed.
     "cp beam-web/openapi.json beam-client-core/api/openapi.json",
-    # TODO(#146): regenerate the TypeScript client.
-    #
-    # `openapi-typescript` 7.13.0 cannot read this document. Its own version
-    # gate accepts 3.2, but it delegates to @redocly/openapi-core 1.34.8, whose
-    # `detectSpec` knows only 3.0 and 3.1 and throws `Unsupported OpenAPI
-    # version: 3.2.0` from both `lint` and `bundle` -- no ruleset or severity
-    # override reaches it. Redocly 2.x speaks 3.2 natively; openapi-typescript
-    # has not bumped to it.
-    #
-    # beam-web is being rewritten shortly and is not being kept in step in the
-    # meantime, so the step is off rather than worked around. `api.gen.ts` is
-    # therefore STALE: every schema key still reads
-    # `beam_server.models.media.MediaMetadata` where the server now emits
-    # `MediaMetadata`. Restore this line, regenerate, and rename the ~55 schema
-    # references across beam-web when the toolchain can read 3.2.
-    #
-    # "bun run --filter beam-web codegen:openapi",
+    # The same command codegen:openapi:web runs, over the export just written.
+    "bun run --filter beam-web codegen:openapi",
 ]
+
+[tasks."codegen:openapi:web"]
+description = "Regenerate beam-web's api.gen.ts from the committed openapi.json"
+# Reads only the committed document, so it needs no Rust toolchain and runs in
+# a second -- which is why ts:typecheck and ts:build:web can depend on it and
+# pass on a fresh checkout, where the gitignored api.gen.ts does not exist yet.
+#
+# `openapi-typescript` reads the 3.2 document through @redocly/openapi-core,
+# which accepts 3.2 only from 1.34.22 on (#146). 7.13.0 declares `^1.34.6`, so
+# the root package.json's `overrides` raises the floor inside that range; drop
+# it once openapi-typescript's own requirement reaches a 3.2-aware Redocly.
+depends = ["deps:js"]
+run = "bun run --filter beam-web codegen:openapi"
 
 [tasks."codegen:openapi:check"]
 description = "Fail when the committed OpenAPI spec differs from the one the router generates"
@@ -2290,23 +2295,10 @@ depends = [
     "codegen:openapi:check",
     "ts:check",
     "ts:test",
-    # TODO(#146): restore "ts:typecheck".
-    #
-    # beam-web is generated from `api.gen.ts`, which cannot be regenerated
-    # until the TypeScript toolchain reads OpenAPI 3.2 (see codegen:openapi).
-    # Every schema key it names was renamed by the Kynos port, so the gate
-    # fails on ~55 references across 20 files -- all of them
-    # `Cannot find module '@/api.gen'` in a fresh checkout. beam-web is being
-    # rewritten shortly, so it is off rather than mechanically renamed twice.
-    #
-    # `ts:check` stays: biome excludes api.gen.ts and does not type-check.
-    # `ts:test` is back: it was switched off alongside `ts:typecheck` rather
-    # than for a reason of its own. vitest resolves through Vite, which does
-    # not need the generated types to exist, so the suite runs on a fresh
-    # checkout. It was off while over half of its suites were silently not
-    # running at all (the Node >= 26 `localStorage` shadowing fixed in
-    # `src/test/setup.ts`), which is exactly the state a gate exists to catch.
-    # ci.yml's ts-test job and the pre-push hook in hk.pkl enforce the same.
+    # Regenerates api.gen.ts from the committed openapi.json first (it is
+    # gitignored), so it passes on a fresh checkout; ci.yml's ts-typecheck job
+    # and the pre-push hook in hk.pkl enforce the same.
+    "ts:typecheck",
     "docs:build",
     "android:lint",
     "android:test",

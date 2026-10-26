@@ -11,7 +11,7 @@ import {
 import { ContinueWatchingRow } from "@/components/ContinueWatchingRow";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/hooks/auth";
-import { apiClient, asConnection } from "@/lib/apiClient";
+import { apiClient } from "@/lib/apiClient";
 import { apiError } from "@/lib/problem";
 
 export const Route = createFileRoute("/")({
@@ -27,7 +27,7 @@ function DashboardPage() {
 				credentials: "include",
 			});
 			if (error) throw apiError(error, "Failed to load libraries");
-			return asConnection(data).items;
+			return data.items;
 		},
 		enabled: isAuthenticated,
 	});

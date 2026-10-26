@@ -8,10 +8,8 @@ import { artworkSrc } from "@/lib/artwork";
 import { apiError } from "@/lib/problem";
 import { formatDuration } from "@/lib/utils";
 
-type ContinueWatchingItem =
-	components["schemas"]["beam_server.services.playback.ContinueWatchingItem"];
-type MediaMetadata =
-	components["schemas"]["beam_server.models.media.MediaMetadata"];
+type ContinueWatchingItem = components["schemas"]["ContinueWatchingItem"];
+type MediaMetadata = components["schemas"]["MediaMetadata"];
 
 async function fetchMediaMetadata(
 	mediaId: string,
@@ -34,11 +32,11 @@ export function ContinueWatchingRow() {
 		queryKey: ["continue-watching"],
 		queryFn: async (): Promise<ContinueWatchingItem[]> => {
 			const { data, error } = await apiClient.GET("/v1/continue-watching", {
-				params: { query: { limit: 20 } },
+				params: { query: { first: 20 } },
 				credentials: "include",
 			});
 			if (error) throw apiError(error, "Failed to load continue watching");
-			return data ?? [];
+			return data?.items ?? [];
 		},
 		enabled: isAuthenticated,
 	});

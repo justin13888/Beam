@@ -10,62 +10,48 @@ import { renderRoute, waitForRouter } from "@/test/harness";
 import { recordRequests } from "@/test/requests";
 import { server } from "@/test/server";
 
-type MediaConnection =
-	components["schemas"]["beam_server.services.metadata.MediaConnection"];
-type MediaEdge =
-	components["schemas"]["beam_server.services.metadata.MediaEdge"];
+type MediaConnection = components["schemas"]["MediaConnection"];
+type MediaMetadata = components["schemas"]["MediaMetadata"];
 
-function movieEdge(id: string, title: string, cursor: string): MediaEdge {
+function movieItem(id: string, title: string): MediaMetadata {
 	return {
-		cursor,
-		node: {
-			Movie: factory.movie({
-				id,
-				title: { original: title, localized: null, alternatives: [] },
-				year: 2000,
-			}),
-		},
+		Movie: factory.movie({
+			id,
+			title: { original: title, localized: null, alternatives: [] },
+			year: 2000,
+		}),
 	};
 }
 
-function showEdge(
+function showItem(
 	id: string,
 	title: string,
-	cursor: string,
 	seasons: { poster_url: string | null }[],
-): MediaEdge {
+): MediaMetadata {
 	return {
-		cursor,
-		node: {
-			Show: factory.show({
-				id,
-				title: { original: title, localized: null, alternatives: [] },
-				year: 2010,
-				seasons: seasons.map((s, i) => ({
+		Show: factory.show({
+			id,
+			title: { original: title, localized: null, alternatives: [] },
+			year: 2010,
+			seasons: seasons.map((s, i) =>
+				factory.season({
+					id: `${id}-season-${i}`,
 					season_number: i,
 					poster_url: s.poster_url,
-					dates: {},
-					genres: [],
-					episodes: [],
-				})),
-			}),
-		},
+				}),
+			),
+		}),
 	};
 }
 
 function connectionPage(
-	edges: MediaEdge[],
+	items: MediaMetadata[],
 	{ hasNext, endCursor }: { hasNext: boolean; endCursor?: string },
 ): MediaConnection {
-	return {
-		edges,
-		page_info: {
-			has_next_page: hasNext,
-			has_previous_page: false,
-			start_cursor: null,
-			end_cursor: endCursor ?? null,
-		},
-	};
+	return factory.connection(items, {
+		has_next_page: hasNext,
+		end_cursor: endCursor ?? null,
+	});
 }
 
 const emptyPage = connectionPage([], { hasNext: false });
@@ -80,7 +66,11 @@ function serveExplore({
 } = {}) {
 	const queue = [...mediaPages];
 	server.use(
-		http.get(`${BASE_URL}/v1/genres`, () => HttpResponse.json({ genres })),
+		http.get(`${BASE_URL}/v1/genres`, () =>
+			HttpResponse.json<components["schemas"]["GenreConnection"]>(
+				factory.connection(genres),
+			),
+		),
 		http.get(`${BASE_URL}/v1/media`, () =>
 			HttpResponse.json(queue.length > 1 ? queue.shift() : queue[0]),
 		),
@@ -135,7 +125,7 @@ describe("/explore", () => {
 			mediaPages: [
 				connectionPage(
 					[
-						showEdge("s1", "Severance", "cursor-1", [
+						showItem("s1", "Severance", [
 							{ poster_url: "/v1/artwork/season/abc/poster" },
 						]),
 					],
@@ -173,13 +163,10 @@ describe("/explore", () => {
 		serveExplore({
 			mediaPages: [
 				connectionPage(
-					[
-						movieEdge("m1", "Movie One", "cursor-1"),
-						movieEdge("m2", "Movie Two", "cursor-2"),
-					],
+					[movieItem("m1", "Movie One"), movieItem("m2", "Movie Two")],
 					{ hasNext: true, endCursor: "cursor-2" },
 				),
-				connectionPage([movieEdge("m3", "Movie Three", "cursor-3")], {
+				connectionPage([movieItem("m3", "Movie Three")], {
 					hasNext: false,
 					endCursor: "cursor-3",
 				}),
@@ -287,7 +274,7 @@ describe("/explore", () => {
 			mediaPages: [
 				connectionPage(
 					[
-						showEdge("s1", "Specials First", "cursor-1", [
+						showItem("s1", "Specials First", [
 							{ poster_url: null },
 							{ poster_url: "https://posters.test/season-1.jpg" },
 						]),
@@ -300,5 +287,21 @@ describe("/explore", () => {
 
 		const poster = await screen.findByAltText("Specials First");
 		expect(poster).toHaveAttribute("src", "https://posters.test/season-1.jpg");
+	});
+
+	it("prefers the show's own poster to any season's", async () => {
+		const withOwnPoster = showItem("s1", "Own Art", [
+			{ poster_url: "https://posters.test/season-1.jpg" },
+		]);
+		if ("Show" in withOwnPoster) {
+			withOwnPoster.Show.poster_url = "https://posters.test/show.jpg";
+		}
+		serveExplore({
+			mediaPages: [connectionPage([withOwnPoster], { hasNext: false })],
+		});
+		renderRoute("/explore");
+
+		const poster = await screen.findByAltText("Own Art");
+		expect(poster).toHaveAttribute("src", "https://posters.test/show.jpg");
 	});
 });

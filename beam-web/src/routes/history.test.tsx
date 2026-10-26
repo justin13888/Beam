@@ -10,21 +10,20 @@ import { problem } from "@/test/problem";
 import { recordRequests } from "@/test/requests";
 import { server } from "@/test/server";
 
-type MediaMetadata =
-	components["schemas"]["beam_server.models.media.MediaMetadata"];
+type MediaMetadata = components["schemas"]["MediaMetadata"];
 
 const movieInProgress = factory.historyItem({
 	file_id: "file-1",
 	media_id: "movie-1",
-	updated_at: new Date(Date.now() - 5 * 60_000).toISOString(),
+	last_played_at: new Date(Date.now() - 5 * 60_000).toISOString(),
 });
 
 const movieCompleted = factory.historyItem({
 	file_id: "file-2",
 	media_id: "movie-2",
 	position_secs: 5900,
-	completed: true,
-	updated_at: new Date(Date.now() - 3 * 3600_000).toISOString(),
+	played: true,
+	last_played_at: new Date(Date.now() - 3 * 3600_000).toISOString(),
 });
 
 const showEpisode = factory.historyItem({
@@ -34,7 +33,7 @@ const showEpisode = factory.historyItem({
 	episode_id: "ep-1",
 	position_secs: 300,
 	duration_secs: 1500,
-	updated_at: new Date(Date.now() - 2 * 86400_000).toISOString(),
+	last_played_at: new Date(Date.now() - 2 * 86400_000).toISOString(),
 });
 
 const mediaById: Record<string, MediaMetadata> = {
@@ -57,33 +56,40 @@ const mediaById: Record<string, MediaMetadata> = {
 			id: "show-1",
 			title: { original: "Severance", localized: null, alternatives: [] },
 			seasons: [
-				{
+				factory.season({
 					season_number: 1,
 					poster_url: "https://img.example/severance-s1.jpg",
-					dates: {},
-					genres: [],
 					episodes: [
-						{
+						factory.episode({
 							id: "ep-1",
 							episode_number: 2,
 							title: "Half Loop",
-							streams: [],
-						},
+						}),
 					],
-				},
+				}),
 			],
 		}),
 	},
 };
 
-/** Serve `/v1/history` and the media lookups the page fans out to. */
+/**
+ * Serve `/v1/history` and the media lookups the page fans out to. When `total`
+ * exceeds the page, the page reports a next one after the cursor `cursor-1`.
+ */
 function serveHistory(
-	items: components["schemas"]["beam_server.services.playback.HistoryItem"][],
+	items: components["schemas"]["HistoryItem"][],
 	total: number,
 ) {
+	const more = total > items.length;
 	server.use(
 		http.get(`${BASE_URL}/v1/history`, () =>
-			HttpResponse.json({ items, total }),
+			HttpResponse.json<components["schemas"]["HistoryConnection"]>(
+				factory.countedConnection(
+					items,
+					{ has_next_page: more, end_cursor: more ? "cursor-1" : null },
+					total,
+				),
+			),
 		),
 		http.get(`${BASE_URL}/v1/media/:id`, ({ params }) => {
 			const media = mediaById[String(params.id)];
@@ -121,28 +127,32 @@ describe("/history", () => {
 		expect(screen.getByText("Watched 3h ago")).toBeInTheDocument();
 	});
 
-	it("puts limit and offset on the wire and advances the offset a page at a time", async () => {
+	it("pages forward after the end cursor and back to the first page", async () => {
 		const requests = recordRequests();
 		serveHistory([movieInProgress], 120);
 		const user = userEvent.setup();
 		renderRoute("/history");
 
 		await screen.findByText("Inception");
-		expect(requests.matching("GET", "/v1/history")[0].query.get("limit")).toBe(
-			"50",
-		);
-		expect(requests.matching("GET", "/v1/history")[0].query.get("offset")).toBe(
-			"0",
-		);
+		const [first] = requests.matching("GET", "/v1/history");
+		expect(first.query.get("first")).toBe("50");
+		expect(first.query.has("after")).toBe(false);
+		expect(screen.getByText("Page 1 of 3")).toBeInTheDocument();
+		expect(screen.getByRole("button", { name: /prev/i })).toBeDisabled();
 
 		await user.click(screen.getByRole("button", { name: /next/i }));
 
 		await waitFor(() => {
-			const offsets = requests
+			const afters = requests
 				.matching("GET", "/v1/history")
-				.map((r) => r.query.get("offset"));
-			expect(offsets).toContain("50");
+				.map((r) => r.query.get("after"));
+			expect(afters).toContain("cursor-1");
 		});
+		expect(await screen.findByText("Page 2 of 3")).toBeInTheDocument();
+
+		await user.click(screen.getByRole("button", { name: /prev/i }));
+
+		expect(await screen.findByText("Page 1 of 3")).toBeInTheDocument();
 	});
 
 	it("links Resume to the media page with the file deep-link", async () => {

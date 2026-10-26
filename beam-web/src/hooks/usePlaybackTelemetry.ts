@@ -7,9 +7,6 @@ import { apiError } from "@/lib/problem";
  * What `GET /v1/admin/telemetry/playback` answers: daily counts of playback
  * starts, start failures, rebuffers and source switches, summed over a range
  * of UTC days. No row names a user, a file or a title.
- *
- * TODO(#146): typed by the current schema name, which the stale `api.gen.ts`
- * does not carry yet; it resolves once the client is regenerated.
  */
 export type PlaybackTelemetryReport =
 	components["schemas"]["PlaybackTelemetryReport"];

@@ -15,8 +15,7 @@ import { useAuth } from "@/hooks/auth";
 import { apiClient } from "@/lib/apiClient";
 import { apiError } from "@/lib/problem";
 
-type Session =
-	components["schemas"]["beam_auth.server.oidc_routes.SessionSummary"];
+type Session = components["schemas"]["SessionSummary"];
 
 export const Route = createFileRoute("/profile")({
 	beforeLoad: ({ context, location }) => {
@@ -176,7 +175,7 @@ export function ProfilePage() {
 		}
 	};
 
-	const sessions = data ?? [];
+	const sessions = data?.items ?? [];
 
 	return (
 		<div className="container mx-auto max-w-2xl py-12 px-4">
