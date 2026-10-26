@@ -184,7 +184,9 @@ internal class ExoBeamPlayer(
         trigger: SwitchTrigger,
     ) {
         val request = mutableState.value.request ?: return
-        recorder.switched(from = request.fileId, to = fileId, trigger = trigger)
+        // From the part playing: once a multi-part source has moved on,
+        // `request.fileId` still names the part it started in.
+        recorder.switched(from = currentFileId ?: request.fileId, to = fileId, trigger = trigger)
         // Read the position before tearing anything down: after `prepare` the
         // player has been reset and `currentPosition` is zero, so reading it
         // afterwards would silently restart the title. Read as a moment of the
@@ -273,7 +275,10 @@ internal class ExoBeamPlayer(
         // A different file: whatever the last one's stalls said about it, they
         // say nothing about this one.
         rebuffers.reset()
-        recorder.begin(request.fileId)
+        // The part that plays first, not the file the request names: a switch
+        // into a later part of a multi-part version names that version's
+        // first file, and its first frame and stalls belong to `startPart`.
+        recorder.begin(startPart.fileId)
         isStalled = false
         isFillingOnPurpose = true
         // Set before the items, so the transition the new playlist reports is
