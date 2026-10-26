@@ -303,12 +303,16 @@ impl PersonRepository for SqlPersonRepository {
     ) -> Result<Vec<Person>, DbErr> {
         let (filter, mut values) = search_filter(query);
         let limit_at = values.len() + 1;
-        // `COLLATE "C"` orders the lowered names by code point, as every
-        // other store does, rather than by whatever the database's collation
-        // says -- so a page boundary falls in the same place everywhere.
+        // Applied to the name, `COLLATE "C"` makes `lower` fold ASCII
+        // letters only -- whatever the database's locale -- and orders the
+        // result by code point. That is exactly `str::to_ascii_lowercase`
+        // compared as Rust strings, the in-memory store's order, so a page
+        // boundary falls in the same place in both. Folding by the
+        // database's locale would not: a `C`-locale database folds nothing
+        // beyond ASCII while Rust's `to_lowercase` folds all of Unicode.
         let sql = format!(
             "SELECT people.* FROM people WHERE {filter} \
-             ORDER BY lower(people.name) COLLATE \"C\", people.id \
+             ORDER BY lower(people.name COLLATE \"C\"), people.id \
              LIMIT ${limit_at} OFFSET ${}",
             limit_at + 1
         );

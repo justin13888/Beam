@@ -35,7 +35,9 @@ pub trait PersonRepository: Send + Sync + std::fmt::Debug {
     /// particular order. Empty for an unknown id.
     async fn filmography(&self, person_id: Uuid) -> Result<Vec<PersonCredit>, DbErr>;
     /// One page of the people credited on at least one title, ordered by name
-    /// ignoring case and then by id: those whose name contains `query`,
+    /// ignoring ASCII case -- by code point once `A`-`Z` are folded to
+    /// `a`-`z`, and nothing else is folded, so the order cannot depend on a
+    /// store's locale -- and then by id: those whose name contains `query`,
     /// ignoring case, or everyone without one. `query`'s `%` and `_` are
     /// themselves, not wildcards.
     async fn search(
@@ -158,8 +160,8 @@ pub mod in_memory {
                 .collect();
             people.sort_by(|a, b| {
                 a.name
-                    .to_lowercase()
-                    .cmp(&b.name.to_lowercase())
+                    .to_ascii_lowercase()
+                    .cmp(&b.name.to_ascii_lowercase())
                     .then_with(|| a.id.cmp(&b.id))
             });
             people

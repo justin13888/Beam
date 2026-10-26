@@ -7157,6 +7157,11 @@ macro_rules! person_repository_contract {
                     cast("31", "Adam Smithers", "B", 1),
                     cast("32", "Mia Jones", "C", 2),
                     cast("33", "100%_Real", "D", 3),
+                    // Non-ASCII names: folding all of Unicode would put
+                    // "édith" before "Éva"; folding only ASCII leaves `É`
+                    // (U+00C9) before `é` (U+00E9), and both after `z`.
+                    cast("35", "édith Piaf", "F", 4),
+                    cast("36", "Éva Green", "G", 5),
                 ],
             )
             .await
@@ -7184,8 +7189,13 @@ macro_rules! person_repository_contract {
                 names(repo.search(None, 2, 2).await.unwrap()),
                 ["Mia Jones", "zoe Smith"]
             );
-            assert!(repo.search(None, 2, 4).await.unwrap().is_empty());
-            assert_eq!(repo.count(None).await.unwrap(), 4);
+            assert_eq!(
+                names(repo.search(None, 2, 4).await.unwrap()),
+                ["Éva Green", "édith Piaf"],
+                "ordered by code point once only ASCII case is folded"
+            );
+            assert!(repo.search(None, 2, 6).await.unwrap().is_empty());
+            assert_eq!(repo.count(None).await.unwrap(), 6);
             assert_eq!(
                 names(repo.search(Some("%_"), 10, 0).await.unwrap()),
                 ["100%_Real"],
