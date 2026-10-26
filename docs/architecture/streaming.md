@@ -35,9 +35,10 @@ A movie split across files (`Movie (2019) - CD1.avi`, `- CD2.avi`,
 of one edition in one folder, listed in part order in the source's `parts`, each with its own
 `stream_url`. The contract a client is expected to follow is to play them as a playlist --
 Android's ExoPlayer as consecutive `MediaItem`s, a browser by moving to the next part's stream when
-one ends. No current client does so yet: the web player and the Android app start a multi-part
-source at its first part and stop there, and advancing through the parts is the client-playback
-work split from #233. Either way every request is still a direct play of one file: the server
+one ends. The web player does so ([#138](https://github.com/justin13888/beam/issues/138)): it moves
+to the next part's stream when one ends, reports each part's position against that part's file, and
+resumes the part the title's watch state names. The Android app still starts a multi-part source at
+its first part and stops there. Either way every request is still a direct play of one file: the server
 never concatenates or remuxes parts, which would be the transcoding ADR-0004 rules out. Watch
 state is kept per title ([#188](https://github.com/justin13888/beam/issues/188)) with the file last
 played, so a multi-part movie is one continue-watching row, and resuming it resumes the part that
@@ -55,9 +56,12 @@ served as they are, like any file. Whether they play is the client's to say
 ([ADR-0014](decisions/ADR-0014-adaptive-streaming-rejected.md)): a VOB is an MPEG program stream
 (`container_format` `mpeg`), usually MPEG-2 video with AC-3 or MPEG audio, which no browser and not
 the Android app's ExoPlayer container list open, so the Android app's capability check lists the
-source as not directly playable with its reason. The web player has no capability check yet
-([#138](https://github.com/justin13888/beam/issues/138)): it plays `sources[0]`, so a title whose
-primary source is a disc is tried and fails in the browser. A Blu-ray clip is a BDAV transport stream
+source as not directly playable with its reason. The web player
+([#138](https://github.com/justin13888/beam/issues/138), `beam-web/src/lib/playback-capability.ts`)
+lists any source with a `disc_structure`, and any transport stream, as unplayable in a browser
+without asking the browser, and judges every other source by `canPlayType` and
+`MediaSource.isTypeSupported` on its container and codecs; it plays the first playable source in the
+order above, keeps the others in its picker with their reasons, and says so when none plays. A Blu-ray clip is a BDAV transport stream
 (`mpegts`, each packet carrying a 4-byte timestamp): the Android app's container list admits
 `mpegts`, so its capability check judges the clip by its codecs -- often refusing its DTS or TrueHD
 audio -- though ExoPlayer has not been verified to demux BDAV's timestamped packets, which a client
@@ -79,8 +83,8 @@ decision. The existing episode is never written on that path: its title and runt
 first file (or enrichment) set.
 
 The Android app is the client that switches on observed network conditions
-([#141](https://github.com/justin13888/beam/issues/141)); `beam-web` does not, and its source
-selection is [#138](https://github.com/justin13888/beam/issues/138)'s. `beam-client-core`
+([#141](https://github.com/justin13888/beam/issues/141)); `beam-web` does not; it chooses a
+source once, by what the browser can decode ([#138](https://github.com/justin13888/beam/issues/138)). `beam-client-core`
 decides both halves so another native client inherits the same rule:
 
 - **When.** `RebufferDetector` (`capability/rebuffer.rs`) judges rebuffering *sustained* at three

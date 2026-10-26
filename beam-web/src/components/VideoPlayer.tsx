@@ -7,6 +7,7 @@ import {
 	MediaProvider,
 	type PlayerSrc,
 	Poster,
+	VIDEO_TYPES,
 } from "@vidstack/react";
 import {
 	DefaultVideoLayout,
@@ -60,9 +61,25 @@ export function playerHandlers({
 	};
 }
 
+/**
+ * The type to hand Vidstack for a file the capability check already judged
+ * playable (`lib/playback-capability.ts`).
+ *
+ * Vidstack reads `type` only to route a source to its `<video>` provider, and
+ * routes an extension-less URL such as `/v1/files/{id}/stream` only when the
+ * type is one of its `VIDEO_TYPES`; anything else -- `video/x-matroska`, or
+ * no type at all -- loads no provider and plays nothing. The element itself is
+ * given the URL alone and sniffs the bytes, so a type outside that set is
+ * replaced by one inside it rather than passed on to be refused.
+ */
+export function providerType(type: string | undefined): string {
+	return type && VIDEO_TYPES.has(type) ? type : "video/mp4";
+}
+
 export interface VideoPlayerProps {
 	title: string;
 	src: string;
+	/** The file's container MIME type, as the capability check accepted it. */
 	type?: string;
 	poster?: string | null;
 	/** Playback position (seconds) to seek to once the player can play --
@@ -88,7 +105,7 @@ export interface VideoPlayerProps {
 export function VideoPlayer({
 	title,
 	src,
-	type = "video/mp4",
+	type,
 	poster,
 	startTime = 0,
 	autoPlay = false,
@@ -105,11 +122,7 @@ export function VideoPlayer({
 			key={src}
 			ref={player}
 			title={title}
-			// `type` comes straight from the file's detected container format
-			// (see `MediaSource.mime_type`), which isn't guaranteed to match
-			// Vidstack's known mime-type literals -- it's only a provider-
-			// selection hint, so a mismatch just falls back gracefully.
-			src={{ src, type } as PlayerSrc}
+			src={{ src, type: providerType(type) } as PlayerSrc}
 			autoPlay={autoPlay}
 			playsInline
 			className={className}

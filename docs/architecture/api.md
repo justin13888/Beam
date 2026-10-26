@@ -85,9 +85,9 @@ plays, in order: one for a whole file, and each part of a movie split across fil
 CD1.avi`, `- CD2.avi`, [#233](https://github.com/justin13888/beam/issues/233)) otherwise, each with
 its `part_number`, size, duration, subtitle tracks, `stream_url` and `download_url`. A client is
 expected to play a multi-part source as a playlist of its parts' streams; the server never joins
-them ([ADR-0004](decisions/ADR-0004-never-transcode.md)). No current client does so yet -- each
-plays the source's top-level `stream_url`, its first part -- and advancing through the parts is the
-client-playback work split from #233. The parts of a folder are one source only as the whole run
+them ([ADR-0004](decisions/ADR-0004-never-transcode.md)). The web player does
+([#138](https://github.com/justin13888/beam/issues/138)); the Android app still plays the source's
+top-level `stream_url`, its first part, alone. The parts of a folder are one source only as the whole run
 1, 2, ... n; any other set leaves each file a source of its own. A DVD or Blu-ray folder rip is a
 source too ([#234](https://github.com/justin13888/beam/issues/234), FR-222): its `parts` are the
 stream files the disc's main title plays -- VOBs or `.m2ts` clips, served as they are, and across
