@@ -15,8 +15,8 @@ use tracing::{info, warn};
 use beam_domain::models::ProviderPin;
 use beam_domain::models::enrichment::{EnrichmentState, EnrichmentTargetId, MetadataField};
 use beam_domain::providers::enrichment::{
-    EnrichmentError, EnrichmentProvider, ExternalMediaRef, MediaQuery, MovieEnrichment,
-    ShowEnrichment,
+    EnrichmentError, EnrichmentProvider, EpisodeEnrichment, ExternalMediaRef, MediaQuery,
+    MovieEnrichment, SeasonEnrichment, ShowEnrichment,
 };
 use beam_domain::repositories::{
     CollectionRepository, EnrichmentStateRepository, GenreRepository, MovieRepository,
@@ -75,31 +75,133 @@ impl EnrichmentPolicy {
     }
 }
 
+/// The provider ids a match reports, which a pin is checked against.
+#[derive(Debug, Clone, Copy, Default)]
+struct MatchIds<'a> {
+    tmdb: Option<u32>,
+    imdb: Option<&'a str>,
+    anilist: Option<u32>,
+    tvdb: Option<u32>,
+}
+
+impl<'a> MatchIds<'a> {
+    fn of_movie(enrichment: &'a MovieEnrichment) -> Self {
+        let MovieEnrichment {
+            tmdb_id,
+            imdb_id,
+            anilist_id,
+            ..
+        } = enrichment;
+        Self {
+            tmdb: *tmdb_id,
+            imdb: imdb_id.as_deref(),
+            anilist: *anilist_id,
+            // A movie carries no TheTVDB id: a TheTVDB pin names a series.
+            tvdb: None,
+        }
+    }
+
+    fn of_show(enrichment: &'a ShowEnrichment) -> Self {
+        let ShowEnrichment {
+            tmdb_id,
+            imdb_id,
+            anilist_id,
+            tvdb_id,
+            ..
+        } = enrichment;
+        Self {
+            tmdb: *tmdb_id,
+            imdb: imdb_id.as_deref(),
+            anilist: *anilist_id,
+            tvdb: *tvdb_id,
+        }
+    }
+}
+
 /// Why a match a search found contradicts `pin`: the match carries an id
 /// of the pin's provider, and it is another. A match that carries no id of
-/// that provider -- no provider Beam uses reports a TheTVDB id -- cannot
-/// contradict it.
-fn contradiction(
-    pin: &ProviderPin,
-    tmdb_id: Option<u32>,
-    imdb_id: Option<&str>,
-    anilist_id: Option<u32>,
-) -> Option<String> {
+/// that provider cannot contradict it.
+fn contradiction(pin: &ProviderPin, ids: MatchIds<'_>) -> Option<String> {
     let found = match pin {
-        ProviderPin::Tmdb(id) => tmdb_id
+        ProviderPin::Tmdb(id) => ids
+            .tmdb
             .filter(|found| found != id)
             .map(|f| format!("tmdb:{f}")),
-        ProviderPin::Anilist(id) => anilist_id
+        ProviderPin::Anilist(id) => ids
+            .anilist
             .filter(|found| found != id)
             .map(|f| format!("anilist:{f}")),
-        ProviderPin::Imdb(id) => imdb_id
+        ProviderPin::Imdb(id) => ids
+            .imdb
             .filter(|found| *found != id.as_str())
             .map(|f| format!("imdb:{f}")),
-        ProviderPin::Tvdb(_) => None,
+        ProviderPin::Tvdb(id) => ids
+            .tvdb
+            .filter(|found| found != id)
+            .map(|f| format!("tvdb:{f}")),
     }?;
     Some(format!(
         "the NFO pins {pin}, but the best match found is {found}"
     ))
+}
+
+/// The most seasons read to find where an absolute number falls: past any
+/// real show's length, so the walk is bounded however a provider answers.
+const MAX_ORDER_SEASONS: u32 = 100;
+
+/// A show's provider seasons, each fetched at most once per enrichment:
+/// the season loop and the absolute order both read them. `None` records a
+/// season the provider has none of, or failed to give.
+#[derive(Debug, Default)]
+struct SeasonCache {
+    seasons: std::collections::BTreeMap<u32, Option<SeasonEnrichment>>,
+}
+
+impl SeasonCache {
+    async fn get(
+        &mut self,
+        provider: &dyn EnrichmentProvider,
+        show: &ExternalMediaRef,
+        season_number: u32,
+    ) -> Option<SeasonEnrichment> {
+        if let Some(cached) = self.seasons.get(&season_number) {
+            return cached.clone();
+        }
+        let fetched = match provider.season_enrichment(show, season_number).await {
+            Ok(season) => Some(season),
+            Err(EnrichmentError::NotFound) => None,
+            Err(err) => {
+                warn!(show = %show, season_number, error = %err, "fetching a season failed");
+                None
+            }
+        };
+        self.seasons.insert(season_number, fetched.clone());
+        fetched
+    }
+
+    /// The provider's regular seasons from the first, in order, until one
+    /// is missing or they hold `through` episodes -- enough to place every
+    /// absolute number up to it.
+    async fn absolute_order(
+        &mut self,
+        provider: &dyn EnrichmentProvider,
+        show: &ExternalMediaRef,
+        through: u32,
+    ) -> Vec<SeasonEnrichment> {
+        let mut order = Vec::new();
+        let mut episodes = 0usize;
+        for season_number in 1..=MAX_ORDER_SEASONS {
+            if episodes >= through as usize {
+                break;
+            }
+            let Some(season) = self.get(provider, show, season_number).await else {
+                break;
+            };
+            episodes += season.episodes.len();
+            order.push(season);
+        }
+        order
+    }
 }
 
 /// A title's enrichment fetched by the id it was matched to, with the
@@ -368,14 +470,9 @@ impl MetadataEnrichmentService {
             Ok(enrichment) => enrichment,
             Err(err) => return Ok(Err(err)),
         };
-        if let Some(reason) = pin.and_then(|pin| {
-            contradiction(
-                pin,
-                enrichment.tmdb_id,
-                enrichment.imdb_id.as_deref(),
-                enrichment.anilist_id,
-            )
-        }) {
+        if let Some(reason) =
+            pin.and_then(|pin| contradiction(pin, MatchIds::of_movie(&enrichment)))
+        {
             warn!(
                 movie_id = %movie_id,
                 candidate = %ref_id,
@@ -417,14 +514,8 @@ impl MetadataEnrichmentService {
             Ok(enrichment) => enrichment,
             Err(err) => return Ok(Err(err)),
         };
-        if let Some(reason) = pin.and_then(|pin| {
-            contradiction(
-                pin,
-                enrichment.tmdb_id,
-                enrichment.imdb_id.as_deref(),
-                enrichment.anilist_id,
-            )
-        }) {
+        if let Some(reason) = pin.and_then(|pin| contradiction(pin, MatchIds::of_show(&enrichment)))
+        {
             warn!(
                 show_id = %show_id,
                 candidate = %ref_id,
@@ -669,30 +760,104 @@ impl MetadataEnrichmentService {
                     warn!(error = %err, show_id = %show_id, "failed to persist show credits");
                 }
 
-                // Best-effort: enrich every season the local library already
-                // has files for. Never fabricates seasons/episodes that
-                // scanning hasn't created.
-                if let Ok(seasons) = self.show_repo.find_seasons_by_show_id(show_id).await {
-                    for season in seasons {
-                        if let Ok(season_enrichment) = self
-                            .provider
-                            .season_enrichment(&ref_id, season.season_number)
-                            .await
-                        {
-                            let _ = self
-                                .show_repo
-                                .apply_season_enrichment(show_id, &season_enrichment)
-                                .await;
-                        }
-                    }
-                }
-
+                self.enrich_seasons(show_id, &ref_id).await;
                 self.mark_enriched(row, ref_id.as_str(), confidence).await
             }
             Err(EnrichmentError::NotFound) if by_id.is_some() => {
                 self.missing_by_id(row, by_id.as_ref()).await
             }
             Err(err) => self.handle_error(row, err).await,
+        }
+    }
+
+    /// Best-effort: enrich every season the local library already has files
+    /// for from the provider's season of the same number. Never fabricates
+    /// seasons or episodes that scanning hasn't created.
+    ///
+    /// A local episode the provider's season has no episode for is read as
+    /// an absolute number (issue #267): `Show - 030` is indexed as episode 30
+    /// of season 1, or of its season folder's season, and the provider's
+    /// absolute order ([`matcher::absolute_episode`]) says which episode that
+    /// is. It takes that episode's metadata where it stands. Episode 30 of
+    /// season 1 is taken wherever the order places it; of a later season,
+    /// only when the order places it in that season, since a season folder
+    /// and the number must agree. Specials keep their own numbering: the
+    /// absolute order counts none of them.
+    async fn enrich_seasons(&self, show_id: uuid::Uuid, ref_id: &ExternalMediaRef) {
+        let Ok(seasons) = self.show_repo.find_seasons_by_show_id(show_id).await else {
+            return;
+        };
+        let mut fetched = SeasonCache::default();
+        for season in seasons {
+            let season_number = season.season_number;
+            let provider_season = fetched.get(&*self.provider, ref_id, season_number).await;
+            let unplaced: Vec<u32> = match self
+                .show_repo
+                .find_episodes_by_season_id(season.id)
+                .await
+            {
+                Ok(episodes) => episodes
+                    .into_iter()
+                    .map(|episode| episode.episode_number)
+                    .filter(|number| {
+                        provider_season.as_ref().is_none_or(|provider| {
+                            !provider
+                                .episodes
+                                .iter()
+                                .any(|episode| episode.episode_number == *number)
+                        })
+                    })
+                    .collect(),
+                Err(err) => {
+                    warn!(error = %err, show_id = %show_id, "failed to read a season's episodes");
+                    Vec::new()
+                }
+            };
+
+            let mut placed = Vec::new();
+            if season_number != matcher::SPECIALS_SEASON && !unplaced.is_empty() {
+                let order = fetched
+                    .absolute_order(
+                        &*self.provider,
+                        ref_id,
+                        unplaced.iter().copied().max().unwrap_or(0),
+                    )
+                    .await;
+                for number in unplaced {
+                    let Some((in_season, episode)) = matcher::absolute_episode(&order, number)
+                    else {
+                        continue;
+                    };
+                    if season_number != 1 && in_season != season_number {
+                        continue;
+                    }
+                    placed.push(EpisodeEnrichment {
+                        episode_number: number,
+                        ..episode.clone()
+                    });
+                }
+            }
+
+            let season_enrichment = match (provider_season, placed.is_empty()) {
+                (Some(mut provider), _) => {
+                    provider.episodes.extend(placed);
+                    provider
+                }
+                (None, false) => SeasonEnrichment {
+                    season_number,
+                    poster_url: None,
+                    air_date: None,
+                    episodes: placed,
+                },
+                (None, true) => continue,
+            };
+            if let Err(err) = self
+                .show_repo
+                .apply_season_enrichment(show_id, &season_enrichment)
+                .await
+            {
+                warn!(error = %err, show_id = %show_id, season_number, "failed to persist season enrichment");
+            }
         }
     }
 
@@ -2192,6 +2357,126 @@ mod tests {
         );
     }
 
+    /// Issue #267: a file numbered absolutely (`Show - 013`) is indexed as
+    /// that episode of season 1, or of its season folder's season, and takes
+    /// the metadata of the episode the provider's absolute order puts there.
+    #[tokio::test]
+    async fn an_absolutely_numbered_episode_takes_the_metadata_its_place_in_the_order_names() {
+        use beam_domain::models::CreateEpisode;
+        use beam_domain::providers::enrichment::{EpisodeEnrichment, SeasonEnrichment};
+
+        let show_ref = ExternalMediaRef::new("tvdb", "81797");
+        let provider_season = |season_number: u32, count: u32| SeasonEnrichment {
+            season_number,
+            poster_url: Some(format!("https://example.com/s{season_number}.jpg")),
+            episodes: (1..=count)
+                .map(|n| EpisodeEnrichment {
+                    episode_number: n,
+                    title: Some(format!("S{season_number:02}E{n:02}")),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let mut provider = InMemoryEnrichmentProvider::new(&["tvdb"])
+            .with_show_search(
+                "One Piece",
+                vec![ShowSearchHit {
+                    external_ref: show_ref.clone(),
+                    title: "One Piece".to_string(),
+                    original_title: None,
+                    year: Some(1999),
+                    popularity: None,
+                    vote_average: None,
+                }],
+            )
+            .with_show_enrichment(
+                show_ref.clone(),
+                ShowEnrichment {
+                    tvdb_id: Some(81797),
+                    title: "One Piece".to_string(),
+                    year: Some(1999),
+                    ..Default::default()
+                },
+            );
+        for (season_number, count) in [(0, 1), (1, 12), (2, 3)] {
+            provider = provider
+                .with_season_enrichment(show_ref.clone(), provider_season(season_number, count));
+        }
+        let (service, _movies, show_repo, state_repo, _genres, _clock) = harness(provider);
+
+        let show = show_repo
+            .find_or_create_by_identity(CreateShow::new("One Piece".to_string(), Some(1999)))
+            .await
+            .unwrap();
+        let mut local = Vec::new();
+        for (season_number, episode_number) in
+            [(0, 1), (1, 1), (1, 13), (1, 15), (1, 16), (2, 14), (3, 2)]
+        {
+            let season = show_repo
+                .find_or_create_season(show.id, season_number)
+                .await
+                .unwrap();
+            let episode = show_repo
+                .find_or_create_episode(CreateEpisode {
+                    season_id: season.id,
+                    episode_number,
+                    title: format!("local {season_number}x{episode_number}"),
+                    runtime: None,
+                    air_date: None,
+                })
+                .await
+                .unwrap();
+            local.push(((season_number, episode_number), episode.id));
+        }
+        state_repo
+            .ensure_pending(EnrichmentTargetId::Show(show.id))
+            .await
+            .unwrap();
+
+        assert_eq!(service.sweep_once().await.enriched, 1);
+
+        let mut titles = Vec::new();
+        for (position, episode_id) in local {
+            let episode = show_repo
+                .find_episode_by_id(episode_id)
+                .await
+                .unwrap()
+                .unwrap();
+            titles.push((position, episode.title));
+        }
+        let expected = [
+            // A special keeps its own number: the order counts none.
+            ((0, 1), "S00E01"),
+            ((1, 1), "S01E01"),
+            // Past season 1's twelve: the order runs on into season 2.
+            ((1, 13), "S02E01"),
+            ((1, 15), "S02E03"),
+            // Past the order's end: left as indexed.
+            ((1, 16), "local 1x16"),
+            // In a season folder, and the order agrees it is that season's.
+            ((2, 14), "S02E02"),
+            // The order puts 2 in season 1, not the folder's season 3.
+            ((3, 2), "local 3x2"),
+        ];
+        let expected: Vec<((u32, u32), String)> = expected
+            .into_iter()
+            .map(|(position, title)| (position, title.to_string()))
+            .collect();
+        assert_eq!(titles, expected);
+
+        // Season 3 has nothing from the provider, so its row is left alone.
+        let seasons = show_repo.find_seasons_by_show_id(show.id).await.unwrap();
+        let poster = |number: u32| {
+            seasons
+                .iter()
+                .find(|season| season.season_number == number)
+                .and_then(|season| season.poster_url.clone())
+        };
+        assert_eq!(poster(1).as_deref(), Some("https://example.com/s1.jpg"));
+        assert_eq!(poster(3), None);
+    }
+
     #[tokio::test]
     async fn missing_target_row_marks_failed() {
         let (service, movie_repo, _show_repo, state_repo, _genre_repo, _clock) =
@@ -2518,21 +2803,46 @@ mod tests {
 
     #[test]
     fn a_match_contradicts_a_pin_only_with_another_id_of_the_pins_provider() {
+        let ids = |tmdb, imdb, anilist, tvdb| MatchIds {
+            tmdb,
+            imdb,
+            anilist,
+            tvdb,
+        };
         let tmdb = ProviderPin::Tmdb(603);
-        assert_eq!(contradiction(&tmdb, Some(603), None, None), None);
-        assert!(contradiction(&tmdb, Some(604), None, None).is_some());
+        assert_eq!(contradiction(&tmdb, ids(Some(603), None, None, None)), None);
+        assert!(contradiction(&tmdb, ids(Some(604), None, None, None)).is_some());
         assert_eq!(
-            contradiction(&tmdb, None, Some("tt1"), Some(1)),
+            contradiction(&tmdb, ids(None, Some("tt1"), Some(1), Some(1))),
             None,
             "a match with no TMDB id cannot contradict a TMDB pin"
         );
         let anilist = ProviderPin::Anilist(5);
-        assert!(contradiction(&anilist, None, None, Some(6)).is_some());
-        assert_eq!(contradiction(&anilist, Some(1), None, Some(5)), None);
+        assert!(contradiction(&anilist, ids(None, None, Some(6), None)).is_some());
+        assert_eq!(
+            contradiction(&anilist, ids(Some(1), None, Some(5), None)),
+            None
+        );
+        let imdb = ProviderPin::Imdb("tt0000001".to_string());
+        assert!(contradiction(&imdb, ids(None, Some("tt0000002"), None, None)).is_some());
+        assert_eq!(
+            contradiction(&imdb, ids(Some(1), Some("tt0000001"), None, None)),
+            None
+        );
+        // TheTVDB reports its id now (issue #267), so a TheTVDB pin is
+        // contradicted by a match with another one, and only by that.
         let tvdb = ProviderPin::Tvdb(81189);
         assert_eq!(
-            contradiction(&tvdb, Some(1), Some("tt0000001"), Some(1)),
+            contradiction(&tvdb, ids(Some(1), Some("tt0000001"), Some(1), None)),
             None
+        );
+        assert_eq!(
+            contradiction(&tvdb, ids(None, None, None, Some(81189))),
+            None
+        );
+        assert_eq!(
+            contradiction(&tvdb, ids(None, None, None, Some(81190))).as_deref(),
+            Some("the NFO pins tvdb:81189, but the best match found is tvdb:81190")
         );
     }
 }

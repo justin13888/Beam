@@ -138,6 +138,9 @@ pub struct ShowEnrichment {
     pub tmdb_id: Option<u32>,
     pub imdb_id: Option<String>,
     pub anilist_id: Option<u32>,
+    /// The show's TheTVDB series id (issue #267): the id a TheTVDB match
+    /// is made by, and the one a TheTVDB pin is checked against.
+    pub tvdb_id: Option<u32>,
     pub title: String,
     pub original_title: Option<String>,
     pub description: Option<String>,
@@ -157,6 +160,11 @@ pub struct ShowEnrichment {
 #[derive(Debug, Clone, Default)]
 pub struct EpisodeEnrichment {
     pub episode_number: u32,
+    /// The episode's place in the provider's absolute order -- one running
+    /// number across the series, specials excluded -- when the provider
+    /// numbers its episodes that way (TheTVDB does; issue #267). `None`
+    /// leaves the absolute order to be read from the seasons' order.
+    pub absolute_number: Option<u32>,
     pub title: Option<String>,
     pub description: Option<String>,
     pub air_date: Option<NaiveDate>,
@@ -187,7 +195,7 @@ pub enum EnrichmentError {
 }
 
 /// Abstracts external metadata lookups (TMDB/AniList via the `cameo` crate,
-/// in production). Every method is fallible and must never panic on network
+/// and TheTVDB, in production). Every method is fallible and must never panic on network
 /// failures. Unit tests drive this exclusively through
 /// [`test_utils::InMemoryEnrichmentProvider`] -- no test ever constructs a
 /// real, network-capable implementation.

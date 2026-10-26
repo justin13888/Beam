@@ -691,6 +691,7 @@ impl ShowRepository for SqlShowRepository {
         active.tmdb_id = Set(enrichment.tmdb_id.map(|id| id as i32));
         active.imdb_id = Set(enrichment.imdb_id.clone());
         active.anilist_id = Set(enrichment.anilist_id.map(|id| id as i32));
+        active.tvdb_id = Set(enrichment.tvdb_id.map(|id| id as i32));
         if open(MetadataField::Rating) {
             active.rating_tmdb = Set(enrichment.rating);
         }

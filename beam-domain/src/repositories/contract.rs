@@ -3837,6 +3837,7 @@ macro_rules! show_repository_contract {
                     tmdb_id: Some(603),
                     imdb_id: Some("tt0133093".to_string()),
                     anilist_id: Some(5114),
+                    tvdb_id: Some(121361),
                     ..Default::default()
                 },
                 &$crate::models::enrichment::FieldLocks::none(),
@@ -3847,6 +3848,7 @@ macro_rules! show_repository_contract {
                 ProviderPin::Tmdb(603),
                 ProviderPin::Imdb("tt0133093".to_string()),
                 ProviderPin::Anilist(5114),
+                ProviderPin::Tvdb(121361),
             ] {
                 assert_eq!(
                     repo.find_by_pin(&by_id).await.unwrap().map(|t| t.id),
@@ -4071,6 +4073,7 @@ macro_rules! show_repository_contract {
                     tmdb_id: Some(1396),
                     imdb_id: None,
                     anilist_id: None,
+                    tvdb_id: Some(81189),
                     title: "Breaking Bad".to_string(),
                     original_title: Some("Breaking Bad (orig)".to_string()),
                     description: Some("A teacher turns.".to_string()),
@@ -4098,6 +4101,7 @@ macro_rules! show_repository_contract {
             assert_eq!(after.description.as_deref(), Some("A teacher turns."));
             assert_eq!(after.backdrop_url.as_deref(), Some("https://img/b.jpg"));
             assert_eq!(after.tmdb_id, Some(1396), "the match is always written");
+            assert_eq!(after.tvdb_id, Some(81189), "as is its TheTVDB id");
             assert_eq!(
                 after.content_rating.as_deref(),
                 Some("TV-MA"),

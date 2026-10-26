@@ -471,6 +471,9 @@ fn map_show_enrichment(details: &cameo::UnifiedTvShowDetails) -> ShowEnrichment 
     ShowEnrichment {
         tmdb_id: is_tmdb.then_some(native_id).flatten(),
         anilist_id: is_anilist.then_some(native_id).flatten(),
+        // Neither TMDB nor AniList reports one through cameo; TheTVDB's own
+        // adapter does (`providers::tvdb`).
+        tvdb_id: None,
         // cameo's UnifiedTvShowDetails doesn't surface an external IMDB id at
         // this level (TMDB's TV endpoints don't map one to the unified model).
         imdb_id: None,
@@ -499,6 +502,9 @@ fn map_season_enrichment(details: &cameo::UnifiedSeasonDetails) -> SeasonEnrichm
             .iter()
             .map(|ep| beam_domain::providers::enrichment::EpisodeEnrichment {
                 episode_number: ep.episode_number,
+                // cameo's unified episode carries no absolute number; the
+                // absolute order is read from the seasons' order instead.
+                absolute_number: None,
                 title: ep.name.clone(),
                 description: ep.overview.clone(),
                 air_date: ep.air_date.as_ref().and_then(|d| d.to_naive_date()),
