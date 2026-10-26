@@ -176,6 +176,17 @@ private fun BeamNavDisplay(
                                 },
                                 onOpenHistory = { backStack.add(History) },
                                 onOpenAdmin = { backStack.add(Admin) },
+                                // Everything on the back stack came from the
+                                // server just left, so the app starts afresh
+                                // at home against the new one.
+                                onServerSwitched = {
+                                    backStack.clear()
+                                    backStack.add(TopLevel.Home)
+                                    onSelectTab(TopLevel.Home)
+                                },
+                                // On top of settings, so backing out of adding
+                                // a server returns here.
+                                onAddServer = { backStack.add(SignIn) },
                             )
                         }
                     }

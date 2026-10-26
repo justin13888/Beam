@@ -35,6 +35,14 @@ public data class SettingsUiState(
     val trustedCertificates: List<String> = emptyList(),
     /** Set once the viewer has signed out, so the shell can navigate. */
     val isSignedOut: Boolean = false,
+    /** Every server this device knows, the active one among them. */
+    val servers: List<ServerSummary> = emptyList(),
+    /**
+     * Set once the viewer has switched to a server they are signed in to, so
+     * the shell can start the app afresh against it. A switch to one they are
+     * not signed in to sets [isSignedOut] instead: signing in comes first.
+     */
+    val hasSwitchedServer: Boolean = false,
 )
 
 /** Preferences, the account, and this device's trust decisions. */
@@ -55,7 +63,44 @@ public class SettingsViewModel
                     mutableState.update { it.copy(preferences = value) }
                 }
             }
+            viewModelScope.launch {
+                servers.servers.collect { known ->
+                    mutableState.update { it.copy(servers = known) }
+                }
+            }
             refresh()
+        }
+
+        /**
+         * Make another known server the active one.
+         *
+         * Everything on screen belongs to the server it was loaded from, so a
+         * switch is a fresh start: home, against the new server, when the
+         * viewer is signed in there; sign-in first when they are not.
+         */
+        public fun switchServer(serverId: String) {
+            if (mutableState.value.server?.id == serverId) return
+            viewModelScope.launch {
+                runCatching { servers.selectServer(serverId) }.onFailure { return@launch }
+                val chosen = runCatching { servers.activeServer() }.getOrNull()
+                if (chosen?.state is SessionState.Authenticated) {
+                    mutableState.update { it.copy(hasSwitchedServer = true) }
+                } else {
+                    mutableState.update { it.copy(isSignedOut = true) }
+                }
+            }
+        }
+
+        /**
+         * Forget a server this device is not using, with its session and its
+         * queued progress. The active one is signed out of instead, which is
+         * the account row's button.
+         */
+        public fun removeServer(serverId: String) {
+            if (mutableState.value.server?.id == serverId) return
+            viewModelScope.launch {
+                runCatching { servers.removeServer(serverId) }
+            }
         }
 
         /** Reload the account and server sections. */

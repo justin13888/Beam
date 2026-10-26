@@ -7,13 +7,16 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Logout
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -24,6 +27,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -33,6 +37,8 @@ import dev.beam.android.core.designsystem.supportsDynamicColor
 import dev.beam.android.core.model.PaletteSource
 import dev.beam.android.core.model.QualityPreference
 import dev.beam.android.core.model.ThemeMode
+import uniffi.beam_client_core.ServerSummary
+import uniffi.beam_client_core.SessionState
 import java.text.DateFormat
 import java.util.Date
 
@@ -43,6 +49,8 @@ public fun SettingsRoute(
     onOpenHistory: () -> Unit,
     onOpenAdmin: () -> Unit,
     modifier: Modifier = Modifier,
+    onServerSwitched: () -> Unit = {},
+    onAddServer: () -> Unit = {},
     viewModel: SettingsViewModel = hiltViewModel(),
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -51,10 +59,17 @@ public fun SettingsRoute(
         if (state.isSignedOut) onSignedOut()
     }
 
+    LaunchedEffect(state.hasSwitchedServer) {
+        if (state.hasSwitchedServer) onServerSwitched()
+    }
+
     SettingsScreen(
         state = state,
         onOpenHistory = onOpenHistory,
         onOpenAdmin = onOpenAdmin,
+        onSwitchServer = viewModel::switchServer,
+        onRemoveServer = viewModel::removeServer,
+        onAddServer = onAddServer,
         onThemeMode = viewModel::setThemeMode,
         onPaletteSource = viewModel::setPaletteSource,
         onQuality = viewModel::setQuality,
@@ -86,8 +101,34 @@ internal fun SettingsScreen(
     onSignOut: () -> Unit,
     onSignOutEverywhere: () -> Unit,
     modifier: Modifier = Modifier,
+    onSwitchServer: (String) -> Unit = {},
+    onRemoveServer: (String) -> Unit = {},
+    onAddServer: () -> Unit = {},
 ) {
     var confirmingSignOutEverywhere by remember { mutableStateOf(false) }
+    var removing by remember { mutableStateOf<ServerSummary?>(null) }
+
+    removing?.let { server ->
+        AlertDialog(
+            onDismissRequest = { removing = null },
+            title = { Text("Forget ${server.displayName}?") },
+            text = {
+                Text(
+                    "This device signs out of it and forgets it. Anything it had not " +
+                        "yet sent about where you got to is dropped.",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        removing = null
+                        onRemoveServer(server.id)
+                    },
+                ) { Text("Forget") }
+            },
+            dismissButton = { TextButton(onClick = { removing = null }) { Text("Cancel") } },
+        )
+    }
     val preferences = state.preferences
 
     if (confirmingSignOutEverywhere) {
@@ -131,6 +172,47 @@ internal fun SettingsScreen(
                     },
                 )
             }
+        }
+
+        // Every server this device knows. Switching starts the app afresh
+        // against the chosen one, since everything on screen came from the
+        // server it is leaving.
+        item(key = "servers-header") {
+            SectionHeader(title = "Servers", actionLabel = "Add", onAction = onAddServer)
+        }
+        items(state.servers, key = { "server-${it.id}" }) { server ->
+            ListItem(
+                headlineContent = { Text(server.displayName) },
+                supportingContent = {
+                    Text(
+                        listOfNotNull(
+                            server.baseUrl,
+                            when (server.state) {
+                                is SessionState.Authenticated -> null
+                                else -> "Not signed in"
+                            },
+                        ).joinToString(" · "),
+                    )
+                },
+                leadingContent = {
+                    RadioButton(selected = server.isActive, onClick = null)
+                },
+                trailingContent = {
+                    if (!server.isActive) {
+                        IconButton(onClick = { removing = server }) {
+                            Icon(Icons.Rounded.Delete, contentDescription = "Forget ${server.displayName}")
+                        }
+                    }
+                },
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .selectable(
+                            selected = server.isActive,
+                            role = Role.RadioButton,
+                            onClick = { onSwitchServer(server.id) },
+                        ),
+            )
         }
 
         // History and the admin area live here rather than as their own tabs.
