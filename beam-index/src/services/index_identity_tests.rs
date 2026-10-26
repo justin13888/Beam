@@ -2563,6 +2563,83 @@ async fn reclassifying_a_titles_last_file_carries_its_watch_state() {
     );
 }
 
+/// Reclassifying a title's last file carries its users' watchlist and
+/// favourites entries to the title the file joins, as it carries watch state
+/// (issue #262): orphan cleanup retires the emptied title, and would take the
+/// entries with it. Lists hold the show, so a husk show's entries follow its
+/// last episode's file to the series.
+#[tokio::test]
+async fn reclassifying_a_titles_last_file_carries_its_list_entries() {
+    use beam_domain::models::user_list::UserList;
+    use beam_domain::models::watch_state::TitleRef;
+    use beam_domain::repositories::UserListRepository;
+
+    let h = Harness::keeping_missing_files().await;
+    let base = chrono::Utc::now() - chrono::Duration::days(30);
+    let husk = h
+        .keyed_show(
+            "Season 05",
+            "season 05|",
+            &["Show X/Season 05/Show.X.S05E01.mkv"],
+            base,
+        )
+        .await;
+    // Its files name two films and neither is the one its key names.
+    let emptied = h
+        .keyed_movie(
+            "Dune",
+            None,
+            "dune|",
+            &["Dune.1984.mkv", "Dune.2021.mkv"],
+            base,
+        )
+        .await;
+    let user = Uuid::new_v4();
+    h.lists
+        .add(user, UserList::Favourites, TitleRef::Show(husk))
+        .await
+        .unwrap();
+    h.lists
+        .add(user, UserList::Watchlist, TitleRef::Movie(emptied))
+        .await
+        .unwrap();
+
+    h.service
+        .scan_all_libraries(ScanTrigger::Periodic)
+        .await
+        .unwrap();
+
+    let show = h.only_show();
+    assert_ne!(show.id, husk, "the husk is retired");
+    assert_eq!(
+        h.lists
+            .lists_of(user, TitleRef::Show(show.id))
+            .await
+            .unwrap(),
+        [UserList::Favourites],
+        "on the series the file now is"
+    );
+    let movies = h.movies();
+    assert_eq!(movies.len(), 2, "the files are two films: {movies:?}");
+    assert!(movies.iter().all(|movie| movie.id != emptied), "retired");
+    let mut kept = Vec::new();
+    for movie in &movies {
+        kept.extend(
+            h.lists
+                .lists_of(user, TitleRef::Movie(movie.id))
+                .await
+                .unwrap(),
+        );
+    }
+    assert_eq!(
+        kept,
+        [UserList::Watchlist],
+        "on the film the last file joined"
+    );
+    assert_eq!(h.lists.count(user, UserList::Favourites).await.unwrap(), 1);
+    assert_eq!(h.lists.count(user, UserList::Watchlist).await.unwrap(), 1);
+}
+
 /// A movie whose files the scan reclassifies to two other films, one after
 /// the other, carries its watch state when the second leaves it empty: the
 /// viewer's place is on one of the films, not retired with the movie.

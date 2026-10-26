@@ -1958,7 +1958,8 @@ impl LocalIndexService {
             (Some(_), status) => status,
         };
         // A title the move empties goes with orphan cleanup, and its viewers'
-        // state with it unless carried first (issue #246).
+        // state (issue #246) and users' list entries (issue #262) with it
+        // unless carried first.
         if let (Some(from), Some(to)) = (&existing.content, &content) {
             self.carry_from_emptied_title(existing.id, from, to).await?;
         }
@@ -3998,6 +3999,11 @@ impl LocalIndexService {
     /// would otherwise retire it with its viewers' state (issue #246). A
     /// title another file still holds keeps its state; so does one moving to
     /// a title of the other kind, which no watch state can follow.
+    ///
+    /// Users' watchlist and favourites entries are carried the same way
+    /// (issue #262): a movie's with its watch state, and a show's when the
+    /// move leaves the show itself -- not only the episode -- with no other
+    /// file, since lists hold the show rather than its episodes.
     async fn carry_from_emptied_title(
         &self,
         file_id: Uuid,
@@ -4052,7 +4058,45 @@ impl LocalIndexService {
         if keeps_a_file {
             return Ok(());
         }
-        self.progress_repo.carry(from, to).await
+        self.progress_repo.carry(from, to).await?;
+        match (from, to) {
+            (WatchTarget::Movie { movie_id }, WatchTarget::Movie { movie_id: to_movie }) => {
+                self.carry_list_entries(TitleRef::Movie(movie_id), TitleRef::Movie(to_movie))
+                    .await
+            }
+            (
+                WatchTarget::Episode { show_id, .. },
+                WatchTarget::Episode {
+                    show_id: to_show, ..
+                },
+            ) => {
+                if show_id == to_show || self.show_keeps_a_file(show_id, file_id).await? {
+                    return Ok(());
+                }
+                self.carry_list_entries(TitleRef::Show(show_id), TitleRef::Show(to_show))
+                    .await
+            }
+            (WatchTarget::Movie { .. }, WatchTarget::Episode { .. })
+            | (WatchTarget::Episode { .. }, WatchTarget::Movie { .. }) => Ok(()),
+        }
+    }
+
+    /// Whether any episode of `show_id` holds a file other than `file_id`.
+    async fn show_keeps_a_file(&self, show_id: Uuid, file_id: Uuid) -> Result<bool, DbErr> {
+        for season in self.show_repo.find_seasons_by_show_id(show_id).await? {
+            for episode in self.show_repo.find_episodes_by_season_id(season.id).await? {
+                if self
+                    .file_repo
+                    .find_by_episode_id(episode.id)
+                    .await?
+                    .iter()
+                    .any(|file| file.id != file_id)
+                {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
     }
 
     /// Point `file` at `content`, keeping its status and classifier version.
