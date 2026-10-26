@@ -10,13 +10,15 @@ mod tests {
     use std::sync::Arc;
 
     use beam_auth::utils::{models::CreateUser, session_store::SessionData};
+    use beam_domain::models::person::CreditRole;
     use beam_domain::models::{CreateMovie, CreateShow};
     use beam_domain::providers::artwork::test_utils::InMemoryArtworkFetcher;
     use beam_domain::providers::artwork::{ArtworkFetchError, ImageFormat};
-    use beam_domain::providers::enrichment::MovieEnrichment;
+    use beam_domain::providers::enrichment::{CreditEnrichment, ExternalMediaRef, MovieEnrichment};
     use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
+    use beam_domain::repositories::person::in_memory::InMemoryPersonRepository;
     use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
-    use beam_domain::repositories::{MovieRepository, ShowRepository};
+    use beam_domain::repositories::{MovieRepository, PersonRepository, ShowRepository};
     use beam_domain::services::RealClock;
     use kynos::http::StatusCode;
     use kynos::prelude::*;
@@ -36,6 +38,7 @@ mod tests {
         state: AppState,
         movies: Arc<InMemoryMovieRepository>,
         shows: Arc<InMemoryShowRepository>,
+        people: Arc<InMemoryPersonRepository>,
         fetcher: Arc<InMemoryArtworkFetcher>,
         _root: TempDir,
     }
@@ -46,6 +49,7 @@ mod tests {
         let fetcher = Arc::new(fetcher);
         let movies = Arc::new(InMemoryMovieRepository::default());
         let shows = Arc::new(InMemoryShowRepository::default());
+        let people = Arc::new(InMemoryPersonRepository::default());
 
         let artwork = Arc::new(ArtworkCache::new(
             ArtworkCacheConfig {
@@ -71,7 +75,11 @@ mod tests {
             file_repo: base.services.file_repo.clone(),
             enrichment_repo: base.services.enrichment_repo.clone(),
             enrichment_control: base.services.enrichment_control.clone(),
-            people: crate::routes::test_support::idle_people(movies.clone(), shows.clone()),
+            people: Arc::new(crate::services::people::PeopleService::new(
+                people.clone(),
+                movies.clone(),
+                shows.clone(),
+            )),
             movie_repo: movies.clone(),
             show_repo: shows.clone(),
             artwork,
@@ -89,8 +97,90 @@ mod tests {
             state: AppState::new(base.config.clone(), services, base.probe.clone(), None),
             movies,
             shows,
+            people,
             fetcher,
             _root: root,
+        }
+    }
+
+    /// A person credited on a movie, with `portrait` as their provider
+    /// portrait, by their id.
+    async fn credited_person(fixture: &Fixture, native: &str, portrait: Option<&str>) -> Uuid {
+        let movie = movie_with_poster(fixture, None).await;
+        fixture
+            .people
+            .set_movie_credits(
+                movie,
+                &[CreditEnrichment {
+                    person_ref: ExternalMediaRef::new("tmdb", native),
+                    name: format!("Person {native}"),
+                    profile_url: portrait.map(str::to_string),
+                    role: CreditRole::Cast {
+                        character: None,
+                        billing_order: 0,
+                    },
+                }],
+            )
+            .await
+            .expect("credits are stored");
+        fixture
+            .people
+            .movie_credits(movie)
+            .await
+            .expect("credits are read")
+            .into_iter()
+            .find(|credit| credit.person.external_ref == format!("tmdb:{native}"))
+            .expect("the person is credited")
+            .person
+            .id
+    }
+
+    #[tokio::test]
+    async fn a_persons_portrait_is_served_by_beam_and_nothing_else_of_theirs_is() {
+        const PORTRAIT_URL: &str = "https://image.tmdb.org/t/p/h632/portrait.jpg";
+        let fixture = fixture(InMemoryArtworkFetcher::new().with_image(
+            PORTRAIT_URL,
+            ImageFormat::Jpeg,
+            POSTER_BYTES,
+        ));
+        let pictured = credited_person(&fixture, "1", Some(PORTRAIT_URL)).await;
+        let unpictured = credited_person(&fixture, "2", None).await;
+        let movie = movie_with_poster(&fixture, Some(POSTER_URL)).await;
+        let client = client(&fixture);
+        let token = signed_in(&fixture).await;
+
+        let response = client
+            .get(&format!("/v1/artwork/person/{pictured}/profile"))
+            .cookie("beam_session", &token)
+            .send()
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.bytes().as_ref(), POSTER_BYTES);
+
+        for (case, path) in [
+            (
+                "a person with no portrait",
+                format!("/v1/artwork/person/{unpictured}/profile"),
+            ),
+            (
+                "a person who does not exist",
+                format!("/v1/artwork/person/{}/profile", Uuid::new_v4()),
+            ),
+            (
+                "a person's poster, which Beam does not store",
+                format!("/v1/artwork/person/{pictured}/poster"),
+            ),
+            (
+                "a movie's profile, which no title has",
+                format!("/v1/artwork/movie/{movie}/profile"),
+            ),
+        ] {
+            let response = client
+                .get(&path)
+                .cookie("beam_session", &token)
+                .send()
+                .await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{case}");
         }
     }
 
