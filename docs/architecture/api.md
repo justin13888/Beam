@@ -28,8 +28,17 @@ libraries, continue-watching and history drop the rows it hides, and every route
 hidden title -- or of its season, episode, file, subtitle or art -- answers exactly as for an id
 naming nothing, with the same `404` and problem type. A title's detail and browse row carry the
 provider's certification as `content_rating` (absent while none is known). The `/v1/admin`
-operations are not filtered; people, collections, genres and the watchlist and favourites are not
-filtered yet (#328).
+operations are not filtered.
+
+What hangs off titles follows them (issue #328). The watchlist and favourites list and count only
+admitted titles -- a hidden title's entry is kept, and listed again once the policy admits it --
+and refuse a hidden id with `404` `media-not-found`. People search lists only people credited on an
+admitted title, a filmography only those titles, and a person credited on none answers `404`
+`person-not-found`. The collection listing holds only collections with an admitted movie, each
+`movie_count` counting those alone, and a collection with none answers `404`
+`collection-not-found`. The genre list holds only genres an admitted title carries. A portrait or
+a collection's art is served exactly while its person or collection is. The stores filter in their
+queries, so a page still holds `first` items and every `total` counts only what the caller sees.
 
 | Route | Method(s) | Purpose |
 |---|---|---|
@@ -41,7 +50,7 @@ filtered yet (#328).
 | `/v1/people` | GET | People search: the cast and crew credited in the library whose name contains `query` (ignoring case; every credited person without it), by name. A `PersonConnection` paged by `first` (1-100, default 20) and `after`, with `total`; shares the `search` rate-limit class with `/v1/media` |
 | `/v1/people/{id}` | GET | One person (`PersonDetail`) and their filmography: `cast` and `crew` credits in the library, newest title first; `404` `person-not-found` for an unknown id or a person no title credits any more |
 | `/v1/media/{id}/sources` | GET | Playable/downloadable source files for a movie or an episode, primary first, each with its video, audio and subtitle tracks |
-| `/v1/genres` | GET | Every genre in the catalog, for filter chips: a `GenreConnection`, never paged |
+| `/v1/genres` | GET | Every genre a title the caller may see carries, for filter chips: a `GenreConnection`, never paged |
 | `/v1/artwork/{kind}/{id}/{variant}` | GET, HEAD | Poster, backdrop or thumbnail art, people's portraits and collections' art, fetched from the provider once and served from Beam's cache. `kind` is `movie`/`show`/`season`/`episode`/`person`/`collection`; `variant` is `poster`/`backdrop`/`thumbnail`/`profile` (a person has only `profile`, a collection `poster` and `backdrop`) |
 | `/v1/libraries`, `/v1/libraries/{id}`, `/v1/libraries/{id}/files` | GET | Library listing (a `LibraryConnection`, never paged) and contents: a `LibraryFileConnection` paged by `first` (1-500, default 100) and `after`, by stored path then id. File paths are relative to the library root, in the listing and inside its cursor (NFR-108); another library's cursor is `400 #invalid-cursor` |
 | `/v1/files/{fileId}/stream` | GET, HEAD | Direct-play byte-range streaming (see `streaming.md`) |

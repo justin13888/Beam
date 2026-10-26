@@ -96,7 +96,10 @@ answer `204`, and both are idempotent: a title already on the list keeps its pla
 episode is refused with `not-a-title` -- the lists hold whole titles. `GET /v1/watchlist` and
 `GET /v1/favourites` page through a list, newest addition first, with `first` and `after`; each
 item is the title as browse lists it, with when it was added. A movie's or show's detail says
-whether it is on each list, as `user_state.in_watchlist` and `user_state.in_favourites`.
+whether it is on each list, as `user_state.in_watchlist` and `user_state.in_favourites`. A title the
+user's access hides (see below) is left off every page and out of `total`, and putting it on a
+list or taking it off answers `404` as an unknown id does; its entry stays, for when the user may
+see it again.
 
 Collections are the groupings a metadata provider makes of movies, such as a franchise: TMDB's
 "collection". A movie's detail names the one it is in as `collection`; `GET /v1/collections` lists
@@ -116,6 +119,14 @@ may see, and any route given the id of something else -- a title, its seasons an
 files, subtitles and artwork -- answers `404` exactly as for an id that does not exist. Under a
 maximum rating, a title with no certification Beam recognises is hidden. A movie's or show's
 `content_rating` is the provider's certification, absent while none is known.
+
+What hangs off titles follows them. The watchlist and favourites hold only the titles the user may
+see. People search finds only people credited on one of them, a person's filmography lists only
+those, and a person credited on none answers `404`. `GET /v1/collections` lists only collections
+holding a movie the user may see, each `movie_count` counting only those, and a collection with none
+answers `404`. `GET /v1/genres` offers only the genres of titles the user may see. Every `total`
+counts only what the user sees, and a portrait or a collection's art is served only while its person
+or collection is.
 
 ## Artwork
 
