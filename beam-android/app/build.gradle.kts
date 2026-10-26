@@ -14,6 +14,15 @@ android {
     }
 }
 
+// The shell's view-model test runs under Robolectric, and the API level it can
+// run is pinned once for every module in this shared file. Configured through
+// the typed DSL, as in core/media.
+configure<com.android.build.api.dsl.ApplicationExtension> {
+    sourceSets.getByName("test").resources.srcDir(
+        rootProject.layout.projectDirectory.dir("gradle/robolectric"),
+    )
+}
+
 dependencies {
     implementation(projects.core.model)
     implementation(projects.core.ffi)
