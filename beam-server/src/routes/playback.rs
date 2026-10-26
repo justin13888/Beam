@@ -6,6 +6,8 @@
 
 use std::num::NonZeroU32;
 
+use beam_domain::models::access::AccessPolicy;
+use beam_domain::models::watch_state::TitleRef;
 use kynos::prelude::*;
 use kynos::response::status::NoContent;
 use serde::{Deserialize, Serialize};
@@ -167,6 +169,73 @@ pub(crate) fn parse_user_id(user_id: &str) -> Result<Uuid, InternalError> {
         .map_err(|_| InternalError::Internal("invalid user id in session".to_owned()))
 }
 
+/// The session's user id and their access policy (issue #263): what every
+/// route reading or delivering a title checks the ids it is given against.
+pub(crate) async fn caller_access(
+    state: &AppState,
+    auth: &SessionAuth,
+) -> Result<(Uuid, AccessPolicy), InternalError> {
+    let user_id = parse_user_id(&auth.0.user_id)?;
+    let policy = state
+        .services
+        .access
+        .policy(user_id)
+        .await
+        .map_err(|err| InternalError::Internal(err.to_string()))?;
+    Ok((user_id, policy))
+}
+
+/// Whether `policy` hides what `id` names, a failed read as a 500.
+pub(crate) async fn hides(
+    state: &AppState,
+    policy: &AccessPolicy,
+    id: Uuid,
+) -> Result<bool, InternalError> {
+    state
+        .services
+        .access
+        .hides(policy, id)
+        .await
+        .map_err(|err| InternalError::Internal(err.to_string()))
+}
+
+/// The detail of the 404 a hidden id answers with: the one an id naming
+/// nothing gets, so the two cannot be told apart.
+pub(crate) fn media_not_found(id: Uuid) -> String {
+    format!("media {id} not found")
+}
+
+/// Which of a page's rows the policy admits, each row named by its title.
+pub(crate) async fn visible_rows<T>(
+    state: &AppState,
+    policy: &AccessPolicy,
+    rows: Vec<T>,
+    title_of: impl Fn(&T) -> TitleRef,
+) -> Result<Vec<T>, InternalError> {
+    if policy.is_unrestricted() {
+        return Ok(rows);
+    }
+    let titles: Vec<TitleRef> = rows.iter().map(&title_of).collect();
+    let visible = state
+        .services
+        .access
+        .visible_titles(policy, &titles)
+        .await
+        .map_err(|err| InternalError::Internal(err.to_string()))?;
+    Ok(rows
+        .into_iter()
+        .filter(|row| visible.contains(&title_of(row)))
+        .collect())
+}
+
+/// A continue-watching or history row's title: its movie, or its show.
+fn row_title(media_type: crate::models::search::TitleKind, media_id: Uuid) -> TitleRef {
+    match media_type {
+        crate::models::search::TitleKind::Movie => TitleRef::Movie(media_id),
+        crate::models::search::TitleKind::Show => TitleRef::Show(media_id),
+    }
+}
+
 /// `first`, defaulted and held to `1..=max`.
 pub(crate) fn page_size(first: Option<u32>, default: u32, max: u32) -> Result<NonZeroU32, String> {
     let size = first.unwrap_or(default);
@@ -194,11 +263,23 @@ pub async fn report_playback_progress(
     Inject(state): Inject<AppState>,
     Json(body): Json<ReportProgressRequest>,
 ) -> Result<Json<UserTitleState>, ProgressError> {
-    let user_id = parse_user_id(&auth.0.user_id)?;
+    let (user_id, policy) = caller_access(&state, &auth).await?;
     let ReportProgressRequest {
         position_secs,
         duration_secs,
     } = body;
+    if state
+        .services
+        .access
+        .hides_file(&policy, path.file_id)
+        .await
+        .map_err(|err| ProgressError::Internal(err.to_string()))?
+    {
+        return Err(ProgressError::FileNotFound(format!(
+            "file {} not found",
+            path.file_id
+        )));
+    }
 
     let progress = state
         .services
@@ -221,7 +302,10 @@ pub async fn get_title_progress(
     Path(path): Path<TitlePath>,
     Inject(state): Inject<AppState>,
 ) -> Result<Json<UserTitleState>, TitleProgressError> {
-    let user_id = parse_user_id(&auth.0.user_id)?;
+    let (user_id, policy) = caller_access(&state, &auth).await?;
+    if hides(&state, &policy, path.id).await? {
+        return Err(TitleProgressError::MediaNotFound(media_not_found(path.id)));
+    }
     let progress = state
         .services
         .playback
@@ -242,7 +326,10 @@ pub async fn clear_title_progress(
     Path(path): Path<TitlePath>,
     Inject(state): Inject<AppState>,
 ) -> Result<NoContent, TitleProgressError> {
-    let user_id = parse_user_id(&auth.0.user_id)?;
+    let (user_id, policy) = caller_access(&state, &auth).await?;
+    if hides(&state, &policy, path.id).await? {
+        return Err(TitleProgressError::MediaNotFound(media_not_found(path.id)));
+    }
     state
         .services
         .playback
@@ -265,7 +352,10 @@ pub async fn mark_watched(
     Path(path): Path<TitlePath>,
     Inject(state): Inject<AppState>,
 ) -> Result<NoContent, MediaRefLookupError> {
-    let user_id = parse_user_id(&auth.0.user_id)?;
+    let (user_id, policy) = caller_access(&state, &auth).await?;
+    if hides(&state, &policy, path.id).await? {
+        return Err(MediaRefLookupError::MediaNotFound(media_not_found(path.id)));
+    }
     state
         .services
         .playback
@@ -286,7 +376,10 @@ pub async fn mark_unwatched(
     Path(path): Path<TitlePath>,
     Inject(state): Inject<AppState>,
 ) -> Result<NoContent, MediaRefLookupError> {
-    let user_id = parse_user_id(&auth.0.user_id)?;
+    let (user_id, policy) = caller_access(&state, &auth).await?;
+    if hides(&state, &policy, path.id).await? {
+        return Err(MediaRefLookupError::MediaNotFound(media_not_found(path.id)));
+    }
     state
         .services
         .playback
@@ -311,7 +404,7 @@ pub async fn get_continue_watching(
     Query(query): Query<ContinueWatchingQuery>,
     Inject(state): Inject<AppState>,
 ) -> Result<Json<ContinueWatchingConnection>, ContinueWatchingError> {
-    let user_id = parse_user_id(&auth.0.user_id)?;
+    let (user_id, policy) = caller_access(&state, &auth).await?;
     let ContinueWatchingQuery { first } = query;
     let first = page_size(first, CONTINUE_WATCHING_DEFAULT, CONTINUE_WATCHING_MAX)
         .map_err(ContinueWatchingError::InvalidPagination)?;
@@ -324,6 +417,12 @@ pub async fn get_continue_watching(
         .playback
         .get_continue_watching(user_id, first)
         .await?;
+    // A title the caller can no longer see leaves the shelf, which may then
+    // hold fewer than `first`.
+    let items = visible_rows(&state, &policy, items, |item| {
+        row_title(item.media_type, item.media_id)
+    })
+    .await?;
 
     Ok(Json(ContinueWatchingConnection {
         items,
@@ -348,7 +447,10 @@ pub async fn dismiss_continue_watching(
     Path(path): Path<TitlePath>,
     Inject(state): Inject<AppState>,
 ) -> Result<NoContent, MediaRefLookupError> {
-    let user_id = parse_user_id(&auth.0.user_id)?;
+    let (user_id, policy) = caller_access(&state, &auth).await?;
+    if hides(&state, &policy, path.id).await? {
+        return Err(MediaRefLookupError::MediaNotFound(media_not_found(path.id)));
+    }
     state.services.playback.dismiss(user_id, path.id).await?;
     Ok(NoContent)
 }
@@ -357,14 +459,15 @@ pub async fn dismiss_continue_watching(
 /// recently first, a page at a time.
 ///
 /// `total` counts every title in the history; a title whose files are all
-/// gone is counted but not listed, so a page can hold fewer than `first`.
+/// gone, or that the caller may no longer see, is counted but not listed, so
+/// a page can hold fewer than `first`.
 #[kynos::get("/history", tag = Playback, operation_id = "getHistory")]
 pub async fn get_history(
     auth: SessionAuth,
     Query(query): Query<HistoryQuery>,
     Inject(state): Inject<AppState>,
 ) -> Result<Json<HistoryConnection>, HistoryError> {
-    let user_id = parse_user_id(&auth.0.user_id)?;
+    let (user_id, policy) = caller_access(&state, &auth).await?;
     let HistoryQuery { first, after } = query;
     let first =
         page_size(first, HISTORY_DEFAULT, HISTORY_MAX).map_err(HistoryError::InvalidPagination)?;
@@ -380,9 +483,16 @@ pub async fn get_history(
         .playback
         .get_history(user_id, after, first)
         .await?;
+    // A title the caller can no longer see is counted, as one whose files
+    // are gone is, but not listed. The cursors are the page's own, so paging
+    // on is unaffected.
+    let items = visible_rows(&state, &policy, page.items, |item| {
+        row_title(item.media_type, item.media_id)
+    })
+    .await?;
 
     Ok(Json(HistoryConnection {
-        items: page.items,
+        items,
         page_info: PageInfo {
             has_next_page: page.has_next_page,
             has_previous_page,

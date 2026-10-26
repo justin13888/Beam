@@ -26,8 +26,9 @@ import Foundation
 /// when the active server changes rather than captured once at launch.
 ///
 /// There is no cache here on purpose. Beam answers artwork with
-/// `Cache-Control: public, max-age=86400` and a strong `ETag`, so `URLCache`
-/// stores and revalidates it correctly without a second cache to keep in step.
+/// `Cache-Control: private, max-age=86400` and a strong `ETag`. `private` keeps
+/// shared caches out but not this client's own, so `URLCache` stores and
+/// revalidates it correctly without a second cache to keep in step.
 public final class AuthenticatedArtworkLoader: ArtworkLoading, @unchecked Sendable {
     private let configure: @Sendable () -> ServerHttpConfig?
     private let lock = NSLock()

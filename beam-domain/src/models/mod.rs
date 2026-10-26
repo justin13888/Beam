@@ -1,3 +1,4 @@
+pub mod access;
 pub mod admin_log;
 pub mod applied_nfo;
 pub mod catalog;
@@ -18,6 +19,7 @@ pub mod stream;
 pub mod user_list;
 pub mod watch_state;
 
+pub use access::*;
 pub use admin_log::*;
 pub use applied_nfo::*;
 pub use catalog::*;

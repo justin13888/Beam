@@ -49,6 +49,13 @@
 //! Which plan is cheaper depends on the value, so each page is planned with
 //! its own.
 //!
+//! **Access** (issue #263). A caller restricted to some libraries sees a
+//! title only when `library_movies` / `library_shows` associates it with one
+//! of them, and a caller under a rating ceiling only one whose
+//! `content_rating` is a certification within it. Both are per-row checks
+//! beside liveness, bound as `IN` lists the size of the grant and of the
+//! ceiling's certifications; an unrestricted caller's statement has neither.
+//!
 //! **Seeking.** A page after a position keeps the rows whose tuple compares
 //! past it in the display direction; a page before one flips both the
 //! comparison and the `ORDER BY`, takes the nearest rows, and is reversed
@@ -63,6 +70,7 @@ use sea_orm::{
 };
 use uuid::Uuid;
 
+use beam_domain::models::access::{AccessPolicy, LibraryAccess};
 use beam_domain::models::catalog::{
     CatalogFilters, CatalogPosition, CatalogQuery, CatalogSort, CatalogSortField, Seek,
     SortDirection, SortKey, TitleKind,
@@ -164,11 +172,22 @@ struct BranchFilters {
     year_from: Option<String>,
     year_to: Option<String>,
     min_rating: Option<String>,
+    /// The placeholders of the libraries the caller may see; `None` for
+    /// every library.
+    libraries: Option<Vec<String>>,
+    /// The placeholders of the certifications within the caller's ceiling;
+    /// `None` for no ceiling.
+    certifications: Option<Vec<String>>,
 }
 
 impl BranchFilters {
     /// `genre` is the id `filters.genre_slug` names, resolved beforehand.
-    fn bind(filters: &CatalogFilters, genre: Option<Uuid>, binds: &mut Binds) -> Self {
+    fn bind(
+        filters: &CatalogFilters,
+        access: &AccessPolicy,
+        genre: Option<Uuid>,
+        binds: &mut Binds,
+    ) -> Self {
         let CatalogFilters {
             kind: _,
             query,
@@ -178,6 +197,10 @@ impl BranchFilters {
             year_to,
             min_rating,
         } = filters;
+        let AccessPolicy {
+            libraries,
+            max_rating,
+        } = access;
         Self {
             query: query.clone().map(|q| binds.push(q)),
             genre: genre.map(|id| binds.push(id)),
@@ -185,23 +208,55 @@ impl BranchFilters {
             year_from: year_from.map(|y| binds.push(y)),
             year_to: year_to.map(|y| binds.push(y)),
             min_rating: min_rating.map(|r| binds.push(r)),
+            libraries: match libraries {
+                LibraryAccess::All => None,
+                LibraryAccess::Only(granted) => {
+                    Some(granted.iter().map(|id| binds.push(*id)).collect())
+                }
+            },
+            certifications: max_rating.map(|ceiling| {
+                ceiling
+                    .certifications_within()
+                    .map(|label| binds.push(label))
+                    .collect()
+            }),
         }
     }
 
     fn conditions(&self, kind: TitleKind) -> Vec<String> {
-        let (table, live, genre_join) = match kind {
+        let (table, live, genre_join, library_join) = match kind {
             TitleKind::Movie => (
                 "movies",
                 LIVE_MOVIE,
                 "movie_genres j WHERE j.movie_id = movies.id",
+                "library_movies l WHERE l.movie_id = movies.id",
             ),
             TitleKind::Show => (
                 "shows",
                 LIVE_SHOW,
                 "show_genres j WHERE j.show_id = shows.id",
+                "library_shows l WHERE l.show_id = shows.id",
             ),
         };
         let mut conditions = vec![live.to_string()];
+        // Access first (issue #263): a title the caller may not see is not
+        // there to filter. An empty grant or ceiling admits nothing, which
+        // `IN ()` cannot spell.
+        match self.libraries.as_deref() {
+            None => {}
+            Some([]) => conditions.push("FALSE".to_string()),
+            Some(granted) => conditions.push(format!(
+                "EXISTS (SELECT 1 FROM {library_join} AND l.library_id IN ({}))",
+                granted.join(", ")
+            )),
+        }
+        match self.certifications.as_deref() {
+            None => {}
+            Some([]) => conditions.push("FALSE".to_string()),
+            Some(within) => {
+                conditions.push(format!("{table}.content_rating IN ({})", within.join(", ")))
+            }
+        }
         if let Some(q) = &self.query {
             // `%` is `similarity() > pg_trgm.similarity_threshold`, which
             // `SIMILARITY_THRESHOLD` sets for the statement; unlike the
@@ -461,7 +516,7 @@ fn browse_statement(query: &CatalogQuery, genre: Option<Uuid>) -> Result<Stateme
         ));
     }
     let mut binds = Binds::default();
-    let filters = BranchFilters::bind(&query.filters, genre, &mut binds);
+    let filters = BranchFilters::bind(&query.filters, &query.access, genre, &mut binds);
     let keyset = keyset(query.sort, &query.seek, &mut binds)?;
     let limit = binds.push(i64::from(query.limit.get()));
     let branches: Vec<String> = [TitleKind::Movie, TitleKind::Show]

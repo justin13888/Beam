@@ -33,7 +33,7 @@ public final class HTTPByteSource: ByteSource, @unchecked Sendable {
         self.delegate = TrustingSessionDelegate(evaluator: evaluator)
 
         let configuration = URLSessionConfiguration.ephemeral
-        // Beam sets `Cache-Control: public, max-age=3600` on stream responses,
+        // Beam sets `Cache-Control: private, max-age=3600` on stream responses,
         // and URLCache would happily hold a chunk of a film in memory. The
         // demuxer's own window is the only cache that should exist here.
         configuration.urlCache = nil

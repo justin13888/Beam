@@ -425,6 +425,31 @@ impl ShowRepository for SqlShowRepository {
         Ok(())
     }
 
+    async fn library_ids(
+        &self,
+        show_ids: &[Uuid],
+    ) -> Result<std::collections::HashMap<Uuid, std::collections::BTreeSet<Uuid>>, DbErr> {
+        use beam_entity::library_show;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+        let mut libraries: std::collections::HashMap<Uuid, std::collections::BTreeSet<Uuid>> =
+            std::collections::HashMap::new();
+        if show_ids.is_empty() {
+            return Ok(libraries);
+        }
+        for link in library_show::Entity::find()
+            .filter(library_show::Column::ShowId.is_in(show_ids.iter().copied()))
+            .all(self.db.as_ref())
+            .await?
+        {
+            libraries
+                .entry(link.show_id)
+                .or_default()
+                .insert(link.library_id);
+        }
+        Ok(libraries)
+    }
+
     async fn find_or_create_season(
         &self,
         show_id: Uuid,
@@ -669,6 +694,7 @@ impl ShowRepository for SqlShowRepository {
         if open(MetadataField::Rating) {
             active.rating_tmdb = Set(enrichment.rating);
         }
+        active.content_rating = Set(enrichment.content_rating.clone());
         active.updated_at = Set(chrono::Utc::now().into());
         active.update(self.db.as_ref()).await?;
         Ok(())

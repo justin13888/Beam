@@ -44,6 +44,9 @@ pub struct Model {
 
     pub rating_tmdb: Option<f32>,
     pub rating_imdb: Option<f32>,
+    /// The provider's certification (`PG-13`), as enrichment stored it
+    /// (issue #263); `NULL` while none is reported.
+    pub content_rating: Option<String>,
 
     pub created_at: DateTimeWithTimeZone,
     pub updated_at: DateTimeWithTimeZone,

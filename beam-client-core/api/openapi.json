@@ -3584,7 +3584,7 @@
           "playback"
         ],
         "summary": "Every movie and episode the caller has played or marked watched, most recently first, a page at a time.",
-        "description": "`total` counts every title in the history; a title whose files are all\ngone is counted but not listed, so a page can hold fewer than `first`.",
+        "description": "`total` counts every title in the history; a title whose files are all\ngone, or that the caller may no longer see, is counted but not listed, so\na page can hold fewer than `first`.",
         "operationId": "getHistory",
         "parameters": [
           {
@@ -7717,7 +7717,7 @@
         "tags": [
           "admin"
         ],
-        "summary": "One library by id.",
+        "summary": "One library by id. A library the caller has not been granted answers as one that does not exist.",
         "operationId": "getLibrary",
         "parameters": [
           {
@@ -7854,7 +7854,7 @@
           "admin"
         ],
         "summary": "The files indexed under one library, a page at a time, by path.",
-        "description": "Pass `page_info.end_cursor` as `after` for the next page; a cursor\nanother library's list issued is refused.",
+        "description": "Pass `page_info.end_cursor` as `after` for the next page; a cursor\nanother library's list issued is refused.\n\nA library the caller has not been granted answers as one that does not\nexist, and so does every library for a caller with a maximum content\nrating: a file's path names its title whatever that title's rating.",
         "operationId": "getLibraryFiles",
         "parameters": [
           {
@@ -10269,6 +10269,503 @@
           },
           "204": {
             "description": "the request succeeded and there is no content to send"
+          },
+          "404": {
+            "description": "User not found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#user-not-found"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#internal"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BeamSession": [
+              "admin"
+            ]
+          }
+        ]
+      }
+    },
+    "/v1/admin/users/{id}/access": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Which libraries a user sees, and the highest content rating.",
+        "description": "A user nobody restricted sees every library with no maximum rating.",
+        "operationId": "getAdminUserAccess",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "User id (UUID).",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden; Cross-origin request rejected; Malformed Origin/Referer header",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "about:blank"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#admin-required"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#cross-origin-rejected"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Cross-origin request rejected"
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#malformed-origin"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Malformed Origin/Referer header"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserAccess"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "User not found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#user-not-found"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#internal"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BeamSession": [
+              "admin"
+            ]
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Set which libraries a user sees, and the highest content rating, as one whole: what is not in the body is not kept. Answers what is now stored.",
+        "description": "Takes effect on the user's next request. A title the user may not see\nanswers every route as one that does not exist and is never listed, so\nits existence does not leak. An administrator is held to their own\naccess as any user is; the `/v1/admin` operations are not.",
+        "operationId": "setAdminUserAccess",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "User id (UUID).",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserAccess"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden; Cross-origin request rejected; Malformed Origin/Referer header",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "about:blank"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#admin-required"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#cross-origin-rejected"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Cross-origin request rejected"
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#malformed-origin"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Malformed Origin/Referer header"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Payload Too Large",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Unsupported Media Type",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Entity; Validation failed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "about:blank"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#validation-failed"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserAccess"
+                }
+              }
+            }
           },
           "404": {
             "description": "User not found",
@@ -15254,6 +15751,13 @@
             ],
             "description": "The show's ratings."
           },
+          "content_rating": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The provider's certification for the show, such as `TV-14`; absent\nwhile none is known. A user's maximum content rating is compared\nagainst it."
+          },
           "identifiers": {
             "anyOf": [
               {
@@ -15432,6 +15936,13 @@
               }
             ],
             "description": "Movie ratings"
+          },
+          "content_rating": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The provider's certification for the movie, such as `PG-13`; absent\nwhile none is known. A user's maximum content rating is compared\nagainst it."
           },
           "identifiers": {
             "anyOf": [
@@ -17644,6 +18155,51 @@
           "disabled"
         ],
         "description": "Body of `PATCH /v1/admin/users/{id}`. `disabled` is the only mutable\nfield: `is_admin` is IdP-claim-driven (recomputed at every login), so a\nlocal toggle would be silently overwritten and is deliberately absent."
+      },
+      "ContentRatingBand": {
+        "type": "string",
+        "enum": [
+          "all_ages",
+          "older_children",
+          "parental_guidance",
+          "teen",
+          "mature",
+          "adult"
+        ],
+        "description": "An age band content ratings are grouped into, youngest first: the unit a\nuser's maximum content rating is set in. Each takes the US film and TV\ncertifications for that audience -- `all_ages` takes `G`, `TV-Y` and\n`TV-G`; `older_children` `TV-Y7`; `parental_guidance` `PG` and `TV-PG`;\n`teen` `PG-13` and `TV-14`; `mature` `R` and `TV-MA`; `adult` `NC-17`."
+      },
+      "UserAccess": {
+        "properties": {
+          "all_libraries": {
+            "type": "boolean",
+            "description": "Whether the user sees every library, those created later included.\nWhen `true`, `library_ids` is empty."
+          },
+          "library_ids": {
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": "array",
+            "description": "The libraries the user sees when `all_libraries` is `false`, in no\nparticular order; empty sees none."
+          },
+          "max_content_rating": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ContentRatingBand"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The highest band the user sees; absent for no maximum. Under a\nmaximum, a title whose certification falls in no band -- or that has\nnone yet -- is hidden."
+          }
+        },
+        "type": "object",
+        "required": [
+          "all_libraries",
+          "library_ids"
+        ],
+        "description": "What one user may see: the body of `PUT /v1/admin/users/{id}/access`,\nand what `GET` answers. A user nobody restricted sees every library with\nno maximum rating.\n\nA title the user may not see answers every route as one that does not\nexist, and is never listed."
       },
       "AdminStatusCounts": {
         "properties": {

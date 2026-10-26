@@ -125,6 +125,7 @@ fn build(
     let users_dyn: Arc<dyn UserRepository> = users.clone();
     let services = AppServices {
         hash: base.services.hash.clone(),
+        access: base.services.access.clone(),
         library: base.services.library.clone(),
         metadata: base.services.metadata.clone(),
         subtitles: base.services.subtitles.clone(),

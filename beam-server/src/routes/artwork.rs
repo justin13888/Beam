@@ -32,6 +32,7 @@ use uuid::Uuid;
 use crate::models::media::{ArtworkKind, ArtworkVariant};
 use crate::routes::api_error::{ArtworkError, SessionAuth};
 use crate::routes::delivery::{AnyMedia, MediaRanges, RuntimeDelivery};
+use crate::routes::playback::{caller_access, hides};
 use crate::routes::tags::Media;
 use crate::state::AppState;
 
@@ -137,9 +138,30 @@ fn lookup_failed(err: sea_orm::DbErr) -> ArtworkError {
 /// Builds the delivery both methods share.
 async fn deliver(
     state: &AppState,
+    auth: &SessionAuth,
     path: &ArtworkPath,
     conditions: &Conditions,
 ) -> Result<ArtworkDelivery, ArtworkError> {
+    // The art of a title the caller may not see is the art of a title that
+    // does not exist (issue #263). A person's portrait and a collection's art
+    // belong to no one title.
+    let of_a_title = matches!(
+        path.kind,
+        ArtworkKind::Movie | ArtworkKind::Show | ArtworkKind::Season | ArtworkKind::Episode
+    );
+    if of_a_title {
+        let hidden = match caller_access(state, auth).await {
+            Ok((_, policy)) => hides(state, &policy, path.id).await,
+            Err(err) => Err(err),
+        }
+        .map_err(|err| {
+            error!(%err, "artwork access lookup failed");
+            ArtworkError::Internal("Failed to look up artwork".into())
+        })?;
+        if hidden {
+            return Err(ArtworkError::NotFound("No artwork for this title".into()));
+        }
+    }
     let Some(url) = upstream_url(state, path).await? else {
         return Err(ArtworkError::NotFound("No artwork for this title".into()));
     };
@@ -191,9 +213,12 @@ async fn deliver(
     // the wrong reason. The `ETag` is the cache key -- a digest of the provider
     // URL -- which moves exactly when enrichment points the title somewhere
     // else.
+    // `private`: whether the art is served at all depends on who asks, so a
+    // shared cache must not answer one viewer with what it stored for
+    // another (issue #263).
     let served = Served::<_, AnyMedia>::new(InMemory::new(image.bytes))
         .etag(ETag::strong(image.key.to_string()))
-        .cache_control("public, max-age=86400");
+        .cache_control("private, max-age=86400");
 
     let delivery = served.deliver(conditions).await.map_err(|err| {
         error!(?err, "failed to read cached artwork");
@@ -221,12 +246,12 @@ async fn deliver(
 #[kynos::get("/artwork/{kind}/{id}/{variant}", tag = Media, operation_id = "getArtwork")]
 #[tracing::instrument(skip_all)]
 pub async fn get_artwork(
-    _auth: SessionAuth,
+    auth: SessionAuth,
     Path(path): Path<ArtworkPath>,
     conditions: Conditions,
     Inject(state): Inject<AppState>,
 ) -> Result<ArtworkDelivery, ArtworkError> {
-    deliver(&state, &path, &conditions).await
+    deliver(&state, &auth, &path, &conditions).await
 }
 
 /// Headers for [`get_artwork`], without the image.
@@ -236,12 +261,12 @@ pub async fn get_artwork(
 #[kynos::head("/artwork/{kind}/{id}/{variant}", tag = Media, operation_id = "headArtwork")]
 #[tracing::instrument(skip_all)]
 pub async fn head_artwork(
-    _auth: SessionAuth,
+    auth: SessionAuth,
     Path(path): Path<ArtworkPath>,
     conditions: Conditions,
     Inject(state): Inject<AppState>,
 ) -> Result<ArtworkDelivery, ArtworkError> {
-    deliver(&state, &path, &conditions).await
+    deliver(&state, &auth, &path, &conditions).await
 }
 
 #[path = "artwork_tests.rs"]

@@ -281,6 +281,180 @@ pub mod fixture {
         /// A library that exists as far as the backing store is concerned.
         async fn new_library(&self) -> Uuid;
     }
+
+    /// Everything the [`crate::access_policy_repository_contract`] suite
+    /// needs: the repository under contract and the users and libraries a
+    /// policy names, which a real Postgres holds to foreign keys.
+    #[async_trait::async_trait]
+    pub trait AccessPolicyFixture: Send + Sync {
+        /// The repository under contract.
+        fn repo(&self) -> &dyn crate::repositories::AccessPolicyRepository;
+
+        /// A user that exists as far as the backing store is concerned.
+        async fn new_user(&self) -> Uuid;
+
+        /// A library that exists as far as the backing store is concerned.
+        async fn new_library(&self) -> Uuid;
+    }
+}
+
+/// Behavioural contract for [`crate::repositories::AccessPolicyRepository`]:
+/// a user nobody restricted reads as unrestricted, a policy reads back as it
+/// was replaced -- its grants whole, never merged with the previous ones --
+/// users are kept apart, and a policy naming a user or library that does not
+/// exist is refused without touching the stored one (issue #263).
+///
+/// `$setup` names an `async fn() -> impl AccessPolicyFixture`.
+#[macro_export]
+macro_rules! access_policy_repository_contract {
+    ($setup:path) => {
+        use ::std::collections::BTreeSet;
+        use ::uuid::Uuid;
+        use $crate::models::access::{AccessPolicy, ContentRating, LibraryAccess};
+        use $crate::repositories::contract::fixture::AccessPolicyFixture as _;
+
+        fn only(ids: &[Uuid]) -> LibraryAccess {
+            LibraryAccess::Only(ids.iter().copied().collect::<BTreeSet<_>>())
+        }
+
+        #[tokio::test]
+        async fn a_user_nobody_restricted_is_unrestricted() {
+            let fixture = $setup().await;
+            let user = fixture.new_user().await;
+
+            assert_eq!(
+                fixture.repo().find(user).await.unwrap(),
+                AccessPolicy::unrestricted()
+            );
+            assert_eq!(
+                fixture.repo().find(Uuid::new_v4()).await.unwrap(),
+                AccessPolicy::unrestricted(),
+                "an id no user has"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_policy_reads_back_as_it_was_replaced() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let user = fixture.new_user().await;
+            let (kids, family) = (fixture.new_library().await, fixture.new_library().await);
+
+            for policy in [
+                AccessPolicy {
+                    libraries: only(&[kids, family]),
+                    max_rating: Some(ContentRating::ParentalGuidance),
+                },
+                AccessPolicy {
+                    libraries: only(&[]),
+                    max_rating: None,
+                },
+                AccessPolicy {
+                    libraries: LibraryAccess::All,
+                    max_rating: Some(ContentRating::Adult),
+                },
+                AccessPolicy::unrestricted(),
+            ] {
+                repo.replace(user, &policy).await.unwrap();
+                assert_eq!(repo.find(user).await.unwrap(), policy);
+            }
+        }
+
+        #[tokio::test]
+        async fn replacing_a_policy_replaces_its_grants_whole() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let user = fixture.new_user().await;
+            let (first, second) = (fixture.new_library().await, fixture.new_library().await);
+            repo.replace(
+                user,
+                &AccessPolicy {
+                    libraries: only(&[first]),
+                    max_rating: None,
+                },
+            )
+            .await
+            .unwrap();
+
+            let replacement = AccessPolicy {
+                libraries: only(&[second]),
+                max_rating: None,
+            };
+            repo.replace(user, &replacement).await.unwrap();
+
+            assert_eq!(repo.find(user).await.unwrap(), replacement);
+        }
+
+        #[tokio::test]
+        async fn one_users_policy_leaves_anothers_alone() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let (restricted, other) = (fixture.new_user().await, fixture.new_user().await);
+            let library = fixture.new_library().await;
+            let other_policy = AccessPolicy {
+                libraries: LibraryAccess::All,
+                max_rating: Some(ContentRating::Teen),
+            };
+            repo.replace(other, &other_policy).await.unwrap();
+
+            repo.replace(
+                restricted,
+                &AccessPolicy {
+                    libraries: only(&[library]),
+                    max_rating: Some(ContentRating::AllAges),
+                },
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(repo.find(other).await.unwrap(), other_policy);
+        }
+
+        #[tokio::test]
+        async fn a_policy_naming_a_missing_user_or_library_is_refused_and_changes_nothing() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let user = fixture.new_user().await;
+            let library = fixture.new_library().await;
+            let stored = AccessPolicy {
+                libraries: only(&[library]),
+                max_rating: Some(ContentRating::Teen),
+            };
+            repo.replace(user, &stored).await.unwrap();
+
+            let naming_a_missing_library = AccessPolicy {
+                libraries: only(&[library, Uuid::new_v4()]),
+                max_rating: None,
+            };
+            assert!(repo.replace(user, &naming_a_missing_library).await.is_err());
+            assert_eq!(
+                repo.find(user).await.unwrap(),
+                stored,
+                "the failed replacement left the stored policy whole"
+            );
+
+            let missing_user = Uuid::new_v4();
+            assert!(
+                repo.replace(
+                    missing_user,
+                    &AccessPolicy {
+                        libraries: only(&[library]),
+                        max_rating: None,
+                    },
+                )
+                .await
+                .is_err()
+            );
+            // Lifting every restriction stores nothing, so it needs no user.
+            repo.replace(missing_user, &AccessPolicy::unrestricted())
+                .await
+                .unwrap();
+            assert_eq!(
+                repo.find(missing_user).await.unwrap(),
+                AccessPolicy::unrestricted()
+            );
+        }
+    };
 }
 
 /// Behavioural contract for [`crate::repositories::WatchStateRepository`].
@@ -3578,6 +3752,7 @@ macro_rules! show_repository_contract {
                     poster_url: Some("https://img/p.jpg".to_string()),
                     backdrop_url: Some("https://img/b.jpg".to_string()),
                     rating: Some(9.5),
+                    content_rating: Some("TV-MA".to_string()),
                     genres: Vec::new(),
                     credits: None,
                 },
@@ -3597,6 +3772,59 @@ macro_rules! show_repository_contract {
             assert_eq!(after.description.as_deref(), Some("A teacher turns."));
             assert_eq!(after.backdrop_url.as_deref(), Some("https://img/b.jpg"));
             assert_eq!(after.tmdb_id, Some(1396), "the match is always written");
+            assert_eq!(
+                after.content_rating.as_deref(),
+                Some("TV-MA"),
+                "the certification is no lockable field, so it is always written"
+            );
+
+            repo.apply_enrichment(
+                title.id,
+                &ShowEnrichment {
+                    title: after.title.clone(),
+                    ..Default::default()
+                },
+                &FieldLocks::none(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                repo.find_by_id(title.id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .content_rating,
+                None,
+                "a provider reporting none clears it"
+            );
+        }
+
+        #[tokio::test]
+        async fn library_ids_are_the_libraries_each_show_is_associated_with() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let (one, two) = (fixture.new_library().await, fixture.new_library().await);
+            let both = repo
+                .find_or_create_by_identity(new_show("In both"))
+                .await
+                .unwrap();
+            let unassociated = repo
+                .find_or_create_by_identity(new_show("In none"))
+                .await
+                .unwrap();
+            for library in [one, two, two] {
+                repo.ensure_library_association(library, both.id)
+                    .await
+                    .unwrap();
+            }
+
+            let libraries = repo
+                .library_ids(&[both.id, unassociated.id, Uuid::new_v4()])
+                .await
+                .unwrap();
+            assert_eq!(libraries.len(), 1, "{libraries:?}");
+            assert_eq!(libraries[&both.id], [one, two].into_iter().collect());
+            assert!(repo.library_ids(&[]).await.unwrap().is_empty());
         }
 
         #[tokio::test]
@@ -3909,6 +4137,105 @@ macro_rules! movie_repository_contract {
                 Some(::std::time::Duration::from_secs(121 * 60))
             );
             assert_eq!(stored.rating_tmdb, Some(7.5));
+        }
+
+        #[tokio::test]
+        async fn enrichment_replaces_the_certification_and_clears_it_when_none_is_reported() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let movie = repo
+                .find_or_create_by_identity(new_movie("Certified"))
+                .await
+                .unwrap();
+            assert_eq!(
+                movie.content_rating, None,
+                "none until enrichment reports one"
+            );
+            let enrich = |content_rating: Option<&str>| MovieEnrichment {
+                title: movie.title.clone(),
+                content_rating: content_rating.map(str::to_string),
+                ..Default::default()
+            };
+            // Locking every field leaves the certification to the provider:
+            // it is not a field an administrator edits.
+            let every_lock: $crate::models::enrichment::FieldLocks =
+                $crate::models::enrichment::MetadataField::ALL
+                    .into_iter()
+                    .collect();
+
+            repo.apply_enrichment(movie.id, &enrich(Some("PG-13")), &every_lock)
+                .await
+                .unwrap();
+            assert_eq!(
+                repo.find_by_id(movie.id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .content_rating
+                    .as_deref(),
+                Some("PG-13")
+            );
+
+            repo.apply_enrichment(
+                movie.id,
+                &enrich(None),
+                &$crate::models::enrichment::FieldLocks::none(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                repo.find_by_id(movie.id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .content_rating,
+                None
+            );
+        }
+
+        #[tokio::test]
+        async fn library_ids_are_the_libraries_each_movie_is_associated_with() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let (one, two) = (fixture.new_library().await, fixture.new_library().await);
+            let both = repo
+                .find_or_create_by_identity(new_movie("In both"))
+                .await
+                .unwrap();
+            let single = repo
+                .find_or_create_by_identity(new_movie("In one"))
+                .await
+                .unwrap();
+            let unassociated = repo
+                .find_or_create_by_identity(new_movie("In none"))
+                .await
+                .unwrap();
+            for (library, movie) in [(one, both.id), (two, both.id), (two, single.id)] {
+                repo.ensure_library_association(library, movie)
+                    .await
+                    .unwrap();
+                // Associating twice is one association.
+                repo.ensure_library_association(library, movie)
+                    .await
+                    .unwrap();
+            }
+
+            let libraries = repo
+                .library_ids(&[both.id, single.id, unassociated.id, Uuid::new_v4()])
+                .await
+                .unwrap();
+            assert_eq!(libraries.len(), 2, "{libraries:?}");
+            assert_eq!(libraries[&both.id], [one, two].into_iter().collect());
+            assert_eq!(libraries[&single.id], [two].into_iter().collect());
+            assert!(
+                !repo
+                    .library_ids(&[single.id])
+                    .await
+                    .unwrap()
+                    .contains_key(&both.id),
+                "only the movies asked about"
+            );
+            assert!(repo.library_ids(&[]).await.unwrap().is_empty());
         }
 
         #[tokio::test]
@@ -4591,6 +4918,7 @@ macro_rules! movie_repository_contract {
                 poster_url: Some("https://img/poster.jpg".to_string()),
                 backdrop_url: Some("https://img/backdrop.jpg".to_string()),
                 rating: Some(8.2),
+                content_rating: Some("R".to_string()),
                 genres: Vec::new(),
                 credits: None,
                 collection: None,
@@ -6177,12 +6505,187 @@ macro_rules! catalog_repository_contract {
                 .repo()
                 .browse(&CatalogQuery {
                     filters,
+                    access: $crate::models::access::AccessPolicy::unrestricted(),
                     sort,
                     seek,
                     limit: NonZeroU32::new(limit).expect("a positive limit"),
                 })
                 .await
                 .expect("browse")
+        }
+
+        /// A live title in `library_id`, associated with it as the indexer
+        /// associates one, certified `certification`. Returns its id.
+        async fn certified(
+            fixture: &impl CatalogRepositoryFixture,
+            kind: TitleKind,
+            library_id: Uuid,
+            certification: Option<&str>,
+        ) -> Uuid {
+            let name = format!("certified {}", Uuid::new_v4());
+            match kind {
+                TitleKind::Movie => {
+                    let movies = fixture.movies();
+                    let movie = movies
+                        .find_or_create_by_identity(CreateMovie::new(name.clone(), None, None))
+                        .await
+                        .expect("create a movie");
+                    movies
+                        .apply_enrichment(
+                            movie.id,
+                            &MovieEnrichment {
+                                title: name,
+                                content_rating: certification.map(str::to_string),
+                                ..Default::default()
+                            },
+                            &$crate::models::enrichment::FieldLocks::none(),
+                        )
+                        .await
+                        .expect("certify the movie");
+                    let entry = movies
+                        .find_or_create_entry(CreateMovieEntry {
+                            library_id,
+                            movie_id: movie.id,
+                            edition: None,
+                        })
+                        .await
+                        .expect("create an entry");
+                    movies
+                        .ensure_library_association(library_id, movie.id)
+                        .await
+                        .expect("associate the movie");
+                    present_file(fixture, library_id, MediaFileContent::movie(entry.id)).await;
+                    movie.id
+                }
+                TitleKind::Show => {
+                    let shows = fixture.shows();
+                    let show = shows
+                        .find_or_create_by_identity(CreateShow::new(name.clone(), None))
+                        .await
+                        .expect("create a show");
+                    shows
+                        .apply_enrichment(
+                            show.id,
+                            &ShowEnrichment {
+                                title: name,
+                                content_rating: certification.map(str::to_string),
+                                ..Default::default()
+                            },
+                            &$crate::models::enrichment::FieldLocks::none(),
+                        )
+                        .await
+                        .expect("certify the show");
+                    let season = shows
+                        .find_or_create_season(show.id, 1)
+                        .await
+                        .expect("create a season");
+                    let episode = shows
+                        .find_or_create_episode(CreateEpisode {
+                            season_id: season.id,
+                            episode_number: 1,
+                            title: "Pilot".to_string(),
+                            runtime: None,
+                            air_date: None,
+                        })
+                        .await
+                        .expect("create an episode");
+                    shows
+                        .ensure_library_association(library_id, show.id)
+                        .await
+                        .expect("associate the show");
+                    present_file(fixture, library_id, MediaFileContent::episode(episode.id))
+                        .await;
+                    show.id
+                }
+            }
+        }
+
+        /// Only the titles a user's policy admits are listed: those in a
+        /// granted library, certified within the ceiling (issue #263).
+        #[tokio::test]
+        async fn a_listing_holds_only_the_titles_the_access_policy_admits() {
+            use ::std::collections::BTreeSet;
+            use $crate::models::access::{AccessPolicy, ContentRating, LibraryAccess};
+
+            let fixture = $setup().await;
+            let (kids, grown) = (fixture.new_library().await, fixture.new_library().await);
+            let pg_movie = certified(&fixture, TitleKind::Movie, kids, Some("PG")).await;
+            let unrated_movie = certified(&fixture, TitleKind::Movie, kids, None).await;
+            let not_recognised = certified(&fixture, TitleKind::Movie, kids, Some("NR")).await;
+            let tv_pg_show = certified(&fixture, TitleKind::Show, kids, Some("TV-PG")).await;
+            let r_movie = certified(&fixture, TitleKind::Movie, grown, Some("R")).await;
+            let tv_ma_show = certified(&fixture, TitleKind::Show, grown, Some("TV-MA")).await;
+
+            let listed = |access: AccessPolicy| {
+                let fixture = &fixture;
+                async move {
+                    fixture
+                        .repo()
+                        .browse(&CatalogQuery {
+                            filters: CatalogFilters::default(),
+                            access,
+                            sort: by_title(),
+                            seek: Seek::Forward(None),
+                            limit: NonZeroU32::new(1000).expect("a positive limit"),
+                        })
+                        .await
+                        .expect("browse")
+                        .into_iter()
+                        .map(|row| row.id)
+                        .collect::<BTreeSet<Uuid>>()
+                }
+            };
+            let set = |ids: &[Uuid]| ids.iter().copied().collect::<BTreeSet<Uuid>>();
+            let only = |ids: &[Uuid]| LibraryAccess::Only(ids.iter().copied().collect());
+
+            assert_eq!(
+                listed(AccessPolicy::unrestricted()).await,
+                set(&[pg_movie, unrated_movie, not_recognised, tv_pg_show, r_movie, tv_ma_show])
+            );
+            assert_eq!(
+                listed(AccessPolicy {
+                    libraries: only(&[kids]),
+                    max_rating: None,
+                })
+                .await,
+                set(&[pg_movie, unrated_movie, not_recognised, tv_pg_show]),
+                "a grant lists its library's titles, rated or not"
+            );
+            assert_eq!(
+                listed(AccessPolicy {
+                    libraries: LibraryAccess::All,
+                    max_rating: Some(ContentRating::ParentalGuidance),
+                })
+                .await,
+                set(&[pg_movie, tv_pg_show]),
+                "a ceiling hides what is above it and what it cannot place"
+            );
+            assert_eq!(
+                listed(AccessPolicy {
+                    libraries: only(&[grown]),
+                    max_rating: Some(ContentRating::Mature),
+                })
+                .await,
+                set(&[r_movie, tv_ma_show])
+            );
+            assert_eq!(
+                listed(AccessPolicy {
+                    libraries: only(&[grown]),
+                    max_rating: Some(ContentRating::Teen),
+                })
+                .await,
+                set(&[]),
+                "both restrictions hold at once"
+            );
+            assert_eq!(
+                listed(AccessPolicy {
+                    libraries: only(&[]),
+                    max_rating: None,
+                })
+                .await,
+                set(&[]),
+                "no grant lists nothing"
+            );
         }
 
         /// The whole listing in one page.
@@ -6675,6 +7178,7 @@ macro_rules! catalog_repository_contract {
                 .repo()
                 .browse(&CatalogQuery {
                     filters: CatalogFilters::default(),
+                    access: $crate::models::access::AccessPolicy::unrestricted(),
                     sort: by_title(),
                     seek: Seek::Forward(Some(CatalogPosition {
                         kind: TitleKind::Movie,
@@ -6782,6 +7286,7 @@ macro_rules! catalog_repository_contract {
                 .repo()
                 .browse(&CatalogQuery {
                     filters: CatalogFilters::default(),
+                    access: $crate::models::access::AccessPolicy::unrestricted(),
                     sort: sorted(CatalogSortField::Relevance, SortDirection::Asc),
                     seek: Seek::Forward(None),
                     limit: NonZeroU32::MIN,

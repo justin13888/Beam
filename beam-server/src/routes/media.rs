@@ -12,7 +12,7 @@ use crate::models::{EpisodeDetail, MediaMetadata, MediaSourceConnection, SeasonD
 use crate::routes::api_error::{
     MediaBrowseError, MediaLookupError, MediaRefLookupError, MediaSourcesError, SessionAuth,
 };
-use crate::routes::playback::parse_user_id;
+use crate::routes::playback::{caller_access, hides, media_not_found};
 use crate::routes::tags::Media;
 use crate::services::metadata::{BrowseRequest, MediaSearchFilters, MetadataError};
 use crate::state::AppState;
@@ -95,7 +95,8 @@ pub async fn browse_media(
     Query(params): Query<BrowseQuery>,
     Inject(state): Inject<AppState>,
 ) -> Result<Json<MediaConnection>, MediaBrowseError> {
-    let user_id = parse_user_id(&auth.0.user_id)
+    let (user_id, access) = caller_access(&state, &auth)
+        .await
         .map_err(|err| MediaBrowseError::Internal(err.to_string()))?;
     let BrowseQuery {
         first,
@@ -134,6 +135,7 @@ pub async fn browse_media(
             sort_by: sort_by.unwrap_or_default(),
             sort_order: sort_order.unwrap_or_default(),
             filters,
+            access,
         })
         .await;
 
@@ -174,7 +176,12 @@ pub async fn get_media_detail(
     Inject(state): Inject<AppState>,
 ) -> Result<Json<MediaMetadata>, MediaLookupError> {
     let id = path.id;
-    let user_id = parse_user_id(&auth.0.user_id)?;
+    let (user_id, policy) = caller_access(&state, &auth).await?;
+    // A title the caller may not see answers exactly as one that does not
+    // exist.
+    if hides(&state, &policy, id).await? {
+        return Err(MediaLookupError::MediaNotFound(media_not_found(id)));
+    }
 
     // A failed lookup is a 500: answering 404 would tell the client the
     // title is gone when the server only failed to read it.
@@ -195,10 +202,7 @@ pub async fn get_media_detail(
                 .map_err(|err| MediaLookupError::Internal(err.to_string()))?;
             Ok(Json(metadata))
         }
-        Ok(None) => Err(MediaLookupError::MediaNotFound(format!(
-            "media {} not found",
-            path.id
-        ))),
+        Ok(None) => Err(MediaLookupError::MediaNotFound(media_not_found(path.id))),
         Err(err) => Err(MediaLookupError::Internal(err.to_string())),
     }
 }
@@ -213,16 +217,19 @@ pub async fn get_media_detail(
 /// every source, primary first.
 #[kynos::get("/media/{id}/sources", tag = Media, operation_id = "getMediaSources")]
 pub async fn get_media_sources(
-    _auth: SessionAuth,
+    auth: SessionAuth,
     Path(path): Path<MediaPath>,
     Inject(state): Inject<AppState>,
 ) -> Result<Json<MediaSourceConnection>, MediaSourcesError> {
+    let (_, policy) = caller_access(&state, &auth).await?;
+    if hides(&state, &policy, path.id).await? {
+        return Err(MediaSourcesError::MediaNotFound(media_not_found(path.id)));
+    }
     match state.services.metadata.get_media_sources(path.id).await {
         Ok(sources) => Ok(Json(MediaSourceConnection::complete(sources))),
-        Err(MetadataError::MediaNotFound) => Err(MediaSourcesError::MediaNotFound(format!(
-            "media {} not found",
-            path.id
-        ))),
+        Err(MetadataError::MediaNotFound) => {
+            Err(MediaSourcesError::MediaNotFound(media_not_found(path.id)))
+        }
         Err(MetadataError::Unsupported(msg)) => {
             Err(MediaSourcesError::SourcesNotAvailableForShow(msg))
         }
@@ -246,7 +253,13 @@ pub async fn get_episode_detail(
     Path(path): Path<ChildPath>,
     Inject(state): Inject<AppState>,
 ) -> Result<Json<EpisodeDetail>, MediaRefLookupError> {
-    let user_id = parse_user_id(&auth.0.user_id)?;
+    let (user_id, policy) = caller_access(&state, &auth).await?;
+    if hides(&state, &policy, path.id).await? {
+        return Err(MediaRefLookupError::MediaNotFound(format!(
+            "episode {} not found",
+            path.id
+        )));
+    }
     let mut detail = state
         .services
         .metadata
@@ -273,7 +286,13 @@ pub async fn get_season_detail(
     Path(path): Path<ChildPath>,
     Inject(state): Inject<AppState>,
 ) -> Result<Json<SeasonDetail>, MediaRefLookupError> {
-    let user_id = parse_user_id(&auth.0.user_id)?;
+    let (user_id, policy) = caller_access(&state, &auth).await?;
+    if hides(&state, &policy, path.id).await? {
+        return Err(MediaRefLookupError::MediaNotFound(format!(
+            "season {} not found",
+            path.id
+        )));
+    }
     let mut detail = state
         .services
         .metadata

@@ -28,6 +28,10 @@ pub struct ShowMetadata {
     pub genres: Vec<String>,
     /// The show's ratings.
     pub ratings: Option<Ratings>,
+    /// The provider's certification for the show, such as `TV-14`; absent
+    /// while none is known. A user's maximum content rating is compared
+    /// against it.
+    pub content_rating: Option<String>,
     /// The show's identifiers at external providers.
     pub identifiers: Option<ExternalIdentifiers>,
     /// How many seasons the show has.

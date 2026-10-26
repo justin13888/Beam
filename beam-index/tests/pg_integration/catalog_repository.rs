@@ -107,6 +107,7 @@ async fn titles_differing_only_in_case_sort_together_and_page_exactly() {
         .repo
         .browse(&CatalogQuery {
             filters: CatalogFilters::default(),
+            access: Default::default(),
             sort,
             seek: Seek::Forward(None),
             limit: std::num::NonZeroU32::new(2).unwrap(),
@@ -126,6 +127,7 @@ async fn titles_differing_only_in_case_sort_together_and_page_exactly() {
         .repo
         .browse(&CatalogQuery {
             filters: CatalogFilters::default(),
+            access: Default::default(),
             sort,
             seek: Seek::Forward(first.last().cloned()),
             limit: std::num::NonZeroU32::new(10).unwrap(),
@@ -186,6 +188,7 @@ async fn a_search_matches_at_a_similarity_of_two_tenths_and_leaves_the_session_a
                     query: Some("matirx".to_string()),
                     ..Default::default()
                 },
+                access: Default::default(),
                 sort: CatalogSort {
                     field: sort,
                     direction: SortDirection::Asc,
@@ -438,6 +441,7 @@ mod plans {
                 kind,
                 ..Default::default()
             },
+            access: Default::default(),
             sort,
             seek,
             limit: NonZeroU32::new(21).expect("positive"),
@@ -620,6 +624,7 @@ mod plans {
                 for seek in [Seek::Forward(None), Seek::Backward(None)] {
                     let query = CatalogQuery {
                         filters: filters.clone(),
+                        access: Default::default(),
                         sort,
                         seek,
                         limit: NonZeroU32::new(21).expect("positive"),
@@ -663,6 +668,7 @@ mod plans {
                 genre_slug: Some(slug.to_string()),
                 ..Default::default()
             },
+            access: Default::default(),
             sort: CatalogSort {
                 field: CatalogSortField::Title,
                 direction: SortDirection::Asc,

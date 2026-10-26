@@ -28,6 +28,7 @@ fn state_with(people: PeopleService) -> AppState {
     let base = make_app_state();
     let services = AppServices {
         hash: base.services.hash.clone(),
+        access: base.services.access.clone(),
         library: base.services.library.clone(),
         metadata: base.services.metadata.clone(),
         subtitles: crate::routes::test_support::idle_subtitles(),

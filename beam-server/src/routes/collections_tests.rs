@@ -90,6 +90,7 @@ fn fixture_over(collections: Arc<dyn CollectionRepository>) -> Fixture {
 
     let services = AppServices {
         hash: base.services.hash.clone(),
+        access: base.services.access.clone(),
         library: base.services.library.clone(),
         metadata: metadata.clone(),
         subtitles: base.services.subtitles.clone(),

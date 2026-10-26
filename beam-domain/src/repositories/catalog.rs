@@ -158,6 +158,12 @@ pub mod in_memory {
                 {
                     continue;
                 }
+                if !query.access.admits_title(
+                    &self.movies.libraries_of(movie.id),
+                    movie.content_rating.as_deref(),
+                ) {
+                    continue;
+                }
                 candidates.push(Candidate {
                     kind: TitleKind::Movie,
                     id: movie.id,
@@ -179,6 +185,12 @@ pub mod in_memory {
                     .as_ref()
                     .is_some_and(|live| !live.contains(&show.id))
                 {
+                    continue;
+                }
+                if !query.access.admits_title(
+                    &self.shows.libraries_of(show.id),
+                    show.content_rating.as_deref(),
+                ) {
                     continue;
                 }
                 candidates.push(Candidate {

@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
+use beam_domain::models::access::{AccessPolicy, ContentRating, LibraryAccess};
 use beam_domain::models::catalog::{
     CatalogFilters, CatalogPosition, CatalogQuery, CatalogSort, CatalogSortField, Seek,
     SortDirection, SortKey, TitleKind,
@@ -55,6 +56,7 @@ fn values(statement: &Statement) -> Vec<Value> {
 fn query(filters: CatalogFilters, sort: CatalogSort, seek: Seek, limit: u32) -> CatalogQuery {
     CatalogQuery {
         filters,
+        access: AccessPolicy::unrestricted(),
         sort,
         seek,
         limit: NonZeroU32::new(limit).expect("a positive limit"),
@@ -163,6 +165,87 @@ async fn a_genre_is_looked_up_by_slug_then_filtered_by_id() {
     drop(repo);
     let sql = statements(db);
     assert_eq!(sql.len(), 1, "only the lookup runs: {sql:?}");
+}
+
+/// A restricted caller's page checks, in both branches, that the title is
+/// associated with a granted library and certified within the ceiling, each
+/// against exactly the values the policy names; an unrestricted caller's page
+/// checks neither (issue #263).
+#[test]
+fn an_access_policy_binds_its_libraries_and_the_certifications_within_its_ceiling() {
+    let (kids, family) = (Uuid::from_u128(0x1d), Uuid::from_u128(0xfa));
+    let page = |access: AccessPolicy| CatalogQuery {
+        access,
+        ..query(
+            CatalogFilters::default(),
+            by(CatalogSortField::Title, SortDirection::Asc),
+            Seek::Forward(None),
+            20,
+        )
+    };
+
+    let open = statement_for(&page(AccessPolicy::unrestricted()));
+    assert!(!open.sql.contains("library_movies"), "{}", open.sql);
+    assert!(!open.sql.contains("content_rating"), "{}", open.sql);
+
+    let restricted = statement_for(&page(AccessPolicy {
+        libraries: LibraryAccess::Only([kids, family].into_iter().collect()),
+        max_rating: Some(ContentRating::ParentalGuidance),
+    }));
+    let sql = &restricted.sql;
+    let bound = values(&restricted);
+    let at = |value: Value| {
+        bound
+            .iter()
+            .position(|v| *v == value)
+            .unwrap_or_else(|| panic!("{value:?} is bound: {bound:?}"))
+            + 1
+    };
+    let libraries = format!(
+        "l.library_id IN (${}, ${})",
+        at(kids.into()),
+        at(family.into())
+    );
+    assert!(
+        sql.contains(&format!(
+            "library_movies l WHERE l.movie_id = movies.id AND {libraries}"
+        )),
+        "{sql}"
+    );
+    assert!(
+        sql.contains(&format!(
+            "library_shows l WHERE l.show_id = shows.id AND {libraries}"
+        )),
+        "{sql}"
+    );
+    let within: Vec<String> = ContentRating::ParentalGuidance
+        .certifications_within()
+        .map(|label| format!("${}", at(label.into())))
+        .collect();
+    for table in ["movies", "shows"] {
+        assert!(
+            sql.contains(&format!(
+                "{table}.content_rating IN ({})",
+                within.join(", ")
+            )),
+            "{sql}"
+        );
+    }
+    assert!(
+        !bound.contains(&Value::from("PG-13")),
+        "nothing above the ceiling is admitted: {bound:?}"
+    );
+
+    let nothing_granted = statement_for(&page(AccessPolicy {
+        libraries: LibraryAccess::Only(Default::default()),
+        max_rating: None,
+    }));
+    assert!(
+        nothing_granted.sql.contains("AND FALSE"),
+        "{}",
+        nothing_granted.sql
+    );
+    assert!(!nothing_granted.sql.contains("library_movies"));
 }
 
 /// The statement never drops a genre filter it was not given the id of, nor
@@ -852,6 +935,19 @@ fn key_for(field: CatalogSortField, present: bool, n: i32) -> SortKey {
     }
 }
 
+fn any_access() -> impl Strategy<Value = AccessPolicy> {
+    (
+        proptest::option::of(proptest::collection::btree_set(any::<u128>(), 0..4)),
+        proptest::option::of(prop::sample::select(ContentRating::ALL.to_vec())),
+    )
+        .prop_map(|(granted, max_rating)| AccessPolicy {
+            libraries: granted.map_or(LibraryAccess::All, |ids| {
+                LibraryAccess::Only(ids.into_iter().map(Uuid::from_u128).collect())
+            }),
+            max_rating,
+        })
+}
+
 fn any_query() -> impl Strategy<Value = CatalogQuery> {
     (
         (
@@ -866,6 +962,7 @@ fn any_query() -> impl Strategy<Value = CatalogQuery> {
         any_sort(),
         (0_u8..3, any::<bool>(), any::<bool>(), -5_i32..5),
         1_u32..=100,
+        any_access(),
     )
         .prop_map(
             |(
@@ -873,6 +970,7 @@ fn any_query() -> impl Strategy<Value = CatalogQuery> {
                 sort,
                 (seek, backward, present, n),
                 limit,
+                access,
             )| {
                 let position = (seek > 0).then(|| CatalogPosition {
                     kind: TitleKind::Movie,
@@ -894,6 +992,7 @@ fn any_query() -> impl Strategy<Value = CatalogQuery> {
                         year_to,
                         min_rating,
                     },
+                    access,
                     sort,
                     seek: if backward {
                         Seek::Backward(position)

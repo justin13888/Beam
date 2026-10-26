@@ -77,6 +77,7 @@ pub async fn movie(db: &DatabaseConnection) -> Result<Uuid, DbErr> {
         anilist_id: Set(None),
         rating_tmdb: Set(None),
         rating_imdb: Set(None),
+        content_rating: Set(None),
         created_at: Set(now()),
         updated_at: Set(now()),
     }
@@ -163,6 +164,7 @@ pub async fn show(db: &DatabaseConnection) -> Result<Uuid, DbErr> {
         tvdb_id: Set(None),
         anilist_id: Set(None),
         rating_tmdb: Set(None),
+        content_rating: Set(None),
         created_at: Set(now()),
         updated_at: Set(now()),
     }

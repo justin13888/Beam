@@ -40,13 +40,15 @@ use tempfile::TempDir;
 use tokio::sync::broadcast;
 
 use crate::models::{
-    AdminLogConnection, AdminStatus, AdminUserConnection, CreateLibraryRequest, Library,
-    LibraryConnection, ScanJob, ScanState, ScanTrigger, UpdateAdminUserRequest,
+    AdminLogConnection, AdminStatus, AdminUserConnection, ContentRatingBand, CreateLibraryRequest,
+    Library, LibraryConnection, ScanJob, ScanState, ScanTrigger, UpdateAdminUserRequest,
+    UserAccess,
 };
 use crate::routes::admin::{
     create_library, delete_library, get_admin_events, get_admin_logs, get_admin_status,
-    get_library, get_library_files, get_library_scan, list_admin_users, list_libraries,
-    refresh_media_metadata, scan_library, stream_admin_events, update_admin_user,
+    get_admin_user_access, get_library, get_library_files, get_library_scan, list_admin_users,
+    list_libraries, refresh_media_metadata, scan_library, set_admin_user_access,
+    stream_admin_events, update_admin_user,
 };
 use crate::services::admin_log::{AdminLogService, LocalAdminLogService};
 use crate::services::hash::HashService;
@@ -351,6 +353,7 @@ fn build_fixture(
 
     let services = AppServices {
         hash: Arc::new(StubHashService),
+        access: crate::routes::test_support::open_access(),
         library,
         metadata: Arc::new(StubMetadataService),
         subtitles: crate::routes::test_support::idle_subtitles(),
@@ -502,7 +505,8 @@ fn build_client(fixture: &TestFixture) -> TestClient<AppState> {
                     list_admin_users,
                     update_admin_user,
                     get_admin_status,
-                ]),
+                ])
+                .mount(kynos::routes![get_admin_user_access, set_admin_user_access]),
         )
         .build(fixture.state.clone())
         .expect("the admin router describes itself");
@@ -2391,5 +2395,331 @@ async fn the_status_endpoint_reports_how_each_library_is_watched() {
     assert_eq!(
         watcher.libraries[0].poll_reason,
         Some(LibraryPollReason::WatchLimitReached)
+    );
+}
+
+// ─── Per-user access (issue #263) ───────────────────────────────────────────
+
+/// A user of its own, and a session for them.
+async fn seed_named_user(
+    fixture: &TestFixture,
+    subject: &str,
+    is_admin: bool,
+) -> (uuid::Uuid, String) {
+    let user = fixture
+        .user_repo
+        .create(CreateUser {
+            oidc_issuer: "https://test.example".to_string(),
+            oidc_subject: subject.to_string(),
+            email: None,
+            display_name: subject.to_string(),
+            avatar_url: None,
+            is_admin,
+        })
+        .await
+        .expect("seed a user");
+    let token = fixture
+        .session_store
+        .create(
+            &SessionData {
+                user_id: user.id.to_string(),
+                device_hash: "test-device".to_string(),
+                ip: "127.0.0.1".to_string(),
+                created_at: chrono::Utc::now().timestamp(),
+                last_active: chrono::Utc::now().timestamp(),
+            },
+            86400,
+            86400,
+        )
+        .await
+        .expect("seed a session");
+    (user.id, token)
+}
+
+/// A library row, as registration leaves one.
+async fn seed_library(fixture: &TestFixture, name: &str) -> uuid::Uuid {
+    fixture
+        .state
+        .services
+        .library_repo
+        .create(beam_domain::models::library::CreateLibrary {
+            name: name.to_string(),
+            root_path: PathBuf::from(format!("/videos/{name}")),
+            description: None,
+        })
+        .await
+        .expect("seed a library")
+        .id
+}
+
+fn sorted(mut ids: Vec<uuid::Uuid>) -> Vec<uuid::Uuid> {
+    ids.sort();
+    ids
+}
+
+#[tokio::test]
+async fn a_users_access_reads_back_as_it_was_set_and_is_replaced_whole() {
+    let fixture = make_test_state();
+    let client = build_client(&fixture);
+    let (_, admin) = seed_named_user(&fixture, "admin", true).await;
+    let (child, _) = seed_named_user(&fixture, "child", false).await;
+    let (kids, family) = (
+        seed_library(&fixture, "kids").await,
+        seed_library(&fixture, "family").await,
+    );
+    let path = format!("/v1/admin/users/{child}/access");
+
+    let unrestricted: UserAccess = client
+        .get(&path)
+        .cookie("beam_session", &admin)
+        .send()
+        .await
+        .assert_status(StatusCode::OK)
+        .json();
+    assert_eq!(
+        unrestricted,
+        UserAccess {
+            all_libraries: true,
+            library_ids: vec![],
+            max_content_rating: None,
+        }
+    );
+
+    for access in [
+        UserAccess {
+            all_libraries: false,
+            library_ids: vec![kids, family],
+            max_content_rating: Some(ContentRatingBand::ParentalGuidance),
+        },
+        UserAccess {
+            all_libraries: false,
+            library_ids: vec![family],
+            max_content_rating: None,
+        },
+        UserAccess {
+            all_libraries: true,
+            library_ids: vec![],
+            max_content_rating: Some(ContentRatingBand::Teen),
+        },
+    ] {
+        let mut stored: UserAccess = client
+            .put(&path)
+            .cookie("beam_session", &admin)
+            .json(&access)
+            .send()
+            .await
+            .assert_status(StatusCode::OK)
+            .json();
+        let mut read: UserAccess = client
+            .get(&path)
+            .cookie("beam_session", &admin)
+            .send()
+            .await
+            .assert_status(StatusCode::OK)
+            .json();
+        stored.library_ids = sorted(stored.library_ids);
+        read.library_ids = sorted(read.library_ids);
+        let expected = UserAccess {
+            library_ids: sorted(access.library_ids.clone()),
+            ..access
+        };
+        assert_eq!(stored, expected, "what PUT answers");
+        assert_eq!(read, expected, "what GET reads back");
+    }
+}
+
+#[tokio::test]
+async fn access_naming_a_missing_library_or_both_kinds_of_grant_is_422_and_changes_nothing() {
+    let fixture = make_test_state();
+    let client = build_client(&fixture);
+    let (_, admin) = seed_named_user(&fixture, "admin", true).await;
+    let (child, _) = seed_named_user(&fixture, "child", false).await;
+    let kids = seed_library(&fixture, "kids").await;
+    let path = format!("/v1/admin/users/{child}/access");
+
+    for (case, body, pointers) in [
+        (
+            "an unknown library",
+            UserAccess {
+                all_libraries: false,
+                library_ids: vec![kids, uuid::Uuid::new_v4()],
+                max_content_rating: None,
+            },
+            vec!["/library_ids/1"],
+        ),
+        (
+            "every library and some",
+            UserAccess {
+                all_libraries: true,
+                library_ids: vec![kids],
+                max_content_rating: None,
+            },
+            vec!["/library_ids"],
+        ),
+    ] {
+        let problem: Value = client
+            .put(&path)
+            .cookie("beam_session", &admin)
+            .json(&body)
+            .send()
+            .await
+            .assert_status(StatusCode::UNPROCESSABLE_ENTITY)
+            .assert_problem_type("https://beam.justinchung.net/reference/errors/#validation-failed")
+            .json();
+        let named: Vec<&str> = problem["errors"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{case}: an errors list: {problem}"))
+            .iter()
+            .map(|error| error["pointer"].as_str().unwrap())
+            .collect();
+        assert_eq!(named, pointers, "{case}");
+    }
+    assert_eq!(
+        fixture
+            .state
+            .services
+            .access
+            .policy(child)
+            .await
+            .expect("read the policy"),
+        beam_domain::models::access::AccessPolicy::unrestricted(),
+        "nothing was stored"
+    );
+}
+
+#[tokio::test]
+async fn access_is_an_administrators_to_read_and_set_and_names_a_user_that_exists() {
+    let fixture = make_test_state();
+    let client = build_client(&fixture);
+    let (_, admin) = seed_named_user(&fixture, "admin", true).await;
+    let (child, child_token) = seed_named_user(&fixture, "child", false).await;
+    let body = UserAccess {
+        all_libraries: true,
+        library_ids: vec![],
+        max_content_rating: None,
+    };
+
+    let own = format!("/v1/admin/users/{child}/access");
+    client
+        .get(&own)
+        .cookie("beam_session", &child_token)
+        .send()
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+    client
+        .put(&own)
+        .cookie("beam_session", &child_token)
+        .json(&body)
+        .send()
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+
+    let nobody = format!("/v1/admin/users/{}/access", uuid::Uuid::new_v4());
+    client
+        .get(&nobody)
+        .cookie("beam_session", &admin)
+        .send()
+        .await
+        .assert_status(StatusCode::NOT_FOUND)
+        .assert_problem_type("https://beam.justinchung.net/reference/errors/#user-not-found");
+    client
+        .put(&nobody)
+        .cookie("beam_session", &admin)
+        .json(&body)
+        .send()
+        .await
+        .assert_status(StatusCode::NOT_FOUND)
+        .assert_problem_type("https://beam.justinchung.net/reference/errors/#user-not-found");
+}
+
+/// A restricted viewer's library reads hold only the libraries they were
+/// granted, and a ceiling closes every file listing: a file's path names
+/// its title whatever that title's rating.
+#[tokio::test]
+async fn a_restricted_viewer_reads_only_the_libraries_granted_to_them() {
+    let fixture = make_test_state();
+    let client = build_client(&fixture);
+    let (_, admin) = seed_named_user(&fixture, "admin", true).await;
+    let (child, child_token) = seed_named_user(&fixture, "child", false).await;
+    let (kids, grown) = (
+        seed_library(&fixture, "kids").await,
+        seed_library(&fixture, "grown").await,
+    );
+    let listed = || async {
+        let response = client
+            .get("/v1/libraries")
+            .cookie("beam_session", &child_token)
+            .send()
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        sorted(
+            response
+                .json::<LibraryConnection>()
+                .items
+                .into_iter()
+                .map(|library| library.id)
+                .collect(),
+        )
+    };
+    let read = |path: String| {
+        let client = &client;
+        let token = child_token.clone();
+        async move {
+            client
+                .get(&path)
+                .cookie("beam_session", &token)
+                .send()
+                .await
+                .status()
+        }
+    };
+    let set = |access: UserAccess| {
+        let client = &client;
+        let admin = admin.clone();
+        async move {
+            let path = format!("/v1/admin/users/{child}/access");
+            let response = client
+                .put(&path)
+                .cookie("beam_session", &admin)
+                .json(&access)
+                .send()
+                .await;
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+    };
+
+    assert_eq!(listed().await, sorted(vec![kids, grown]));
+
+    set(UserAccess {
+        all_libraries: false,
+        library_ids: vec![kids],
+        max_content_rating: None,
+    })
+    .await;
+    assert_eq!(listed().await, vec![kids]);
+    assert_eq!(read(format!("/v1/libraries/{kids}")).await, StatusCode::OK);
+    assert_eq!(
+        read(format!("/v1/libraries/{grown}")).await,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        read(format!("/v1/libraries/{kids}/files")).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        read(format!("/v1/libraries/{grown}/files")).await,
+        StatusCode::NOT_FOUND
+    );
+
+    set(UserAccess {
+        all_libraries: false,
+        library_ids: vec![kids],
+        max_content_rating: Some(ContentRatingBand::Teen),
+    })
+    .await;
+    assert_eq!(read(format!("/v1/libraries/{kids}")).await, StatusCode::OK);
+    assert_eq!(
+        read(format!("/v1/libraries/{kids}/files")).await,
+        StatusCode::NOT_FOUND
     );
 }

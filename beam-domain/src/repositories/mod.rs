@@ -1,3 +1,4 @@
+pub mod access_policy;
 pub mod admin_log;
 pub mod applied_nfo;
 pub mod catalog;
@@ -22,6 +23,7 @@ pub mod stream;
 pub mod user_list;
 pub mod watch_state;
 
+pub use access_policy::AccessPolicyRepository;
 pub use admin_log::AdminLogRepository;
 pub use applied_nfo::AppliedNfoRepository;
 pub use catalog::CatalogRepository;

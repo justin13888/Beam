@@ -123,6 +123,33 @@ revokes: removing the claim at the IdP demotes the user at their next login, and
 a later admin UI displays the flag read-only. All admin mutations (library management, re-enrichment,
 log viewing, the admin event stream) route through one shared admin-gating check.
 
+## Per-user library access and content ratings
+
+An administrator can restrict what one user sees (issue #263) with
+`PUT /v1/admin/users/{id}/access`: the libraries granted to them, or every library, and the
+highest content rating, as an age band (`all_ages` up to `adult`) that the US film and TV
+certifications are grouped into. A user nobody restricted sees everything.
+
+- **The title is the unit.** A movie or show is visible when one of the libraries it is linked to
+  (`library_movies` / `library_shows`) is granted and its certification is within the ceiling.
+  Its seasons, episodes, files, sidecar subtitles and art follow it, so a visible title's copy in a
+  library that is not granted is still served: it is the same title.
+- **Hidden is not found.** Every route given the id of something hidden answers exactly as for an
+  id naming nothing -- the same `404` and problem type -- so a restricted user cannot tell a hidden
+  title from a missing one. Lists (browse, continue-watching, history, the library reads) leave
+  hidden titles out rather than refusing.
+- **Fail closed under a ceiling.** A title whose certification Beam does not recognise, or that has
+  none yet, is hidden from a user with a ceiling: an unrated title is not known to be within it.
+  A file no title holds is hidden under any ceiling, and a library's file listing is closed to a
+  user with one, since a file's path names its title whatever that title's rating.
+- **No admin exemption.** An administrator is held to their own policy on the media routes; the
+  `/v1/admin` operations, which manage every library, are not filtered.
+- **Not shared by caches.** Art, stream, download and subtitle responses are
+  `Cache-Control: private`: whether they are served at all depends on who asks.
+
+The policy is read on every request that touches a title, so a change takes effect on the user's
+next request; an unrestricted policy short-circuits every check without further reads.
+
 ## Read-only media filesystem as a security boundary
 
 The media library is mounted read-only, as a hard architectural invariant: even a worst-case

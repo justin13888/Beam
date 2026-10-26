@@ -74,6 +74,20 @@ Collections are the groupings a metadata provider makes of movies, such as a fra
 every collection one of the library's movies is in, by name, and `GET /v1/collections/{id}` lists
 its movies in release order. They fill in as movies are enriched.
 
+## Library access and content ratings
+
+An administrator decides what each user sees. `GET /v1/admin/users/{id}/access` reads a user's
+access and `PUT` replaces it whole: `all_libraries`, or the `library_ids` granted, and a
+`max_content_rating` -- an age band from `all_ages` to `adult` that the US film and TV
+certifications fall into (`parental_guidance` takes `PG` and `TV-PG`, `teen` takes `PG-13` and
+`TV-14`, and so on). A user nobody restricted sees every library with no maximum.
+
+For a restricted user, browse, continue-watching, history and the library list hold only what they
+may see, and any route given the id of something else -- a title, its seasons and episodes, its
+files, subtitles and artwork -- answers `404` exactly as for an id that does not exist. Under a
+maximum rating, a title with no certification Beam recognises is hidden. A movie's or show's
+`content_rating` is the provider's certification, absent while none is known.
+
 ## Real-time updates
 
 Administrative events — scan progress, enrichment outcomes — are delivered over **Server-Sent
