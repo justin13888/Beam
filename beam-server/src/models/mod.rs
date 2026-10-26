@@ -7,6 +7,7 @@ pub mod media;
 pub mod people;
 pub mod playback;
 pub mod playback_telemetry;
+pub mod preferences;
 pub mod search;
 pub mod telemetry;
 
@@ -19,5 +20,6 @@ pub use media::*;
 pub use people::*;
 pub use playback::*;
 pub use playback_telemetry::*;
+pub use preferences::*;
 pub use search::*;
 pub use telemetry::*;

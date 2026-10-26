@@ -15,6 +15,7 @@ use crate::routes::api_error::{
 use crate::routes::playback::{caller_access, hides, media_not_found};
 use crate::routes::tags::Media;
 use crate::services::metadata::{BrowseRequest, MediaSearchFilters, MetadataError};
+use crate::services::sources::apply_language_preferences;
 use crate::state::AppState;
 
 /// Everything `GET /v1/media` accepts.
@@ -214,19 +215,30 @@ pub async fn get_media_detail(
 /// sources for the show's individual episode ids instead. An episode with no
 /// files yet returns an empty list (a valid, "not yet playable" response).
 /// The list is a connection, but never paged: `items` is
-/// every source, primary first.
+/// every source, primary first. Each source names the audio and subtitle
+/// track to start on for the caller, by their language preferences
+/// (`PUT /v1/me/language-preferences`).
 #[kynos::get("/media/{id}/sources", tag = Media, operation_id = "getMediaSources")]
 pub async fn get_media_sources(
     auth: SessionAuth,
     Path(path): Path<MediaPath>,
     Inject(state): Inject<AppState>,
 ) -> Result<Json<MediaSourceConnection>, MediaSourcesError> {
-    let (_, policy) = caller_access(&state, &auth).await?;
+    let (user_id, policy) = caller_access(&state, &auth).await?;
     if hides(&state, &policy, path.id).await? {
         return Err(MediaSourcesError::MediaNotFound(media_not_found(path.id)));
     }
     match state.services.metadata.get_media_sources(path.id).await {
-        Ok(sources) => Ok(Json(MediaSourceConnection::complete(sources))),
+        Ok(mut sources) => {
+            let preferences = state
+                .services
+                .language_preferences
+                .find(user_id)
+                .await
+                .map_err(|err| MediaSourcesError::Internal(err.to_string()))?;
+            apply_language_preferences(&preferences, &mut sources);
+            Ok(Json(MediaSourceConnection::complete(sources)))
+        }
         Err(MetadataError::MediaNotFound) => {
             Err(MediaSourcesError::MediaNotFound(media_not_found(path.id)))
         }

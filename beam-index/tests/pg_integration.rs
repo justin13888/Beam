@@ -29,6 +29,8 @@ mod enrichment_state;
 mod file_repository;
 #[path = "pg_integration/genre_repository.rs"]
 mod genre_repository;
+#[path = "pg_integration/language_preferences.rs"]
+mod language_preferences;
 #[path = "pg_integration/library_shape.rs"]
 mod library_shape;
 #[path = "pg_integration/movie_repository.rs"]

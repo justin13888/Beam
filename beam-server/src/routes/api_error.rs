@@ -605,6 +605,39 @@ pub enum AdminUserError {
     Internal(String),
 }
 
+/// `PUT /v1/me/language-preferences` (issue #264).
+#[derive(Debug, thiserror::Error, ApiError)]
+pub enum LanguagePreferencesUpdateError {
+    /// A language names no language Beam can match a track against: one
+    /// entry per such language, each naming its place in its list.
+    #[error("the request body breaks {} rule(s)", errors.len())]
+    #[problem(
+        status = 422,
+        type = "https://beam.justinchung.net/reference/errors/#validation-failed",
+        title = "Validation failed"
+    )]
+    ValidationFailed {
+        // kynos gap: as for `FixMatchError::ValidationFailed`; getkono/kynos#991.
+        #[problem(extension)]
+        errors: Vec<crate::models::FieldError>,
+    },
+
+    #[error("{0}")]
+    #[problem(
+        status = 500,
+        type = "https://beam.justinchung.net/reference/errors/#internal",
+        title = "Internal server error"
+    )]
+    Internal(String),
+}
+
+impl From<InternalError> for LanguagePreferencesUpdateError {
+    fn from(e: InternalError) -> Self {
+        let InternalError::Internal(m) = e;
+        Self::Internal(m)
+    }
+}
+
 /// `GET /v1/admin/users/{id}/access`.
 #[derive(Debug, thiserror::Error, ApiError)]
 pub enum UserAccessReadError {

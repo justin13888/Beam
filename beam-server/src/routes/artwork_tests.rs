@@ -77,6 +77,7 @@ mod tests {
             notification: base.services.notification.clone(),
             admin_log: base.services.admin_log.clone(),
             user_repo: base.services.user_repo.clone(),
+            language_preferences: base.services.language_preferences.clone(),
             playback: base.services.playback.clone(),
             genre_repo: base.services.genre_repo.clone(),
             library_repo: base.services.library_repo.clone(),

@@ -6,6 +6,7 @@ pub mod collection;
 pub mod enrichment;
 pub mod file;
 pub mod genre;
+pub mod language_preferences;
 pub mod library;
 pub mod library_shape;
 pub mod movie;

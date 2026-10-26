@@ -107,8 +107,12 @@ fn state_with(metadata: StubMetadataService) -> AppState {
 
 /// [`state_with`] for any metadata service, the real one included.
 fn state_with_service(metadata: Arc<dyn MetadataService>) -> AppState {
-    let base = make_app_state();
+    state_over(make_app_state(), metadata)
+}
 
+/// `base` with `metadata` as its metadata service, and fresh subtitle,
+/// watcher and telemetry services.
+fn state_over(base: AppState, metadata: Arc<dyn MetadataService>) -> AppState {
     let services = AppServices {
         hash: base.services.hash.clone(),
         access: base.services.access.clone(),
@@ -118,6 +122,7 @@ fn state_with_service(metadata: Arc<dyn MetadataService>) -> AppState {
         notification: base.services.notification.clone(),
         admin_log: base.services.admin_log.clone(),
         user_repo: base.services.user_repo.clone(),
+        language_preferences: base.services.language_preferences.clone(),
         playback: base.services.playback.clone(),
         genre_repo: base.services.genre_repo.clone(),
         library_repo: base.services.library_repo.clone(),
@@ -162,12 +167,17 @@ fn client(state: AppState) -> TestClient<AppState> {
 /// Issues a session directly, bypassing the OIDC login flow, which is not what
 /// these tests are about.
 async fn seed_session(state: &AppState) -> String {
+    session_for(state, uuid::Uuid::new_v4()).await
+}
+
+/// A session for the user `user_id`.
+async fn session_for(state: &AppState, user_id: uuid::Uuid) -> String {
     state
         .services
         .session_store
         .create(
             &SessionData {
-                user_id: uuid::Uuid::new_v4().to_string(),
+                user_id: user_id.to_string(),
                 device_hash: "test-device".to_owned(),
                 ip: "127.0.0.1".to_owned(),
                 created_at: chrono::Utc::now().timestamp(),
@@ -228,6 +238,7 @@ fn movie_source(file_id: &str) -> MediaSource {
             size_bytes: 1_000_000,
             duration_secs: Some(8160.0),
             subtitle_tracks: vec![],
+            default_subtitle_track_index: None,
             stream_url: format!("/v1/files/{file_id}/stream"),
             download_url: format!("/v1/files/{file_id}/download"),
         }],
@@ -238,6 +249,8 @@ fn movie_source(file_id: &str) -> MediaSource {
         video_tracks: vec![],
         audio_tracks: vec![],
         subtitle_tracks: vec![],
+        default_audio_track_index: None,
+        default_subtitle_track_index: None,
         stream_url: format!("/v1/files/{file_id}/stream"),
         download_url: format!("/v1/files/{file_id}/download"),
     }
@@ -1067,6 +1080,310 @@ async fn sources_carry_their_tracks_and_the_subtitle_files_beside_them() {
             "webvtt_url": format!("/v1/files/{file}/subtitles/{id}/webvtt"),
         })
     );
+}
+
+/// Each source names the tracks to start on for the caller (issue #264):
+/// the file's own choices for a caller who set nothing, their languages
+/// once they have, and someone else's preferences never.
+#[tokio::test]
+async fn sources_name_the_callers_default_tracks() {
+    use beam_domain::models::CreateMediaStream;
+    use beam_domain::models::language_preferences::SubtitleMode;
+    use beam_domain::models::language_preferences::test_utils::prefs;
+    use beam_domain::models::stream::{
+        AudioStreamMetadata, StreamMetadata, StreamType, SubtitleStreamMetadata,
+    };
+    use beam_domain::repositories::MediaStreamRepository;
+
+    let library = Library::new();
+    let (movie, file) = indexed_movie(&library.movies, &library.files, "Arrival").await;
+    let audio = |index: u32, language: &str, is_default: bool| CreateMediaStream {
+        file_id: file,
+        index,
+        stream_type: StreamType::Audio,
+        codec: "aac".to_string(),
+        metadata: StreamMetadata::Audio(AudioStreamMetadata {
+            language: Some(language.to_string()),
+            title: None,
+            channels: 2,
+            sample_rate: 48_000,
+            channel_layout: None,
+            bit_rate: None,
+            is_default,
+            is_forced: false,
+        }),
+    };
+    let subtitle = |index: u32, language: &str, is_forced: bool| CreateMediaStream {
+        file_id: file,
+        index,
+        stream_type: StreamType::Subtitle,
+        codec: "subrip".to_string(),
+        metadata: StreamMetadata::Subtitle(SubtitleStreamMetadata {
+            language: Some(language.to_string()),
+            title: None,
+            is_default: false,
+            is_forced,
+            is_hearing_impaired: false,
+        }),
+    };
+    library
+        .streams
+        .insert_streams(vec![
+            audio(1, "eng", true),
+            audio(2, "jpn", false),
+            subtitle(3, "eng", true),
+            subtitle(4, "eng", false),
+            subtitle(5, "jpn", true),
+        ])
+        .await
+        .unwrap();
+    let state = state_with_service(real_service(library));
+    let viewer = uuid::Uuid::new_v4();
+    let token = session_for(&state, viewer).await;
+    let other = session_for(&state, uuid::Uuid::new_v4()).await;
+    let client = client(state.clone());
+    let defaults = |token: String| {
+        let client = &client;
+        async move {
+            let body: serde_json::Value = client
+                .get(&format!("/v1/media/{movie}/sources"))
+                .cookie("beam_session", &token)
+                .send()
+                .await
+                .assert_status(StatusCode::OK)
+                .json();
+            let source = &body["items"][0];
+            (
+                source["default_audio_track_index"].clone(),
+                source["default_subtitle_track_index"].clone(),
+                source["parts"][0]["default_subtitle_track_index"].clone(),
+            )
+        }
+    };
+
+    // Nothing set: the file's default audio, and the forced English track
+    // beside it.
+    assert_eq!(
+        defaults(token.clone()).await,
+        (
+            serde_json::json!(0),
+            serde_json::json!(0),
+            serde_json::json!(0)
+        )
+    );
+
+    state
+        .services
+        .language_preferences
+        .replace(viewer, &prefs(&["ja"], &["eng"], SubtitleMode::On))
+        .await
+        .unwrap();
+    assert_eq!(
+        defaults(token.clone()).await,
+        (
+            serde_json::json!(1),
+            serde_json::json!(1),
+            serde_json::json!(1)
+        ),
+        "Japanese audio, full English subtitles"
+    );
+
+    state
+        .services
+        .language_preferences
+        .replace(viewer, &prefs(&["jpn"], &[], SubtitleMode::Off))
+        .await
+        .unwrap();
+    assert_eq!(
+        defaults(token).await,
+        (
+            serde_json::json!(1),
+            serde_json::Value::Null,
+            serde_json::Value::Null
+        ),
+        "subtitles off"
+    );
+    assert_eq!(
+        defaults(other).await,
+        (
+            serde_json::json!(0),
+            serde_json::json!(0),
+            serde_json::json!(0)
+        ),
+        "another viewer keeps the defaults"
+    );
+}
+
+/// Each part of a multi-part source names its subtitle default from its own
+/// subtitle files (issue #264): the second disc carries a Danish file before
+/// its English one, so its English track sits at a position the first
+/// disc's does not, and copying the source's index would name the Danish.
+#[tokio::test]
+async fn each_part_names_its_default_subtitle_from_its_own_tracks() {
+    use beam_domain::models::language_preferences::SubtitleMode;
+    use beam_domain::models::language_preferences::test_utils::prefs;
+    use beam_domain::models::sidecar::{SidecarInfo, SubtitleFormat, UpsertSidecarSubtitle};
+    use beam_domain::models::{
+        CreateMediaFile, CreateMovie, CreateMovieEntry, FileStatus, MediaFileContent,
+    };
+    use beam_domain::repositories::{FileRepository, MovieRepository, SidecarSubtitleRepository};
+
+    let library = Library::new();
+    let library_id = uuid::Uuid::new_v4();
+    let movie = library
+        .movies
+        .find_or_create_by_identity(CreateMovie::new("Heat", None, None))
+        .await
+        .unwrap();
+    let entry = library
+        .movies
+        .find_or_create_entry(CreateMovieEntry {
+            library_id,
+            movie_id: movie.id,
+            edition: None,
+        })
+        .await
+        .unwrap();
+    let mut parts = Vec::new();
+    for part_number in [1_u32, 2] {
+        let file = library
+            .files
+            .create(CreateMediaFile {
+                library_id,
+                path: std::path::PathBuf::from(format!("/videos/Heat/Heat - CD{part_number}.mkv")),
+                hash: u64::from(part_number),
+                size_bytes: 1024,
+                mtime: None,
+                identity: None,
+                mime_type: Some("video/x-matroska".to_string()),
+                duration: None,
+                container_format: None,
+                content: Some(MediaFileContent::Movie {
+                    movie_entry_id: entry.id,
+                    part_number: Some(part_number),
+                }),
+                status: FileStatus::Known,
+                classifier_version: 0,
+                container_tags: None,
+            })
+            .await
+            .unwrap();
+        parts.push(file.id);
+    }
+    let sidecar = |file_id: uuid::Uuid, name: &str, language: &str| UpsertSidecarSubtitle {
+        file_id,
+        library_id,
+        path: std::path::PathBuf::from(format!("/videos/Heat/{name}")),
+        info: SidecarInfo {
+            format: SubtitleFormat::Srt,
+            language: Some(language.to_string()),
+            title: None,
+            is_forced: false,
+            is_sdh: false,
+            is_default: false,
+        },
+        size_bytes: 1_000,
+        mtime: None,
+    };
+    let mut english = Vec::new();
+    for upsert in [
+        sidecar(parts[0], "Heat - CD1.eng.srt", "eng"),
+        sidecar(parts[1], "Heat - CD2.dan.srt", "dan"),
+        sidecar(parts[1], "Heat - CD2.eng.srt", "eng"),
+    ] {
+        let is_english = upsert.info.language.as_deref() == Some("eng");
+        let row = library.sidecars.upsert_by_path(upsert).await.unwrap();
+        if is_english {
+            english.push(row.id.to_string());
+        }
+    }
+    let state = state_with_service(real_service(library));
+    let viewer = uuid::Uuid::new_v4();
+    let token = session_for(&state, viewer).await;
+    state
+        .services
+        .language_preferences
+        .replace(viewer, &prefs(&[], &["eng"], SubtitleMode::On))
+        .await
+        .unwrap();
+
+    let body: serde_json::Value = client(state)
+        .get(&format!("/v1/media/{}/sources", movie.id))
+        .cookie("beam_session", &token)
+        .send()
+        .await
+        .assert_status(StatusCode::OK)
+        .json();
+
+    let source = &body["items"][0];
+    assert_eq!(
+        source["parts"]
+            .as_array()
+            .expect("an array")
+            .iter()
+            .map(|part| part["file_id"].as_str().expect("an id").to_owned())
+            .collect::<Vec<_>>(),
+        parts.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        "one source of both discs, in order"
+    );
+    assert_eq!(source["default_subtitle_track_index"], serde_json::json!(0));
+    let named = |part: &serde_json::Value| {
+        let index = part["default_subtitle_track_index"]
+            .as_u64()
+            .expect("a default subtitle track");
+        part["subtitle_tracks"][usize::try_from(index).unwrap()]["sidecar_id"].clone()
+    };
+    assert_eq!(named(&source["parts"][0]), serde_json::json!(english[0]));
+    assert_eq!(
+        source["parts"][1]["default_subtitle_track_index"],
+        serde_json::json!(1),
+        "the second disc's English file follows its Danish one"
+    );
+    assert_eq!(named(&source["parts"][1]), serde_json::json!(english[1]));
+}
+
+/// The preferences cannot be read: a 500, never sources whose defaults are
+/// silently someone else's choice.
+#[tokio::test]
+async fn sources_whose_preferences_cannot_be_read_are_a_500() {
+    #[derive(Debug)]
+    struct Unreadable;
+
+    #[async_trait::async_trait]
+    impl beam_domain::repositories::LanguagePreferenceRepository for Unreadable {
+        async fn find(
+            &self,
+            _user_id: uuid::Uuid,
+        ) -> Result<beam_domain::models::language_preferences::LanguagePreferences, sea_orm::DbErr>
+        {
+            Err(sea_orm::DbErr::Custom("the store is down".to_owned()))
+        }
+
+        async fn replace(
+            &self,
+            _user_id: uuid::Uuid,
+            _preferences: &beam_domain::models::language_preferences::LanguagePreferences,
+        ) -> Result<(), sea_orm::DbErr> {
+            Err(sea_orm::DbErr::Custom("the store is down".to_owned()))
+        }
+    }
+
+    let mut stub = StubMetadataService::default();
+    stub.sources
+        .insert(MOVIE_ID.to_owned(), vec![movie_source(FILE_ID)]);
+    let state = state_over(
+        crate::routes::test_support::state_with_language_preferences(Arc::new(Unreadable)),
+        Arc::new(stub),
+    );
+    let token = seed_session(&state).await;
+
+    client(state)
+        .get(&format!("/v1/media/{MOVIE_ID}/sources"))
+        .cookie("beam_session", &token)
+        .send()
+        .await
+        .assert_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .assert_problem_type("https://beam.justinchung.net/reference/errors/#internal");
 }
 
 #[tokio::test]
