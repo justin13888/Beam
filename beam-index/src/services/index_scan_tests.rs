@@ -107,6 +107,7 @@ impl MediaInfoService for ScriptedProber {
             file_size: 1024,
             bit_rate: 1000,
             probe_score: 100,
+            chapters: Vec::new(),
         })
     }
 }

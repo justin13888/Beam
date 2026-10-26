@@ -87,6 +87,17 @@ static SYNTH_LOCK: Mutex<()> = Mutex::new(());
 /// and caching it for the rest of this build. `name` carries the container
 /// extension (`.mp4`/`.mkv`) that the muxer is inferred from.
 fn synth_fixture(name: &str, codec_id: ffmpeg::codec::Id) -> PathBuf {
+    synth_fixture_with(name, codec_id, 25, &[])
+}
+
+/// [`synth_fixture`] for a file `nb_frames` long with `chapters`. `name`
+/// must be unique to its arguments: it is the cache key.
+fn synth_fixture_with(
+    name: &str,
+    codec_id: ffmpeg::codec::Id,
+    nb_frames: i64,
+    chapters: &[SynthChapter],
+) -> PathBuf {
     init_ffmpeg();
     let path = synth_dir().join(name);
 
@@ -98,27 +109,41 @@ fn synth_fixture(name: &str, codec_id: ffmpeg::codec::Id) -> PathBuf {
         // Write to a sibling temp path that keeps the container extension so
         // muxer inference still works, then rename into place atomically.
         let tmp = synth_dir().join(format!("partial-{name}"));
-        encode_video(&tmp, codec_id).expect("synthesise fixture");
+        encode_video_with(&tmp, codec_id, nb_frames, chapters).expect("synthesise fixture");
         std::fs::rename(&tmp, &path).expect("publish synth fixture");
     }
     path
 }
 
-/// Encode a tiny (64x64, ~1s) video-only file with a native FFmpeg encoder.
+/// A chapter of a synthesised file: start and end in milliseconds, and its
+/// title.
+type SynthChapter = (i64, i64, &'static str);
+
+/// Encode a tiny (64x64) video-only file with a native FFmpeg encoder.
 ///
 /// Verbose by design: an explicit send-frame / drain-packet loop mirrors
 /// ffmpeg-next's `transcode-x264` example rather than hiding the muxing
 /// bookkeeping behind clever abstractions.
-fn encode_video(path: &Path, codec_id: ffmpeg::codec::Id) -> Result<(), ffmpeg::Error> {
+///
+/// `nb_frames` long at 25 frames a second (25 is about a second), with
+/// `chapters` written to the container.
+fn encode_video_with(
+    path: &Path,
+    codec_id: ffmpeg::codec::Id,
+    nb_frames: i64,
+    chapters: &[SynthChapter],
+) -> Result<(), ffmpeg::Error> {
     use ffmpeg::{Packet, Rational, codec, encoder, format, frame};
 
     const W: u32 = 64;
     const H: u32 = 64;
     const FPS: i32 = 25;
-    const NB_FRAMES: i64 = 25; // ~1 second
     let enc_tb = Rational(1, FPS);
 
     let mut octx = format::output(&path)?;
+    for (id, (start_ms, end_ms, title)) in chapters.iter().enumerate() {
+        octx.add_chapter(id as i64 + 1, Rational(1, 1000), *start_ms, *end_ms, title)?;
+    }
     let global_header = octx.format().flags().contains(format::Flags::GLOBAL_HEADER);
 
     let vcodec = encoder::find(codec_id).ok_or(ffmpeg::Error::EncoderNotFound)?;
@@ -146,7 +171,7 @@ fn encode_video(path: &Path, codec_id: ffmpeg::codec::Id) -> Result<(), ffmpeg::
     octx.write_header()?;
     let ost_tb = octx.stream(0).expect("output video stream").time_base();
 
-    for i in 0..NB_FRAMES {
+    for i in 0..nb_frames {
         let mut frame = frame::Video::new(format::Pixel::YUV420P, W, H);
         fill_frame(&mut frame, i);
         frame.set_pts(Some(i));
@@ -264,6 +289,113 @@ fn synth_mpeg2video_mkv() {
     let meta = probe(&path).expect("probe synth mpeg2video mkv");
     assert_video_fixture(&meta, CodecId::MPEG2VIDEO);
     assert!(meta.format_name.contains("matroska"));
+}
+
+/// The chapters of the three-second fixture below, as written.
+const CHAPTERS: &[SynthChapter] = &[
+    (0, 1_000, "Opening"),
+    (1_000, 2_500, "Part A"),
+    (2_500, 3_000, "Ending"),
+];
+
+/// Three seconds of MPEG-2 in Matroska, with [`CHAPTERS`].
+fn chaptered_fixture() -> PathBuf {
+    synth_fixture_with(
+        "mpeg2video-3s-chapters.mkv",
+        ffmpeg::codec::Id::MPEG2VIDEO,
+        75,
+        CHAPTERS,
+    )
+}
+
+#[test]
+fn chapters_are_read_from_the_container_in_milliseconds() {
+    use crate::probe::metadata::ChapterMetadata;
+
+    let meta = probe(&chaptered_fixture()).expect("probe the chaptered fixture");
+    assert_eq!(
+        meta.chapters,
+        CHAPTERS
+            .iter()
+            .map(|(start_ms, end_ms, title)| ChapterMetadata {
+                start_ms: *start_ms as u64,
+                end_ms: *end_ms as u64,
+                title: Some((*title).to_owned()),
+            })
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn a_file_without_chapters_reads_none() {
+    let path = synth_fixture("mpeg2video.mkv", ffmpeg::codec::Id::MPEG2VIDEO);
+    assert!(probe(&path).expect("probe").chapters.is_empty());
+}
+
+#[test]
+fn trickplay_sheets_tile_the_files_frames_into_jpegs() {
+    use crate::probe::trickplay::{TrickplaySpec, generate_sheets};
+
+    let path = chaptered_fixture();
+    let out = tempfile::tempdir().expect("an output directory");
+    let root = path.parent().expect("a file has a folder");
+    let file = LibraryFile::open(root, &path).expect("open the fixture");
+    let spec = TrickplaySpec {
+        interval_ms: 1_000,
+        tile_width: 32,
+        columns: 2,
+        rows: 1,
+        max_tiles: 100,
+    };
+
+    let layout = generate_sheets(file, out.path(), &spec)
+        .expect("sheets are made")
+        .expect("a video file has a layout");
+
+    // Three seconds at one a second; a 64x64 picture is a square tile.
+    assert_eq!((layout.tile_width, layout.tile_height), (32, 32));
+    assert!(
+        (3..=4).contains(&layout.tile_count),
+        "{} tiles",
+        layout.tile_count
+    );
+    let mut written: Vec<String> = std::fs::read_dir(out.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    written.sort();
+    let expected: Vec<String> = (0..layout.sheet_count())
+        .map(|sheet| format!("{sheet}.jpg"))
+        .collect();
+    assert_eq!(written, expected);
+
+    // Each sheet is a JPEG of the whole grid: two tiles across, one down.
+    for name in &written {
+        let sheet = probe(&out.path().join(name)).expect("a sheet is an image FFmpeg reads");
+        let idx = sheet.best_video_stream.expect("a sheet is a picture");
+        match &sheet.streams[idx] {
+            StreamMetadata::Video(v) => {
+                assert_eq!(v.video.codec_name, "mjpeg", "{name}");
+                assert_eq!((v.video.width, v.video.height), (64, 32), "{name}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+}
+
+#[test]
+fn trickplay_of_a_file_that_is_not_media_is_an_error_and_writes_nothing() {
+    use crate::probe::trickplay::{TrickplaySpec, generate_sheets};
+
+    init_ffmpeg();
+    let dir = tempfile::tempdir().expect("a directory");
+    let path = dir.path().join("noise.mkv");
+    std::fs::write(&path, [0x5a_u8; 4096]).unwrap();
+    let out = tempfile::tempdir().expect("an output directory");
+    let file = LibraryFile::open(dir.path(), &path).expect("open the file");
+
+    assert!(generate_sheets(file, out.path(), &TrickplaySpec::default()).is_err());
+    assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 0);
 }
 
 // ---------------------------------------------------------------------------

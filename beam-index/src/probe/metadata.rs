@@ -389,6 +389,8 @@ pub struct VideoFileMetadata {
     pub bit_rate: i64,
     /// Probe score indicating confidence in format detection (0-100)
     pub probe_score: i32,
+    /// The container's chapters, in the order it lists them (issue #265).
+    pub chapters: Vec<ChapterMetadata>,
 }
 
 /// FFmpeg's descriptive name for a container, falling back to its short name.
@@ -402,6 +404,79 @@ pub struct VideoFileMetadata {
 ///
 /// Read the pointer and check it instead. `name` is a required field and is
 /// always populated, which makes it the right fallback.
+/// Open `file` for FFmpeg to demux, from its open handle (issue #238), and
+/// hand back beside the demuxer the handle's metadata and the path it was
+/// opened at.
+///
+/// FFmpeg reads the handle through a custom I/O context
+/// ([`ffmpeg::format::context::StreamIo`]) and never opens a path. The path
+/// is only FFmpeg's hint at the container, from its extension.
+pub(crate) fn open_input(
+    file: LibraryFile,
+) -> Result<(ffmpeg::format::context::Input, std::fs::Metadata, PathBuf), MetadataError> {
+    let (mut handle, handle_metadata, file_path) = file.into_parts();
+    trace!("Opening file for FFmpeg: {:?}", file_path);
+    // A handle shares its offset with the one it was cloned from, which
+    // may have been read to its end (hashed).
+    handle.rewind().map_err(|e| {
+        MetadataError::UnknownError(format!("Failed to rewind {}: {e}", file_path.display()))
+    })?;
+    let io = ffmpeg::format::context::StreamIo::from_read_seek(handle)?;
+    // The handle is all FFmpeg may read (issue #246). A container that
+    // names other files -- an HLS or DASH playlist, a concat list, a MOV
+    // data reference -- would have FFmpeg open each by URL, through no
+    // check of where it leads; an empty protocol whitelist refuses every
+    // such open, so only the handle's own bytes are read.
+    let mut options = ffmpeg::Dictionary::new();
+    options.set("protocol_whitelist", "");
+    let context = ffmpeg::format::input_from_stream(io, file_path.to_str(), Some(options))?;
+    Ok((context, handle_metadata, file_path))
+}
+
+/// One chapter as the container lists it, in milliseconds from the file's
+/// start (issue #265).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChapterMetadata {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub title: Option<String>,
+}
+
+/// `value` units of `time_base` in whole milliseconds, rounded down; `None`
+/// for a time base with no denominator, or a time before the start.
+fn rescaled_ms(value: i64, time_base: (i32, i32)) -> Option<u64> {
+    let (num, den) = time_base;
+    if den <= 0 || num < 0 || value < 0 {
+        return None;
+    }
+    let ms = i128::from(value) * i128::from(num) * 1_000 / i128::from(den);
+    u64::try_from(ms).ok()
+}
+
+/// A chapter from what the container says of it: its start and end in its
+/// own time base, and its title tag. One that starts before the file, or
+/// whose time base is unusable, is dropped; one ending before it starts is
+/// taken to end where it starts.
+fn chapter_metadata(
+    start: i64,
+    end: i64,
+    time_base: (i32, i32),
+    title: Option<&str>,
+) -> Option<ChapterMetadata> {
+    let start_ms = rescaled_ms(start, time_base)?;
+    let end_ms = rescaled_ms(end, time_base)
+        .unwrap_or(start_ms)
+        .max(start_ms);
+    Some(ChapterMetadata {
+        start_ms,
+        end_ms,
+        title: title
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .map(str::to_owned),
+    })
+}
+
 fn format_long_name(format: &ffmpeg::format::format::Input) -> String {
     let long_name = unsafe { (*format.as_ptr()).long_name };
     if long_name.is_null() {
@@ -423,23 +498,8 @@ impl VideoFileMetadata {
     /// container, from its extension, as it was when FFmpeg opened the path
     /// itself; the file size is the handle's.
     pub fn from_library_file(file: LibraryFile) -> Result<Self, MetadataError> {
-        let (mut handle, handle_metadata, file_path) = file.into_parts();
+        let (context, handle_metadata, file_path) = open_input(file)?;
         let file_path = file_path.as_path();
-        trace!("Opening file for metadata extraction: {:?}", file_path);
-        // A handle shares its offset with the one it was cloned from, which
-        // may have been read to its end (hashed).
-        handle.rewind().map_err(|e| {
-            MetadataError::UnknownError(format!("Failed to rewind {}: {e}", file_path.display()))
-        })?;
-        let io = ffmpeg::format::context::StreamIo::from_read_seek(handle)?;
-        // The handle is all FFmpeg may read (issue #246). A container that
-        // names other files -- an HLS or DASH playlist, a concat list, a MOV
-        // data reference -- would have FFmpeg open each by URL, through no
-        // check of where it leads; an empty protocol whitelist refuses every
-        // such open, so only the handle's own bytes are probed.
-        let mut options = ffmpeg::Dictionary::new();
-        options.set("protocol_whitelist", "");
-        let context = ffmpeg::format::input_from_stream(io, file_path.to_str(), Some(options))?;
 
         // Collect file-level metadata
         let metadata: HashMap<String, String> = context
@@ -709,6 +769,18 @@ impl VideoFileMetadata {
         let file_size = handle_metadata.len();
         let bit_rate = context.bit_rate();
         let probe_score = context.probe_score();
+        let chapters = context
+            .chapters()
+            .filter_map(|chapter| {
+                let time_base = chapter.time_base();
+                chapter_metadata(
+                    chapter.start(),
+                    chapter.end(),
+                    (time_base.numerator(), time_base.denominator()),
+                    chapter.metadata().get("title"),
+                )
+            })
+            .collect();
 
         Ok(VideoFileMetadata {
             file_path: file_path.to_path_buf(),
@@ -723,6 +795,7 @@ impl VideoFileMetadata {
             file_size,
             bit_rate,
             probe_score,
+            chapters,
         })
     }
 
@@ -1117,6 +1190,68 @@ mod tests {
             let subtitles = subtitle_stream(1000, HashMap::new());
             assert_eq!(subtitles.title(), None);
             assert_eq!(subtitles.language(), None);
+        }
+    }
+
+    mod chapters {
+        use super::*;
+
+        #[test]
+        fn a_chapter_is_read_in_milliseconds_from_its_own_time_base() {
+            // Matroska's nanosecond time base, MP4's millisecond one, and an
+            // odd one that does not divide evenly.
+            assert_eq!(
+                chapter_metadata(
+                    90_000_000_000,
+                    180_500_000_000,
+                    (1, 1_000_000_000),
+                    Some("Opening")
+                ),
+                Some(ChapterMetadata {
+                    start_ms: 90_000,
+                    end_ms: 180_500,
+                    title: Some("Opening".into()),
+                })
+            );
+            assert_eq!(
+                chapter_metadata(1_500, 3_000, (1, 1_000), None),
+                Some(ChapterMetadata {
+                    start_ms: 1_500,
+                    end_ms: 3_000,
+                    title: None,
+                })
+            );
+            assert_eq!(
+                chapter_metadata(10, 20, (1, 3), None).map(|c| (c.start_ms, c.end_ms)),
+                Some((3_333, 6_666))
+            );
+        }
+
+        #[test]
+        fn a_blank_title_is_none_and_a_padded_one_is_trimmed() {
+            let title = |raw| chapter_metadata(0, 1, (1, 1), Some(raw)).and_then(|c| c.title);
+            assert_eq!(title("   "), None);
+            assert_eq!(title(""), None);
+            assert_eq!(title("  Ending  ").as_deref(), Some("Ending"));
+        }
+
+        #[test]
+        fn a_chapter_before_the_start_or_in_no_time_base_is_dropped() {
+            assert_eq!(chapter_metadata(-1, 10, (1, 1_000), None), None);
+            assert_eq!(chapter_metadata(0, 10, (1, 0), None), None);
+            assert_eq!(chapter_metadata(0, 10, (-1, 1_000), None), None);
+        }
+
+        #[test]
+        fn a_chapter_ending_before_it_starts_ends_where_it_starts() {
+            assert_eq!(
+                chapter_metadata(5_000, 1_000, (1, 1_000), None).map(|c| (c.start_ms, c.end_ms)),
+                Some((5_000, 5_000))
+            );
+            assert_eq!(
+                chapter_metadata(5_000, -1, (1, 1_000), None).map(|c| (c.start_ms, c.end_ms)),
+                Some((5_000, 5_000))
+            );
         }
     }
 }

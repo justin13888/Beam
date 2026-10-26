@@ -12,6 +12,7 @@ pub mod color;
 pub mod format;
 pub mod media;
 pub mod metadata;
+pub mod trickplay;
 
 #[cfg(test)]
 mod real_media_tests;

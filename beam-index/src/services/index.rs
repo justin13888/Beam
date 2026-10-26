@@ -31,6 +31,7 @@ use crate::services::scan::{
 use crate::services::watcher::FsEventKind;
 use beam_domain::models::Library;
 use beam_domain::models::admin_log::{AdminLogCategory, AdminLogLevel};
+use beam_domain::models::chapter::Chapter;
 use beam_domain::models::enrichment::{EnrichmentTargetId, FieldLocks, MetadataField};
 use beam_domain::models::file::{
     CreateMediaFile, FileClassification, FileIdentity, FileRelink, FileStatus, MediaFile,
@@ -41,9 +42,9 @@ use beam_domain::models::show::{CreateEpisode, CreateShow, Episode, Show};
 use beam_domain::models::watch_state::{TitleRef, WatchTarget};
 use beam_domain::models::{PinSource, ProviderPin};
 use beam_domain::repositories::{
-    AppliedNfoRepository, EnrichmentStateRepository, FileRepository, LibraryRepository,
-    MediaStreamRepository, MovieRepository, ShowRepository, SidecarSubtitleRepository,
-    UserListRepository, WatchStateRepository,
+    AppliedNfoRepository, ChapterRepository, EnrichmentStateRepository, FileRepository,
+    LibraryRepository, MediaStreamRepository, MovieRepository, ShowRepository,
+    SidecarSubtitleRepository, UserListRepository, WatchStateRepository,
 };
 use beam_domain::services::{Clock, IdGenerator, RealClock, UuidGenerator};
 use beam_domain::utils::classification::{Classification, ContainerTags, Hints, classify};
@@ -1284,6 +1285,9 @@ pub struct LocalIndexService {
     path_policy: PathPolicy,
     enrichment_repo: Option<Arc<dyn EnrichmentStateRepository>>,
     sidecar_repo: Option<Arc<dyn SidecarSubtitleRepository>>,
+    /// Where each probed file's chapters go (issue #265). Unset, none are
+    /// recorded.
+    chapter_repo: Option<Arc<dyn ChapterRepository>>,
     applied_nfo_repo: Option<Arc<dyn AppliedNfoRepository>>,
     /// Users' watchlists and favourites (issue #262), whose entries a title
     /// merge carries onto the survivor. Unset, a merge carries none.
@@ -1336,6 +1340,7 @@ impl LocalIndexService {
             path_policy: PathPolicy::default(),
             enrichment_repo: None,
             sidecar_repo: None,
+            chapter_repo: None,
             applied_nfo_repo: None,
             user_list_repo: None,
             divergence_policy: DivergencePolicy::default(),
@@ -1425,6 +1430,24 @@ impl LocalIndexService {
         self
     }
 
+    /// Wire up chapters (issue #265): when set, every probe of a file
+    /// replaces its chapters with the ones its container lists, and a
+    /// changed file that no longer probes is left with none. Defaults to
+    /// `None`, which records no chapters.
+    pub fn with_chapter_repo(mut self, repo: Arc<dyn ChapterRepository>) -> Self {
+        self.chapter_repo = Some(repo);
+        self
+    }
+
+    /// Replace the chapters of the file `file_id` with `chapters`, when
+    /// chapters are wired.
+    async fn replace_chapters(&self, file_id: Uuid, chapters: Vec<Chapter>) -> Result<(), DbErr> {
+        match &self.chapter_repo {
+            Some(repo) => repo.replace_for_file(file_id, chapters).await,
+            None => Ok(()),
+        }
+    }
+
     /// Wire up users' watchlists and favourites (issue #262): when set, a
     /// title merge carries the retired title's entries onto the survivor
     /// rather than letting them go with it.
@@ -1459,7 +1482,8 @@ impl LocalIndexService {
         &self.library_repo
     }
 
-    /// Helper to extract and insert media streams for a file
+    /// Helper to extract and insert media streams for a file, and to replace
+    /// its chapters with the ones the same probe read
     pub(crate) async fn insert_media_streams(
         &self,
         file_id: Uuid,
@@ -1533,6 +1557,19 @@ impl LocalIndexService {
         }
 
         let count = self.stream_repo.insert_streams(streams_to_insert).await?;
+        // The chapters the same probe read, in the container's order.
+        let chapters = metadata
+            .chapters
+            .iter()
+            .enumerate()
+            .map(|(index, chapter)| Chapter {
+                index: u32::try_from(index).unwrap_or(u32::MAX),
+                start_ms: chapter.start_ms,
+                end_ms: chapter.end_ms,
+                title: chapter.title.clone(),
+            })
+            .collect();
+        self.replace_chapters(file_id, chapters).await?;
         Ok(count)
     }
 
@@ -2719,6 +2756,7 @@ impl LocalIndexService {
                 // file that is gone. Cleared, the row reads as unprobed, so
                 // every later visit probes it again until a probe succeeds.
                 self.stream_repo.delete_by_file_id(existing.id).await?;
+                self.replace_chapters(existing.id, Vec::new()).await?;
                 let updated = self
                     .file_repo
                     .update(UpdateMediaFile {
@@ -5868,6 +5906,7 @@ mod tests {
             file_size: 1024,
             bit_rate: 1000,
             probe_score: 100,
+            chapters: Vec::new(),
         }
     }
 
@@ -6832,6 +6871,7 @@ mod tests {
                     file_size: 1024,
                     bit_rate: 1000,
                     probe_score: 100,
+                    chapters: Vec::new(),
                 })
             });
 
@@ -6987,6 +7027,7 @@ mod tests {
                     file_size: 500 * 1024 * 1024,
                     bit_rate: 2000,
                     probe_score: 100,
+                    chapters: Vec::new(),
                 })
             });
 
@@ -7225,6 +7266,7 @@ mod tests {
             file_size: 1024,
             bit_rate: 1000,
             probe_score: 100,
+            chapters: Vec::new(),
         }
     }
 

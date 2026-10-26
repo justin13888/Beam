@@ -9,7 +9,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 
 use super::*;
-use crate::probe::metadata::MetadataError;
+use crate::probe::metadata::{ChapterMetadata, MetadataError};
 use crate::services::admin_log::LocalAdminLogService;
 use crate::services::hash::{HashService, LocalHashService, MockHashService};
 use crate::services::media_info::{LocalMediaInfoService, MockMediaInfoService};
@@ -21,6 +21,7 @@ use beam_domain::models::sidecar::{SidecarSubtitle, SubtitleFormat};
 use beam_domain::models::{CreateLibrary, Movie, Show};
 use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
 use beam_domain::repositories::applied_nfo::in_memory::InMemoryAppliedNfoRepository;
+use beam_domain::repositories::chapter::in_memory::InMemoryChapterRepository;
 use beam_domain::repositories::enrichment::in_memory::InMemoryEnrichmentStateRepository;
 use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
 use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
@@ -35,6 +36,9 @@ use tempfile::TempDir;
 
 /// Container tags the prober reports, by path.
 type Tags = Arc<Mutex<HashMap<PathBuf, HashMap<String, String>>>>;
+
+/// Chapters the prober reports, by path.
+type Chapters = Arc<Mutex<HashMap<PathBuf, Vec<ChapterMetadata>>>>;
 
 /// The in-memory file repository, counting the reads that list files: how
 /// many read a whole library, and how many only the files beneath a folder.
@@ -167,10 +171,12 @@ struct Harness {
     show_repo: Arc<InMemoryShowRepository>,
     enrichment_repo: Arc<InMemoryEnrichmentStateRepository>,
     sidecar_repo: Arc<InMemorySidecarSubtitleRepository>,
+    chapter_repo: Arc<InMemoryChapterRepository>,
     applied_nfo_repo: Arc<InMemoryAppliedNfoRepository>,
     admin_log_repo: Arc<InMemoryAdminLogRepository>,
     file_reads: Arc<CountingFileRepository>,
     tags: Tags,
+    chapters: Chapters,
     /// While set, every probe fails, as one of a file still being muxed.
     probe_fails: Arc<AtomicBool>,
     service: Arc<LocalIndexService>,
@@ -197,6 +203,7 @@ impl Harness {
         let show_repo = Arc::new(InMemoryShowRepository::with_files(file_repo.clone()));
         let enrichment_repo = Arc::new(InMemoryEnrichmentStateRepository::default());
         let sidecar_repo = Arc::new(InMemorySidecarSubtitleRepository::default());
+        let chapter_repo = Arc::new(InMemoryChapterRepository::default());
         let applied_nfo_repo = Arc::new(InMemoryAppliedNfoRepository::default());
         let file_reads = Arc::new(CountingFileRepository {
             inner: file_repo.clone(),
@@ -220,6 +227,8 @@ impl Harness {
             .returning(move |_| Ok(next_hash.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
         let tags: Tags = Arc::default();
         let prober_tags = tags.clone();
+        let chapters: Chapters = Arc::default();
+        let prober_chapters = chapters.clone();
         let probe_fails = Arc::new(AtomicBool::new(false));
         let prober_fails = probe_fails.clone();
         let mut prober = MockMediaInfoService::new();
@@ -246,6 +255,12 @@ impl Harness {
                 file_size: 1024,
                 bit_rate: 1000,
                 probe_score: 100,
+                chapters: prober_chapters
+                    .lock()
+                    .unwrap()
+                    .get(path)
+                    .cloned()
+                    .unwrap_or_default(),
             })
         });
 
@@ -273,6 +288,7 @@ impl Harness {
         )
         .with_enrichment_repo(enrichment_repo.clone())
         .with_sidecar_repo(sidecar_repo.clone())
+        .with_chapter_repo(chapter_repo.clone())
         .with_applied_nfo_repo(applied_nfo_repo.clone())
         .with_clock(clock);
 
@@ -285,10 +301,12 @@ impl Harness {
             show_repo,
             enrichment_repo,
             sidecar_repo,
+            chapter_repo,
             applied_nfo_repo,
             admin_log_repo,
             file_reads,
             tags,
+            chapters,
             probe_fails,
             service: Arc::new(service),
         }
@@ -374,6 +392,28 @@ impl Harness {
             .into_iter()
             .find(|row| row.target == target)
             .expect("the title is queued for enrichment")
+    }
+
+    /// Have the prober report `chapters` for `rel`.
+    fn chapter(&self, rel: &str, chapters: &[(u64, u64, Option<&str>)]) {
+        self.chapters.lock().unwrap().insert(
+            self.root.join(rel),
+            chapters
+                .iter()
+                .map(|(start_ms, end_ms, title)| ChapterMetadata {
+                    start_ms: *start_ms,
+                    end_ms: *end_ms,
+                    title: title.map(str::to_owned),
+                })
+                .collect(),
+        );
+    }
+
+    async fn chapters_of(&self, rel: &str) -> Vec<Chapter> {
+        self.chapter_repo
+            .find_by_file_id(self.file(rel).id)
+            .await
+            .unwrap()
     }
 
     async fn subtitles_of(&self, rel: &str) -> Vec<SidecarSubtitle> {
@@ -673,6 +713,60 @@ async fn a_reprobe_that_succeeds_classifies_by_the_tags_it_read() {
     let (show, season, episode) = h.show_of("The Office/The Dundies.m4v");
     assert_eq!((season, episode), (2, 1));
     assert_eq!(show.identity_key.as_deref(), Some("the office|"));
+}
+
+/// A probe records the chapters it read (issue #265), by position, and the
+/// next probe of the file replaces them; a file whose content changed and
+/// no longer probes is left with none, since they described the old content.
+#[tokio::test]
+async fn a_probe_records_the_chapters_it_read_and_a_failed_reprobe_clears_them() {
+    let h = Harness::new().await;
+    h.video("Matrix/matrix.mkv");
+    h.chapter(
+        "Matrix/matrix.mkv",
+        &[(0, 90_000, Some("Opening")), (90_000, 600_000, None)],
+    );
+
+    h.scan().await;
+
+    assert_eq!(
+        h.chapters_of("Matrix/matrix.mkv").await,
+        vec![
+            Chapter {
+                index: 0,
+                start_ms: 0,
+                end_ms: 90_000,
+                title: Some("Opening".into()),
+            },
+            Chapter {
+                index: 1,
+                start_ms: 90_000,
+                end_ms: 600_000,
+                title: None,
+            },
+        ]
+    );
+
+    // A remux: new content, one chapter.
+    h.write("Matrix/matrix.mkv", "Matrix/matrix.mkv, remuxed");
+    h.chapter("Matrix/matrix.mkv", &[(0, 600_000, Some("Whole"))]);
+    h.scan().await;
+    assert_eq!(
+        h.chapters_of("Matrix/matrix.mkv").await,
+        vec![Chapter {
+            index: 0,
+            start_ms: 0,
+            end_ms: 600_000,
+            title: Some("Whole".into()),
+        }]
+    );
+
+    // Changed again, and now it does not probe.
+    h.write("Matrix/matrix.mkv", "Matrix/matrix.mkv, half-copied over");
+    h.probe_fails
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    h.scan().await;
+    assert!(h.chapters_of("Matrix/matrix.mkv").await.is_empty());
 }
 
 #[tokio::test]
