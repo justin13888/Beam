@@ -505,6 +505,29 @@ mod tests {
         assert_eq!(fetcher.call_count(), 2, "each original is fetched once");
     }
 
+    /// A few hundred bytes can declare dimensions whose pixels would not fit
+    /// in memory. Past the decode ceiling Beam does not decode at all: the
+    /// original is served, never a rendition.
+    #[tokio::test]
+    async fn an_image_past_the_decode_ceiling_is_not_decoded() {
+        let root = TempDir::new().unwrap();
+        let oversized = jpeg(12_001, 1);
+        let fetcher = Arc::new(InMemoryArtworkFetcher::new().with_image(
+            POSTER,
+            ImageFormat::Jpeg,
+            &oversized,
+        ));
+        let cache = sized_cache(&root, 10_000_000, &fetcher).await;
+
+        let served = cache
+            .get_sized(POSTER, width(185))
+            .await
+            .expect("the original");
+
+        assert_eq!(served.bytes.as_ref(), oversized.as_slice());
+        assert_eq!(served.key, CacheKey::for_url(POSTER));
+    }
+
     #[tokio::test]
     async fn transparency_survives_a_resize() {
         let root = TempDir::new().unwrap();
