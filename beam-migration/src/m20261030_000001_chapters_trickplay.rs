@@ -10,7 +10,11 @@ use sea_orm_migration::prelude::*;
 /// - `file_trickplay`: one row per file whose trickplay sheets Beam tried to
 ///   make, for the content hash (`files.hash_xxh3`'s bits) it made them
 ///   from. The six layout columns are all set, or all `NULL` for a file that
-///   gave no sheets. Goes with its file.
+///   gave no sheets. The constraint counts the `NULL`s rather than testing
+///   each column positive, because a `CHECK` passes when it evaluates to
+///   `NULL`: `interval_ms > 0 AND tile_width > 0` with `tile_width` unset is
+///   `NULL`, so a half-set layout would otherwise get through. Goes with its
+///   file.
 ///
 /// `down()` drops both tables.
 #[derive(DeriveMigrationName)]
@@ -47,9 +51,9 @@ impl MigrationTrait for Migration {
                  tile_count INTEGER, \
                  generated_at TIMESTAMPTZ NOT NULL, \
                  CONSTRAINT file_trickplay_layout CHECK (\
-                     (interval_ms IS NULL AND tile_width IS NULL AND tile_height IS NULL \
-                         AND columns IS NULL AND rows IS NULL AND tile_count IS NULL) \
-                     OR (interval_ms > 0 AND tile_width > 0 AND tile_height > 0 \
+                     num_nulls(interval_ms, tile_width, tile_height, columns, rows, tile_count) = 6 \
+                     OR (num_nulls(interval_ms, tile_width, tile_height, columns, rows, tile_count) = 0 \
+                         AND interval_ms > 0 AND tile_width > 0 AND tile_height > 0 \
                          AND columns > 0 AND rows > 0 AND tile_count > 0))\
              )",
         )
