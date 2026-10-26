@@ -29,10 +29,10 @@ import uniffi.beam_client_core.ContinueWatchingEntry
  * and because the point of the row is "carry on from here", which an
  * episode still communicates better than cover art.
  *
- * The entry may not have hydrated -- the playback endpoints return bare
- * identifiers -- so this renders sensibly with `media` unset rather than
- * dropping the row. The user's place is valid whether or not its poster
- * loaded.
+ * The row carries its own title and artwork (issue #188); a record built
+ * without them still renders, with `media` unset, rather than dropping the
+ * row. A next-up row -- the next episode of a show, from its start -- says so
+ * instead of a time remaining it does not have.
  */
 @Composable
 public fun ContinueWatchingCard(
@@ -41,13 +41,18 @@ public fun ContinueWatchingCard(
     modifier: Modifier = Modifier,
 ) {
     val title = entry.media?.title ?: "Continue watching"
-    val subtitle =
+    // A next-up row starts its episode from the beginning, so it has no time
+    // remaining to show; it says which episode is next instead.
+    val progressLabel =
+        if (entry.isNextUp) "Next episode" else Format.remaining(entry.positionSecs, entry.durationSecs)
+    val episodeLabel =
         entry.episode?.let { episode ->
             listOfNotNull(
+                episode.episodeNumber.takeIf { it > 0u }?.let { "E$it" },
                 episode.title.takeIf { it.isNotBlank() },
-                Format.remaining(entry.positionSecs, entry.durationSecs).takeIf { it.isNotEmpty() },
-            ).joinToString(" · ")
-        } ?: Format.remaining(entry.positionSecs, entry.durationSecs)
+            ).joinToString(" ").takeIf { it.isNotEmpty() }
+        }
+    val subtitle = listOfNotNull(episodeLabel, progressLabel.takeIf { it.isNotEmpty() }).joinToString(" · ")
 
     Column(
         modifier =
@@ -55,7 +60,7 @@ public fun ContinueWatchingCard(
                 .width(BeamSizes.ThumbnailWidth)
                 .clickable(onClick = onClick)
                 .semantics(mergeDescendants = true) {
-                    contentDescription = "Resume $title, $subtitle"
+                    contentDescription = "${if (entry.isNextUp) "Play" else "Resume"} $title, $subtitle"
                 }.padding(bottom = BeamSpacing.Small),
     ) {
         Box(contentAlignment = Alignment.BottomStart) {

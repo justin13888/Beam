@@ -40,6 +40,16 @@ internal class TelemetryRecorder(
         hasFailed = false
     }
 
+    /**
+     * Playback moved on to the next part of the same source. Not a new start:
+     * the viewer pressed play once. Later stalls are counted against the file
+     * that is playing.
+     */
+    fun partChanged(fileId: String) {
+        if (this.fileId == null) return
+        this.fileId = fileId
+    }
+
     /** The current file's first frame is on screen. Reported once per file. */
     fun firstFrame(audioTrackIndex: UInt?) {
         val file = fileId ?: return

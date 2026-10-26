@@ -11,9 +11,14 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.beam.android.core.model.PlaybackRequest
@@ -49,11 +54,20 @@ public fun PlayerRoute(
         }
     }
 
+    // Where the picture sits on screen, for the shrink into a window to start from.
+    var videoBounds by remember { mutableStateOf<android.graphics.Rect?>(null) }
+    PictureInPicture(
+        isPlaying = state.playback.isPlaying,
+        sourceRectHint = videoBounds,
+        onModeChanged = viewModel::setInPictureInPicture,
+        onDismissed = viewModel::onPictureInPictureDismissed,
+    )
+
     // Controls fade out on their own while playing, and stay put while paused
     // -- a viewer who paused is usually looking at the frame, not waiting for
-    // the chrome to disappear.
-    LaunchedEffect(state.areControlsVisible, state.playback.isPlaying) {
-        if (state.areControlsVisible && state.playback.isPlaying) {
+    // the chrome to disappear. Never while the settings sheet is open over them.
+    LaunchedEffect(state.areControlsVisible, state.playback.isPlaying, state.isSettingsOpen) {
+        if (state.areControlsVisible && state.playback.isPlaying && !state.isSettingsOpen) {
             delay(CONTROLS_TIMEOUT_MS)
             viewModel.setControlsVisible(false)
         }
@@ -79,7 +93,22 @@ public fun PlayerRoute(
                     )
                 },
     ) {
-        VideoSurface(player = viewModel.exoPlayer, modifier = Modifier.fillMaxSize())
+        VideoSurface(
+            player = viewModel.exoPlayer,
+            modifier =
+                Modifier
+                    .fillMaxSize()
+                    .onGloballyPositioned { coordinates ->
+                        val bounds = coordinates.boundsInWindow()
+                        videoBounds =
+                            android.graphics.Rect(
+                                bounds.left.toInt(),
+                                bounds.top.toInt(),
+                                bounds.right.toInt(),
+                                bounds.bottom.toInt(),
+                            )
+                    },
+        )
 
         PlayerControls(
             state = state,
@@ -87,7 +116,7 @@ public fun PlayerRoute(
             onSeek = viewModel::seekTo,
             onRewind = viewModel::rewind,
             onFastForward = viewModel::fastForward,
-            onOpenSettings = { viewModel.setControlsVisible(true) },
+            onOpenSettings = { viewModel.setSettingsOpen(true) },
             onClose = {
                 viewModel.stop()
                 onClose()
@@ -95,6 +124,18 @@ public fun PlayerRoute(
             onPlayNext = viewModel::playNext,
             onDismissNext = viewModel::dismissUpNext,
             onUndoDowngrade = viewModel::undoDowngrade,
+        )
+    }
+
+    if (state.isSettingsOpen && !state.isInPictureInPicture) {
+        PlayerSettingsSheet(
+            playback = state.playback,
+            sources = state.sources,
+            onSubtitle = viewModel::selectSubtitleTrack,
+            onAudio = viewModel::selectAudioTrack,
+            onSource = viewModel::switchSource,
+            onSpeed = viewModel::setSpeed,
+            onDismiss = { viewModel.setSettingsOpen(false) },
         )
     }
 }

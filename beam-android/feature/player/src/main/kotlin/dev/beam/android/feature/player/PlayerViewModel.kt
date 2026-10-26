@@ -44,6 +44,14 @@ public data class PlayerScreenState(
      * overridden, however much it stalls.
      */
     val isSourcePinned: Boolean = false,
+    /** Whether the playback settings sheet -- subtitles, audio, version, speed -- is open. */
+    val isSettingsOpen: Boolean = false,
+    /**
+     * Whether the screen is a picture-in-picture window. Nothing but the
+     * picture is drawn then: the window is too small to touch, and the system
+     * draws its own play and close controls over it.
+     */
+    val isInPictureInPicture: Boolean = false,
 )
 
 /**
@@ -83,7 +91,13 @@ public class PlayerViewModel
                 "the player needs a fileId"
             }
         private val mediaId: String? = savedStateHandle["mediaId"]
-        private val episodeId: String? = savedStateHandle["episodeId"]
+
+        /**
+         * The episode playing, which moves on as the player advances through a
+         * series: what plays after it, and which versions of it there are, are
+         * asked about this episode and not the one the screen opened on.
+         */
+        private var episodeId: String? = savedStateHandle["episodeId"]
 
         private val mutableState = MutableStateFlow(PlayerScreenState())
         public val state: StateFlow<PlayerScreenState> = mutableState.asStateFlow()
@@ -114,16 +128,37 @@ public class PlayerViewModel
                     if (playbackState.isRebufferingSustained) onSustainedRebuffering(playbackState)
                 }
             }
+            loadTitle()
+        }
+
+        /**
+         * The versions of what is playing, for the switcher, and what plays
+         * after it.
+         *
+         * Sources belong to a movie or an episode -- a show has none of its
+         * own -- so an episode's are asked for by the episode. Up-next is the
+         * server's answer for the episode playing now.
+         */
+        private fun loadTitle() {
+            val episode = episodeId
+            val titleId = episode ?: mediaId
+            mutableState.update { it.copy(sources = emptyList(), upNext = null) }
             viewModelScope.launch {
-                mediaId?.let { id ->
+                titleId?.let { id ->
                     runCatching { playback.sources(id) }
-                        .onSuccess { sources -> mutableState.update { it.copy(sources = sources) } }
+                        .onSuccess { sources ->
+                            // A later episode may have started while this one
+                            // was asked about; its answer is not this one's.
+                            if (episodeId == episode) mutableState.update { it.copy(sources = sources) }
+                        }
                 }
             }
             viewModelScope.launch {
-                if (mediaId != null && episodeId != null) {
-                    runCatching { catalog.upNext(mediaId, episodeId) }
-                        .onSuccess { next -> mutableState.update { it.copy(upNext = next) } }
+                if (mediaId != null && episode != null) {
+                    runCatching { catalog.upNext(mediaId, episode) }
+                        .onSuccess { next ->
+                            if (episodeId == episode) mutableState.update { it.copy(upNext = next) }
+                        }
                 }
             }
         }
@@ -171,7 +206,7 @@ public class PlayerViewModel
          * downgrade overrides it afterwards.
          */
         public fun switchSource(source: MediaSourceView) {
-            mutableState.update { it.copy(isSourcePinned = true, downgrade = null) }
+            mutableState.update { it.copy(isSourcePinned = true, downgrade = null, isSettingsOpen = false) }
             viewModelScope.launch { player.switchSource(source.fileId, SwitchTrigger.MANUAL) }
         }
 
@@ -208,6 +243,11 @@ public class PlayerViewModel
             // A different title: a pin on this episode's file says nothing about
             // which file of the next one the viewer wants.
             mutableState.update { it.copy(isOfferingNext = false, isSourcePinned = false, downgrade = null) }
+            episodeId = next.id
+            downgradeAttemptedFrom = null
+            // Asked again for the episode now playing, so the end of this one
+            // advances to the one after it rather than replaying it.
+            loadTitle()
             viewModelScope.launch {
                 player.play(
                     PlaybackRequest(
@@ -215,12 +255,41 @@ public class PlayerViewModel
                         episodeId = next.id,
                         fileId = nextFile,
                         title = next.title,
-                        subtitle = null,
+                        subtitle = "E${next.episodeNumber}",
                         artworkUrl = next.thumbnailUrl,
                         durationSecs = next.durationSecs,
                     ),
                 )
             }
+        }
+
+        /** Open or close the playback settings sheet. */
+        public fun setSettingsOpen(open: Boolean) {
+            mutableState.update { it.copy(isSettingsOpen = open, areControlsVisible = it.areControlsVisible || open) }
+        }
+
+        /**
+         * The screen became, or stopped being, a picture-in-picture window.
+         *
+         * Entering hides every overlay; the settings sheet is closed rather
+         * than left to reappear over the picture when the window grows back.
+         */
+        public fun setInPictureInPicture(inPictureInPicture: Boolean) {
+            mutableState.update {
+                it.copy(
+                    isInPictureInPicture = inPictureInPicture,
+                    isSettingsOpen = it.isSettingsOpen && !inPictureInPicture,
+                )
+            }
+        }
+
+        /**
+         * The viewer closed the picture-in-picture window. Closing it is
+         * stopping: playback would otherwise carry on with nothing on screen,
+         * audible and out of reach but for the notification.
+         */
+        public fun onPictureInPictureDismissed() {
+            player.pause()
         }
 
         /** Stop and release the decoder. */

@@ -9,6 +9,7 @@ package dev.beam.android.core.media.player
 
 import android.content.Context
 import android.content.pm.PackageManager
+import androidx.core.net.toUri
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
@@ -35,6 +36,8 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import uniffi.beam_client_core.BeamException
+import uniffi.beam_client_core.PlaybackPart
+import uniffi.beam_client_core.PlaybackPlan
 import uniffi.beam_client_core.RebufferMonitor
 import uniffi.beam_client_core.SwitchTrigger
 import uniffi.beam_client_core.TelemetryClientKind
@@ -66,7 +69,12 @@ internal class ExoBeamPlayer(
     /** When the open stall began, on [nowMs]'s clock. */
     private var stallStartedAtMs: ULong = 0uL
     private var positionTicker: Job? = null
+
+    /** The file playing: the source's own, or the part of it the player is in. */
     private var currentFileId: String? = null
+
+    /** Where the loaded source's parts sit end to end, for a switch to hold position. */
+    private var timeline: PartTimeline? = null
 
     /**
      * Whether rebuffering on this file is sustained. The rule is the core's;
@@ -98,7 +106,15 @@ internal class ExoBeamPlayer(
     }
 
     override suspend fun play(request: PlaybackRequest) {
-        val started = prepare(request, request.startPositionSecs)
+        // The resume position is within the file the request names, which for
+        // a multi-part movie is the part the viewer was last in.
+        val started =
+            prepare(request) { plan ->
+                PartPosition(
+                    index = plan.startPartIndex.toInt(),
+                    offsetMs = (request.startPositionSecs * ProgressReporter.MILLIS_PER_SECOND).toLong(),
+                )
+            }
         if (started) {
             exoPlayer.playWhenReady = true
         }
@@ -171,15 +187,19 @@ internal class ExoBeamPlayer(
         recorder.switched(from = request.fileId, to = fileId, trigger = trigger)
         // Read the position before tearing anything down: after `prepare` the
         // player has been reset and `currentPosition` is zero, so reading it
-        // afterwards would silently restart the title.
-        val resumeAtMs = exoPlayer.currentPosition
+        // afterwards would silently restart the title. Read as a moment of the
+        // whole film, not of the part playing, so a switch between a
+        // multi-part version and a whole file lands at the same scene.
+        val resumeAtMs =
+            timeline?.absoluteMs(exoPlayer.currentMediaItemIndex, exoPlayer.currentPosition)
+                ?: exoPlayer.currentPosition
         val wasPlaying = exoPlayer.playWhenReady
         val switched =
             request.copy(
                 fileId = fileId,
                 startPositionSecs = resumeAtMs / ProgressReporter.MILLIS_PER_SECOND,
             )
-        if (prepare(switched, switched.startPositionSecs)) {
+        if (prepare(switched) { plan -> plan.timeline().locate(resumeAtMs) }) {
             exoPlayer.playWhenReady = wasPlaying
         }
     }
@@ -192,6 +212,7 @@ internal class ExoBeamPlayer(
         exoPlayer.stop()
         exoPlayer.clearMediaItems()
         currentFileId = null
+        timeline = null
         mutableState.value = PlaybackUiState()
         recorder.end()
     }
@@ -206,45 +227,48 @@ internal class ExoBeamPlayer(
         rebuffers.close()
     }
 
+    /**
+     * Load the source [request] names, every part of it, and position the
+     * player where [startAt] says within that plan.
+     */
     private suspend fun prepare(
         request: PlaybackRequest,
-        startAtSecs: Double,
+        startAt: (PlaybackPlan) -> PartPosition,
     ): Boolean {
-        val config =
+        // Sources belong to a movie or an episode; a show has none of its own,
+        // so an episode's are asked for by the episode.
+        val titleId = request.episodeId ?: request.mediaId.takeIf { it.isNotEmpty() }
+        val plan =
             try {
-                repository.playbackConfig(request.fileId)
+                repository.playbackPlan(titleId, request.fileId)
             } catch (failure: BeamException) {
                 mutableState.update {
                     it.copy(request = request, error = failure.toFailure().asPlaybackFailure())
                 }
                 return false
             }
-
-        val item =
-            MediaItem
-                .Builder()
-                .setUri(config.url)
-                .setMediaId(request.fileId)
-                .setMediaMetadata(
-                    MediaMetadata
-                        .Builder()
-                        .setTitle(request.title)
-                        .setSubtitle(request.subtitle)
-                        .setArtworkUri(request.artworkUrl?.let(android.net.Uri::parse))
-                        .build(),
-                ).build()
+        if (plan.parts.isEmpty()) return false
 
         val factory =
-            beamDataSourceFactory(
-                context,
-                clients,
-                config.headers,
-                config.trustedFingerprints,
+            androidx.media3.exoplayer.source.DefaultMediaSourceFactory(
+                beamDataSourceFactory(
+                    context,
+                    clients,
+                    plan.headers,
+                    plan.trustedFingerprints,
+                ),
             )
-        val source =
-            androidx.media3.exoplayer.source
-                .DefaultMediaSourceFactory(factory)
-                .createMediaSource(item)
+        // One item per part (issue #233): the player moves to the next as one
+        // ends, and each is a direct play of its own file.
+        val sources =
+            plan.parts.mapIndexed { index, part ->
+                factory.createMediaSource(mediaItem(request, part, index, plan.parts.size))
+            }
+        val start =
+            startAt(plan).let { position ->
+                position.copy(index = position.index.coerceIn(0, plan.parts.lastIndex))
+            }
+        val startPart = plan.parts[start.index]
 
         // A different file: whatever the last one's stalls said about it, they
         // say nothing about this one.
@@ -252,26 +276,68 @@ internal class ExoBeamPlayer(
         recorder.begin(request.fileId)
         isStalled = false
         isFillingOnPurpose = true
-        exoPlayer.setMediaSource(source)
+        // Set before the items, so the transition the new playlist reports is
+        // recognised as this start rather than a move to the next part.
+        currentFileId = startPart.fileId
+        timeline = plan.timeline()
+        exoPlayer.setMediaSources(sources, start.index, start.offsetMs.coerceAtLeast(0L))
         exoPlayer.prepare()
-        if (startAtSecs > 0.0) {
-            exoPlayer.seekTo((startAtSecs * ProgressReporter.MILLIS_PER_SECOND).toLong())
-        }
 
-        currentFileId = request.fileId
         mutableState.value =
             PlaybackUiState(
                 request = request,
                 isBuffering = true,
                 durationMs =
-                    request.durationSecs
+                    (startPart.durationSecs ?: request.durationSecs.takeIf { plan.parts.size == 1 })
                         ?.let { (it * ProgressReporter.MILLIS_PER_SECOND).toLong() }
                         ?: PlaybackUiState.UNKNOWN_DURATION,
-                positionMs = (startAtSecs * ProgressReporter.MILLIS_PER_SECOND).toLong(),
+                positionMs = start.offsetMs.coerceAtLeast(0L),
+                partIndex = start.index,
+                partCount = plan.parts.size,
             )
-        reporter.start(request.fileId, ::sample)
+        reporter.start(startPart.fileId, ::sample)
         startPositionTicker()
         return true
+    }
+
+    private fun mediaItem(
+        request: PlaybackRequest,
+        part: PlaybackPart,
+        index: Int,
+        count: Int,
+    ): MediaItem {
+        // The lock screen says which part is playing, so "Part 2 of 2" is not
+        // mistaken for the film restarting.
+        val subtitle =
+            if (count > 1) {
+                listOfNotNull(request.subtitle, "Part ${index + 1} of $count").joinToString(" · ")
+            } else {
+                request.subtitle
+            }
+        return MediaItem
+            .Builder()
+            .setUri(part.url)
+            .setMediaId(part.fileId)
+            .setSubtitleConfigurations(
+                part.sidecarSubtitles.mapNotNull(::sidecarSubtitle).map { sidecar ->
+                    MediaItem.SubtitleConfiguration
+                        .Builder(sidecar.url.toUri())
+                        .setId(sidecar.id)
+                        .setMimeType(sidecar.mimeType)
+                        .setLanguage(sidecar.language)
+                        .setLabel(sidecar.label)
+                        .setSelectionFlags(sidecar.selectionFlags)
+                        .setRoleFlags(sidecar.roleFlags)
+                        .build()
+                },
+            ).setMediaMetadata(
+                MediaMetadata
+                    .Builder()
+                    .setTitle(request.title)
+                    .setSubtitle(subtitle)
+                    .setArtworkUri(request.artworkUrl?.let(android.net.Uri::parse))
+                    .build(),
+            ).build()
     }
 
     private fun applyOverride(
@@ -436,6 +502,33 @@ internal class ExoBeamPlayer(
         publishTracks(tracks)
     }
 
+    override fun onMediaItemTransition(
+        mediaItem: MediaItem?,
+        reason: Int,
+    ) {
+        val fileId = mediaItem?.mediaId ?: return
+        if (fileId == currentFileId || currentFileId == null) return
+        // The next part of the same source. Nothing is reported for the part
+        // that ended -- only the last part can mark the title played, and that
+        // is the server's call -- and from here progress is the new part's, at
+        // the position within it, which is what the server records.
+        reporter.stop()
+        currentFileId = fileId
+        recorder.partChanged(fileId)
+        rebuffers.reset()
+        isStalled = false
+        val index = exoPlayer.currentMediaItemIndex
+        mutableState.update {
+            it.copy(
+                partIndex = index,
+                positionMs = 0L,
+                durationMs = PlaybackUiState.UNKNOWN_DURATION,
+                isRebufferingSustained = false,
+            )
+        }
+        reporter.start(fileId, ::sample)
+    }
+
     override fun onRenderedFirstFrame() {
         recorder.firstFrame(selectedAudioTrackIndex())
     }
@@ -468,6 +561,10 @@ internal class ExoBeamPlayer(
     }
 }
 
+/** Where this plan's parts sit end to end. */
+internal fun PlaybackPlan.timeline(): PartTimeline =
+    PartTimeline(parts.map { part -> part.durationSecs?.let { (it * ProgressReporter.MILLIS_PER_SECOND).toLong() } })
+
 /** Stable identity for one track within a group. */
 internal fun trackId(
     group: Tracks.Group,
@@ -487,7 +584,7 @@ private fun Tracks.optionsOfType(trackType: Int): List<TrackOption> =
                 id = trackId(group, index),
                 label =
                     format.label
-                        ?: format.language
+                        ?: format.language?.let(::languageName)
                         ?: "Track ${index + 1}",
                 language = format.language,
                 isSelected = group.isTrackSelected(index),

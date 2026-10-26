@@ -51,9 +51,9 @@ internal object FfiProvidesModule {
      * The core itself.
      *
      * A singleton because it owns the per-server HTTP clients, the session
-     * cookies, and the metadata cache. Building a second one would silently
-     * halve the cache hit rate and give the two copies different ideas about
-     * which server is active.
+     * cookies, and the queued progress and telemetry. Building a second one
+     * would split the queues between two copies and give them different ideas
+     * about which server is active.
      */
     @Provides
     @Singleton
