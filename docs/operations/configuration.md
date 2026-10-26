@@ -38,6 +38,8 @@ optional variables unset/commented rather than blank.
 | `BEAM_ENRICH_MIN_CONFIDENCE` | `0.7` | Minimum overall match confidence, in `(0.0, 1.0]`, a candidate must reach before its metadata is applied. Higher is stricter (fewer false matches, more titles left un-enriched). |
 | `BEAM_TMDB_API_TOKEN` | unset | TMDB read-access token for `cameo` enrichment. Absent → TMDB-eligible titles are left un-enriched (never fails a scan). |
 | `BEAM_ANILIST_ENABLED` | `true` | Toggle AniList-sourced enrichment (needs no token). |
+| `BEAM_TVDB_API_KEY` | unset | TheTVDB v4 API key, for TheTVDB-sourced enrichment: series with their specials and absolute episode numbering, and movies. Asked after TMDB and AniList. Absent or empty → TheTVDB is not asked. |
+| `BEAM_TVDB_PIN` | unset | The subscriber PIN TheTVDB issues with a user-supported API key; unset for a licensed project key. |
 | `BEAM_METADATA_LANGUAGE` | unset | Preferred metadata language as a BCP-47 tag, e.g. `en` or `en-US` (lowercase language, uppercase region). Affects TMDB only — AniList has no language concept. Unset or empty → the provider's default. An invalid tag **fails startup** with an error naming the bad tag (an explicitly-set knob is never silently ignored; leaving it unset keeps the graceful warn-and-disable behavior for other cameo build failures). |
 | `BEAM_ARTWORK_CACHE_MAX_BYTES` | `1073741824` | Ceiling for the on-disk artwork cache under `BEAM_DATA_DIR/artwork`. Past it, the least recently served images are deleted. Sizing it below a library's artwork costs re-fetches, never correctness. |
 | `BEAM_ARTWORK_FETCH_TIMEOUT_SECS` | `10` | How long to wait on a provider CDN for one image. |
