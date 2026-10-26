@@ -1214,6 +1214,134 @@ async fn sources_name_the_callers_default_tracks() {
     );
 }
 
+/// Each part of a multi-part source names its subtitle default from its own
+/// subtitle files (issue #264): the second disc carries a Danish file before
+/// its English one, so its English track sits at a position the first
+/// disc's does not, and copying the source's index would name the Danish.
+#[tokio::test]
+async fn each_part_names_its_default_subtitle_from_its_own_tracks() {
+    use beam_domain::models::language_preferences::SubtitleMode;
+    use beam_domain::models::language_preferences::test_utils::prefs;
+    use beam_domain::models::sidecar::{SidecarInfo, SubtitleFormat, UpsertSidecarSubtitle};
+    use beam_domain::models::{
+        CreateMediaFile, CreateMovie, CreateMovieEntry, FileStatus, MediaFileContent,
+    };
+    use beam_domain::repositories::{FileRepository, MovieRepository, SidecarSubtitleRepository};
+
+    let library = Library::new();
+    let library_id = uuid::Uuid::new_v4();
+    let movie = library
+        .movies
+        .find_or_create_by_identity(CreateMovie::new("Heat", None, None))
+        .await
+        .unwrap();
+    let entry = library
+        .movies
+        .find_or_create_entry(CreateMovieEntry {
+            library_id,
+            movie_id: movie.id,
+            edition: None,
+        })
+        .await
+        .unwrap();
+    let mut parts = Vec::new();
+    for part_number in [1_u32, 2] {
+        let file = library
+            .files
+            .create(CreateMediaFile {
+                library_id,
+                path: std::path::PathBuf::from(format!("/videos/Heat/Heat - CD{part_number}.mkv")),
+                hash: u64::from(part_number),
+                size_bytes: 1024,
+                mtime: None,
+                identity: None,
+                mime_type: Some("video/x-matroska".to_string()),
+                duration: None,
+                container_format: None,
+                content: Some(MediaFileContent::Movie {
+                    movie_entry_id: entry.id,
+                    part_number: Some(part_number),
+                }),
+                status: FileStatus::Known,
+                classifier_version: 0,
+                container_tags: None,
+            })
+            .await
+            .unwrap();
+        parts.push(file.id);
+    }
+    let sidecar = |file_id: uuid::Uuid, name: &str, language: &str| UpsertSidecarSubtitle {
+        file_id,
+        library_id,
+        path: std::path::PathBuf::from(format!("/videos/Heat/{name}")),
+        info: SidecarInfo {
+            format: SubtitleFormat::Srt,
+            language: Some(language.to_string()),
+            title: None,
+            is_forced: false,
+            is_sdh: false,
+            is_default: false,
+        },
+        size_bytes: 1_000,
+        mtime: None,
+    };
+    let mut english = Vec::new();
+    for upsert in [
+        sidecar(parts[0], "Heat - CD1.eng.srt", "eng"),
+        sidecar(parts[1], "Heat - CD2.dan.srt", "dan"),
+        sidecar(parts[1], "Heat - CD2.eng.srt", "eng"),
+    ] {
+        let is_english = upsert.info.language.as_deref() == Some("eng");
+        let row = library.sidecars.upsert_by_path(upsert).await.unwrap();
+        if is_english {
+            english.push(row.id.to_string());
+        }
+    }
+    let state = state_with_service(real_service(library));
+    let viewer = uuid::Uuid::new_v4();
+    let token = session_for(&state, viewer).await;
+    state
+        .services
+        .language_preferences
+        .replace(viewer, &prefs(&[], &["eng"], SubtitleMode::On))
+        .await
+        .unwrap();
+
+    let body: serde_json::Value = client(state)
+        .get(&format!("/v1/media/{}/sources", movie.id))
+        .cookie("beam_session", &token)
+        .send()
+        .await
+        .assert_status(StatusCode::OK)
+        .json();
+
+    let source = &body["items"][0];
+    assert_eq!(
+        source["parts"]
+            .as_array()
+            .expect("an array")
+            .iter()
+            .map(|part| part["file_id"].as_str().expect("an id").to_owned())
+            .collect::<Vec<_>>(),
+        parts.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        "one source of both discs, in order"
+    );
+    assert_eq!(source["default_subtitle_track_index"], serde_json::json!(0));
+    let named = |part: &serde_json::Value| {
+        let index = part["default_subtitle_track_index"]
+            .as_u64()
+            .expect("a default subtitle track");
+        part["subtitle_tracks"][usize::try_from(index).unwrap()]["sidecar_id"].clone()
+    };
+    assert_eq!(named(&source["parts"][0]), serde_json::json!(english[0]));
+    assert_eq!(
+        source["parts"][1]["default_subtitle_track_index"],
+        serde_json::json!(1),
+        "the second disc's English file follows its Danish one"
+    );
+    assert_eq!(named(&source["parts"][1]), serde_json::json!(english[1]));
+}
+
 /// The preferences cannot be read: a 500, never sources whose defaults are
 /// silently someone else's choice.
 #[tokio::test]
