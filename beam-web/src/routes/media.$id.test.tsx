@@ -31,6 +31,14 @@ vi.mock("@/components/VideoPlayer", () => ({
 			>
 				Finish playback
 			</button>
+			<button
+				type="button"
+				onClick={() =>
+					(props.onProgress as (time: number, duration: number) => void)(5, 100)
+				}
+			>
+				Advance playback
+			</button>
 		</div>
 	),
 }));
@@ -123,8 +131,8 @@ function source(fileId: string, height: number, codec: string): MediaSource {
 				codec,
 				width: height * 2,
 				height,
-				frame_rate: null,
-				bit_rate: null,
+				frame_rate: 24,
+				bit_rate: 5_000_000,
 				hdr_format: null,
 			},
 		],
@@ -570,5 +578,125 @@ describe("/media/$id (show)", () => {
 				screen.getByText(/Failed to load media metadata/),
 			).toBeInTheDocument(),
 		);
+	});
+});
+
+describe("/media/$id (decoding quality)", () => {
+	type DecodingInfo = (
+		configuration: MediaDecodingConfiguration,
+	) => Promise<MediaCapabilitiesDecodingInfo>;
+
+	/** Give jsdom the `navigator.mediaCapabilities` it lacks, answering with
+	 * `decodingInfo`. Only these tests have it; every other test runs as the
+	 * browsers without the API do. */
+	function browserReports(decodingInfo: DecodingInfo) {
+		Object.defineProperty(navigator, "mediaCapabilities", {
+			configurable: true,
+			value: { decodingInfo },
+		});
+	}
+
+	/** Pictures up to `maxHeight` decode smoothly and power-efficiently. */
+	function hardwareUpTo(maxHeight: number): DecodingInfo {
+		return async (configuration) => {
+			const hardware = (configuration.video?.height ?? 0) <= maxHeight;
+			return {
+				supported: true,
+				smooth: hardware,
+				powerEfficient: hardware,
+				keySystemAccess: null,
+			} as MediaCapabilitiesDecodingInfo;
+		};
+	}
+
+	afterEach(() => {
+		Reflect.deleteProperty(navigator, "mediaCapabilities");
+	});
+
+	it("prefers a source the browser decodes in hardware over a software-only one listed first", async () => {
+		browserReports(hardwareUpTo(1080));
+		serveMedia({ Movie: movie }, [
+			source("file-4k", 2160, "h264"),
+			source("file-hd", 1080, "h264"),
+		]);
+		renderRoute("/media/movie-1");
+
+		await waitFor(() => expect(currentStreamSrc()).toContain("file-hd"));
+		// The software-only source is still offered, marked as such.
+		const fourK = screen.getByRole("option", { name: /2160p · h264/ });
+		expect(fourK).toBeEnabled();
+		expect(fourK).toHaveTextContent("decodes in software here");
+		expect(screen.queryByText(/may stutter/)).not.toBeInTheDocument();
+	});
+
+	it("plays the best source anyway when every one decodes in software, and says so", async () => {
+		browserReports(hardwareUpTo(0));
+		serveMedia({ Movie: movie }, [
+			source("file-4k", 2160, "h264"),
+			source("file-hd", 1080, "h264"),
+		]);
+		renderRoute("/media/movie-1");
+
+		expect(
+			await screen.findByText("H264 decodes in software here and may stutter"),
+		).toBeInTheDocument();
+		expect(currentStreamSrc()).toContain("file-4k");
+	});
+
+	it("does not swap out a source that has started playing when the answer arrives", async () => {
+		const user = userEvent.setup();
+		let answer: () => void = () => {};
+		const decide = hardwareUpTo(1080);
+		browserReports(
+			(configuration) =>
+				new Promise((resolve) => {
+					const previous = answer;
+					answer = () => {
+						previous();
+						resolve(decide(configuration));
+					};
+				}),
+		);
+		serveMedia({ Movie: movie }, [
+			source("file-4k", 2160, "h264"),
+			source("file-hd", 1080, "h264"),
+		]);
+		renderRoute("/media/movie-1");
+
+		// Chosen from the synchronous verdicts while the answer is pending.
+		await waitFor(() => expect(currentStreamSrc()).toContain("file-4k"));
+		await user.click(screen.getByRole("button", { name: "Advance playback" }));
+		answer();
+
+		// The answer arrives and marks the playing source software-only; the
+		// player keeps it.
+		expect(
+			await screen.findByText("H264 decodes in software here and may stutter"),
+		).toBeInTheDocument();
+		expect(currentStreamSrc()).toContain("file-4k");
+	});
+
+	it("refines the choice before playback has started", async () => {
+		let answer: () => void = () => {};
+		const decide = hardwareUpTo(1080);
+		browserReports(
+			(configuration) =>
+				new Promise((resolve) => {
+					const previous = answer;
+					answer = () => {
+						previous();
+						resolve(decide(configuration));
+					};
+				}),
+		);
+		serveMedia({ Movie: movie }, [
+			source("file-4k", 2160, "h264"),
+			source("file-hd", 1080, "h264"),
+		]);
+		renderRoute("/media/movie-1");
+
+		await waitFor(() => expect(currentStreamSrc()).toContain("file-4k"));
+		answer();
+		await waitFor(() => expect(currentStreamSrc()).toContain("file-hd"));
 	});
 });
