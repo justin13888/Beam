@@ -421,7 +421,7 @@ jobs:
       - run: mise run rust:test:pg
 
   openapi:
-    name: Generate OpenAPI artifacts
+    name: OpenAPI spec is current
     needs: [changes, ffmpeg]
     # Also on Rust changes: the spec is generated from the server's route
     # annotations, so a Rust-only change is exactly how it drifts.
@@ -437,7 +437,6 @@ jobs:
           rustflags: ""
       - uses: ./.github/actions/install-rust-build-deps
       - uses: ./.github/actions/setup-ffmpeg
-      - uses: ./.github/actions/bun-install
 
       # `beam-web/openapi.json` is committed, and it is the contract every
       # client is generated from. Fail when it no longer matches what the
