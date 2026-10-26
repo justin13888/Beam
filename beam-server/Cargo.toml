@@ -28,6 +28,11 @@ dotenvy = "0.15.7"
 eyre = "0.6.14"
 # `Sse` is generic over `futures_core::Stream`, which kynos does not re-export.
 futures-core = { workspace = true }
+# Artwork size variants (issue #266): decode, downscale and re-encode a cached
+# poster once per size. Pure-Rust codecs only -- no system libraries -- and
+# only the formats providers actually serve posters in; AVIF and GIF are
+# served at their original size rather than pulling in a C AV1 decoder.
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
 kynos = { workspace = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }

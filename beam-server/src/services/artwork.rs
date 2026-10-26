@@ -22,12 +22,20 @@
 //!   over `Bytes` would duplicate it while needing its own cap, its own
 //!   eviction and its own accounting. At poster size a warm read is a memcpy.
 //!
+//! A size a client asks for (issue #266) is one more entry of the same cache:
+//! resized from the cached original once, keyed by the URL and the width, and
+//! evicted by the same LRU under the same ceiling. Beam resizes itself rather
+//! than asking for a provider's sized rendition, because that would mean
+//! rewriting each provider's URL scheme -- TMDB has one, AniList has none --
+//! and every fetched URL would stop being one enrichment wrote.
+//!
 //! The index is what makes a hit one `open` rather than a directory scan, and
 //! it is rebuilt from the directory at startup, so the files on disk remain the
 //! thing that survives a restart.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -38,13 +46,118 @@ use beam_domain::providers::artwork::{
 use beam_domain::services::Clock;
 use bytes::Bytes;
 use sha2::{Digest, Sha256};
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 use tracing::{debug, warn};
 
 /// How many upstream failures are remembered at once. A ceiling rather than a
 /// policy: the TTL is what expires an entry, this only stops a provider
 /// failing across a whole library from growing the map without bound.
 const MAX_NEGATIVE_ENTRIES: usize = 4096;
+
+/// How many sizes are remembered as served at the original's size. Bounded
+/// for the same reason as [`MAX_NEGATIVE_ENTRIES`]; forgetting one only costs
+/// one more decode.
+const MAX_PASSTHROUGH_ENTRIES: usize = 4096;
+
+/// The widest or tallest image Beam will decode to resize. A provider's
+/// largest original backdrop is under 4,000 pixels wide; anything past this is
+/// a decompression bomb, not a poster, and is served at its original size.
+const MAX_DECODE_DIMENSION: u32 = 12_000;
+
+/// The most memory one decode may allocate. An 8,000 by 8,000 RGBA image is
+/// exactly this, so every real poster and backdrop fits with room to spare.
+const MAX_DECODE_ALLOC: u64 = 256 * 1024 * 1024;
+
+/// The JPEG quality a resized rendition is encoded at. High enough that a
+/// downscaled poster shows no blocking at the size it is drawn; the size win
+/// comes from the pixel count, not from starving the encoder.
+const RESIZED_JPEG_QUALITY: u8 = 85;
+
+/// What downscaling one image came to.
+#[derive(Debug)]
+enum Downscale {
+    /// A narrower rendition, ready to cache.
+    Resized(FetchedImage),
+    /// The original is already no wider than asked, so it is the rendition:
+    /// Beam never upscales.
+    AlreadyNarrow,
+    /// Beam does not resize this image -- a format it does not decode (GIF,
+    /// AVIF), or bytes that do not decode within the limits -- so it is served
+    /// at its original size, which every client can still draw.
+    NotResizable(String),
+}
+
+/// Scales `bytes` to `width` pixels wide, keeping the aspect ratio.
+///
+/// Synchronous and CPU-bound: the caller runs it on the blocking pool. The
+/// rendition is a PNG where the image has transparency and a JPEG where it has
+/// none, whatever the source was -- a poster has no use for lossless pixels,
+/// and a logo's transparency must survive.
+fn downscale(bytes: &[u8], format: ImageFormat, width: NonZeroU32) -> Downscale {
+    let codec = match format {
+        ImageFormat::Jpeg => image::ImageFormat::Jpeg,
+        ImageFormat::Png => image::ImageFormat::Png,
+        ImageFormat::WebP => image::ImageFormat::WebP,
+        ImageFormat::Gif | ImageFormat::Avif => {
+            return Downscale::NotResizable(format!("{} is not resized", format.extension()));
+        }
+    };
+
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_DECODE_DIMENSION);
+    limits.max_image_height = Some(MAX_DECODE_DIMENSION);
+    limits.max_alloc = Some(MAX_DECODE_ALLOC);
+
+    let mut reader = image::ImageReader::with_format(std::io::Cursor::new(bytes), codec);
+    reader.limits(limits);
+    let decoded = reader.into_decoder().and_then(|mut decoder| {
+        use image::ImageDecoder as _;
+        // The original is drawn upright by any client that honours its
+        // orientation tag, and the rendition carries no tag, so it is turned
+        // upright here or it would be served on its side.
+        let orientation = decoder.orientation()?;
+        let mut decoded = image::DynamicImage::from_decoder(decoder)?;
+        decoded.apply_orientation(orientation);
+        Ok(decoded)
+    });
+    let decoded = match decoded {
+        Ok(decoded) => decoded,
+        Err(err) => return Downscale::NotResizable(err.to_string()),
+    };
+
+    let (original_width, original_height) = (decoded.width(), decoded.height());
+    let width = width.get();
+    if original_width <= width {
+        return Downscale::AlreadyNarrow;
+    }
+    // Rounded to the nearest pixel, and never zero: a 4,000 by 1 strip scaled
+    // to 185 wide is still one pixel tall.
+    let height = (u64::from(original_height) * u64::from(width) + u64::from(original_width) / 2)
+        / u64::from(original_width);
+    let height = u32::try_from(height.max(1)).expect("narrower than the original, so it fits");
+    let resized = decoded.resize_exact(width, height, image::imageops::FilterType::Lanczos3);
+
+    let mut encoded = Vec::new();
+    let written = if resized.color().has_alpha() {
+        resized
+            .write_to(
+                &mut std::io::Cursor::new(&mut encoded),
+                image::ImageFormat::Png,
+            )
+            .map(|()| ImageFormat::Png)
+    } else {
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut encoded, RESIZED_JPEG_QUALITY)
+            .encode_image(&resized.to_rgb8())
+            .map(|()| ImageFormat::Jpeg)
+    };
+    match written {
+        Ok(format) => Downscale::Resized(FetchedImage {
+            bytes: encoded,
+            format,
+        }),
+        Err(err) => Downscale::NotResizable(err.to_string()),
+    }
+}
 
 /// The identity of one cached image: a digest of the URL it came from.
 ///
@@ -58,6 +171,16 @@ impl CacheKey {
     pub fn for_url(url: &str) -> Self {
         let digest = Sha256::digest(url.as_bytes());
         Self(beam_auth::utils::hex::encode_lower(&digest[..16]))
+    }
+
+    /// The key for `url` scaled to `width` pixels wide (issue #266).
+    ///
+    /// A digest like [`Self::for_url`]'s, so every size is its own file, its
+    /// own LRU entry and its own strong `ETag`, and it moves with the URL
+    /// exactly as the original's does. The NUL separator cannot occur in a
+    /// URL, so no sized key is ever the key of some other URL's original.
+    pub fn for_sized(url: &str, width: NonZeroU32) -> Self {
+        Self::for_url(&format!("{url}\0w{width}"))
     }
 
     pub fn as_str(&self) -> &str {
@@ -174,6 +297,14 @@ pub struct ArtworkCache {
     /// request holding it is done, rather than the map growing per key ever
     /// requested.
     lanes: Mutex<HashMap<CacheKey, std::sync::Weak<AsyncMutex<()>>>>,
+    /// Sized keys whose rendition is the original itself -- already narrow
+    /// enough, or not resizable -- so the decode that found that out is not
+    /// repeated per request. No TTL: the bytes under a URL never change.
+    passthrough: Mutex<HashSet<CacheKey>>,
+    /// Bounds how many resizes run at once. Each holds a decoded poster in
+    /// memory and a blocking thread busy, and a cold grid asks for dozens of
+    /// different posters at the same moment.
+    resizes: Semaphore,
 }
 
 impl ArtworkCache {
@@ -195,6 +326,10 @@ impl ArtworkCache {
             index: Mutex::new(Index::default()),
             negative: Mutex::new(HashMap::new()),
             lanes: Mutex::new(HashMap::new()),
+            passthrough: Mutex::new(HashSet::new()),
+            resizes: Semaphore::new(
+                std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get),
+            ),
         }
     }
 
@@ -323,6 +458,93 @@ impl ArtworkCache {
                 Err(err)
             }
         }
+    }
+
+    /// The image for `url` scaled to `width` pixels wide (issue #266), resized
+    /// once and cached beside the original under its own key.
+    ///
+    /// Where the original is no wider than `width`, or is not an image Beam
+    /// resizes, the original is the answer -- under the original's key, since
+    /// its bytes are the original's. A failure to fetch the original is the
+    /// only error: a size that cannot be made degrades to the full-size image
+    /// rather than to a broken one.
+    pub async fn get_sized(
+        &self,
+        url: &str,
+        width: NonZeroU32,
+    ) -> Result<CachedImage, ArtworkFetchError> {
+        let key = CacheKey::for_sized(url, width);
+
+        if self.is_passthrough(&key) {
+            return self.get(url).await;
+        }
+        if let Some(hit) = self.read(&key).await {
+            return Ok(hit);
+        }
+
+        // One resize per key at a time, as one fetch per key is: a grid of
+        // viewers asking for the same cold size decode it once.
+        let lane = self.lane(&key);
+        let _held = lane.lock().await;
+
+        if self.is_passthrough(&key) {
+            return self.get(url).await;
+        }
+        if let Some(hit) = self.read(&key).await {
+            return Ok(hit);
+        }
+
+        let original = self.get(url).await?;
+        let outcome = {
+            let _permit = self
+                .resizes
+                .acquire()
+                .await
+                .expect("the resize semaphore is never closed");
+            let bytes = original.bytes.clone();
+            let format = original.format;
+            tokio::task::spawn_blocking(move || downscale(&bytes, format, width)).await
+        };
+
+        match outcome {
+            Ok(Downscale::Resized(rendition)) => Ok(self.store(&key, rendition).await),
+            Ok(Downscale::AlreadyNarrow) => {
+                self.remember_passthrough(&key);
+                Ok(original)
+            }
+            Ok(Downscale::NotResizable(reason)) => {
+                debug!(%url, %width, %reason, "artwork served at its original size");
+                self.remember_passthrough(&key);
+                Ok(original)
+            }
+            // A decoder that panicked on these bytes will panic on them again,
+            // so this is remembered like any other image Beam cannot resize.
+            Err(err) => {
+                warn!(%url, %width, %err, "artwork resize did not finish");
+                self.remember_passthrough(&key);
+                Ok(original)
+            }
+        }
+    }
+
+    fn is_passthrough(&self, key: &CacheKey) -> bool {
+        self.passthrough
+            .lock()
+            .expect("artwork passthrough set poisoned")
+            .contains(key)
+    }
+
+    fn remember_passthrough(&self, key: &CacheKey) {
+        let mut passthrough = self
+            .passthrough
+            .lock()
+            .expect("artwork passthrough set poisoned");
+        // Forgetting is cheap -- one more decode -- so a full set is simply
+        // started over rather than ordered for eviction.
+        if passthrough.len() >= MAX_PASSTHROUGH_ENTRIES {
+            passthrough.clear();
+        }
+        passthrough.insert(key.clone());
     }
 
     /// The lane for `key`, shared with every other request for it.
