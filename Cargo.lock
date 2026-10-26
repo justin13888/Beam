@@ -730,6 +730,7 @@ dependencies = [
  "beam-entity",
  "beam-index",
  "beam-migration",
+ "beam-test-support",
  "bytes",
  "cameo",
  "chrono",

@@ -35,3 +35,7 @@ pub mod stack;
 pub mod wait;
 
 pub use stack::{Stack, StackOptions};
+
+/// The plain HTTP client the harness uses, for what the generated client
+/// deliberately does not cover: Dex's pages and byte-range media.
+pub use reqwest;
