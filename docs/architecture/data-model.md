@@ -293,6 +293,18 @@ composite PK -- one row per library granted to a user whose policy does not cove
 `idx_user_library_access_library_id` serves the library's cascade. A policy is replaced in one
 transaction and read in one statement, so a reader never sees half of two policies.
 
+### `user_language_preferences`
+The audio and subtitle languages one user prefers (issue #264), which name each source's default
+tracks in `GET /v1/media/{id}/sources`. A user with no row has the defaults -- no preferred
+language, forced subtitles only -- so nothing was backfilled.
+
+`user_id` (PK, FK `users`, cascade), `audio_languages` and `subtitle_languages` (TEXT[], not null
+-- ISO 639-2/B codes, most preferred first, at most 16, each three lowercase letters, held there by
+`user_language_preferences_audio_languages` and `user_language_preferences_subtitle_languages`),
+`subtitle_mode` (TEXT, not null -- `off`, `forced_only` or `on`, held there by
+`user_language_preferences_subtitle_mode`), `updated_at`. Replaced whole by one upsert on
+`user_id`.
+
 ### `movie_entries`
 A specific *edition* of a movie within a library — e.g. a theatrical cut vs. a director's cut, each
 potentially backed by its own file(s).

@@ -41,6 +41,17 @@ with a `url` to fetch them as stored and, for SubRip and WebVTT, a `webvtt_url` 
 WebVTT. Every URL in a source is relative to the server and authenticated by the session cookie
 like any other request.
 
+Each source also names the tracks to start on for the signed-in user:
+`default_audio_track_index` is a position in `audio_tracks` and `default_subtitle_track_index` a
+position in `subtitle_tracks`, both counted from 0, the subtitle one absent to start without
+subtitles. They follow the user's language preferences, which `GET /v1/me/language-preferences`
+reads and `PUT` replaces whole: `audio_languages` and `subtitle_languages`, each most preferred
+first and at most 16, and a `subtitle_mode` -- `off`, `forced_only` (the forced track in the
+audio's language, for a film's foreign-language dialogue; the default) or `on` (full subtitles in
+the first preferred language a source carries). A language is sent as `en`, `eng`, `English` or
+`en-GB` alike and answered as the code tracks carry, `eng`. With no preference that a source can
+meet, the file's own default track is chosen.
+
 ## Watched state
 
 Progress is kept per movie and per episode, not per file. `PUT /v1/files/{file_id}/progress`

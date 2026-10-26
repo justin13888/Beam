@@ -62,6 +62,7 @@ filtered yet (#328).
 | `/v1/auth/device` | POST | Start a device login (RFC 8628) for a client with no browser: user code, verification URI, opaque device handle. `501` when the IdP does not offer the grant ([ADR-0017](decisions/ADR-0017-device-authorization-grant.md)) |
 | `/v1/auth/device/token` | POST | Poll a device login once: `202` while waiting (`authorization_pending` / `slow_down`), `200` with the `beam_session` value on approval |
 | `/v1/me` | GET | Current user |
+| `/v1/me/language-preferences` | GET, PUT | The caller's `LanguagePreferenceSettings` (issue #264): `audio_languages` and `subtitle_languages`, each most preferred first and at most 16, and `subtitle_mode` (`off`, `forced_only`, `on`). A user who set nothing has empty lists and `forced_only`. `PUT` replaces the whole and answers what is stored, every language as its ISO 639-2/B code (`de`, `deu`, `German` and `de-AT` are all `ger`), a repeat keeping its first place; `422` `validation-failed` for an entry naming no language (`/audio_languages/N`, `/subtitle_languages/N`). Read by `/v1/media/{id}/sources` |
 | `/v1/logout`, `/v1/logout-all` | POST | End this session / all sessions |
 | `/v1/sessions`, `/v1/sessions/{id}` | GET, DELETE | List (a `SessionConnection`, never paged) / revoke own sessions; an id naming none of the caller's is `404 #session-not-found`, another user's included |
 | `/v1/admin/status` | GET | Dashboard snapshot: version, uptime, counts, enrichment progress, each metadata provider's configuration (`configured`, `not_configured`, `unavailable`, FR-307), recent scans, and the filesystem watcher's per-library mode (native, polling and why, unwatched) with the watch limit |
@@ -117,7 +118,19 @@ the file does not state -- a frame rate, a bit rate, a sample rate -- is absent 
 default. Subtitle tracks are the file's own, by index, then the subtitle files beside it
 (`origin: sidecar`, a `sidecar_id`, a `url`, and a `webvtt_url` for a SubRip or WebVTT file of at
 most 8 MiB); `is_text` says whether a client can render a track itself. An embedded track has no
-URL: Beam never extracts one ([ADR-0020](decisions/ADR-0020-text-subtitle-delivery.md)). It accepts
+URL: Beam never extracts one ([ADR-0020](decisions/ADR-0020-text-subtitle-delivery.md)). Each
+source names the tracks to start on for the caller
+([#264](https://github.com/justin13888/beam/issues/264)), by their
+`/v1/me/language-preferences`: `default_audio_track_index`, a position in `audio_tracks` (from 0)
+-- the first preferred audio language the source carries, the file's default track within it, else
+the file's default track, else the first; absent only with no audio -- and
+`default_subtitle_track_index`, a position in `subtitle_tracks`, absent to start without subtitles.
+`off` picks none; `forced_only` the forced track in the default audio track's language; `on` a full
+(not forced) track in the first preferred subtitle language carried -- with none listed, the full
+track the file marks default -- else what `forced_only` picks. A tie within one language prefers
+the file's default, then not SDH, then text, then list order. Each part carries its own
+`default_subtitle_track_index` into its own `subtitle_tracks`, chosen beside the source's default
+audio. The choice is `beam_domain::utils::track_selection`, a pure function. It accepts
 a movie id or an episode id; a show id is rejected with 400, since shows have no files of their
 own. Episode sources landed in [#102](https://github.com/justin13888/beam/pull/102), closing
 [#68](https://github.com/justin13888/beam/issues/68).
