@@ -70,5 +70,15 @@ public class MainViewModel
                     )
                 }
             }
+            viewModelScope.launch {
+                // Who administers what is per server: switching servers in
+                // settings, or signing in to another, changes it.
+                servers.servers.collect { known ->
+                    val session = known.firstOrNull { it.isActive }?.state
+                    mutableState.update {
+                        it.copy(isAdmin = (session as? SessionState.Authenticated)?.user?.isAdmin ?: false)
+                    }
+                }
+            }
         }
     }

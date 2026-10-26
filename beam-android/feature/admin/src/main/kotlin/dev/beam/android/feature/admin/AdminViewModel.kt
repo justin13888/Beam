@@ -7,8 +7,11 @@ import dev.beam.android.core.ffi.repository.AdminRepository
 import dev.beam.android.core.ffi.repository.CatalogRepository
 import dev.beam.android.core.ffi.toFailure
 import dev.beam.android.core.model.LoadState
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -19,6 +22,8 @@ import uniffi.beam_client_core.AdminUser
 import uniffi.beam_client_core.BeamException
 import uniffi.beam_client_core.LibrarySummary
 import uniffi.beam_client_core.PlaybackTelemetrySummary
+import uniffi.beam_client_core.ScanJob
+import uniffi.beam_client_core.ScanJobState
 import java.time.LocalDate
 import java.time.ZoneOffset
 import javax.inject.Inject
@@ -33,6 +38,12 @@ public data class AdminUiState(
     val users: List<AdminUser> = emptyList(),
     /** A library currently being scanned, so the row can say so. */
     val scanningLibraryId: String? = null,
+    /**
+     * Each library's latest scan since the server started, keyed by library
+     * id. A library with no entry has not been scanned since, or its scan
+     * could not be read; either way its row shows its last finished scan.
+     */
+    val scans: Map<String, ScanJob> = emptyMap(),
     /** The result of the last action, to show in a snackbar. */
     val message: String? = null,
     /** The days playback telemetry is shown for. */
@@ -116,16 +127,19 @@ public class AdminViewModel
                             val range = mutableState.value.previous()?.telemetryRange ?: TelemetryRange.LAST_30_DAYS
                             val telemetry = async { loadTelemetry(range) }
                             val (summary, telemetryError) = telemetry.await()
+                            val libraryList = libraries.await()
                             AdminUiState(
                                 status = status.await(),
-                                libraries = libraries.await(),
+                                libraries = libraryList,
                                 users = users.await(),
+                                scans = loadScans(libraryList.map { it.id }),
                                 telemetryRange = range,
                                 telemetry = summary,
                                 telemetryError = telemetryError,
                             )
                         }
                     mutableState.value = LoadState.Success(loaded)
+                    followRunningScans()
                 } catch (failure: BeamException) {
                     val reason = failure.toFailure()
                     mutableState.value =
@@ -229,6 +243,65 @@ public class AdminViewModel
             }
         }
 
+        /**
+         * The latest scan of each of [libraryIds], read side by side. A scan
+         * that cannot be read is left out rather than failing the dashboard:
+         * its row falls back to the library's last finished scan.
+         */
+        private suspend fun loadScans(libraryIds: List<String>): Map<String, ScanJob> =
+            coroutineScope {
+                libraryIds
+                    .map { id -> async { id to runCatching { admin.scanJob(id) }.getOrNull() } }
+                    .awaitAll()
+                    .mapNotNull { (id, job) -> job?.let { id to it } }
+                    .toMap()
+            }
+
+        /** The poll following a queued or running scan, while one is. */
+        private var scanFollower: Job? = null
+
+        /**
+         * Keep a queued or running scan's progress current until it finishes,
+         * so the operator watches it advance rather than pressing refresh.
+         *
+         * Bounded: a scan still running after [MAX_SCAN_POLLS] reads is left
+         * for the operator to refresh, rather than polled for as long as the
+         * screen is open. A finished scan changes its library's file count, so
+         * the libraries are read again then.
+         */
+        private fun followRunningScans() {
+            if (scanFollower?.isActive == true) return
+            scanFollower =
+                viewModelScope.launch {
+                    repeat(MAX_SCAN_POLLS) {
+                        val following =
+                            mutableState.value
+                                .previous()
+                                ?.scans
+                                ?.values
+                                ?.filter { it.state.isUnderWay() }
+                                .orEmpty()
+                        if (following.isEmpty()) return@launch
+                        delay(SCAN_POLL_MS)
+                        val updated = loadScans(following.map { it.libraryId })
+                        val libraries =
+                            if (updated.values.any { !it.state.isUnderWay() }) {
+                                runCatching { catalog.libraries() }.getOrNull()
+                            } else {
+                                null
+                            }
+                        mutableState.update {
+                            it.mapValue { state ->
+                                state.copy(
+                                    scans = state.scans + updated,
+                                    libraries = libraries ?: state.libraries,
+                                )
+                            }
+                        }
+                    }
+                }
+        }
+
         /** Telemetry for [range], or why it could not be had. */
         private suspend fun loadTelemetry(range: TelemetryRange): Pair<PlaybackTelemetrySummary?, String?> {
             val (from, to) = range.bounds(LocalDate.now(ZoneOffset.UTC))
@@ -284,8 +357,17 @@ public class AdminViewModel
 
         private companion object {
             const val USER_PAGE: UInt = 100u
+
+            /** How often a scan under way is read again. */
+            const val SCAN_POLL_MS: Long = 2_000L
+
+            /** How many reads a scan is followed for: fifteen minutes' worth. */
+            const val MAX_SCAN_POLLS: Int = 450
         }
     }
+
+/** Whether a scan is waiting or running, as opposed to finished either way. */
+internal fun ScanJobState.isUnderWay(): Boolean = this == ScanJobState.QUEUED || this == ScanJobState.RUNNING
 
 /** The problem type the server answers a scan of a library already being scanned with. */
 private const val SCAN_IN_PROGRESS = "#library-scan-in-progress"

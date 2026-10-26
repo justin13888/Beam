@@ -15,6 +15,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.CheckCircleOutline
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Tune
@@ -22,6 +24,7 @@ import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -68,6 +71,7 @@ public fun DetailRoute(
         onMessageShown = viewModel::clearMessage,
         onRetry = viewModel::refresh,
         modifier = modifier,
+        onSetWatched = viewModel::setWatched,
     )
 }
 
@@ -83,6 +87,7 @@ internal fun DetailScreen(
     onMessageShown: () -> Unit,
     onRetry: () -> Unit,
     modifier: Modifier = Modifier,
+    onSetWatched: (id: String, watched: Boolean) -> Unit = { _, _ -> },
 ) {
     val content = state.valueOrNull
     val snackbarHost = remember { SnackbarHostState() }
@@ -112,6 +117,7 @@ internal fun DetailScreen(
                 onPickSource = onPickSource,
                 onDismissPicker = onDismissPicker,
                 onDownload = onDownload,
+                onSetWatched = onSetWatched,
                 modifier = modifier,
             )
         }
@@ -138,6 +144,7 @@ private fun DetailContent(
     onPickSource: () -> Unit,
     onDismissPicker: () -> Unit,
     onDownload: (fileId: String, title: String, subtitle: String?) -> Unit,
+    onSetWatched: (id: String, watched: Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val summary = state.summary
@@ -192,6 +199,7 @@ private fun DetailContent(
                             summary.year?.toString(),
                             Format.runtime(summary.runtimeMinutes).takeIf(String::isNotEmpty),
                             summary.tmdbRating?.let { "$it%" },
+                            watchedLabel(state),
                         ),
                 )
             }
@@ -203,6 +211,7 @@ private fun DetailContent(
                 onPlay = onPlay,
                 onPickSource = onPickSource,
                 onDownload = onDownload,
+                onSetWatched = onSetWatched,
             )
         }
 
@@ -261,7 +270,20 @@ private fun DetailContent(
                 }
             }
 
-            item(key = "episodes-header") { SectionHeader(title = "Episodes") }
+            item(key = "episodes-header") {
+                // The whole season at once: the usual way to catch a library
+                // up with what was watched before Beam knew about it.
+                val season =
+                    state.seasons
+                        .firstOrNull { it.seasonNumber == state.selectedSeason }
+                        ?.takeIf { it.id.isNotEmpty() }
+                SectionHeader(
+                    title = "Episodes",
+                    actionLabel =
+                        season?.let { if (it.played) "Mark season unwatched" else "Mark season watched" },
+                    onAction = season?.let { shown -> { onSetWatched(shown.id, !shown.played) } },
+                )
+            }
 
             items(state.episodes, key = { it.id }) { episode ->
                 EpisodeRow(
@@ -271,6 +293,7 @@ private fun DetailContent(
                             onPlay(fileId, episode.id, episode.title, false)
                         }
                     },
+                    onToggleWatched = { onSetWatched(episode.id, !episode.played) },
                 )
             }
         }
@@ -283,6 +306,7 @@ private fun Actions(
     onPlay: (fileId: String, episodeId: String?, title: String, isSourcePicked: Boolean) -> Unit,
     onPickSource: () -> Unit,
     onDownload: (fileId: String, title: String, subtitle: String?) -> Unit,
+    onSetWatched: (id: String, watched: Boolean) -> Unit,
 ) {
     val playable = state.selection?.source
     Row(
@@ -321,6 +345,37 @@ private fun Actions(
                 Icon(Icons.Rounded.Tune, contentDescription = "Choose a source")
             }
         }
+
+        // The whole title: a film, or every episode of a series.
+        val played = state.summary.played
+        OutlinedButton(onClick = { onSetWatched(state.summary.id, !played) }) {
+            Icon(
+                imageVector = if (played) Icons.Rounded.CheckCircle else Icons.Rounded.CheckCircleOutline,
+                contentDescription = if (played) "Mark unwatched" else "Mark watched",
+            )
+        }
+    }
+}
+
+/**
+ * Whether the viewer has watched this, in words: "Watched" for a film or a
+ * finished series, "3 of 12 watched" for a series under way, nothing for one
+ * not started.
+ */
+internal fun watchedLabel(state: DetailUiState): String? {
+    val summary = state.summary
+    return when {
+        summary.played -> {
+            "Watched"
+        }
+
+        summary.watchedEpisodeCount > 0u && summary.episodeCount > 0u -> {
+            "${summary.watchedEpisodeCount} of ${summary.episodeCount} watched"
+        }
+
+        else -> {
+            null
+        }
     }
 }
 
@@ -328,6 +383,7 @@ private fun Actions(
 private fun EpisodeRow(
     episode: EpisodeSummary,
     onPlay: () -> Unit,
+    onToggleWatched: () -> Unit,
 ) {
     // An episode with no file is listed but not playable: the series has the
     // episode, this server does not have the file, and hiding it would make a
@@ -356,8 +412,30 @@ private fun EpisodeRow(
             }
         },
         trailingContent = {
-            episode.durationSecs?.let { seconds ->
-                Text(Format.timecode(seconds))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                episode.durationSecs?.let { seconds ->
+                    Text(Format.timecode(seconds))
+                }
+                // A tick that is also the toggle: watched episodes read at a
+                // glance, and marking one is a single tap on the same spot.
+                IconButton(onClick = onToggleWatched) {
+                    Icon(
+                        imageVector =
+                            if (episode.played) Icons.Rounded.CheckCircle else Icons.Rounded.CheckCircleOutline,
+                        contentDescription =
+                            if (episode.played) {
+                                "Mark episode ${episode.episodeNumber} unwatched"
+                            } else {
+                                "Mark episode ${episode.episodeNumber} watched"
+                            },
+                        tint =
+                            if (episode.played) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                    )
+                }
             }
         },
         modifier =

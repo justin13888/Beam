@@ -540,6 +540,103 @@ class PlayerTest {
             assertFalse(model.state.value.isSourcePinned)
         }
 
+    @Test
+    fun `advancing through a series asks what follows the episode now playing`() =
+        runTest {
+            // Up-next is the server's answer per episode. Holding on to the
+            // answer for the episode the screen opened on replayed the second
+            // episode at the end of the second episode.
+            val player = FakeBeamPlayer()
+            val catalog =
+                FakeCatalogRepository().apply {
+                    nextEpisodes["episode-1"] = Fixtures.episode(id = "episode-2", fileId = "file-2")
+                    nextEpisodes["episode-2"] = Fixtures.episode(id = "episode-3", fileId = "file-3")
+                }
+            val model =
+                viewModel(
+                    player = player,
+                    catalog = catalog,
+                    preferences = FakePreferencesRepository(UserPreferences(autoPlayNext = true)),
+                )
+            testScheduler.advanceUntilIdle()
+            model.start(request())
+            testScheduler.advanceUntilIdle()
+
+            player.finish()
+            testScheduler.advanceUntilIdle()
+            player.finish()
+            testScheduler.advanceUntilIdle()
+
+            assertEquals(listOf("file-1", "file-2", "file-3"), player.played.map { it.fileId })
+            assertEquals(listOf("episode-1", "episode-2", "episode-3"), catalog.upNextCalls.map { it.second })
+        }
+
+    @Test
+    fun `an episode's versions are asked for by the episode, not its show`() =
+        runTest {
+            // A show has no sources of its own; asking by the show listed none
+            // and left the version switcher empty for every episode.
+            val playback = FakePlaybackRepository()
+            val catalog =
+                FakeCatalogRepository().apply {
+                    nextEpisodes["episode-1"] = Fixtures.episode(id = "episode-2", fileId = "file-2")
+                }
+            val player = FakeBeamPlayer()
+            val model =
+                viewModel(
+                    player = player,
+                    catalog = catalog,
+                    playback = playback,
+                    preferences = FakePreferencesRepository(UserPreferences(autoPlayNext = true)),
+                )
+            testScheduler.advanceUntilIdle()
+            model.start(request())
+            testScheduler.advanceUntilIdle()
+            player.finish()
+            testScheduler.advanceUntilIdle()
+
+            assertEquals(listOf("episode-1", "episode-2"), playback.sourceRequests)
+        }
+
+    @Test
+    fun `the settings sheet opens over the controls and a version change closes it`() =
+        runTest {
+            val player = FakeBeamPlayer()
+            val model = viewModel(player = player)
+            testScheduler.advanceUntilIdle()
+            model.setControlsVisible(false)
+
+            model.setSettingsOpen(true)
+            assertTrue(model.state.value.isSettingsOpen)
+            assertTrue("the sheet is reached from the controls", model.state.value.areControlsVisible)
+
+            model.switchSource(Fixtures.source(fileId = "file-remux"))
+            testScheduler.advanceUntilIdle()
+
+            assertFalse(model.state.value.isSettingsOpen)
+            assertEquals(listOf("file-remux"), player.switched)
+        }
+
+    @Test
+    fun `a picture-in-picture window closes the sheet, and closing the window pauses`() =
+        runTest {
+            val player = FakeBeamPlayer()
+            val model = viewModel(player = player)
+            testScheduler.advanceUntilIdle()
+            model.start(request())
+            testScheduler.advanceUntilIdle()
+            model.setSettingsOpen(true)
+
+            model.setInPictureInPicture(true)
+            assertTrue(model.state.value.isInPictureInPicture)
+            assertFalse("no sheet reappears when the window grows back", model.state.value.isSettingsOpen)
+
+            model.onPictureInPictureDismissed()
+            testScheduler.advanceUntilIdle()
+
+            assertFalse(player.state.value.isPlaying)
+        }
+
     private fun smallerSource() =
         SourceSelection(
             source = Fixtures.source(fileId = "file-sd", width = 854u, height = 480u),

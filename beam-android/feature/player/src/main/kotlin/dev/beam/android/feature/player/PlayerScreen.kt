@@ -60,6 +60,10 @@ internal fun PlayerControls(
 ) {
     val playback = state.playback
 
+    // A picture-in-picture window shows the picture and nothing else: it is
+    // too small to touch, and the system draws its own controls over it.
+    if (state.isInPictureInPicture) return
+
     Box(modifier = modifier.fillMaxSize()) {
         if (playback.isBuffering) {
             CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
@@ -102,6 +106,21 @@ internal fun PlayerControls(
                         .safeDrawingPadding(),
             ) {
                 Icon(Icons.Rounded.Tune, contentDescription = "Playback settings")
+            }
+
+            // Position and duration are the part's, so the viewer is told
+            // which part they are in rather than seeing the film "restart".
+            if (playback.partCount > 1) {
+                Text(
+                    text = "Part ${playback.partIndex + 1} of ${playback.partCount}",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = Color.White,
+                    modifier =
+                        Modifier
+                            .align(Alignment.TopCenter)
+                            .safeDrawingPadding()
+                            .padding(top = BeamSpacing.Compact),
+                )
             }
 
             Row(

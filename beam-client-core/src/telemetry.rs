@@ -748,6 +748,7 @@ mod tests {
             RejectionReason::HdrUnsupported,
             RejectionReason::NoVideoStream,
             RejectionReason::SoftwareDecodeDisabled,
+            RejectionReason::DiscStructureUnsupported,
         ] {
             let (counted, stage) = StartFailureCause::Rejected { reason }
                 .classify()

@@ -33,6 +33,39 @@ class TelemetryRecorderTest {
         }
 
     @Test
+    fun `the next part of a source is not a new start, and its stalls are its own`() =
+        runTest {
+            val telemetry = FakeTelemetryRepository()
+            val recorder = recorder(telemetry, TestScope(testScheduler))
+
+            recorder.begin("cd1")
+            recorder.firstFrame(audioTrackIndex = 0u)
+            recorder.partChanged("cd2")
+            recorder.firstFrame(audioTrackIndex = 0u)
+            recorder.stalled(durationMs = 750L)
+
+            assertEquals(
+                listOf(TelemetryEvent.Start("cd1", 0u), TelemetryEvent.Rebuffer("cd2", 750uL)),
+                telemetry.allEvents,
+            )
+        }
+
+    @Test
+    fun `a part change after playback stopped reports nothing`() =
+        runTest {
+            val telemetry = FakeTelemetryRepository()
+            val recorder = recorder(telemetry, TestScope(testScheduler))
+
+            recorder.begin("cd1")
+            recorder.firstFrame(audioTrackIndex = 0u)
+            recorder.end()
+            recorder.partChanged("cd2")
+            recorder.stalled(durationMs = 750L)
+
+            assertEquals(listOf(TelemetryEvent.Start("cd1", 0u)), telemetry.allEvents)
+        }
+
+    @Test
     fun `a stall before the first frame is part of starting, not a rebuffer`() =
         runTest {
             val telemetry = FakeTelemetryRepository()

@@ -19,13 +19,19 @@ import uniffi.beam_client_core.MediaKind
 import uniffi.beam_client_core.MediaPage
 import uniffi.beam_client_core.MediaSourceView
 import uniffi.beam_client_core.MediaSummary
+import uniffi.beam_client_core.PlaybackPart
+import uniffi.beam_client_core.PlaybackPlan
 import uniffi.beam_client_core.PlaybackTelemetrySummary
 import uniffi.beam_client_core.RebufferBucket
 import uniffi.beam_client_core.RebufferBucketRow
+import uniffi.beam_client_core.ScanJob
+import uniffi.beam_client_core.ScanJobState
 import uniffi.beam_client_core.SeasonSummary
 import uniffi.beam_client_core.ServerSummary
 import uniffi.beam_client_core.SessionState
 import uniffi.beam_client_core.SourceSwitchRow
+import uniffi.beam_client_core.SubtitleOrigin
+import uniffi.beam_client_core.SubtitleTrackView
 import uniffi.beam_client_core.SwitchTrigger
 import uniffi.beam_client_core.UserSummary
 
@@ -48,6 +54,7 @@ public object Fixtures {
         runtimeMinutes: UInt? = 105u,
         tmdbRating: UInt? = 81u,
         description: String? = "A contract killer plans his last job.",
+        played: Boolean = false,
     ): MediaSummary =
         MediaSummary(
             id = id,
@@ -64,6 +71,7 @@ public object Fixtures {
             fileId = fileId,
             seasonCount = 0u,
             episodeCount = 0u,
+            played = played,
         )
 
     public fun show(
@@ -98,6 +106,7 @@ public object Fixtures {
         title: String = "Pilot",
         fileId: String? = "file-1",
         durationSecs: Double? = 3_120.0,
+        played: Boolean = false,
     ): EpisodeSummary =
         EpisodeSummary(
             id = id,
@@ -108,11 +117,13 @@ public object Fixtures {
             airDate = "2015-05-05",
             durationSecs = durationSecs,
             fileId = fileId,
+            played = played,
         )
 
     public fun season(
         number: UInt = 1u,
         episodes: List<EpisodeSummary> = listOf(episode()),
+        id: String = "season-$number",
     ): SeasonSummary =
         SeasonSummary(
             seasonNumber = number,
@@ -120,6 +131,9 @@ public object Fixtures {
             episodeRuntimeMinutes = 52u,
             genres = listOf("Thriller"),
             episodes = episodes,
+            id = id,
+            played = episodes.isNotEmpty() && episodes.all { it.played },
+            watchedEpisodeCount = episodes.count { it.played }.toUInt(),
         )
 
     public fun movieDetail(summary: MediaSummary = movie()): MediaDetail = MediaDetail.Movie(summary)
@@ -237,6 +251,80 @@ public object Fixtures {
             baseUrl = "https://beam.local:8000",
             state = state,
             isActive = isActive,
+        )
+
+    /** A plan of [parts], starting in the one at [startIndex]. */
+    public fun plan(
+        parts: List<PlaybackPart> = listOf(part()),
+        startIndex: UInt = 0u,
+    ): PlaybackPlan =
+        PlaybackPlan(
+            parts = parts,
+            startPartIndex = startIndex,
+            headers = mapOf("Cookie" to "beam_session=test"),
+            trustedFingerprints = emptyList(),
+            pinnedHost = "beam.test",
+        )
+
+    /** One part of a [plan]. */
+    public fun part(
+        fileId: String = "file-1",
+        durationSecs: Double? = 3_000.0,
+        sidecars: List<SubtitleTrackView> = emptyList(),
+    ): PlaybackPart =
+        PlaybackPart(
+            fileId = fileId,
+            url = "https://beam.test/v1/files/$fileId/stream",
+            durationSecs = durationSecs,
+            sidecarSubtitles = sidecars,
+        )
+
+    /** A subtitle file beside a media file. */
+    public fun sidecar(
+        id: String = "sidecar-1",
+        codec: String = "subrip",
+        language: String? = "eng",
+        title: String? = null,
+        isForced: Boolean = false,
+        isHearingImpaired: Boolean = false,
+        webvtt: Boolean = false,
+    ): SubtitleTrackView =
+        SubtitleTrackView(
+            origin = SubtitleOrigin.SIDECAR,
+            index = null,
+            sidecarId = id,
+            codec = codec,
+            language = language,
+            title = title,
+            isDefault = false,
+            isForced = isForced,
+            isHearingImpaired = isHearingImpaired,
+            isText = true,
+            url = "https://beam.test/v1/files/file-1/subtitles/$id",
+            webvttUrl = if (webvtt) "https://beam.test/v1/files/file-1/subtitles/$id/webvtt" else null,
+        )
+
+    /** The latest scan of a library. */
+    public fun scanJob(
+        libraryId: String = "library-1",
+        state: ScanJobState = ScanJobState.RUNNING,
+        processed: ULong = 30uL,
+        total: ULong? = 120uL,
+        failure: String? = null,
+    ): ScanJob =
+        ScanJob(
+            id = "scan-$libraryId",
+            libraryId = libraryId,
+            state = state,
+            totalCount = total,
+            processedCount = processed,
+            addedCount = 12uL,
+            changedCount = 3uL,
+            failedCount = 0uL,
+            missingCount = 1uL,
+            finishedAtUnix =
+                if (state == ScanJobState.SUCCEEDED || state == ScanJobState.FAILED) 1_767_225_900L else null,
+            failure = failure,
         )
 
     public fun user(

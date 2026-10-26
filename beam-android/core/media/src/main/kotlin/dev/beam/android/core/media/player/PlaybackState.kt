@@ -33,6 +33,14 @@ public data class PlaybackUiState(
     val subtitleTracks: List<TrackOption> = emptyList(),
     /** Why playback stopped, phrased for a person. */
     val error: PlaybackFailure? = null,
+    /** Which part of a multi-part source is playing, from 0. */
+    val partIndex: Int = 0,
+    /**
+     * How many parts the source plays (issue #233); 1 for a whole file.
+     * Position and duration are always the current part's: that is what the
+     * server records progress against.
+     */
+    val partCount: Int = 1,
 ) {
     /**
      * Fraction watched, or null while the duration is unknown.

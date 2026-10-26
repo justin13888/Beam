@@ -285,6 +285,82 @@ class DetailTest {
             )
         }
 
+    /** A two-season show, its second season's episode in the given state. */
+    private fun twoSeasons(secondWatched: Boolean) =
+        Fixtures.showDetail(
+            seasons =
+                listOf(
+                    Fixtures.season(number = 1u, episodes = listOf(Fixtures.episode(id = "s1e1"))),
+                    Fixtures.season(
+                        number = 2u,
+                        episodes = listOf(Fixtures.episode(id = "s2e1", played = secondWatched)),
+                    ),
+                ),
+        )
+
+    @Test
+    fun `marking an episode watched tells the server and shows what it now says`() =
+        runTest {
+            val catalog = FakeCatalogRepository().apply { details[MEDIA_ID] = twoSeasons(secondWatched = false) }
+            val playback = FakePlaybackRepository()
+            val model = viewModel(catalog = catalog, playback = playback)
+            testScheduler.advanceUntilIdle()
+            model.selectSeason(2u)
+            // What the server answers once the mark has landed.
+            catalog.details[MEDIA_ID] = twoSeasons(secondWatched = true)
+
+            model.setWatched("s2e1", watched = true)
+            testScheduler.advanceUntilIdle()
+
+            assertEquals(setOf("s2e1"), playback.watched)
+            val state = model.state.value.valueOrNull!!
+            assertTrue("the title is read back after the mark", state.episodes.single().played)
+            assertEquals("the season on screen stays on screen", 2u, state.selectedSeason)
+        }
+
+    @Test
+    fun `marking unwatched takes the mark back`() =
+        runTest {
+            val playback = FakePlaybackRepository().apply { watched += "s2e1" }
+            val model = viewModel(playback = playback)
+            testScheduler.advanceUntilIdle()
+
+            model.setWatched("s2e1", watched = false)
+            testScheduler.advanceUntilIdle()
+
+            assertTrue(playback.watched.isEmpty())
+        }
+
+    @Test
+    fun `a mark the server refuses says so and keeps the page`() =
+        runTest {
+            val playback = FakePlaybackRepository()
+            val model = viewModel(playback = playback)
+            testScheduler.advanceUntilIdle()
+            playback.failWith = BeamException.Network("offline", true)
+
+            model.setWatched("episode-1", watched = true)
+            testScheduler.advanceUntilIdle()
+
+            val state = model.state.value
+            assertTrue("the page is still there", state is LoadState.Success)
+            assertNotNull(state.valueOrNull?.message)
+            assertTrue(playback.watched.isEmpty())
+        }
+
+    @Test
+    fun `how much of a title is watched reads as words`() {
+        fun label(summary: uniffi.beam_client_core.MediaSummary) =
+            watchedLabel(DetailUiState(detail = Fixtures.movieDetail(summary)))
+
+        assertEquals("Watched", label(Fixtures.movie(played = true)))
+        assertNull("nothing to say about a title not started", label(Fixtures.movie()))
+        assertEquals(
+            "3 of 12 watched",
+            label(Fixtures.show(episodeCount = 12u).copy(watchedEpisodeCount = 3u)),
+        )
+    }
+
     private companion object {
         const val MEDIA_ID = "media-1"
     }

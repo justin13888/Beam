@@ -6,7 +6,7 @@
 //! integration test can assert against the same fixtures.
 
 use super::{DecoderCapability, DeviceProfile};
-use crate::capability::select::{AudioTrackView, MediaSourceView};
+use crate::capability::select::{AudioTrackView, DiscStructure, MediaSourceView, SourcePartView};
 
 /// Builds a [`DeviceProfile`] a test can reason about.
 #[derive(Debug, Clone)]
@@ -190,6 +190,9 @@ impl MediaSourceBuilder {
                 }],
                 stream_url: format!("/v1/files/{file_id}/stream"),
                 download_url: format!("/v1/files/{file_id}/download"),
+                parts: Vec::new(),
+                disc_structure: None,
+                subtitle_tracks: Vec::new(),
             },
         }
     }
@@ -252,6 +255,31 @@ impl MediaSourceBuilder {
         self.source.video_codec = None;
         self.source.width = None;
         self.source.height = None;
+        self
+    }
+
+    /// Mark the source as a disc folder rip of the given structure.
+    #[must_use]
+    pub fn disc(mut self, structure: DiscStructure) -> Self {
+        self.source.disc_structure = Some(structure);
+        self
+    }
+
+    /// Replace the parts, each `(file_id, duration_secs)`, numbered from 1.
+    #[must_use]
+    pub fn parts(mut self, parts: &[(&str, f64)]) -> Self {
+        self.source.parts = parts
+            .iter()
+            .zip(1_u32..)
+            .map(|((file_id, duration), number)| SourcePartView {
+                file_id: (*file_id).to_owned(),
+                part_number: Some(number),
+                size_bytes: 0,
+                duration_secs: Some(*duration),
+                stream_url: format!("/v1/files/{file_id}/stream"),
+                subtitle_tracks: Vec::new(),
+            })
+            .collect();
         self
     }
 

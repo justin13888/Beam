@@ -314,10 +314,11 @@ which does not cross-compile to Android.
   host, and it has not expired.
 - **`transport.rs`** — attaches the `beam_session` cookie below the generated code, as a spargen
   middleware, and notices a mid-session 401 in one place rather than at every call site.
-- **`upnext.rs`, `progress.rs`, `paging.rs`, `session.rs`, `servers.rs`, `catalog.rs`** — next
-  playable episode across season boundaries, the 15-second progress throttle with a durable retry
-  queue, Relay cursor state, the auth state machine, the multi-server registry, and the mapping
-  from generated wire types to the vocabulary a UI renders.
+- **`progress.rs`, `paging.rs`, `session.rs`, `servers.rs`, `catalog.rs`** — the 15-second
+  progress throttle with a durable retry queue, Relay cursor state, the auth state machine, the
+  multi-server registry, and the mapping from generated wire types to the vocabulary a UI renders.
+  Which episode plays next is the server's `next_episode_id`, not worked out in the core, and a
+  continue-watching or history row is drawn from its own display fields with no lookup per row.
 
 **Testing:** 152 tests, all pure or against an `InMemoryKeyValueStore`. Certificates in the TLS
 tests are generated with `rcgen` rather than hand-built, so they cannot disagree with reality.

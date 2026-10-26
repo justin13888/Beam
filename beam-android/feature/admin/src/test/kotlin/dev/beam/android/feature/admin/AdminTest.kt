@@ -4,6 +4,7 @@ import dev.beam.android.core.model.LoadState
 import dev.beam.android.core.model.valueOrNull
 import dev.beam.android.core.testing.FakeAdminRepository
 import dev.beam.android.core.testing.FakeCatalogRepository
+import dev.beam.android.core.testing.Fixtures
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -19,6 +20,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import uniffi.beam_client_core.BeamException
+import uniffi.beam_client_core.ScanJobState
 import java.time.LocalDate
 import java.time.temporal.ChronoUnit
 
@@ -273,5 +275,134 @@ class AdminTest {
     fun `a failure rate with nothing attempted is zero, not a division by zero`() {
         assertEquals("0%", percent(failureRate(started = 0uL, failed = 0uL)))
         assertEquals("25%", percent(failureRate(started = 3uL, failed = 1uL)))
+    }
+
+    @Test
+    fun `a started scan is shown queued at once`() =
+        runTest {
+            val admin = FakeAdminRepository()
+            val viewModel = AdminViewModel(admin, FakeCatalogRepository())
+            testScheduler.advanceUntilIdle()
+
+            viewModel.scan("library-1")
+            testScheduler.runCurrent()
+
+            assertEquals(
+                ScanJobState.QUEUED,
+                viewModel.state.value.valueOrNull!!
+                    .scans["library-1"]
+                    ?.state,
+            )
+        }
+
+    @Test
+    fun `a running scan is followed until it finishes, and its library read again`() =
+        runTest {
+            val admin =
+                FakeAdminRepository().apply {
+                    scanJobs["library-1"] = Fixtures.scanJob(state = ScanJobState.RUNNING, processed = 30uL)
+                }
+            val catalog = FakeCatalogRepository()
+            val viewModel = AdminViewModel(admin, catalog)
+            testScheduler.runCurrent()
+            assertEquals(
+                30uL,
+                viewModel.state.value.valueOrNull!!
+                    .scans["library-1"]
+                    ?.processedCount,
+            )
+
+            // The server moves on; the dashboard follows without a refresh.
+            admin.scanJobs["library-1"] = Fixtures.scanJob(state = ScanJobState.SUCCEEDED, processed = 120uL)
+            catalog.libraryList = listOf(Fixtures.library(size = 520u))
+            testScheduler.advanceUntilIdle()
+
+            val state = viewModel.state.value.valueOrNull!!
+            assertEquals(ScanJobState.SUCCEEDED, state.scans["library-1"]?.state)
+            assertEquals("a finished scan changes the count", 520u, state.libraries.single().size)
+
+            // Nothing under way: nothing more is read.
+            val reads = admin.scanJobReads
+            testScheduler.advanceTimeBy(60_000L)
+            testScheduler.runCurrent()
+            assertEquals(reads, admin.scanJobReads)
+        }
+
+    @Test
+    fun `a scan that is never seen to finish is not followed forever`() =
+        runTest {
+            val admin =
+                FakeAdminRepository().apply {
+                    scanJobs["library-1"] = Fixtures.scanJob(state = ScanJobState.RUNNING)
+                }
+            AdminViewModel(admin, FakeCatalogRepository())
+            testScheduler.advanceUntilIdle()
+
+            val reads = admin.scanJobReads
+            testScheduler.advanceTimeBy(60 * 60_000L)
+            testScheduler.runCurrent()
+            assertEquals("the follow has stopped on its own", reads, admin.scanJobReads)
+        }
+
+    @Test
+    fun `a scan that cannot be read leaves the dashboard standing`() =
+        runTest {
+            val admin =
+                FakeAdminRepository().apply {
+                    scanJobFailWith = BeamException.Network("offline", true)
+                }
+            val viewModel = AdminViewModel(admin, FakeCatalogRepository())
+            testScheduler.advanceUntilIdle()
+
+            val state = viewModel.state.value
+            assertTrue(state is LoadState.Success)
+            assertTrue(state.valueOrNull!!.scans.isEmpty())
+        }
+
+    @Test
+    fun `adding a library says it was added`() =
+        runTest {
+            val viewModel = AdminViewModel(FakeAdminRepository(), FakeCatalogRepository())
+            testScheduler.advanceUntilIdle()
+
+            viewModel.createLibrary("Anime", "/media/anime")
+            testScheduler.advanceUntilIdle()
+
+            assertEquals(
+                "Added Anime.",
+                viewModel.state.value.valueOrNull!!
+                    .message,
+            )
+        }
+
+    @Test
+    fun `a scan reads as where it is and what it changed`() {
+        assertEquals("Scan queued", scanSummary(Fixtures.scanJob(state = ScanJobState.QUEUED)))
+        assertEquals(
+            "Scanning 30 of 120",
+            scanSummary(Fixtures.scanJob(state = ScanJobState.RUNNING, processed = 30uL, total = 120uL)),
+        )
+        assertEquals(
+            "Scanning, 30 so far",
+            scanSummary(Fixtures.scanJob(state = ScanJobState.RUNNING, processed = 30uL, total = null)),
+        )
+        assertEquals(
+            "Scanned · 12 added, 3 changed, 1 missing",
+            scanSummary(Fixtures.scanJob(state = ScanJobState.SUCCEEDED)),
+        )
+        assertEquals(
+            "Scan failed: the library folder is gone",
+            scanSummary(Fixtures.scanJob(state = ScanJobState.FAILED, failure = "the library folder is gone")),
+        )
+    }
+
+    @Test
+    fun `a scan's progress bar is determinate only once the files are counted`() {
+        assertEquals(0.25f, Fixtures.scanJob(processed = 30uL, total = 120uL).scanFraction())
+        assertNull(Fixtures.scanJob(total = null).scanFraction())
+        assertNull(
+            "an empty library is not 0% of nothing",
+            Fixtures.scanJob(processed = 0uL, total = 0uL).scanFraction(),
+        )
     }
 }

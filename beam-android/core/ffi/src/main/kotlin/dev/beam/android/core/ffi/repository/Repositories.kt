@@ -19,9 +19,11 @@ import uniffi.beam_client_core.MediaDetail
 import uniffi.beam_client_core.MediaPage
 import uniffi.beam_client_core.MediaSourceView
 import uniffi.beam_client_core.PlaybackHttpConfig
+import uniffi.beam_client_core.PlaybackPlan
 import uniffi.beam_client_core.PlaybackTelemetrySummary
 import uniffi.beam_client_core.ProgressOutcome
 import uniffi.beam_client_core.QualityPolicy
+import uniffi.beam_client_core.ScanJob
 import uniffi.beam_client_core.ServerHealth
 import uniffi.beam_client_core.ServerSummary
 import uniffi.beam_client_core.SessionState
@@ -161,6 +163,24 @@ public interface PlaybackRepository {
     /** URL, headers and pins for the platform player to fetch bytes itself. */
     public suspend fun playbackConfig(fileId: String): PlaybackHttpConfig
 
+    /**
+     * Every part of the source [fileId] belongs to, in order, with which to
+     * start in, and the headers and pins to fetch them with.
+     *
+     * [titleId] is the movie or episode the file belongs to; null, or a
+     * lookup that fails, plans [fileId] alone.
+     */
+    public suspend fun playbackPlan(
+        titleId: String?,
+        fileId: String,
+    ): PlaybackPlan
+
+    /** Mark a movie, an episode, a season or a whole show watched. */
+    public suspend fun markWatched(id: String)
+
+    /** Mark a movie, an episode, a season or a whole show unwatched. */
+    public suspend fun markUnwatched(id: String)
+
     /** Partially-watched titles, ready to resume. */
     public suspend fun continueWatching(limit: UInt?): List<ContinueWatchingEntry>
 
@@ -288,6 +308,12 @@ public interface AdminRepository {
      * scan itself runs on the server afterwards.
      */
     public suspend fun scanLibrary(libraryId: String)
+
+    /**
+     * The latest scan of a library since the server started, running or
+     * finished; null when it has not been scanned since.
+     */
+    public suspend fun scanJob(libraryId: String): ScanJob?
 
     /** Re-fetch metadata for one title. */
     public suspend fun refreshMetadata(mediaId: String)

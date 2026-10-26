@@ -22,9 +22,11 @@ import uniffi.beam_client_core.MediaDetail
 import uniffi.beam_client_core.MediaPage
 import uniffi.beam_client_core.MediaSourceView
 import uniffi.beam_client_core.PlaybackHttpConfig
+import uniffi.beam_client_core.PlaybackPlan
 import uniffi.beam_client_core.PlaybackTelemetrySummary
 import uniffi.beam_client_core.ProgressOutcome
 import uniffi.beam_client_core.QualityPolicy
+import uniffi.beam_client_core.ScanJob
 import uniffi.beam_client_core.ServerHealth
 import uniffi.beam_client_core.ServerSummary
 import uniffi.beam_client_core.SessionState
@@ -165,6 +167,15 @@ internal class BeamPlaybackRepository
 
         override suspend fun playbackConfig(fileId: String): PlaybackHttpConfig = client.playbackConfig(fileId)
 
+        override suspend fun playbackPlan(
+            titleId: String?,
+            fileId: String,
+        ): PlaybackPlan = client.playbackPlan(titleId, fileId)
+
+        override suspend fun markWatched(id: String) = client.markWatched(id)
+
+        override suspend fun markUnwatched(id: String) = client.markUnwatched(id)
+
         override suspend fun continueWatching(limit: UInt?): List<ContinueWatchingEntry> =
             client.continueWatching(limit)
 
@@ -266,6 +277,8 @@ internal class BeamAdminRepository
         override suspend fun deleteLibrary(libraryId: String) = client.deleteLibrary(libraryId)
 
         override suspend fun scanLibrary(libraryId: String) = client.scanLibrary(libraryId)
+
+        override suspend fun scanJob(libraryId: String): ScanJob? = client.libraryScan(libraryId)
 
         override suspend fun refreshMetadata(mediaId: String) = client.refreshMediaMetadata(mediaId)
 

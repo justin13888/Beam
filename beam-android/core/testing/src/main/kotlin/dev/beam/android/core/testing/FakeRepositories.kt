@@ -32,9 +32,12 @@ import uniffi.beam_client_core.MediaDetail
 import uniffi.beam_client_core.MediaPage
 import uniffi.beam_client_core.MediaSourceView
 import uniffi.beam_client_core.PlaybackHttpConfig
+import uniffi.beam_client_core.PlaybackPlan
 import uniffi.beam_client_core.PlaybackTelemetrySummary
 import uniffi.beam_client_core.ProgressOutcome
 import uniffi.beam_client_core.QualityPolicy
+import uniffi.beam_client_core.ScanJob
+import uniffi.beam_client_core.ScanJobState
 import uniffi.beam_client_core.ServerHealth
 import uniffi.beam_client_core.ServerSummary
 import uniffi.beam_client_core.SessionState
@@ -138,12 +141,23 @@ public class FakeCatalogRepository : CatalogRepository {
         return files
     }
 
+    /**
+     * The episode after each episode, keyed by the current one: a series the
+     * player can advance through more than once. [nextEpisode] answers for
+     * any episode not listed here.
+     */
+    public val nextEpisodes: MutableMap<String, EpisodeSummary> = mutableMapOf()
+
+    /** Every `(showId, currentEpisodeId)` [upNext] was asked about, in order. */
+    public val upNextCalls: MutableList<Pair<String, String>> = mutableListOf()
+
     override suspend fun upNext(
         showId: String,
         currentEpisodeId: String,
     ): EpisodeSummary? {
+        upNextCalls += showId to currentEpisodeId
         failWith?.let { throw it }
-        return nextEpisode
+        return nextEpisodes[currentEpisodeId] ?: nextEpisode
     }
 }
 
@@ -195,7 +209,11 @@ public class FakePlaybackRepository : PlaybackRepository {
         deviceProfile = profile
     }
 
+    /** Every title [sources] was asked about, in order. */
+    public val sourceRequests: MutableList<String> = mutableListOf()
+
     override suspend fun sources(mediaId: String): List<MediaSourceView> {
+        sourceRequests += mediaId
         failWith?.let { throw it }
         return sourceList
     }
@@ -240,6 +258,39 @@ public class FakePlaybackRepository : PlaybackRepository {
             trustedFingerprints = emptyList(),
             pinnedHost = "beam.test",
         )
+    }
+
+    /** Plans [playbackPlan] answers, keyed by the file asked for; any other file is planned alone. */
+    public val plans: MutableMap<String, PlaybackPlan> = mutableMapOf()
+
+    /** Every `(titleId, fileId)` [playbackPlan] was asked for, in order. */
+    public val planRequests: MutableList<Pair<String?, String>> = mutableListOf()
+
+    override suspend fun playbackPlan(
+        titleId: String?,
+        fileId: String,
+    ): PlaybackPlan {
+        planRequests += titleId to fileId
+        failWith?.let { throw it }
+        return plans[fileId] ?: Fixtures.plan(listOf(Fixtures.part(fileId)))
+    }
+
+    /**
+     * The ids the viewer has marked watched and not since unmarked.
+     *
+     * A set rather than a call log, so marking then unmarking reads back as
+     * unwatched -- what the server would answer.
+     */
+    public val watched: MutableSet<String> = mutableSetOf()
+
+    override suspend fun markWatched(id: String) {
+        failWith?.let { throw it }
+        watched += id
+    }
+
+    override suspend fun markUnwatched(id: String) {
+        failWith?.let { throw it }
+        watched -= id
     }
 
     override suspend fun continueWatching(limit: UInt?): List<ContinueWatchingEntry> {
@@ -585,6 +636,26 @@ public class FakeAdminRepository : AdminRepository {
     override suspend fun scanLibrary(libraryId: String) {
         failWith?.let { throw it }
         scanCalls += libraryId
+        // As the server does: an accepted scan is the library's latest job,
+        // queued until its turn.
+        scanJobs[libraryId] = Fixtures.scanJob(libraryId = libraryId, state = ScanJobState.QUEUED)
+    }
+
+    /** The latest scan of each library, keyed by library id; absent means none since start. */
+    public val scanJobs: MutableMap<String, ScanJob> = mutableMapOf()
+
+    /** Set to make [scanJob] alone fail, like [usersFailWith]. */
+    public var scanJobFailWith: BeamException? = null
+
+    /** How many times [scanJob] was asked, across every library. */
+    public var scanJobReads: Int = 0
+        private set
+
+    override suspend fun scanJob(libraryId: String): ScanJob? {
+        scanJobReads++
+        scanJobFailWith?.let { throw it }
+        failWith?.let { throw it }
+        return scanJobs[libraryId]
     }
 
     override suspend fun refreshMetadata(mediaId: String) {
