@@ -18191,7 +18191,7 @@
                 "type": "null"
               }
             ],
-            "description": "The highest band the user sees; absent for no maximum. Under a\nmaximum, a title whose certification is not one listed on\n`ContentRatingBand` -- or that has none yet -- is hidden."
+            "description": "The highest band the user sees; absent for no maximum. Under a\nmaximum, a title whose certification falls in no band -- or that has\nnone yet -- is hidden."
           }
         },
         "type": "object",

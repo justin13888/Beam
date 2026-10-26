@@ -539,8 +539,8 @@ pub struct UserAccess {
     /// particular order; empty sees none.
     pub library_ids: Vec<Uuid>,
     /// The highest band the user sees; absent for no maximum. Under a
-    /// maximum, a title whose certification is not one listed on
-    /// `ContentRatingBand` -- or that has none yet -- is hidden.
+    /// maximum, a title whose certification falls in no band -- or that has
+    /// none yet -- is hidden.
     pub max_content_rating: Option<ContentRatingBand>,
 }
 

@@ -22,6 +22,15 @@ All routes live under `/v1` and (except `/v1/health` and the OIDC login/callback
 `beam_session` cookie (see `security.md`). Admin routes additionally require the resolved admin
 role.
 
+Every route that reads or delivers a title applies the caller's access policy (issue #263; see
+`security.md`): browse lists only the titles it admits, the library reads only the granted
+libraries, continue-watching and history drop the rows it hides, and every route given the id of a
+hidden title -- or of its season, episode, file, subtitle or art -- answers exactly as for an id
+naming nothing, with the same `404` and problem type. A title's detail and browse row carry the
+provider's certification as `content_rating` (absent while none is known). The `/v1/admin`
+operations are not filtered; people, collections, genres and the watchlist and favourites are not
+filtered yet (#328).
+
 | Route | Method(s) | Purpose |
 |---|---|---|
 | `/v1/health` | GET | Deep health check (public): probes the database and returns `200` `{status:"healthy"}` or `503` `{status:"degraded"}` with per-dependency `checks` (each `{status: "ok" \| "error", detail}`, `detail` the failure reason), `checked_at` and process `uptime_secs` |
@@ -58,6 +67,7 @@ role.
 | `/v1/admin/status` | GET | Dashboard snapshot: version, uptime, counts, enrichment progress, each metadata provider's configuration (`configured`, `not_configured`, `unavailable`, FR-307), recent scans, and the filesystem watcher's per-library mode (native, polling and why, unwatched) with the watch limit |
 | `/v1/admin/users` | GET | User accounts, oldest first: an `AdminUserConnection` paged by `first` (1-100, default 50) and `after`, with `total` |
 | `/v1/admin/users/{id}` | PATCH | Block or unblock an account |
+| `/v1/admin/users/{id}/access` | GET, PUT | What one user may see (`UserAccess`): `all_libraries`, the granted `library_ids` otherwise, and `max_content_rating` (a `ContentRatingBand`, absent for none). `PUT` replaces the whole policy and answers what is stored; `422` `validation-failed` for a library id naming nothing (`/library_ids/N`) or ids beside `all_libraries: true` (`/library_ids`); `404` `user-not-found` |
 | `/v1/admin/libraries`, `/v1/admin/libraries/{id}` | POST, DELETE | Library management; deleting a library cancels its scan and waits for it to stop (at most 30 s on the injected clock) before its rows go, then forgets its latest scan job |
 | `/v1/admin/libraries/{id}/scan` | POST, GET | Start a scan: `202` with the scan job, queued, and the scan runs in the background; `409` `library-scan-in-progress` while one is queued or running. `GET` reads the latest job since the server started (`404` `scan-not-found` before one). `{id}` is a UUID (`format: uuid`); a malformed one is the path extractor's `400` `about:blank` |
 | `/v1/admin/media/{id}/refresh` | POST | Queue a title for another enrichment pass, keeping its match, or with `?rematch=true` discarding it to be matched afresh (`204`) |

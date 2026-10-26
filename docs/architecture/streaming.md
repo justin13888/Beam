@@ -142,7 +142,9 @@ The correctness bar is standard HTTP semantics, not media semantics:
   Requests without a `Range` header get `200` with the full body.
 - `Content-Type` comes from `files.mime_type` (with a container-derived fallback);
   `Content-Length` always reflects the bytes actually being sent.
-- Responses carry `Cache-Control: public, max-age=3600` and a size-derived `ETag` as a coarse
+- Responses carry `Cache-Control: private, max-age=3600` -- private because whether a file is
+  served at all depends on who asks (per-user access, issue #263), so a shared cache must never
+  answer one viewer with what it stored for another -- and a size-derived `ETag` as a coarse
   validator; a changed file is caught by the indexer's `mtime`/`hash_xxh3` change detection (see
   `data-model.md`).
 

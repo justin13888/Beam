@@ -121,6 +121,7 @@ files represent it. Nullable metadata columns are populated by the enrichment wo
 | `anilist_id` | INTEGER | yes | unique — AniList's numeric media ID |
 | `rating_tmdb` | FLOAT | yes | |
 | `rating_imdb` | FLOAT | yes | |
+| `content_rating` | TEXT | yes | the provider's certification (`PG-13`), 1-32 characters (`movies_content_rating_length`), a recognised one in its canonical spelling (`beam_domain::models::access`). Written by enrichment on every match, NULL when the provider reports none; compared against a user's maximum content rating (issue #263). cameo 0.2.0 reports none yet (justin13888/cameo#59) |
 | `created_at` | TIMESTAMPTZ | no | |
 | `updated_at` | TIMESTAMPTZ | no | |
 
@@ -140,7 +141,8 @@ as for movies, pinned by a `tvshow.nfo`), `pin_source` (as for movies), `title_l
 `backdrop_url`, `tmdb_id`/`imdb_id`/`tvdb_id`/`anilist_id` (each unique, nullable),
 `rating_tmdb` (REAL, nullable — the provider rating on the same 0-10 scale as
 `movies.rating_tmdb`; added by `m20261003_000001_catalogue_browse` and filled on a show's next
-enrichment), `created_at`, `updated_at`.
+enrichment), `content_rating` (TEXT, nullable -- as `movies.content_rating`, a TV certification
+such as `TV-14`; `shows_content_rating_length`), `created_at`, `updated_at`.
 
 ### Title identity and lifetime
 
@@ -270,6 +272,26 @@ Many-to-many junctions linking a `libraries` row to the `movies`/`shows` rows di
 | `library_shows` | `library_id`, `show_id` | both `ON DELETE CASCADE` |
 
 Each has a secondary index on the non-library side (`movie_id` / `show_id`) for reverse lookups.
+
+These links are what per-user access reads (issue #263): a user granted some libraries sees a
+title when one of its links names one of them.
+
+### `user_access_policies` / `user_library_access`
+What an administrator restricted a user to (issue #263). A user with no `user_access_policies` row
+is unrestricted -- every library, no ceiling -- as every user was before the tables existed, and
+lifting every restriction deletes the row and the user's grants rather than storing an
+unrestricted one.
+
+`user_access_policies`: `user_id` (PK, FK `users`, cascade), `all_libraries` (BOOLEAN, not null --
+every library, those created later included, or only the granted ones), `max_content_rating`
+(TEXT, nullable -- the highest age band of `beam_domain::models::access::ContentRating` the user
+may see, held to its names by `user_access_policies_max_content_rating`; NULL for no ceiling),
+`updated_at`.
+
+`user_library_access`: `user_id` (FK `users`, cascade), `library_id` (FK `libraries`, cascade),
+composite PK -- one row per library granted to a user whose policy does not cover every library.
+`idx_user_library_access_library_id` serves the library's cascade. A policy is replaced in one
+transaction and read in one statement, so a reader never sees half of two policies.
 
 ### `movie_entries`
 A specific *edition* of a movie within a library — e.g. a theatrical cut vs. a director's cut, each
