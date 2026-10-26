@@ -167,7 +167,7 @@
           "media"
         ],
         "summary": "Poster, backdrop or thumbnail art for one title.",
-        "description": "Beam fetches the image from the metadata provider once and serves it from\nits own cache thereafter, so a viewer's browser never contacts TMDB or\nAniList and those CDNs never see who is looking at what (ADR-0015).\n\nThe URL is stable across re-enrichment; the strong `ETag` is what changes\nwhen a title's artwork does, so clients revalidate rather than re-download.\nA title with no art, an id that does not exist, and a variant that does not\napply to this kind of title are all `404` -- every client already renders a\nplaceholder for that. An id that is not a UUID is a `400`, as on every\nother route that takes a media id.",
+        "description": "Beam fetches the image from the metadata provider once and serves it from\nits own cache thereafter, so a viewer's browser never contacts TMDB or\nAniList and those CDNs never see who is looking at what (ADR-0015).\n\nThe URL is stable across re-enrichment; the strong `ETag` is what changes\nwhen a title's artwork does, so clients revalidate rather than re-download.\n`size` asks for a narrower rendition, resized once and cached beside the\noriginal; each size has its own `ETag`.\n\nA title with no art, an id that does not exist, and a variant that does\nnot apply to this kind of title are all `404` -- every client already\nrenders a placeholder for that. An id that is not a UUID is a `400`, as on every\nother route that takes a media id.",
         "operationId": "getArtwork",
         "parameters": [
           {
@@ -196,6 +196,22 @@
             "required": true,
             "schema": {
               "$ref": "#/components/schemas/ArtworkVariant"
+            }
+          },
+          {
+            "name": "size",
+            "in": "query",
+            "description": "Scale the image to this width, keeping its aspect ratio; omit it for\nthe original. An image already no wider than this, or a GIF or AVIF,\nis served at its original size -- Beam never upscales. Each size is\nits own resource with its own `ETag`.",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/ArtworkSize"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           {
@@ -527,6 +543,22 @@
             "required": true,
             "schema": {
               "$ref": "#/components/schemas/ArtworkVariant"
+            }
+          },
+          {
+            "name": "size",
+            "in": "query",
+            "description": "Scale the image to this width, keeping its aspect ratio; omit it for\nthe original. An image already no wider than this, or a GIF or AVIF,\nis served at its original size -- Beam never upscales. Each size is\nits own resource with its own `ETag`.",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/ArtworkSize"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           {
@@ -16162,6 +16194,17 @@
           "profile"
         ],
         "description": "Which image of that title.\n\nNot every pairing exists -- an episode has a thumbnail and no poster, a\nseason has a poster and no backdrop -- and the ones that do not are a 404,\nthe same answer as a title that simply has no art yet."
+      },
+      "ArtworkSize": {
+        "type": "string",
+        "enum": [
+          "w185",
+          "w342",
+          "w500",
+          "w780",
+          "w1280"
+        ],
+        "description": "How wide an image a client wants (issue #266): a fixed ladder of widths, in\npixels.\n\nA ladder rather than any width a client names, because every size is a file\nin the cache: an open integer would let one client fill\n`BEAM_ARTWORK_CACHE_MAX_BYTES` with a thousand renditions of one poster. The\nrungs match the widths TMDB serves, which is where the art usually comes\nfrom, so a client that already knows those sizes picks the same ones here. A\nclient picks the smallest rung at least as wide as the pixels it draws."
       },
       "Title": {
         "properties": {

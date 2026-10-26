@@ -176,8 +176,10 @@ pub struct ServerConfig {
     /// Ceiling for the on-disk artwork cache, in bytes. Beam serves poster
     /// and backdrop art itself (ADR-0015), caching it under
     /// `BEAM_DATA_DIR/artwork`; once the total exceeds this, the least
-    /// recently served entries are deleted. Sizing it below a library's
-    /// artwork costs re-fetches, never correctness.
+    /// recently served entries are deleted. The resized renditions clients
+    /// ask for with `?size=` are entries of the same cache under the same
+    /// ceiling. Sizing it below a library's artwork costs re-fetches and
+    /// re-resizes, never correctness.
     #[config(env = "BEAM_ARTWORK_CACHE_MAX_BYTES", default = 1_073_741_824)]
     pub artwork_cache_max_bytes: u64,
 

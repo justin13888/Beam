@@ -147,6 +147,12 @@ they are needed again. Setting it smaller than your library's artwork costs a li
 never a broken poster. It needs no pruning or invalidation of its own: when enrichment finds
 different artwork for a title, that is a different image, and the old one ages out on its own.
 
+Clients ask for posters and backdrops at the width they draw them — a phone's grid does not
+download a full-size poster. Your server makes each size from the cached original the first time
+it is asked for, and keeps it in the same cache under the same cap, so a library browsed on
+several devices holds a few sizes of each poster rather than one. An image already narrower than
+the size asked for is served as it is; Beam never enlarges art.
+
 Two things follow that are worth knowing:
 
 - **Artwork now uses your server's bandwidth.** If viewers watch from outside your network, the

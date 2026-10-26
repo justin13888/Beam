@@ -117,6 +117,17 @@ files, subtitles and artwork -- answers `404` exactly as for an id that does not
 maximum rating, a title with no certification Beam recognises is hidden. A movie's or show's
 `content_rating` is the provider's certification, absent while none is known.
 
+## Artwork
+
+Every `poster_url`, `backdrop_url`, `thumbnail_url` and `profile_url` is a relative path on the
+server itself, `GET /v1/artwork/{kind}/{id}/{variant}`, never a provider link. Add `size` to fetch
+a narrower rendition: one of `w185`, `w342`, `w500`, `w780` and `w1280`, a width in pixels, with
+the height following the image's aspect ratio. Pick the smallest at least as wide as the pixels the
+image is drawn at. Without `size` the image is the original. An original already no wider than the
+size asked for, or a GIF or AVIF, is served as it is, because Beam never enlarges art. Any other
+`size` is a `400`. Each size has its own strong `ETag`, which changes when the title's artwork
+does, so revalidate with `If-None-Match` rather than download again.
+
 ## Real-time updates
 
 Administrative events — scan progress, enrichment outcomes — are delivered over **Server-Sent

@@ -26,10 +26,11 @@ use kynos::http::etag::ETag;
 use kynos::prelude::*;
 use kynos::response::range::served::{Conditions, Served};
 use kynos::response::range::source::InMemory;
+use serde::{Deserialize, Serialize};
 use tracing::error;
 use uuid::Uuid;
 
-use crate::models::media::{ArtworkKind, ArtworkVariant};
+use crate::models::media::{ArtworkKind, ArtworkSize, ArtworkVariant};
 use crate::routes::api_error::{ArtworkError, SessionAuth};
 use crate::routes::delivery::{AnyMedia, MediaRanges, RuntimeDelivery};
 use crate::routes::playback::{caller_access, hides};
@@ -45,6 +46,16 @@ pub struct ArtworkPath {
     pub id: Uuid,
     /// Which image of it.
     pub variant: ArtworkVariant,
+}
+
+/// How the artwork endpoint is sized.
+#[derive(Debug, Default, Serialize, Deserialize, Schema, QueryParams)]
+pub struct ArtworkQuery {
+    /// Scale the image to this width, keeping its aspect ratio; omit it for
+    /// the original. An image already no wider than this, or a GIF or AVIF,
+    /// is served at its original size -- Beam never upscales. Each size is
+    /// its own resource with its own `ETag`.
+    pub size: Option<ArtworkSize>,
 }
 
 /// The media-type ranges an artwork delivery answers with.
@@ -140,6 +151,7 @@ async fn deliver(
     state: &AppState,
     auth: &SessionAuth,
     path: &ArtworkPath,
+    size: Option<ArtworkSize>,
     conditions: &Conditions,
 ) -> Result<ArtworkDelivery, ArtworkError> {
     // The art of a title the caller may not see is the art of a title that
@@ -166,7 +178,11 @@ async fn deliver(
         return Err(ArtworkError::NotFound("No artwork for this title".into()));
     };
 
-    let image = state.services.artwork.get(&url).await.map_err(|err| {
+    let fetched = match size {
+        Some(size) => state.services.artwork.get_sized(&url, size.width()).await,
+        None => state.services.artwork.get(&url).await,
+    };
+    let image = fetched.map_err(|err| {
         match err {
             // The provider no longer has it, or never had it. To a viewer this
             // is the same as a title with no art: a placeholder, not an error
@@ -239,19 +255,24 @@ async fn deliver(
 ///
 /// The URL is stable across re-enrichment; the strong `ETag` is what changes
 /// when a title's artwork does, so clients revalidate rather than re-download.
-/// A title with no art, an id that does not exist, and a variant that does not
-/// apply to this kind of title are all `404` -- every client already renders a
-/// placeholder for that. An id that is not a UUID is a `400`, as on every
+/// `size` asks for a narrower rendition, resized once and cached beside the
+/// original; each size has its own `ETag`.
+///
+/// A title with no art, an id that does not exist, and a variant that does
+/// not apply to this kind of title are all `404` -- every client already
+/// renders a placeholder for that. An id that is not a UUID is a `400`, as on every
 /// other route that takes a media id.
 #[kynos::get("/artwork/{kind}/{id}/{variant}", tag = Media, operation_id = "getArtwork")]
 #[tracing::instrument(skip_all)]
 pub async fn get_artwork(
     auth: SessionAuth,
     Path(path): Path<ArtworkPath>,
+    Query(query): Query<ArtworkQuery>,
     conditions: Conditions,
     Inject(state): Inject<AppState>,
 ) -> Result<ArtworkDelivery, ArtworkError> {
-    deliver(&state, &auth, &path, &conditions).await
+    let ArtworkQuery { size } = query;
+    deliver(&state, &auth, &path, size, &conditions).await
 }
 
 /// Headers for [`get_artwork`], without the image.
@@ -263,10 +284,12 @@ pub async fn get_artwork(
 pub async fn head_artwork(
     auth: SessionAuth,
     Path(path): Path<ArtworkPath>,
+    Query(query): Query<ArtworkQuery>,
     conditions: Conditions,
     Inject(state): Inject<AppState>,
 ) -> Result<ArtworkDelivery, ArtworkError> {
-    deliver(&state, &auth, &path, &conditions).await
+    let ArtworkQuery { size } = query;
+    deliver(&state, &auth, &path, size, &conditions).await
 }
 
 #[path = "artwork_tests.rs"]
