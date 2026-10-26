@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::services::artwork::{ArtworkCache, ArtworkCacheConfig, CacheKey};
+    use crate::services::artwork::{ArtworkCache, ArtworkCacheConfig, CacheKey, downscale};
     use beam_domain::providers::artwork::test_utils::InMemoryArtworkFetcher;
     use beam_domain::providers::artwork::{ArtworkFetchError, ImageFormat};
     use beam_domain::services::{Clock, TestClock};
@@ -562,6 +562,92 @@ mod tests {
             .expect_err("no original, no rendition");
 
         assert_eq!(err, ArtworkFetchError::NotFound);
+    }
+
+    /// A request dropped mid-decode -- a client disconnecting from a cold
+    /// grid -- must not release the resize permit or the lane while its
+    /// blocking decode carries on, or cancelled requests could run more
+    /// decodes than the bound allows and a retry could start a second decode
+    /// of the same key. The resize is gated so the request is provably inside
+    /// the decode when it is dropped.
+    #[tokio::test]
+    async fn a_request_dropped_mid_decode_holds_its_permit_and_lane_until_the_decode_ends() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Mutex, mpsc};
+
+        let root = TempDir::new().unwrap();
+        let fetcher = Arc::new(InMemoryArtworkFetcher::new().with_image(
+            POSTER,
+            ImageFormat::Jpeg,
+            &jpeg(1000, 1500),
+        ));
+        let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let release_rx = Mutex::new(release_rx);
+        let decodes = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&decodes);
+        let cache = Arc::new(
+            sized_cache(&root, 10_000_000, &fetcher)
+                .await
+                .with_downscaler(move |bytes, format, width| {
+                    // Only the first decode is held open; the retry runs free.
+                    if counted.fetch_add(1, Ordering::SeqCst) == 0 {
+                        started_tx.send(()).expect("the test is listening");
+                        release_rx
+                            .lock()
+                            .expect("release receiver poisoned")
+                            .recv()
+                            .expect("the test releases the decode");
+                    }
+                    downscale(bytes, format, width)
+                }),
+        );
+        let key = CacheKey::for_sized(POSTER, width(342));
+        let permits = cache.resizes.available_permits();
+
+        let request = tokio::spawn({
+            let cache = Arc::clone(&cache);
+            async move { cache.get_sized(POSTER, width(342)).await }
+        });
+        started_rx.recv().await.expect("the decode starts");
+        request.abort();
+        assert!(
+            request
+                .await
+                .expect_err("the request was dropped")
+                .is_cancelled(),
+            "the request must be dropped while its decode runs",
+        );
+
+        assert_eq!(
+            cache.resizes.available_permits(),
+            permits - 1,
+            "the running decode still holds its resize permit",
+        );
+        assert!(
+            cache.lane(&key).try_lock().is_err(),
+            "the running decode still holds the lane, so a retry cannot start a second one",
+        );
+
+        release_tx.send(()).expect("the decode is waiting");
+        // The lane comes free only once the blocking task has finished and its
+        // output -- the guard -- has been dropped with nobody to receive it.
+        drop(cache.lane(&key).lock().await);
+        assert_eq!(
+            cache.resizes.available_permits(),
+            permits,
+            "the permit is returned when the decode ends",
+        );
+
+        // The cancelled request's rendition went with it, so a retry decodes
+        // again -- after the first, never beside it.
+        let served = cache
+            .get_sized(POSTER, width(342))
+            .await
+            .expect("a rendition");
+        assert_eq!(served.key, key);
+        assert_eq!(decodes.load(Ordering::SeqCst), 2);
+        assert_eq!(fetcher.call_count(), 1);
     }
 
     /// Sizes share the one ceiling: a rendition is an LRU entry like any

@@ -159,6 +159,22 @@ fn downscale(bytes: &[u8], format: ImageFormat, width: NonZeroU32) -> Downscale 
     }
 }
 
+/// The resize the cache runs on the blocking pool: [`downscale`] in the
+/// process, and a test's wrapper around it where a test has to pause a decode
+/// at a known point -- which is the only way to observe what a request
+/// dropped mid-decode still holds.
+#[derive(Clone)]
+struct Downscaler(Arc<DownscaleFn>);
+
+/// The shape of [`downscale`].
+type DownscaleFn = dyn Fn(&[u8], ImageFormat, NonZeroU32) -> Downscale + Send + Sync;
+
+impl std::fmt::Debug for Downscaler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Downscaler")
+    }
+}
+
 /// The identity of one cached image: a digest of the URL it came from.
 ///
 /// Hex, and half a SHA-256 -- 128 bits is far past collision relevance for a
@@ -306,6 +322,7 @@ pub struct ArtworkCache {
     /// different posters at the same moment. `Arc` so a permit can be owned by
     /// the blocking decode itself rather than by the request awaiting it.
     resizes: Arc<Semaphore>,
+    downscaler: Downscaler,
 }
 
 impl ArtworkCache {
@@ -331,7 +348,19 @@ impl ArtworkCache {
             resizes: Arc::new(Semaphore::new(
                 std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get),
             )),
+            downscaler: Downscaler(Arc::new(downscale)),
         }
+    }
+
+    /// Replaces the resize with `downscaler`, so a test can hold a decode
+    /// open while it inspects the cache.
+    #[cfg(test)]
+    fn with_downscaler(
+        mut self,
+        downscaler: impl Fn(&[u8], ImageFormat, NonZeroU32) -> Downscale + Send + Sync + 'static,
+    ) -> Self {
+        self.downscaler = Downscaler(Arc::new(downscaler));
+        self
     }
 
     /// Rebuilds the index from the files already in the cache directory.
@@ -501,6 +530,7 @@ impl ArtworkCache {
             .expect("the resize semaphore is never closed");
         let bytes = original.bytes.clone();
         let format = original.format;
+        let downscaler = self.downscaler.clone();
         // The permit and the lane guard move into the blocking task, because a
         // spawned blocking task runs to completion even when the request
         // awaiting it is dropped -- a client disconnect. Held by the request,
@@ -511,7 +541,7 @@ impl ArtworkCache {
         // the store below, and is dropped with the task's output if nobody is
         // left to receive it.
         let outcome = tokio::task::spawn_blocking(move || {
-            let downscaled = downscale(&bytes, format, width);
+            let downscaled = (downscaler.0)(&bytes, format, width);
             drop(permit);
             (downscaled, held)
         })
