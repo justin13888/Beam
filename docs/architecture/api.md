@@ -48,6 +48,7 @@ filtered yet (#328).
 | `/v1/files/{fileId}/download` | GET, HEAD | Full-file download (attachment) |
 | `/v1/files/{fileId}/subtitles/{subtitleId}` | GET, HEAD | A subtitle file beside the video, as stored, Range-capable; `404` `subtitle-not-found` for an id this file's sources do not list ([ADR-0020](decisions/ADR-0020-text-subtitle-delivery.md)) |
 | `/v1/files/{fileId}/subtitles/{subtitleId}/webvtt` | GET, HEAD | The same SubRip or WebVTT file as WebVTT, for a browser's `<track>`; `404` `subtitle-rendition-unavailable` for ASS, SSA or a file over 8 MiB |
+| `/v1/files/{fileId}/trickplay/{sheet}` | GET, HEAD | One scrub-preview sheet of the file (`image/jpeg`, Range-capable), from Beam's data directory ([#265](https://github.com/justin13888/beam/issues/265)); `404` `trickplay-not-found` while the file has no sheets for its current content, when it gives none, or past its last sheet. The source's `trickplay.sheet_urls` names exactly the sheets this answers |
 | `/v1/media/{id}/progress` | GET, DELETE | The caller's state for a movie or an episode (`UserTitleState`; all zeros if never played) / forget its resume position, keeping it played. `400` `progress-not-available-for-show` for a show or season id |
 | `/v1/media/{id}/watched` | PUT, DELETE | Mark a movie, episode, season or show watched (each episode of a season or show, idempotently) / unwatched (forgotten entirely); `204` |
 | `/v1/episodes/{id}`, `/v1/seasons/{id}` | GET | One episode (`EpisodeDetail`: its season, show and the episodes either side by next-up's rules: `(season, episode)` order, playable episodes only, the next after the run its primary file holds, and never back from a numbered season into season 0) or one season (`SeasonDetail`), with the caller's state |
@@ -130,7 +131,14 @@ the file's default track, else the first; absent only with no audio -- and
 track the file marks default -- else what `forced_only` picks. A tie within one language prefers
 the file's default, then not SDH, then text, then list order. Each part carries its own
 `default_subtitle_track_index` into its own `subtitle_tracks`, chosen beside the source's default
-audio. The choice is `beam_domain::utils::track_selection`, a pure function. It accepts
+audio. The choice is `beam_domain::utils::track_selection`, a pure function. Each source and
+part also carries its file's `chapters` (`start_ms`, `end_ms`, `title`), the `markers` read from
+the chapters titled for a skippable span (`recap`, `intro`, `credits`, `preview`; at most one of
+each, by start, `beam_domain::models::chapter::markers_from_chapters`), and -- once the background
+worker has made them for the file's current content -- `trickplay`, the layout of its JPEG
+scrub-preview sheets and their `sheet_urls` ([#265](https://github.com/justin13888/beam/issues/265)).
+`chapters` and `markers` are `default`ed, so a client generated from this document still reads an
+older server. It accepts
 a movie id or an episode id; a show id is rejected with 400, since shows have no files of their
 own. Episode sources landed in [#102](https://github.com/justin13888/beam/pull/102), closing
 [#68](https://github.com/justin13888/beam/issues/68).

@@ -17,9 +17,10 @@ use crate::models::search::PageInfo;
 /// source whose `parts` play in sequence (issue #233): a client is expected
 /// to play each part's `stream_url` in turn -- a concatenated playlist -- and
 /// Beam never joins them (ADR-0004). A whole file is a source of one part. The fields
-/// that name one file -- `file_id`, the tracks, `stream_url`,
-/// `download_url`, `mime_type` and `container_format` -- are the first
-/// part's; `size_bytes` and `duration_secs` are the whole source's.
+/// that name one file -- `file_id`, the tracks, the chapters, markers and
+/// trickplay, `stream_url`, `download_url`, `mime_type` and
+/// `container_format` -- are the first part's; `size_bytes` and
+/// `duration_secs` are the whole source's.
 #[derive(Clone, Debug, Serialize, serde::Deserialize, Schema)]
 pub struct MediaSource {
     /// The file this source starts with: its only file, or its first part.
@@ -65,6 +66,21 @@ pub struct MediaSource {
     /// their subtitle mode and languages (`GET /v1/me/language-preferences`)
     /// beside the default audio track; absent to start without subtitles.
     pub default_subtitle_track_index: Option<u32>,
+    /// The file's chapters, in order, as its container lists them (issue
+    /// #265); empty for a file with none.
+    //
+    // `default`, so the field is optional on the wire: a client generated
+    // from this document still reads a server from before it.
+    #[serde(default)]
+    pub chapters: Vec<Chapter>,
+    /// The spans of the file a client offers to skip -- its intro, its
+    /// credits, a recap, a preview -- read from the chapters titled for
+    /// them, in the order they start; empty when no chapter is.
+    #[serde(default)]
+    pub markers: Vec<PlaybackMarker>,
+    /// The file's scrub-preview sheets; absent until Beam has made them for
+    /// the file as it is now, and for a file that gives none.
+    pub trickplay: Option<Trickplay>,
     /// Direct-play stream URL for this file (Range-request capable, inline).
     pub stream_url: String,
     /// Download URL for this file (Range-request capable, `Content-Disposition: attachment`).
@@ -113,6 +129,14 @@ pub struct SourcePart {
     /// the caller, chosen as the source's `default_subtitle_track_index` is,
     /// beside the source's default audio track; absent for none.
     pub default_subtitle_track_index: Option<u32>,
+    /// This file's chapters, in order (issue #265).
+    #[serde(default)]
+    pub chapters: Vec<Chapter>,
+    /// This file's skippable spans, on its own timeline.
+    #[serde(default)]
+    pub markers: Vec<PlaybackMarker>,
+    /// This file's scrub-preview sheets, when Beam has made them.
+    pub trickplay: Option<Trickplay>,
     /// Direct-play stream URL for this file.
     pub stream_url: String,
     /// Download URL for this file.
@@ -227,4 +251,74 @@ pub struct SubtitleTrack {
     /// element reads; present for a SubRip or WebVTT sidecar small enough to
     /// convert.
     pub webvtt_url: Option<String>,
+}
+
+/// One chapter of a file, on that file's timeline (issue #265).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize, Schema)]
+pub struct Chapter {
+    /// Where the chapter starts, in milliseconds from the file's start.
+    pub start_ms: u64,
+    /// Where it ends, in milliseconds from the file's start; never before
+    /// `start_ms`.
+    pub end_ms: u64,
+    /// The chapter's own title; absent when the file names none.
+    pub title: Option<String>,
+}
+
+/// What a [`PlaybackMarker`] marks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize, Schema)]
+#[serde(rename_all = "snake_case")]
+pub enum PlaybackMarkerKind {
+    /// A recap of earlier episodes (`Previously on...`).
+    Recap,
+    /// The opening titles or theme: skipping it lands at `end_ms`.
+    Intro,
+    /// The closing credits: where a client offers the next episode.
+    Credits,
+    /// A preview of the next episode, after the credits.
+    Preview,
+}
+
+/// A span of a file a client offers to skip (issue #265), read from the
+/// file's chapter titled for it (`Previously On`, `Opening`, `Intro`,
+/// `Ending`, `End Credits`, `Next Episode`). At most one of each kind per
+/// file.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize, Schema)]
+pub struct PlaybackMarker {
+    pub kind: PlaybackMarkerKind,
+    /// Where the span starts, in milliseconds from the file's start.
+    pub start_ms: u64,
+    /// Where it ends; always after `start_ms`.
+    pub end_ms: u64,
+}
+
+/// A file's scrub-preview thumbnails (issue #265): JPEG sheets of tiles, tile
+/// `n` the frame at `n * interval_ms` (the keyframe at or before it), laid
+/// left to right and then top to bottom, `columns` by `rows` to a sheet.
+/// Tile `n` is on sheet `n / (columns * rows)`, at column
+/// `n % (columns * rows) % columns` and row `n % (columns * rows) / columns`;
+/// the last sheet is part-filled when `tile_count` is not a multiple of a
+/// sheet's tiles.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize, Schema)]
+pub struct Trickplay {
+    /// The time between two tiles, in milliseconds.
+    #[schema(minimum = 1)]
+    pub interval_ms: u32,
+    /// One tile's width in pixels.
+    #[schema(minimum = 1)]
+    pub tile_width: u32,
+    /// One tile's height in pixels.
+    #[schema(minimum = 1)]
+    pub tile_height: u32,
+    /// Tiles across one sheet.
+    #[schema(minimum = 1)]
+    pub columns: u32,
+    /// Tiles down one sheet.
+    #[schema(minimum = 1)]
+    pub rows: u32,
+    /// Tiles in every sheet together.
+    #[schema(minimum = 1)]
+    pub tile_count: u32,
+    /// Where to fetch each sheet, in order (`image/jpeg`).
+    pub sheet_urls: Vec<String>,
 }

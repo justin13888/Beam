@@ -64,14 +64,9 @@ fn fixture() -> Fixture {
     let shows = Arc::new(InMemoryShowRepository::with_files(files.clone()));
     let genres = Arc::new(InMemoryGenreRepository::default());
     let clock = Arc::new(TestClock::new());
-    let sources = Arc::new(SourceCatalog::new(
-        movies.clone(),
-        files.clone(),
-        Arc::new(InMemoryMediaStreamRepository::default()),
-        Arc::new(
+    let sources = Arc::new(SourceCatalog::new(crate::services::sources::SourceRepositories {movies: movies.clone(), files: files.clone(), streams: Arc::new(InMemoryMediaStreamRepository::default()), sidecars: Arc::new(
             beam_domain::repositories::sidecar_subtitle::in_memory::InMemorySidecarSubtitleRepository::default(),
-        ),
-    ));
+        ), chapters: Arc::new(beam_domain::repositories::chapter::in_memory::InMemoryChapterRepository::default()), trickplay: Arc::new(beam_domain::repositories::trickplay::in_memory::InMemoryTrickplayRepository::default()),}));
     let playback = Arc::new(DbPlaybackService::new(PlaybackRepositories {
         watch_state: Arc::new(
             beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::new(
@@ -132,6 +127,7 @@ fn fixture() -> Fixture {
         watch_status: Arc::new(beam_index::services::watch_status::WatchStatus::new()),
         telemetry: crate::routes::test_support::idle_library_report(),
         playback_telemetry: crate::routes::test_support::idle_playback_telemetry(),
+        trickplay: crate::routes::test_support::idle_trickplay(),
     };
 
     Fixture {

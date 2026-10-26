@@ -308,6 +308,237 @@ pub mod fixture {
         /// A user that exists as far as the backing store is concerned.
         async fn new_user(&self) -> Uuid;
     }
+
+    /// Everything the [`crate::chapter_repository_contract`] suite needs:
+    /// the repository under contract and the files a chapter belongs to,
+    /// which a real Postgres holds to a foreign key.
+    #[async_trait::async_trait]
+    pub trait ChapterFixture: Send + Sync {
+        /// The repository under contract.
+        fn repo(&self) -> &dyn crate::repositories::ChapterRepository;
+
+        /// A video file that exists as far as the backing store is concerned.
+        async fn new_file(&self) -> Uuid;
+    }
+
+    /// Everything the [`crate::trickplay_repository_contract`] suite needs:
+    /// the repository under contract and the files a record belongs to,
+    /// which a real Postgres holds to a foreign key.
+    #[async_trait::async_trait]
+    pub trait TrickplayFixture: Send + Sync {
+        /// The repository under contract.
+        fn repo(&self) -> &dyn crate::repositories::TrickplayRepository;
+
+        /// A video file that exists as far as the backing store is concerned.
+        async fn new_file(&self) -> Uuid;
+    }
+}
+
+/// Behavioural contract for [`crate::repositories::ChapterRepository`]
+/// (issue #265): a file's chapters read back as they were written, by index;
+/// a replace is whole, so chapters the new set lacks are gone; an empty set
+/// leaves none; and files are kept apart.
+///
+/// `$setup` names an `async fn() -> impl ChapterFixture`.
+#[macro_export]
+macro_rules! chapter_repository_contract {
+    ($setup:path) => {
+        use $crate::models::chapter::Chapter;
+        use $crate::repositories::contract::fixture::ChapterFixture;
+
+        fn chapter(index: u32, start_ms: u64, end_ms: u64, title: Option<&str>) -> Chapter {
+            Chapter {
+                index,
+                start_ms,
+                end_ms,
+                title: title.map(str::to_owned),
+            }
+        }
+
+        #[tokio::test]
+        async fn a_files_chapters_read_back_by_index_as_written() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let file = fixture.new_file().await;
+            let written = vec![
+                chapter(1, 90_000, 1_200_000, Some("Part A")),
+                chapter(0, 0, 90_000, Some("Opening")),
+                chapter(2, 1_200_000, 1_290_500, None),
+            ];
+
+            repo.replace_for_file(file, written).await.unwrap();
+
+            assert_eq!(
+                repo.find_by_file_id(file).await.unwrap(),
+                vec![
+                    chapter(0, 0, 90_000, Some("Opening")),
+                    chapter(1, 90_000, 1_200_000, Some("Part A")),
+                    chapter(2, 1_200_000, 1_290_500, None),
+                ]
+            );
+        }
+
+        #[tokio::test]
+        async fn a_replace_is_whole_and_an_empty_one_leaves_none() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let file = fixture.new_file().await;
+            repo.replace_for_file(
+                file,
+                vec![
+                    chapter(0, 0, 10_000, Some("One")),
+                    chapter(1, 10_000, 20_000, Some("Two")),
+                    chapter(2, 20_000, 30_000, Some("Three")),
+                ],
+            )
+            .await
+            .unwrap();
+
+            repo.replace_for_file(file, vec![chapter(0, 0, 30_000, Some("Whole"))])
+                .await
+                .unwrap();
+            assert_eq!(
+                repo.find_by_file_id(file).await.unwrap(),
+                vec![chapter(0, 0, 30_000, Some("Whole"))]
+            );
+
+            repo.replace_for_file(file, Vec::new()).await.unwrap();
+            assert!(repo.find_by_file_id(file).await.unwrap().is_empty());
+        }
+
+        #[tokio::test]
+        async fn files_are_kept_apart() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let file = fixture.new_file().await;
+            let other = fixture.new_file().await;
+            repo.replace_for_file(file, vec![chapter(0, 0, 10_000, Some("Mine"))])
+                .await
+                .unwrap();
+            repo.replace_for_file(other, vec![chapter(0, 0, 20_000, Some("Theirs"))])
+                .await
+                .unwrap();
+
+            repo.replace_for_file(other, Vec::new()).await.unwrap();
+
+            assert_eq!(
+                repo.find_by_file_id(file).await.unwrap(),
+                vec![chapter(0, 0, 10_000, Some("Mine"))]
+            );
+            assert!(
+                repo.find_by_file_id(::uuid::Uuid::new_v4())
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    };
+}
+
+/// Behavioural contract for [`crate::repositories::TrickplayRepository`]
+/// (issue #265): a record reads back as written -- its layout, or the
+/// absence of one -- one record per file, the later write winning, and
+/// files are found together by id.
+///
+/// `$setup` names an `async fn() -> impl TrickplayFixture`.
+#[macro_export]
+macro_rules! trickplay_repository_contract {
+    ($setup:path) => {
+        use $crate::models::trickplay::{TrickplayLayout, TrickplayRecord};
+        use $crate::repositories::contract::fixture::TrickplayFixture;
+
+        /// A fixed, non-epoch instant a whole second survives Postgres's
+        /// microsecond precision at.
+        fn at(offset_secs: i64) -> ::chrono::DateTime<::chrono::Utc> {
+            ::chrono::DateTime::from_timestamp(1_700_000_000 + offset_secs, 0)
+                .expect("valid instant")
+        }
+
+        fn ready(file_id: ::uuid::Uuid, file_hash: u64, tile_count: u32) -> TrickplayRecord {
+            TrickplayRecord {
+                file_id,
+                file_hash,
+                layout: Some(TrickplayLayout {
+                    interval_ms: 10_000,
+                    tile_width: 320,
+                    tile_height: 134,
+                    columns: 10,
+                    rows: 10,
+                    tile_count,
+                }),
+                generated_at: at(0),
+            }
+        }
+
+        #[tokio::test]
+        async fn a_record_reads_back_as_written() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let file = fixture.new_file().await;
+            // The top bit set: a hash is a `u64`, which the store must not
+            // read back as some other number.
+            let record = ready(file, u64::MAX - 7, 721);
+
+            repo.upsert(record.clone()).await.unwrap();
+
+            assert_eq!(repo.find(file).await.unwrap(), Some(record));
+        }
+
+        #[tokio::test]
+        async fn a_file_that_gave_no_sheets_reads_back_with_no_layout() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let file = fixture.new_file().await;
+            let record = TrickplayRecord {
+                file_id: file,
+                file_hash: 42,
+                layout: None,
+                generated_at: at(5),
+            };
+
+            repo.upsert(record.clone()).await.unwrap();
+
+            assert_eq!(repo.find(file).await.unwrap(), Some(record));
+        }
+
+        #[tokio::test]
+        async fn a_file_has_one_record_and_the_later_write_wins() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let file = fixture.new_file().await;
+            repo.upsert(ready(file, 1, 10)).await.unwrap();
+            let later = TrickplayRecord {
+                generated_at: at(60),
+                ..ready(file, 2, 12)
+            };
+
+            repo.upsert(later.clone()).await.unwrap();
+
+            assert_eq!(repo.find(file).await.unwrap(), Some(later.clone()));
+            assert_eq!(repo.find_by_file_ids(&[file]).await.unwrap(), vec![later]);
+        }
+
+        #[tokio::test]
+        async fn records_are_found_together_by_file_and_only_for_files_that_have_one() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let first = fixture.new_file().await;
+            let second = fixture.new_file().await;
+            let without = fixture.new_file().await;
+            repo.upsert(ready(first, 1, 1)).await.unwrap();
+            repo.upsert(ready(second, 2, 2)).await.unwrap();
+
+            let mut found = repo
+                .find_by_file_ids(&[first, without, second])
+                .await
+                .unwrap();
+            found.sort_by_key(|record| record.file_hash);
+
+            assert_eq!(found, vec![ready(first, 1, 1), ready(second, 2, 2)]);
+            assert!(repo.find_by_file_ids(&[]).await.unwrap().is_empty());
+            assert_eq!(repo.find(without).await.unwrap(), None);
+        }
+    };
 }
 
 /// Behavioural contract for

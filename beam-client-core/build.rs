@@ -68,6 +68,15 @@ const SUBTITLE_DELIVERY: [(OmitMethod, &str); 2] = [
     ),
 ];
 
+/// The trickplay operations (issue #265), which this client does not call
+/// either: a source's `trickplay.sheet_urls` are resolved against the origin
+/// by `ServerRecord::absolute_url` like every other delivery URL, and the
+/// platform's image loader fetches and caches the sheets.
+const TRICKPLAY_DELIVERY: [(OmitMethod, &str); 2] = [
+    (OmitMethod::Get, "/v1/files/{file_id}/trickplay/{sheet}"),
+    (OmitMethod::Head, "/v1/files/{file_id}/trickplay/{sheet}"),
+];
+
 fn main() {
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR is set by cargo");
 
@@ -76,6 +85,7 @@ fn main() {
         .into_iter()
         .chain(ARTWORK)
         .chain(SUBTITLE_DELIVERY)
+        .chain(TRICKPLAY_DELIVERY)
     {
         spec = spec.omit_rule(OmitRule::operation(method, path));
     }

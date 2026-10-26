@@ -20,6 +20,7 @@ pub mod rate_limit;
 pub mod stream;
 pub mod subtitle;
 pub mod tags;
+pub mod trickplay;
 
 // No `pub use <module>::*`. Two modules declare a `FilePath` -- `playback` for
 // progress reporting and `stream` for delivery -- and glob re-exporting both
@@ -135,6 +136,10 @@ pub fn rest_routes() -> Router<AppState, Propagate, (), RestScopes> {
             subtitle::head_subtitle,
             subtitle::get_subtitle_webvtt,
             subtitle::head_subtitle_webvtt,
+        ])
+        .mount(kynos::routes![
+            trickplay::get_trickplay_sheet,
+            trickplay::head_trickplay_sheet,
         ])
         .mount(kynos::routes![
             admin::list_libraries,

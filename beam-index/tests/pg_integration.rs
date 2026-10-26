@@ -21,6 +21,8 @@ mod access_policy;
 mod applied_nfo;
 #[path = "pg_integration/catalog_repository.rs"]
 mod catalog_repository;
+#[path = "pg_integration/chapters_trickplay.rs"]
+mod chapters_trickplay;
 #[path = "pg_integration/collection_repository.rs"]
 mod collection_repository;
 #[path = "pg_integration/enrichment_state.rs"]

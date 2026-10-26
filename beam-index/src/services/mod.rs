@@ -7,6 +7,7 @@ pub mod media_info;
 pub mod mime;
 pub mod notification;
 pub mod scan;
+pub mod trickplay;
 pub mod watch_status;
 pub mod watcher;
 
@@ -33,6 +34,7 @@ pub use notification::{
 pub use scan::{
     Retirement, ScanJob, ScanPhase, ScanProgress, ScanState, ScanTicket, ScanTrigger, StoppedScan,
 };
+pub use trickplay::{LocalTrickplayGenerator, TrickplayGenerator};
 pub use watcher::{FsEvent, FsEventKind, FsWatcher, NotifyFsWatcher, PathDebouncer, WatchError};
 #[cfg(any(test, feature = "test-utils"))]
 pub use watcher::{InMemoryFsWatcher, MockFsWatcher};
