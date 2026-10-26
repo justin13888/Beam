@@ -393,17 +393,6 @@ pub struct VideoFileMetadata {
     pub chapters: Vec<ChapterMetadata>,
 }
 
-/// FFmpeg's descriptive name for a container, falling back to its short name.
-///
-/// `ffmpeg_next::format::format::Input::description` is unsound: it hands
-/// `AVInputFormat::long_name` straight to `CStr::from_ptr` with no null check.
-/// That field is NULL in any `CONFIG_SMALL` build of FFmpeg -- what
-/// `--enable-small` produces, and what distributions and slim container images
-/// commonly ship -- so calling it segfaults the process on the first file
-/// probed. Not an error, not a panic: a `strlen` on a null pointer.
-///
-/// Read the pointer and check it instead. `name` is a required field and is
-/// always populated, which makes it the right fallback.
 /// Open `file` for FFmpeg to demux, from its open handle (issue #238), and
 /// hand back beside the demuxer the handle's metadata and the path it was
 /// opened at.
@@ -477,6 +466,17 @@ fn chapter_metadata(
     })
 }
 
+/// FFmpeg's descriptive name for a container, falling back to its short name.
+///
+/// `ffmpeg_next::format::format::Input::description` is unsound: it hands
+/// `AVInputFormat::long_name` straight to `CStr::from_ptr` with no null check.
+/// That field is NULL in any `CONFIG_SMALL` build of FFmpeg -- what
+/// `--enable-small` produces, and what distributions and slim container images
+/// commonly ship -- so calling it segfaults the process on the first file
+/// probed. Not an error, not a panic: a `strlen` on a null pointer.
+///
+/// Read the pointer and check it instead. `name` is a required field and is
+/// always populated, which makes it the right fallback.
 fn format_long_name(format: &ffmpeg::format::format::Input) -> String {
     let long_name = unsafe { (*format.as_ptr()).long_name };
     if long_name.is_null() {
