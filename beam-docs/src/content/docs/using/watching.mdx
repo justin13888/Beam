@@ -29,8 +29,12 @@ A file whose video stream Beam could not probe is listed as **Original**.
 
 Beam lists them best first and marks that one the **primary**: the default edition before a
 named one such as a *Director's Cut*, then the tallest picture, the higher bit rate and the larger
-file. The web player starts with the primary; the Android and Apple apps start with the best source
-your device can actually play.
+file. Every player starts with the best source your browser or device can actually play. A source
+it cannot play stays in the picker, greyed out with the reason -- *This browser cannot decode HEVC
+video* -- and a title with no source your browser plays says so, with a download link instead.
+
+A movie split across files (`CD1`, `CD2`) plays its parts one after another, and resumes in the
+part you stopped in.
 
 Switch to a smaller one when your connection cannot keep up: this is how Beam handles constrained
 bandwidth. It has no adaptive streaming and will never switch for you, because there is no
