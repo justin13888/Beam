@@ -8,11 +8,13 @@ use uuid::Uuid;
 
 use crate::common::{Admin, VIEWER, Video, assert_refused};
 
-/// How many large files make a scan last long enough to be asked twice.
-const SLOW_FILES: i64 = 6;
-/// Each one's size: a hole, so it costs no disk, but every byte of it is
-/// read and hashed.
-const SLOW_FILE_BYTES: u64 = 1 << 30;
+/// How many filler files make a scan last long enough to be asked twice:
+/// the second request follows the first's `202` at once, and each filler is
+/// read whole, hashed and probed before the scan can finish.
+const SLOW_FILES: i64 = 4;
+/// Each one's size: a hole, so it costs no disk. Small enough that the
+/// suite's own SHA-256 record of the tree stays cheap in a debug build.
+const SLOW_FILE_BYTES: u64 = 32 << 20;
 
 /// A scan is a job: accepted with `202`, observed through `GET .../scan`
 /// until it finishes, and exclusive per library -- a scan asked for while one
@@ -42,7 +44,7 @@ async fn a_scan_is_a_polled_job_and_a_concurrent_one_is_refused() {
     assert_eq!(job.library_id, library);
     assert_eq!(job.trigger, api::types::ScanTrigger::Manual);
 
-    // Asked again at once, while the first is still hashing gigabytes.
+    // Asked again at once, while the first is still reading its files.
     assert_refused(
         "a second scan of a library being scanned",
         409,
@@ -67,8 +69,8 @@ async fn a_scan_is_a_polled_job_and_a_concurrent_one_is_refused() {
     assert_eq!(processed_count, 1 + SLOW_FILES);
     assert_eq!(
         (added_count, failed_count),
-        (1, SLOW_FILES),
-        "the video indexes, and the filler -- no container at all -- fails to probe"
+        (1 + SLOW_FILES, 0),
+        "every file is indexed, the filler as a file no probe could read"
     );
     assert!(finished.started_at.is_some() && finished.finished_at.is_some());
 
