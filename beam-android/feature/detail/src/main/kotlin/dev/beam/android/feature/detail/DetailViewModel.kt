@@ -103,46 +103,82 @@ public class DetailViewModel
         /** Reload the title. */
         public fun refresh() {
             mutableState.value = LoadState.Loading(mutableState.value.previous())
-            viewModelScope.launch {
-                try {
-                    val detail = catalog.detail(mediaId)
-                    // Sources are fetched separately and are allowed to fail: a
-                    // title whose files cannot be listed is still worth showing,
-                    // and the page degrades to "unavailable" rather than to an
-                    // error page with no information on it at all.
-                    val sources = runCatching { playback.sources(mediaId) }.getOrDefault(emptyList())
-                    val policy =
-                        preferences.preferences
-                            .first()
-                            .quality
-                            .asPolicy()
-                    val selection =
-                        runCatching {
-                            playback.selectSource(mediaId, policy)
-                        }.getOrNull()
+            viewModelScope.launch { reload() }
+        }
 
-                    mutableState.value =
-                        LoadState.Success(
-                            DetailUiState(
-                                detail = detail,
-                                selectedSeason =
-                                    (detail as? MediaDetail.Show)
-                                        ?.seasons
-                                        ?.firstOrNull()
-                                        ?.seasonNumber,
-                                sources = sources,
-                                selection = selection,
-                            ),
-                        )
-                } catch (failure: BeamException) {
-                    val reason = failure.toFailure()
-                    mutableState.value =
-                        LoadState.Failure(
-                            reason.message,
-                            reason.retryable,
-                            mutableState.value.previous(),
-                        )
+        /**
+         * Mark [id] -- this title, one of its seasons, or one of its episodes
+         * -- watched or unwatched, then read the title back.
+         *
+         * Read back rather than patched locally: marking a season marks each
+         * of its episodes, and a show's own state follows from its episodes',
+         * so only the server's answer says what every row now reads.
+         */
+        public fun setWatched(
+            id: String,
+            watched: Boolean,
+        ) {
+            viewModelScope.launch {
+                val outcome =
+                    runCatching {
+                        if (watched) playback.markWatched(id) else playback.markUnwatched(id)
+                    }
+                outcome.onFailure { error ->
+                    setMessage(
+                        (error as? BeamException)?.toFailure()?.message
+                            ?: if (watched) "It could not be marked watched." else "It could not be marked unwatched.",
+                    )
                 }
+                if (outcome.isSuccess) reload()
+            }
+        }
+
+        /**
+         * The load itself, so a mark can await it. Keeps the season on screen
+         * when it still exists: a reload after marking an episode of season 3
+         * that jumped back to season 1 would lose the viewer's place.
+         */
+        private suspend fun reload() {
+            try {
+                val detail = catalog.detail(mediaId)
+                // Sources are fetched separately and are allowed to fail: a
+                // title whose files cannot be listed is still worth showing,
+                // and the page degrades to "unavailable" rather than to an
+                // error page with no information on it at all.
+                val sources = runCatching { playback.sources(mediaId) }.getOrDefault(emptyList())
+                val policy =
+                    preferences.preferences
+                        .first()
+                        .quality
+                        .asPolicy()
+                val selection =
+                    runCatching {
+                        playback.selectSource(mediaId, policy)
+                    }.getOrNull()
+
+                val previous = mutableState.value.previous()
+                val seasons = (detail as? MediaDetail.Show)?.seasons.orEmpty()
+                mutableState.value =
+                    LoadState.Success(
+                        DetailUiState(
+                            detail = detail,
+                            selectedSeason =
+                                previous
+                                    ?.selectedSeason
+                                    ?.takeIf { kept -> seasons.any { it.seasonNumber == kept } }
+                                    ?: seasons.firstOrNull()?.seasonNumber,
+                            sources = sources,
+                            selection = selection,
+                        ),
+                    )
+            } catch (failure: BeamException) {
+                val reason = failure.toFailure()
+                mutableState.value =
+                    LoadState.Failure(
+                        reason.message,
+                        reason.retryable,
+                        mutableState.value.previous(),
+                    )
             }
         }
 
