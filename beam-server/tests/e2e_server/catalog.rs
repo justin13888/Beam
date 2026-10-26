@@ -280,3 +280,63 @@ async fn a_library_root_outside_the_video_directory_or_overlapping_another_is_re
 
     admin.finish().await;
 }
+
+/// The committed probe fixtures -- codecs no CI FFmpeg can encode, and an
+/// MP4 whose index sits after its media -- index through the real server
+/// with the codecs they hold.
+#[tokio::test]
+async fn the_committed_probe_fixtures_index_with_their_codecs() {
+    let mut admin = Admin::start().await;
+    let root = common::workspace_root();
+    let fixtures = [
+        ("hevc.mkv", "Dune (2001)", "mkv", "hevc", None),
+        ("av1.mp4", "Solaris (2002)", "mp4", "av1", None),
+        ("vp9_opus.webm", "Tenet (2003)", "webm", "vp9", Some("opus")),
+        (
+            "h264_aac_moov_at_end.mp4",
+            "Memento (2004)",
+            "mp4",
+            "h264",
+            Some("aac"),
+        ),
+    ];
+    for (fixture, name, extension, _, _) in fixtures {
+        admin.stack.library.copy_in(
+            &common::probe_fixture(&root, fixture),
+            format!("films/{name}/{name}.{extension}"),
+        );
+    }
+    let library = admin.add_library("Films", "films").await;
+    let progress = admin.scan_ok(library).await;
+    assert_eq!(
+        (progress.added_count, progress.failed_count),
+        (4, 0),
+        "{progress:?}"
+    );
+
+    for (fixture, name, _, video, audio) in fixtures {
+        let title = name.split(" (").next().expect("a title");
+        let id = admin.title(title).await.id;
+        let sources = admin
+            .api
+            .get_media_sources(id)
+            .await
+            .unwrap_or_else(|e| panic!("read {title}'s sources: {e:?}"))
+            .into_inner()
+            .items;
+        assert_eq!(sources.len(), 1, "{fixture}");
+        let codecs = (
+            sources[0]
+                .video_tracks
+                .first()
+                .map(|track| track.codec.as_str()),
+            sources[0]
+                .audio_tracks
+                .first()
+                .map(|track| track.codec.as_str()),
+        );
+        assert_eq!(codecs, (Some(video), audio), "{fixture}");
+    }
+
+    admin.finish().await;
+}

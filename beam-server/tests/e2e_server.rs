@@ -24,7 +24,17 @@
 #[path = "e2e_server/common.rs"]
 mod common;
 
+#[path = "e2e_server/admin.rs"]
+mod admin;
 #[path = "e2e_server/catalog.rs"]
 mod catalog;
+#[path = "e2e_server/metadata.rs"]
+mod metadata;
+#[path = "e2e_server/playback.rs"]
+mod playback;
+#[path = "e2e_server/reconciliation.rs"]
+mod reconciliation;
+#[path = "e2e_server/scan.rs"]
+mod scan;
 #[path = "e2e_server/sign_in.rs"]
 mod sign_in;

@@ -195,6 +195,29 @@ impl FixtureLibrary {
         self.rename(&holding, &b);
     }
 
+    /// Set the modification time of the file at `rel` to `modified`, as a
+    /// copy that preserves timestamps would leave it.
+    pub fn set_modified(&mut self, rel: impl AsRef<Path>, modified: SystemTime) {
+        let rel = rel.as_ref().to_path_buf();
+        self.change(|library| {
+            fs::File::options()
+                .write(true)
+                .open(library.path(&rel))
+                .and_then(|file| file.set_modified(modified))
+                .unwrap_or_else(|e| panic!("set the mtime of {}: {e}", rel.display()));
+        });
+        self.record_file(&rel);
+    }
+
+    /// The modification time of the file at `rel`, as the test left it.
+    pub fn modified(&self, rel: impl AsRef<Path>) -> SystemTime {
+        let rel = rel.as_ref();
+        match self.manifest.get(rel) {
+            Some(Entry::File { modified, .. }) => *modified,
+            other => panic!("{} is not a file the test wrote: {other:?}", rel.display()),
+        }
+    }
+
     /// Remove the file or link at `rel`.
     pub fn remove_file(&mut self, rel: impl AsRef<Path>) {
         let rel = rel.as_ref().to_path_buf();
