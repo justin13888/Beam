@@ -1262,19 +1262,27 @@ mod tests {
         ) -> Result<Option<beam_domain::models::collection::Collection>, sea_orm::DbErr> {
             self.0.find_by_id(id).await
         }
-        async fn movie_ids(&self, id: uuid::Uuid) -> Result<Vec<uuid::Uuid>, sea_orm::DbErr> {
-            self.0.movie_ids(id).await
+        async fn movie_ids(
+            &self,
+            id: uuid::Uuid,
+            access: &beam_domain::models::access::AccessPolicy,
+        ) -> Result<Vec<uuid::Uuid>, sea_orm::DbErr> {
+            self.0.movie_ids(id, access).await
         }
         async fn list(
             &self,
+            access: &beam_domain::models::access::AccessPolicy,
             limit: u64,
             offset: u64,
         ) -> Result<Vec<beam_domain::models::collection::CollectionSummary>, sea_orm::DbErr>
         {
-            self.0.list(limit, offset).await
+            self.0.list(access, limit, offset).await
         }
-        async fn count(&self) -> Result<u64, sea_orm::DbErr> {
-            self.0.count().await
+        async fn count(
+            &self,
+            access: &beam_domain::models::access::AccessPolicy,
+        ) -> Result<u64, sea_orm::DbErr> {
+            self.0.count(access).await
         }
     }
 
@@ -1338,19 +1346,25 @@ mod tests {
         async fn filmography(
             &self,
             person_id: uuid::Uuid,
+            access: &beam_domain::models::access::AccessPolicy,
         ) -> Result<Vec<beam_domain::models::person::PersonCredit>, sea_orm::DbErr> {
-            self.0.filmography(person_id).await
+            self.0.filmography(person_id, access).await
         }
         async fn search(
             &self,
             query: Option<&str>,
+            access: &beam_domain::models::access::AccessPolicy,
             limit: u64,
             offset: u64,
         ) -> Result<Vec<beam_domain::models::person::Person>, sea_orm::DbErr> {
-            self.0.search(query, limit, offset).await
+            self.0.search(query, access, limit, offset).await
         }
-        async fn count(&self, query: Option<&str>) -> Result<u64, sea_orm::DbErr> {
-            self.0.count(query).await
+        async fn count(
+            &self,
+            query: Option<&str>,
+            access: &beam_domain::models::access::AccessPolicy,
+        ) -> Result<u64, sea_orm::DbErr> {
+            self.0.count(query, access).await
         }
     }
 

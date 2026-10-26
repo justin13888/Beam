@@ -13,6 +13,7 @@ use crate::services::admin_log::LocalAdminLogService;
 use crate::services::hash::MockHashService;
 use crate::services::media_info::MockMediaInfoService;
 use crate::services::notification::InMemoryNotificationService;
+use beam_domain::models::access::AccessPolicy;
 use beam_domain::models::{CreateLibrary, CreateMovie, CreateMovieEntry, Library, Movie, Show};
 use beam_domain::providers::enrichment::{MovieEnrichment, ShowEnrichment};
 use beam_domain::repositories::AdminLogRepository;
@@ -2090,8 +2091,20 @@ async fn a_merge_carries_each_users_list_entries_to_the_kept_title() {
             .unwrap(),
         [UserList::Favourites]
     );
-    assert_eq!(h.lists.count(user, UserList::Watchlist).await.unwrap(), 1);
-    assert_eq!(h.lists.count(user, UserList::Favourites).await.unwrap(), 1);
+    assert_eq!(
+        h.lists
+            .count(user, UserList::Watchlist, &AccessPolicy::unrestricted())
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        h.lists
+            .count(user, UserList::Favourites, &AccessPolicy::unrestricted())
+            .await
+            .unwrap(),
+        1
+    );
 }
 
 /// A merge moves each viewer's watch state from the retired title onto the
@@ -2640,8 +2653,20 @@ async fn reclassifying_a_titles_last_file_carries_its_list_entries() {
         [UserList::Watchlist],
         "on the film the last file joined"
     );
-    assert_eq!(h.lists.count(user, UserList::Favourites).await.unwrap(), 1);
-    assert_eq!(h.lists.count(user, UserList::Watchlist).await.unwrap(), 1);
+    assert_eq!(
+        h.lists
+            .count(user, UserList::Favourites, &AccessPolicy::unrestricted())
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        h.lists
+            .count(user, UserList::Watchlist, &AccessPolicy::unrestricted())
+            .await
+            .unwrap(),
+        1
+    );
 }
 
 /// A movie whose files the scan reclassifies to two other films, one after

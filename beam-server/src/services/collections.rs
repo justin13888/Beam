@@ -8,6 +8,7 @@ use std::sync::Arc;
 use sea_orm::DbErr;
 use uuid::Uuid;
 
+use beam_domain::models::access::AccessPolicy;
 use beam_domain::models::collection::{Collection as StoredCollection, CollectionSummary};
 use beam_domain::models::watch_state::TitleRef;
 use beam_domain::repositories::CollectionRepository;
@@ -107,21 +108,28 @@ impl CollectionService {
     }
 
     /// The stored collection `id` names, art URLs and all: what the artwork
-    /// route fetches a collection's art by. `Ok(None)` for one no movie is
-    /// in any more, which the listing no longer lists either.
-    pub async fn find_collection(&self, id: Uuid) -> Result<Option<StoredCollection>, DbErr> {
+    /// route fetches a collection's art by. `Ok(None)` for one no movie
+    /// `access` admits is in any more, which the listing no longer lists
+    /// either (issue #328).
+    pub async fn find_collection(
+        &self,
+        id: Uuid,
+        access: &AccessPolicy,
+    ) -> Result<Option<StoredCollection>, DbErr> {
         let Some(collection) = self.collections.find_by_id(id).await? else {
             return Ok(None);
         };
-        if self.collections.movie_ids(id).await?.is_empty() {
+        if self.collections.movie_ids(id, access).await?.is_empty() {
             return Ok(None);
         }
         Ok(Some(collection))
     }
 
-    /// One page of the collections the library's movies are in, by name.
+    /// One page of the collections the library's movies are in, by name:
+    /// those a movie `access` admits is in, each counting only such movies.
     pub async fn list(
         &self,
+        access: &AccessPolicy,
         first: Option<u32>,
         after: Option<String>,
     ) -> Result<CollectionConnection, CollectionError> {
@@ -138,10 +146,10 @@ impl CollectionService {
 
         let page = self
             .collections
-            .list(u64::from(size.get()), offset)
+            .list(access, u64::from(size.get()), offset)
             .await
             .map_err(internal)?;
-        let total = self.collections.count().await.map_err(internal)?;
+        let total = self.collections.count(access).await.map_err(internal)?;
         Ok(CollectionConnection {
             page_info: offset_cursor::page_info(OffsetList::Collections, offset, page.len(), total),
             items: page
@@ -165,18 +173,24 @@ impl CollectionService {
         })
     }
 
-    /// One collection with its movies, in release order, each with the
-    /// viewer's state: `Ok(None)` when no collection has the id, or no movie
-    /// is in it any more.
+    /// One collection with the movies in it `access` admits, in release
+    /// order, each with the viewer's state: `Ok(None)` when no collection
+    /// has the id, or no such movie is in it any more -- one whose every
+    /// movie the policy hides answers as one that does not exist.
     pub async fn detail(
         &self,
         user_id: Uuid,
+        access: &AccessPolicy,
         id: Uuid,
     ) -> Result<Option<CollectionDetail>, CollectionError> {
         let Some(collection) = self.collections.find_by_id(id).await.map_err(internal)? else {
             return Ok(None);
         };
-        let movie_ids = self.collections.movie_ids(id).await.map_err(internal)?;
+        let movie_ids = self
+            .collections
+            .movie_ids(id, access)
+            .await
+            .map_err(internal)?;
         if movie_ids.is_empty() {
             return Ok(None);
         }

@@ -53,8 +53,8 @@
 //! title only when `library_movies` / `library_shows` associates it with one
 //! of them, and a caller under a rating ceiling only one whose
 //! `content_rating` is a certification within it. Both are per-row checks
-//! beside liveness, bound as `IN` lists the size of the grant and of the
-//! ceiling's certifications; an unrestricted caller's statement has neither.
+//! beside liveness, written by [`AccessConditions`]; an unrestricted
+//! caller's statement has neither.
 //!
 //! **Seeking.** A page after a position keeps the rows whose tuple compares
 //! past it in the display direction; a page before one flips both the
@@ -70,13 +70,15 @@ use sea_orm::{
 };
 use uuid::Uuid;
 
-use beam_domain::models::access::{AccessPolicy, LibraryAccess};
+use beam_domain::models::access::AccessPolicy;
 use beam_domain::models::catalog::{
     CatalogFilters, CatalogPosition, CatalogQuery, CatalogSort, CatalogSortField, Seek,
     SortDirection, SortKey, TitleKind,
 };
 use beam_domain::repositories::CatalogRepository;
 use beam_domain::repositories::catalog::{mismatched_position, unranked_relevance};
+
+use crate::repositories::access_sql::AccessConditions;
 
 /// Only live movies: a present file behind one of the movie's entries.
 const LIVE_MOVIE: &str = "EXISTS (SELECT 1 FROM movie_entries me \
@@ -172,12 +174,8 @@ struct BranchFilters {
     year_from: Option<String>,
     year_to: Option<String>,
     min_rating: Option<String>,
-    /// The placeholders of the libraries the caller may see; `None` for
-    /// every library.
-    libraries: Option<Vec<String>>,
-    /// The placeholders of the certifications within the caller's ceiling;
-    /// `None` for no ceiling.
-    certifications: Option<Vec<String>>,
+    /// What the caller's policy restricts them to.
+    access: AccessConditions,
 }
 
 impl BranchFilters {
@@ -197,10 +195,6 @@ impl BranchFilters {
             year_to,
             min_rating,
         } = filters;
-        let AccessPolicy {
-            libraries,
-            max_rating,
-        } = access;
         Self {
             query: query.clone().map(|q| binds.push(q)),
             genre: genre.map(|id| binds.push(id)),
@@ -208,55 +202,31 @@ impl BranchFilters {
             year_from: year_from.map(|y| binds.push(y)),
             year_to: year_to.map(|y| binds.push(y)),
             min_rating: min_rating.map(|r| binds.push(r)),
-            libraries: match libraries {
-                LibraryAccess::All => None,
-                LibraryAccess::Only(granted) => {
-                    Some(granted.iter().map(|id| binds.push(*id)).collect())
-                }
-            },
-            certifications: max_rating.map(|ceiling| {
-                ceiling
-                    .certifications_within()
-                    .map(|label| binds.push(label))
-                    .collect()
-            }),
+            access: AccessConditions::bind(access, |value| binds.push(value)),
         }
     }
 
     fn conditions(&self, kind: TitleKind) -> Vec<String> {
-        let (table, live, genre_join, library_join) = match kind {
+        let (table, live, genre_join) = match kind {
             TitleKind::Movie => (
                 "movies",
                 LIVE_MOVIE,
                 "movie_genres j WHERE j.movie_id = movies.id",
-                "library_movies l WHERE l.movie_id = movies.id",
             ),
             TitleKind::Show => (
                 "shows",
                 LIVE_SHOW,
                 "show_genres j WHERE j.show_id = shows.id",
-                "library_shows l WHERE l.show_id = shows.id",
             ),
         };
         let mut conditions = vec![live.to_string()];
         // Access first (issue #263): a title the caller may not see is not
-        // there to filter. An empty grant or ceiling admits nothing, which
-        // `IN ()` cannot spell.
-        match self.libraries.as_deref() {
-            None => {}
-            Some([]) => conditions.push("FALSE".to_string()),
-            Some(granted) => conditions.push(format!(
-                "EXISTS (SELECT 1 FROM {library_join} AND l.library_id IN ({}))",
-                granted.join(", ")
-            )),
-        }
-        match self.certifications.as_deref() {
-            None => {}
-            Some([]) => conditions.push("FALSE".to_string()),
-            Some(within) => {
-                conditions.push(format!("{table}.content_rating IN ({})", within.join(", ")))
-            }
-        }
+        // there to filter.
+        conditions.extend(self.access.on(
+            kind,
+            &format!("{table}.id"),
+            &format!("{table}.content_rating"),
+        ));
         if let Some(q) = &self.query {
             // `%` is `similarity() > pg_trgm.similarity_threshold`, which
             // `SIMILARITY_THRESHOLD` sets for the statement; unlike the

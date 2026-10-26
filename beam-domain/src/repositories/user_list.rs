@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use sea_orm::DbErr;
 use uuid::Uuid;
 
+use crate::models::access::AccessPolicy;
 use crate::models::user_list::{UserList, UserListEntry, UserListPosition};
 use crate::models::watch_state::TitleRef;
 
@@ -29,17 +30,27 @@ pub trait UserListRepository: Send + Sync + std::fmt::Debug {
     async fn lists_of(&self, user_id: Uuid, title: TitleRef) -> Result<Vec<UserList>, DbErr>;
 
     /// At most `limit` of the user's `list`, newest `(added_at, id)` first,
-    /// starting after `after` -- the last entry of the page before.
+    /// starting after `after` -- the last entry of the page before. Only the
+    /// titles `access` admits (issue #328): an entry for a title it hides is
+    /// kept, and listed again once the policy admits the title, but no page
+    /// holds it meanwhile.
     async fn find_page(
         &self,
         user_id: Uuid,
         list: UserList,
+        access: &AccessPolicy,
         after: Option<UserListPosition>,
         limit: u64,
     ) -> Result<Vec<UserListEntry>, DbErr>;
 
-    /// How many titles are on the user's `list`.
-    async fn count(&self, user_id: Uuid, list: UserList) -> Result<u64, DbErr>;
+    /// How many titles on the user's `list` `access` admits: the entries
+    /// [`Self::find_page`] lists across every page.
+    async fn count(
+        &self,
+        user_id: Uuid,
+        list: UserList,
+        access: &AccessPolicy,
+    ) -> Result<u64, DbErr>;
 
     /// Move every user's entries for `from` onto `to`: the indexer merged
     /// two movies, or two shows, into one, and the title retired would
@@ -63,6 +74,7 @@ pub fn carry_kind_mismatch() -> DbErr {
 #[cfg(any(test, feature = "test-utils"))]
 pub mod in_memory {
     use super::*;
+    use crate::repositories::access_policy::in_memory::InMemoryTitleAccess;
     use crate::services::Clock;
     use std::sync::{Arc, Mutex};
 
@@ -73,13 +85,22 @@ pub mod in_memory {
     pub struct InMemoryUserListRepository {
         entries: Mutex<Vec<UserListEntry>>,
         clock: Arc<dyn Clock>,
+        titles: InMemoryTitleAccess,
     }
 
     impl InMemoryUserListRepository {
+        /// A double applying access policies over no titles: see
+        /// [`InMemoryTitleAccess`].
         pub fn new(clock: Arc<dyn Clock>) -> Self {
+            Self::with_titles(clock, InMemoryTitleAccess::default())
+        }
+
+        /// A double applying access policies over the titles `titles` reads.
+        pub fn with_titles(clock: Arc<dyn Clock>, titles: InMemoryTitleAccess) -> Self {
             Self {
                 entries: Mutex::new(Vec::new()),
                 clock,
+                titles,
             }
         }
     }
@@ -145,6 +166,7 @@ pub mod in_memory {
             &self,
             user_id: Uuid,
             list: UserList,
+            access: &AccessPolicy,
             after: Option<UserListPosition>,
             limit: u64,
         ) -> Result<Vec<UserListEntry>, DbErr> {
@@ -154,6 +176,7 @@ pub mod in_memory {
                 .unwrap()
                 .iter()
                 .filter(|e| e.user_id == user_id && e.list == list)
+                .filter(|e| self.titles.admits(access, e.title))
                 .filter(|e| {
                     after.is_none_or(|after| (e.added_at, e.id) < (after.added_at, after.id))
                 })
@@ -164,13 +187,19 @@ pub mod in_memory {
             Ok(page)
         }
 
-        async fn count(&self, user_id: Uuid, list: UserList) -> Result<u64, DbErr> {
+        async fn count(
+            &self,
+            user_id: Uuid,
+            list: UserList,
+            access: &AccessPolicy,
+        ) -> Result<u64, DbErr> {
             Ok(self
                 .entries
                 .lock()
                 .unwrap()
                 .iter()
                 .filter(|e| e.user_id == user_id && e.list == list)
+                .filter(|e| self.titles.admits(access, e.title))
                 .count() as u64)
         }
 
@@ -217,24 +246,38 @@ pub mod in_memory_fixture {
 
     use super::UserListRepository;
     use super::in_memory::InMemoryUserListRepository;
+    use crate::repositories::access_policy::in_memory::InMemoryTitleAccess;
     use crate::repositories::contract::fixture::UserListFixture;
+    use crate::repositories::movie::in_memory::InMemoryMovieRepository;
+    use crate::repositories::show::in_memory::InMemoryShowRepository;
+    use crate::repositories::{MovieRepository, ShowRepository};
     use crate::services::TestClock;
 
     /// The hermetic instantiation of the shared contract. The in-memory
     /// store enforces no referential integrity, so fresh v4 UUIDs are a valid
-    /// user, movie and show; the Postgres fixture in `beam-index` inserts
-    /// real rows for the same calls.
+    /// user, movie, show and library; the Postgres fixture in `beam-index`
+    /// inserts real rows for the same calls. The list double reads the
+    /// title doubles to apply an access policy.
     pub struct InMemoryFixture {
         repo: InMemoryUserListRepository,
         clock: Arc<TestClock>,
+        movies: Arc<InMemoryMovieRepository>,
+        shows: Arc<InMemoryShowRepository>,
     }
 
     impl Default for InMemoryFixture {
         fn default() -> Self {
             let clock = Arc::new(TestClock::new());
+            let movies = Arc::new(InMemoryMovieRepository::default());
+            let shows = Arc::new(InMemoryShowRepository::default());
             Self {
-                repo: InMemoryUserListRepository::new(clock.clone()),
+                repo: InMemoryUserListRepository::with_titles(
+                    clock.clone(),
+                    InMemoryTitleAccess::new(movies.clone(), shows.clone()),
+                ),
                 clock,
+                movies,
+                shows,
             }
         }
     }
@@ -249,6 +292,14 @@ pub mod in_memory_fixture {
             &self.clock
         }
 
+        fn movies(&self) -> &dyn MovieRepository {
+            self.movies.as_ref()
+        }
+
+        fn shows(&self) -> &dyn ShowRepository {
+            self.shows.as_ref()
+        }
+
         async fn new_user(&self) -> Uuid {
             Uuid::new_v4()
         }
@@ -258,6 +309,10 @@ pub mod in_memory_fixture {
         }
 
         async fn new_show(&self) -> Uuid {
+            Uuid::new_v4()
+        }
+
+        async fn new_library(&self) -> Uuid {
             Uuid::new_v4()
         }
     }

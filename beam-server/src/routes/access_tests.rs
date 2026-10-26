@@ -8,7 +8,7 @@
 //! Each hidden case is paired with the same request for a title the viewer
 //! may see, so a route that answered everything with 404 would fail.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,18 +20,28 @@ use beam_domain::models::file::{CreateMediaFile, FileStatus, MediaFileContent};
 use beam_domain::models::library::CreateLibrary;
 use beam_domain::models::movie::{CreateMovie, CreateMovieEntry};
 use beam_domain::models::show::{CreateEpisode, CreateShow};
+use beam_domain::models::user_list::UserList;
+use beam_domain::models::watch_state::TitleRef;
 use beam_domain::providers::artwork::ImageFormat;
 use beam_domain::providers::artwork::test_utils::InMemoryArtworkFetcher;
+use beam_domain::providers::enrichment::{
+    CollectionEnrichment, CreditEnrichment, ExternalMediaRef,
+};
 use beam_domain::providers::enrichment::{MovieEnrichment, ShowEnrichment};
+use beam_domain::repositories::access_policy::in_memory::InMemoryTitleAccess;
 use beam_domain::repositories::catalog::in_memory::InMemoryCatalogRepository;
+use beam_domain::repositories::collection::in_memory::InMemoryCollectionRepository;
 use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
 use beam_domain::repositories::genre::in_memory::InMemoryGenreRepository;
 use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
 use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
+use beam_domain::repositories::person::in_memory::InMemoryPersonRepository;
 use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
 use beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository;
+use beam_domain::repositories::user_list::InMemoryUserListRepository;
 use beam_domain::repositories::{
-    FileRepository, LibraryRepository, MovieRepository, ShowRepository,
+    CollectionRepository, FileRepository, GenreRepository, LibraryRepository, MovieRepository,
+    PersonRepository, ShowRepository, UserListRepository,
 };
 use beam_domain::services::{RealClock, TestClock};
 use kynos::http::StatusCode;
@@ -43,11 +53,21 @@ use uuid::Uuid;
 use crate::models::playback::{
     ContinueWatchingConnection, HistoryConnection, ReportProgressRequest,
 };
-use crate::models::{MediaConnection, MediaMetadata};
+use crate::models::{
+    CollectionConnection, CollectionDetail, MediaConnection, MediaMetadata, PersonConnection,
+    PersonDetail, UserListConnection,
+};
 use crate::routes::artwork::{get_artwork, head_artwork};
+use crate::routes::collections::{get_collection, list_collections};
+use crate::routes::genres::{GenreConnection, list_genres};
+use crate::routes::lists::{
+    add_to_favourites, add_to_watchlist, get_favourites, get_watchlist, remove_from_favourites,
+    remove_from_watchlist,
+};
 use crate::routes::media::{
     browse_media, get_episode_detail, get_media_detail, get_media_sources, get_season_detail,
 };
+use crate::routes::people::{get_person, search_people};
 use crate::routes::playback::{
     clear_title_progress, dismiss_continue_watching, get_continue_watching, get_history,
     get_title_progress, mark_unwatched, mark_watched, report_playback_progress,
@@ -56,8 +76,11 @@ use crate::routes::stream::{download_file, head_download_file, head_stream_file,
 use crate::routes::subtitle::{get_subtitle, get_subtitle_webvtt};
 use crate::routes::test_support::{access_over, make_app_state};
 use crate::services::artwork::{ArtworkCache, ArtworkCacheConfig};
+use crate::services::collections::CollectionService;
 use crate::services::library::{LibraryError, LibraryService, LocatedFile};
+use crate::services::lists::{ListDependencies, ListService};
 use crate::services::metadata::{DbMetadataService, MetadataRepositories};
+use crate::services::people::PeopleService;
 use crate::services::playback::{DbPlaybackService, PlaybackRepositories};
 use crate::services::sources::SourceCatalog;
 use crate::state::{AppServices, AppState};
@@ -151,6 +174,10 @@ struct Fixture {
     movies: Arc<InMemoryMovieRepository>,
     shows: Arc<InMemoryShowRepository>,
     libraries: Arc<InMemoryLibraryRepository>,
+    genres: Arc<InMemoryGenreRepository>,
+    people: Arc<InMemoryPersonRepository>,
+    collections: Arc<InMemoryCollectionRepository>,
+    lists: Arc<InMemoryUserListRepository>,
     clock: Arc<TestClock>,
     root: TempDir,
 }
@@ -161,9 +188,18 @@ fn fixture() -> Fixture {
     let files = Arc::new(InMemoryFileRepository::default());
     let movies = Arc::new(InMemoryMovieRepository::with_files(files.clone()));
     let shows = Arc::new(InMemoryShowRepository::with_files(files.clone()));
-    let genres = Arc::new(InMemoryGenreRepository::default());
+    // Every store that lists titles or what hangs off them reads the same
+    // titles to apply a policy (issue #328).
+    let titles = InMemoryTitleAccess::new(movies.clone(), shows.clone());
+    let genres = Arc::new(InMemoryGenreRepository::with_titles(titles.clone()));
+    let people = Arc::new(InMemoryPersonRepository::with_titles(titles.clone()));
+    let collections = Arc::new(InMemoryCollectionRepository::with_titles(titles.clone()));
     let libraries = Arc::new(InMemoryLibraryRepository::default());
     let clock = Arc::new(TestClock::new());
+    let lists = Arc::new(InMemoryUserListRepository::with_titles(
+        clock.clone(),
+        titles,
+    ));
     let sidecars = Arc::new(
         beam_domain::repositories::sidecar_subtitle::in_memory::InMemorySidecarSubtitleRepository::default(),
     );
@@ -189,13 +225,8 @@ fn fixture() -> Fixture {
             genres.clone(),
         )),
         genres: genres.clone(),
-        people: Arc::new(
-            beam_domain::repositories::person::in_memory::InMemoryPersonRepository::default(),
-        ),
-        collections: Arc::new(
-            beam_domain::repositories::collection::in_memory::InMemoryCollectionRepository::default(
-            ),
-        ),
+        people: people.clone(),
+        collections: collections.clone(),
     }));
     let artwork = Arc::new(ArtworkCache::new(
         ArtworkCacheConfig {
@@ -218,7 +249,7 @@ fn fixture() -> Fixture {
             files: files.clone(),
             root: root.path().to_path_buf(),
         }),
-        metadata,
+        metadata: metadata.clone(),
         subtitles: Arc::new(crate::services::subtitle::DbSubtitleService::new(
             libraries.clone(),
             files.clone(),
@@ -228,15 +259,29 @@ fn fixture() -> Fixture {
         admin_log: base.services.admin_log.clone(),
         user_repo: base.services.user_repo.clone(),
         language_preferences: base.services.language_preferences.clone(),
-        playback,
-        genre_repo: genres,
+        playback: playback.clone(),
+        genre_repo: genres.clone(),
         library_repo: libraries.clone(),
         file_repo: files.clone(),
         enrichment_repo: base.services.enrichment_repo.clone(),
         enrichment_control: base.services.enrichment_control.clone(),
-        people: crate::routes::test_support::idle_people(movies.clone(), shows.clone()),
-        lists: crate::routes::test_support::unused_lists(),
-        collections: crate::routes::test_support::unused_collections(),
+        people: Arc::new(PeopleService::new(
+            people.clone(),
+            movies.clone(),
+            shows.clone(),
+        )),
+        lists: Arc::new(ListService::new(ListDependencies {
+            lists: lists.clone(),
+            movies: movies.clone(),
+            shows: shows.clone(),
+            metadata: metadata.clone(),
+            playback: playback.clone(),
+        })),
+        collections: Arc::new(CollectionService::new(
+            collections.clone(),
+            metadata.clone(),
+            playback.clone(),
+        )),
         movie_repo: movies.clone(),
         show_repo: shows.clone(),
         artwork,
@@ -257,6 +302,10 @@ fn fixture() -> Fixture {
         movies,
         shows,
         libraries,
+        genres,
+        people,
+        collections,
+        lists,
         clock,
         root,
     }
@@ -296,6 +345,21 @@ fn client(fixture: &Fixture) -> TestClient<AppState> {
                     get_continue_watching,
                     dismiss_continue_watching,
                     get_history,
+                ])
+                .mount(kynos::routes![
+                    get_watchlist,
+                    add_to_watchlist,
+                    remove_from_watchlist,
+                    get_favourites,
+                    add_to_favourites,
+                    remove_from_favourites,
+                ])
+                .mount(kynos::routes![
+                    list_collections,
+                    get_collection,
+                    search_people,
+                    get_person,
+                    list_genres,
                 ]),
         )
         .build(fixture.state.clone())
@@ -883,4 +947,391 @@ async fn an_unknown_id_is_not_found_whatever_the_viewers_access() {
             .assert_status(StatusCode::NOT_FOUND)
             .assert_problem_type(FILE_NOT_FOUND);
     }
+}
+
+const COLLECTION_NOT_FOUND: &str =
+    "https://beam.justinchung.net/reference/errors/#collection-not-found";
+const PERSON_NOT_FOUND: &str = "https://beam.justinchung.net/reference/errors/#person-not-found";
+
+/// The ids of a page of a list, newest first.
+fn listed_ids(page: &UserListConnection) -> Vec<Uuid> {
+    page.items
+        .iter()
+        .map(|item| match &item.media {
+            MediaMetadata::Movie(movie) => movie.id,
+            MediaMetadata::Show(show) => show.id,
+        })
+        .collect()
+}
+
+/// A watchlist and favourites list a hidden title as one that is not there:
+/// pages and totals leave it out, and adding or removing it answers as an
+/// unknown id does -- while its entry stays, for when the policy admits it
+/// again (issue #328).
+#[tokio::test]
+async fn a_hidden_title_is_off_the_viewers_lists_and_cannot_be_put_on_or_taken_off() {
+    let fixture = fixture();
+    let (kids, titles) = fixture.catalogue().await;
+    let client = client(&fixture);
+    let (token, user_id) = fixture.viewer().await;
+
+    for id in [titles.kids_movie, titles.grown_movie, titles.show] {
+        for list in ["watchlist", "favourites"] {
+            client
+                .put(&format!("/v1/{list}/{id}"))
+                .cookie("beam_session", &token)
+                .send()
+                .await
+                .assert_status(StatusCode::NO_CONTENT);
+        }
+        fixture.clock.advance(Duration::from_secs(1));
+    }
+    fixture.restrict(user_id, kids).await;
+
+    for list in ["watchlist", "favourites"] {
+        let page: UserListConnection = client
+            .get(&format!("/v1/{list}?first=1"))
+            .cookie("beam_session", &token)
+            .send()
+            .await
+            .assert_status(StatusCode::OK)
+            .json();
+        assert_eq!(listed_ids(&page), [titles.kids_movie], "{list}");
+        assert_eq!(page.total, 1, "{list}");
+        assert!(
+            !page.page_info.has_next_page,
+            "a hidden entry does not hold a place on a page: {list}"
+        );
+    }
+
+    for id in [
+        titles.grown_movie,
+        titles.show,
+        titles.season,
+        titles.episode,
+    ] {
+        for request in [
+            client.put(&format!("/v1/watchlist/{id}")),
+            client.delete(&format!("/v1/watchlist/{id}")),
+            client.put(&format!("/v1/favourites/{id}")),
+            client.delete(&format!("/v1/favourites/{id}")),
+        ] {
+            request
+                .cookie("beam_session", &token)
+                .send()
+                .await
+                .assert_status(StatusCode::NOT_FOUND)
+                .assert_problem_type(MEDIA_NOT_FOUND);
+        }
+    }
+    client
+        .delete(&format!("/v1/watchlist/{}", titles.kids_movie))
+        .cookie("beam_session", &token)
+        .send()
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+
+    let open = AccessPolicy::unrestricted();
+    let kept: HashSet<TitleRef> = fixture
+        .lists
+        .find_page(user_id, UserList::Watchlist, &open, None, 10)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.title)
+        .collect();
+    assert_eq!(
+        kept,
+        HashSet::from([
+            TitleRef::Movie(titles.grown_movie),
+            TitleRef::Show(titles.show)
+        ]),
+        "the refused removals removed nothing; the visible one did"
+    );
+    assert_eq!(
+        fixture
+            .lists
+            .count(user_id, UserList::Favourites, &open)
+            .await
+            .unwrap(),
+        3
+    );
+}
+
+/// The collection listing, a collection's movies and its art follow the
+/// movies a viewer may see: one whose every movie is hidden is not there
+/// (issue #328).
+#[tokio::test]
+async fn a_collection_holds_only_the_movies_the_viewer_may_see() {
+    let fixture = fixture();
+    let (kids, titles) = fixture.catalogue().await;
+    let more = fixture.library("more").await;
+    let (sequel, _) = fixture.movie(more, "more", "Heat 2", "R").await;
+    let collection = |native: &str, name: &str| CollectionEnrichment {
+        collection_ref: ExternalMediaRef::new("tmdb", native),
+        name: name.to_string(),
+        poster_url: Some(POSTER_URL.to_string()),
+        backdrop_url: None,
+    };
+    let mixed = collection("1", "Mixed Collection");
+    let grown_only = collection("2", "Grown Collection");
+    for (movie, member_of) in [
+        (titles.kids_movie, &mixed),
+        (titles.grown_movie, &mixed),
+        (sequel, &grown_only),
+    ] {
+        fixture
+            .collections
+            .set_movie_collection(movie, Some(member_of))
+            .await
+            .unwrap();
+    }
+    let id_of = |movie| {
+        let collections = fixture.collections.clone();
+        async move {
+            collections
+                .movie_collection(movie)
+                .await
+                .unwrap()
+                .expect("the movie's collection")
+                .id
+        }
+    };
+    let (mixed_id, grown_id) = (id_of(titles.kids_movie).await, id_of(sequel).await);
+    let client = client(&fixture);
+    let (restricted, _) = fixture.kids_viewer(kids).await;
+    let (open, _) = fixture.viewer().await;
+
+    let listing: CollectionConnection = client
+        .get("/v1/collections")
+        .cookie("beam_session", &restricted)
+        .send()
+        .await
+        .assert_status(StatusCode::OK)
+        .json();
+    let listed: Vec<(Uuid, u64)> = listing
+        .items
+        .iter()
+        .map(|c| (c.id, c.movie_count))
+        .collect();
+    assert_eq!(listed, [(mixed_id, 1)]);
+    assert_eq!(listing.total, 1);
+    let everything: CollectionConnection = client
+        .get("/v1/collections")
+        .cookie("beam_session", &open)
+        .send()
+        .await
+        .assert_status(StatusCode::OK)
+        .json();
+    assert_eq!(everything.total, 2);
+
+    let detail: CollectionDetail = client
+        .get(&format!("/v1/collections/{mixed_id}"))
+        .cookie("beam_session", &restricted)
+        .send()
+        .await
+        .assert_status(StatusCode::OK)
+        .json();
+    let movies: Vec<Uuid> = detail.movies.iter().map(|movie| movie.id).collect();
+    assert_eq!(movies, [titles.kids_movie]);
+
+    let grown_path = format!("/v1/collections/{grown_id}");
+    client
+        .get(&grown_path)
+        .cookie("beam_session", &restricted)
+        .send()
+        .await
+        .assert_status(StatusCode::NOT_FOUND)
+        .assert_problem_type(COLLECTION_NOT_FOUND);
+    assert_eq!(status(&client, &open, &grown_path).await, StatusCode::OK);
+
+    let grown_art = format!("/v1/artwork/collection/{grown_id}/poster");
+    assert_eq!(
+        status(&client, &restricted, &grown_art).await,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(status(&client, &open, &grown_art).await, StatusCode::OK);
+    let mixed_art = client
+        .get(&format!("/v1/artwork/collection/{mixed_id}/poster"))
+        .cookie("beam_session", &restricted)
+        .send()
+        .await;
+    assert_eq!(mixed_art.status(), StatusCode::OK);
+    assert_eq!(
+        mixed_art.header("cache-control"),
+        Some("private, max-age=86400")
+    );
+}
+
+/// People search, a filmography and a portrait follow the titles a viewer
+/// may see: a person credited only on hidden titles is not there
+/// (issue #328).
+#[tokio::test]
+async fn people_are_found_only_through_the_titles_the_viewer_may_see() {
+    let fixture = fixture();
+    let (kids, titles) = fixture.catalogue().await;
+    let credit = |native: &str, name: &str, character: &str| CreditEnrichment {
+        person_ref: ExternalMediaRef::new("tmdb", native),
+        name: name.to_string(),
+        profile_url: Some(POSTER_URL.to_string()),
+        role: beam_domain::models::person::CreditRole::Cast {
+            character: Some(character.to_string()),
+            billing_order: 0,
+        },
+    };
+    let both = credit("1", "Both Films", "Lead");
+    fixture
+        .people
+        .set_movie_credits(
+            titles.kids_movie,
+            &[both.clone(), credit("2", "Kids Only", "Bear")],
+        )
+        .await
+        .unwrap();
+    fixture
+        .people
+        .set_movie_credits(
+            titles.grown_movie,
+            &[both, credit("3", "Grown Only", "Cop")],
+        )
+        .await
+        .unwrap();
+    fixture
+        .people
+        .set_show_credits(titles.show, &[credit("4", "Show Only", "Detective")])
+        .await
+        .unwrap();
+    let person = |title, name: &'static str| {
+        let people = fixture.people.clone();
+        async move {
+            people
+                .movie_credits(title)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|c| c.person.name == name)
+                .expect("the credited person")
+                .person
+                .id
+        }
+    };
+    let (shared, grown_only) = (
+        person(titles.kids_movie, "Both Films").await,
+        person(titles.grown_movie, "Grown Only").await,
+    );
+    let client = client(&fixture);
+    let (restricted, _) = fixture.kids_viewer(kids).await;
+    let (open, _) = fixture.viewer().await;
+
+    let found = |token: String, query: &'static str| {
+        let client = &client;
+        async move {
+            let page: PersonConnection = client
+                .get(&format!("/v1/people{query}"))
+                .cookie("beam_session", &token)
+                .send()
+                .await
+                .assert_status(StatusCode::OK)
+                .json();
+            (
+                page.items
+                    .into_iter()
+                    .map(|p| p.name)
+                    .collect::<Vec<String>>(),
+                page.total,
+            )
+        }
+    };
+    assert_eq!(
+        found(restricted.clone(), "").await,
+        (vec!["Both Films".to_string(), "Kids Only".to_string()], 2)
+    );
+    assert_eq!(
+        found(restricted.clone(), "?query=only").await,
+        (vec!["Kids Only".to_string()], 1)
+    );
+    assert_eq!(found(open.clone(), "").await.1, 4);
+
+    let detail: PersonDetail = client
+        .get(&format!("/v1/people/{shared}"))
+        .cookie("beam_session", &restricted)
+        .send()
+        .await
+        .assert_status(StatusCode::OK)
+        .json();
+    let credited: Vec<Uuid> = detail.cast.iter().map(|c| c.title.id).collect();
+    assert_eq!(credited, [titles.kids_movie]);
+
+    let hidden_path = format!("/v1/people/{grown_only}");
+    client
+        .get(&hidden_path)
+        .cookie("beam_session", &restricted)
+        .send()
+        .await
+        .assert_status(StatusCode::NOT_FOUND)
+        .assert_problem_type(PERSON_NOT_FOUND);
+    assert_eq!(status(&client, &open, &hidden_path).await, StatusCode::OK);
+
+    let hidden_portrait = format!("/v1/artwork/person/{grown_only}/profile");
+    assert_eq!(
+        status(&client, &restricted, &hidden_portrait).await,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        status(&client, &open, &hidden_portrait).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        status(
+            &client,
+            &restricted,
+            &format!("/v1/artwork/person/{shared}/profile")
+        )
+        .await,
+        StatusCode::OK
+    );
+}
+
+/// The genre filter offers only the genres of titles a viewer may see.
+#[tokio::test]
+async fn the_genres_listed_are_those_of_the_titles_the_viewer_may_see() {
+    let fixture = fixture();
+    let (kids, titles) = fixture.catalogue().await;
+    fixture
+        .genres
+        .set_movie_genres(titles.kids_movie, &["Family".to_string()])
+        .await
+        .unwrap();
+    fixture
+        .genres
+        .set_movie_genres(
+            titles.grown_movie,
+            &["Crime".to_string(), "Family".to_string()],
+        )
+        .await
+        .unwrap();
+    fixture
+        .genres
+        .set_show_genres(titles.show, &["Drama".to_string()])
+        .await
+        .unwrap();
+    let client = client(&fixture);
+    let (restricted, _) = fixture.kids_viewer(kids).await;
+    let (open, _) = fixture.viewer().await;
+
+    let genres = |token: String| {
+        let client = &client;
+        async move {
+            client
+                .get("/v1/genres")
+                .cookie("beam_session", &token)
+                .send()
+                .await
+                .assert_status(StatusCode::OK)
+                .json::<GenreConnection>()
+                .items
+        }
+    };
+    assert_eq!(genres(restricted).await, ["Family"]);
+    assert_eq!(genres(open).await, ["Crime", "Drama", "Family"]);
 }

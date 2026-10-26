@@ -14,12 +14,15 @@ use sea_orm::{
 };
 use uuid::Uuid;
 
+use beam_domain::models::access::AccessPolicy;
 use beam_domain::models::user_list::{UserList, UserListEntry, UserListPosition};
 use beam_domain::models::watch_state::TitleRef;
 use beam_domain::repositories::UserListRepository;
 use beam_domain::repositories::user_list::carry_kind_mismatch;
 use beam_domain::services::{Clock, RealClock};
 use beam_entity::user_list_entry;
+
+use crate::repositories::access_sql::AccessConditions;
 
 /// SQL-based implementation of the UserListRepository trait.
 #[derive(Debug, Clone)]
@@ -53,6 +56,23 @@ fn title_column(title: TitleRef) -> (&'static str, Uuid) {
 
 fn statement(sql: impl Into<String>, values: Vec<Value>) -> Statement {
     Statement::from_sql_and_values(DbBackend::Postgres, sql, values)
+}
+
+/// The `WHERE` of the user's `list` as `access` lets them see it, over
+/// `user_list_entries e`, and its binds (issue #328): an entry for a title
+/// the policy hides is kept, but no page lists it and no count counts it.
+fn visible_entries(user_id: Uuid, list: UserList, access: &AccessPolicy) -> (String, Vec<Value>) {
+    let mut values: Vec<Value> = vec![user_id.into(), list.as_str().into()];
+    let mut filter = "e.user_id = $1 AND e.list = $2".to_string();
+    let conditions = AccessConditions::bind(access, |value| {
+        values.push(value);
+        format!("${}", values.len())
+    });
+    if let Some(visible) = conditions.on_either("e.movie_id", "e.show_id") {
+        filter.push_str(" AND ");
+        filter.push_str(&visible);
+    }
+    (filter, values)
 }
 
 async fn entries(
@@ -145,45 +165,48 @@ impl UserListRepository for SqlUserListRepository {
         &self,
         user_id: Uuid,
         list: UserList,
+        access: &AccessPolicy,
         after: Option<UserListPosition>,
         limit: u64,
     ) -> Result<Vec<UserListEntry>, DbErr> {
-        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-        let (sql, values) = match after {
-            None => (
-                format!(
-                    "SELECT {COLUMNS} FROM user_list_entries WHERE user_id = $1 AND list = $2 \
-                     ORDER BY added_at DESC, id DESC LIMIT $3"
-                ),
-                vec![user_id.into(), list.as_str().into(), limit.into()],
-            ),
-            Some(UserListPosition { added_at, id }) => (
-                format!(
-                    "SELECT {COLUMNS} FROM user_list_entries WHERE user_id = $1 AND list = $2 \
-                       AND (added_at, id) < ($3, $4) \
-                     ORDER BY added_at DESC, id DESC LIMIT $5"
-                ),
-                vec![
-                    user_id.into(),
-                    list.as_str().into(),
-                    added_at.into(),
-                    id.into(),
-                    limit.into(),
-                ],
-            ),
-        };
-        entries(self.db.as_ref(), sql, values).await
+        let (mut sql, mut values) = visible_entries(user_id, list, access);
+        if let Some(UserListPosition { added_at, id }) = after {
+            values.push(added_at.into());
+            values.push(id.into());
+            sql.push_str(&format!(
+                " AND (e.added_at, e.id) < (${}, ${})",
+                values.len() - 1,
+                values.len()
+            ));
+        }
+        values.push(i64::try_from(limit).unwrap_or(i64::MAX).into());
+        sql.push_str(&format!(
+            " ORDER BY e.added_at DESC, e.id DESC LIMIT ${}",
+            values.len()
+        ));
+        entries(
+            self.db.as_ref(),
+            format!("SELECT {COLUMNS} FROM user_list_entries e WHERE {sql}"),
+            values,
+        )
+        .await
     }
 
-    async fn count(&self, user_id: Uuid, list: UserList) -> Result<u64, DbErr> {
+    async fn count(
+        &self,
+        user_id: Uuid,
+        list: UserList,
+        access: &AccessPolicy,
+    ) -> Result<u64, DbErr> {
         #[derive(Debug, FromQueryResult)]
         struct Counted {
             count: i64,
         }
 
+        let (filter, values) = visible_entries(user_id, list, access);
         let counted = Counted::find_by_statement(statement(
-            "SELECT count(*) AS count FROM user_list_entries WHERE user_id = $1 AND list = $2",
-            vec![user_id.into(), list.as_str().into()],
+            format!("SELECT count(*) AS count FROM user_list_entries e WHERE {filter}"),
+            values,
         ))
         .one(self.db.as_ref())
         .await?;

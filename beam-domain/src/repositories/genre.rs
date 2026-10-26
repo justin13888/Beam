@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use sea_orm::DbErr;
 use uuid::Uuid;
 
+use crate::models::access::AccessPolicy;
 use crate::models::genre::Genre;
 
 /// Genres, shared across movies/shows via junction tables and upserted by
@@ -17,6 +18,10 @@ pub trait GenreRepository: Send + Sync + std::fmt::Debug {
     /// Same as `set_movie_genres`, for shows.
     async fn set_show_genres(&self, show_id: Uuid, names: &[String]) -> Result<(), DbErr>;
     async fn find_all(&self) -> Result<Vec<Genre>, DbErr>;
+    /// Every genre at least one movie or show `access` admits carries, in
+    /// no particular order (issue #328): a genre only hidden titles carry,
+    /// or none at all any more, is left out.
+    async fn find_carried(&self, access: &AccessPolicy) -> Result<Vec<Genre>, DbErr>;
     /// The genre names of each of `movie_ids`, each list in
     /// [`sort_genre_names`] order. A movie with no genre is absent from the
     /// map. One statement however many ids, and none for an empty slice.
@@ -66,17 +71,30 @@ pub fn slugify(name: &str) -> String {
 #[cfg(any(test, feature = "test-utils"))]
 pub mod in_memory {
     use super::*;
+    use crate::models::watch_state::TitleRef;
+    use crate::repositories::access_policy::in_memory::InMemoryTitleAccess;
     use parking_lot::RwLock;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
+    /// The in-memory double. The `Default` applies access policies over no
+    /// titles; see [`InMemoryTitleAccess`].
     #[derive(Debug, Default)]
     pub struct InMemoryGenreRepository {
         genres: RwLock<HashMap<String, Genre>>, // keyed by slug
         movie_genres: RwLock<HashMap<Uuid, Vec<Uuid>>>,
         show_genres: RwLock<HashMap<Uuid, Vec<Uuid>>>,
+        titles: InMemoryTitleAccess,
     }
 
     impl InMemoryGenreRepository {
+        /// A double applying access policies over the titles `titles` reads.
+        pub fn with_titles(titles: InMemoryTitleAccess) -> Self {
+            Self {
+                titles,
+                ..Self::default()
+            }
+        }
+
         fn upsert_genres(&self, names: &[String]) -> Vec<Uuid> {
             let mut genres = self.genres.write();
             names
@@ -140,6 +158,27 @@ pub mod in_memory {
             Ok(self.genres.read().values().cloned().collect())
         }
 
+        async fn find_carried(&self, access: &AccessPolicy) -> Result<Vec<Genre>, DbErr> {
+            let mut carried: HashSet<Uuid> = HashSet::new();
+            for (movie_id, genre_ids) in self.movie_genres.read().iter() {
+                if self.titles.admits(access, TitleRef::Movie(*movie_id)) {
+                    carried.extend(genre_ids.iter().copied());
+                }
+            }
+            for (show_id, genre_ids) in self.show_genres.read().iter() {
+                if self.titles.admits(access, TitleRef::Show(*show_id)) {
+                    carried.extend(genre_ids.iter().copied());
+                }
+            }
+            Ok(self
+                .genres
+                .read()
+                .values()
+                .filter(|genre| carried.contains(&genre.id))
+                .cloned()
+                .collect())
+        }
+
         async fn movie_genre_names(
             &self,
             movie_ids: &[Uuid],
@@ -172,32 +211,58 @@ pub mod in_memory {
 #[mutants::skip]
 #[cfg(any(test, feature = "test-utils"))]
 pub mod in_memory_fixture {
+    use std::sync::Arc;
+
+    use uuid::Uuid;
+
     use super::GenreRepository;
     use super::in_memory::InMemoryGenreRepository;
+    use crate::repositories::access_policy::in_memory::InMemoryTitleAccess;
     use crate::repositories::contract::fixture::GenreRepositoryFixture;
     use crate::repositories::movie::in_memory::InMemoryMovieRepository;
     use crate::repositories::show::in_memory::InMemoryShowRepository;
     use crate::repositories::{MovieRepository, ShowRepository};
 
-    /// The hermetic instantiation of the genre contract.
-    #[derive(Debug, Default)]
+    /// The hermetic instantiation of the genre contract, the genre double
+    /// reading the title doubles to apply a policy.
+    #[derive(Debug)]
     pub struct InMemoryFixture {
         repo: InMemoryGenreRepository,
-        movies: InMemoryMovieRepository,
-        shows: InMemoryShowRepository,
+        movies: Arc<InMemoryMovieRepository>,
+        shows: Arc<InMemoryShowRepository>,
     }
 
+    impl Default for InMemoryFixture {
+        fn default() -> Self {
+            let movies = Arc::new(InMemoryMovieRepository::default());
+            let shows = Arc::new(InMemoryShowRepository::default());
+            Self {
+                repo: InMemoryGenreRepository::with_titles(InMemoryTitleAccess::new(
+                    movies.clone(),
+                    shows.clone(),
+                )),
+                movies,
+                shows,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
     impl GenreRepositoryFixture for InMemoryFixture {
         fn repo(&self) -> &dyn GenreRepository {
             &self.repo
         }
 
         fn movies(&self) -> &dyn MovieRepository {
-            &self.movies
+            self.movies.as_ref()
         }
 
         fn shows(&self) -> &dyn ShowRepository {
-            &self.shows
+            self.shows.as_ref()
+        }
+
+        async fn new_library(&self) -> Uuid {
+            Uuid::new_v4()
         }
     }
 }

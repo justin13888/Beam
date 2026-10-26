@@ -1,6 +1,7 @@
 use std::path::Path;
 
 pub mod access_policy;
+pub(crate) mod access_sql;
 pub mod admin_log;
 pub mod applied_nfo;
 pub mod catalog;

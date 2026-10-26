@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use beam_auth::utils::session_store::SessionData;
+use beam_domain::models::access::AccessPolicy;
 use beam_domain::models::collection::{Collection as StoredCollection, CollectionSummary};
 use beam_domain::models::movie::CreateMovie;
 use beam_domain::providers::enrichment::{CollectionEnrichment, ExternalMediaRef};
@@ -450,13 +451,18 @@ impl CollectionRepository for FailingCollections {
     async fn find_by_id(&self, _: Uuid) -> Result<Option<StoredCollection>, DbErr> {
         Err(outage())
     }
-    async fn movie_ids(&self, _: Uuid) -> Result<Vec<Uuid>, DbErr> {
+    async fn movie_ids(&self, _: Uuid, _: &AccessPolicy) -> Result<Vec<Uuid>, DbErr> {
         Err(outage())
     }
-    async fn list(&self, _: u64, _: u64) -> Result<Vec<CollectionSummary>, DbErr> {
+    async fn list(
+        &self,
+        _: &AccessPolicy,
+        _: u64,
+        _: u64,
+    ) -> Result<Vec<CollectionSummary>, DbErr> {
         Err(outage())
     }
-    async fn count(&self) -> Result<u64, DbErr> {
+    async fn count(&self, _: &AccessPolicy) -> Result<u64, DbErr> {
         Err(outage())
     }
 }

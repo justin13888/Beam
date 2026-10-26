@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use sea_orm::DbErr;
 use uuid::Uuid;
 
+use crate::models::access::AccessPolicy;
 use crate::models::collection::{Collection, CollectionSummary};
 use crate::providers::enrichment::CollectionEnrichment;
 
@@ -26,35 +27,59 @@ pub trait CollectionRepository: Send + Sync + std::fmt::Debug {
     /// The collection with this id, whether or not any movie is in it now.
     async fn find_by_id(&self, id: Uuid) -> Result<Option<Collection>, DbErr>;
 
-    /// The movies in the collection, in no particular order: callers order
-    /// them by what they display. Empty for an unknown id.
-    async fn movie_ids(&self, collection_id: Uuid) -> Result<Vec<Uuid>, DbErr>;
+    /// The movies in the collection `access` admits (issue #328), in no
+    /// particular order: callers order them by what they display. Empty for
+    /// an unknown id.
+    async fn movie_ids(
+        &self,
+        collection_id: Uuid,
+        access: &AccessPolicy,
+    ) -> Result<Vec<Uuid>, DbErr>;
 
-    /// One page of the collections at least one movie is in, with how many
-    /// are, ordered by name ignoring ASCII case -- by code point once `A`-`Z`
-    /// are folded to `a`-`z`, and nothing else is folded, so the order cannot
-    /// depend on a store's locale -- and then by id.
-    async fn list(&self, limit: u64, offset: u64) -> Result<Vec<CollectionSummary>, DbErr>;
+    /// One page of the collections at least one movie `access` admits is
+    /// in, with how many such movies are, ordered by name ignoring ASCII
+    /// case -- by code point once `A`-`Z` are folded to `a`-`z`, and nothing
+    /// else is folded, so the order cannot depend on a store's locale -- and
+    /// then by id.
+    async fn list(
+        &self,
+        access: &AccessPolicy,
+        limit: u64,
+        offset: u64,
+    ) -> Result<Vec<CollectionSummary>, DbErr>;
 
     /// How many collections [`Self::list`] lists across every page.
-    async fn count(&self) -> Result<u64, DbErr>;
+    async fn count(&self, access: &AccessPolicy) -> Result<u64, DbErr>;
 }
 
 #[mutants::skip]
 #[cfg(any(test, feature = "test-utils"))]
 pub mod in_memory {
     use super::*;
+    use crate::models::watch_state::TitleRef;
+    use crate::repositories::access_policy::in_memory::InMemoryTitleAccess;
     use parking_lot::RwLock;
     use std::collections::HashMap;
 
+    /// The in-memory double. The `Default` applies access policies over no
+    /// titles; see [`InMemoryTitleAccess`].
     #[derive(Debug, Default)]
     pub struct InMemoryCollectionRepository {
         collections: RwLock<HashMap<Uuid, Collection>>,
         /// Movie id to collection id.
         members: RwLock<HashMap<Uuid, Uuid>>,
+        titles: InMemoryTitleAccess,
     }
 
     impl InMemoryCollectionRepository {
+        /// A double applying access policies over the titles `titles` reads.
+        pub fn with_titles(titles: InMemoryTitleAccess) -> Self {
+            Self {
+                titles,
+                ..Self::default()
+            }
+        }
+
         fn upsert(&self, enrichment: &CollectionEnrichment) -> Uuid {
             let mut collections = self.collections.write();
             let existing = collections
@@ -84,10 +109,12 @@ pub mod in_memory {
             }
         }
 
-        fn summaries(&self) -> Vec<CollectionSummary> {
+        fn summaries(&self, access: &AccessPolicy) -> Vec<CollectionSummary> {
             let mut counts: HashMap<Uuid, u64> = HashMap::new();
-            for collection_id in self.members.read().values() {
-                *counts.entry(*collection_id).or_default() += 1;
+            for (movie_id, collection_id) in self.members.read().iter() {
+                if self.titles.admits(access, TitleRef::Movie(*movie_id)) {
+                    *counts.entry(*collection_id).or_default() += 1;
+                }
             }
             let collections = self.collections.read();
             let mut summaries: Vec<CollectionSummary> = counts
@@ -140,27 +167,37 @@ pub mod in_memory {
             Ok(self.collections.read().get(&id).cloned())
         }
 
-        async fn movie_ids(&self, collection_id: Uuid) -> Result<Vec<Uuid>, DbErr> {
+        async fn movie_ids(
+            &self,
+            collection_id: Uuid,
+            access: &AccessPolicy,
+        ) -> Result<Vec<Uuid>, DbErr> {
             Ok(self
                 .members
                 .read()
                 .iter()
                 .filter(|(_, id)| **id == collection_id)
                 .map(|(movie_id, _)| *movie_id)
+                .filter(|movie_id| self.titles.admits(access, TitleRef::Movie(*movie_id)))
                 .collect())
         }
 
-        async fn list(&self, limit: u64, offset: u64) -> Result<Vec<CollectionSummary>, DbErr> {
+        async fn list(
+            &self,
+            access: &AccessPolicy,
+            limit: u64,
+            offset: u64,
+        ) -> Result<Vec<CollectionSummary>, DbErr> {
             Ok(self
-                .summaries()
+                .summaries(access)
                 .into_iter()
                 .skip(usize::try_from(offset).unwrap_or(usize::MAX))
                 .take(usize::try_from(limit).unwrap_or(usize::MAX))
                 .collect())
         }
 
-        async fn count(&self) -> Result<u64, DbErr> {
-            Ok(self.summaries().len() as u64)
+        async fn count(&self, access: &AccessPolicy) -> Result<u64, DbErr> {
+            Ok(self.summaries(access).len() as u64)
         }
     }
 }
@@ -168,26 +205,58 @@ pub mod in_memory {
 #[mutants::skip]
 #[cfg(any(test, feature = "test-utils"))]
 pub mod in_memory_fixture {
+    use std::sync::Arc;
+
+    use uuid::Uuid;
+
     use super::CollectionRepository;
     use super::in_memory::InMemoryCollectionRepository;
-    use crate::repositories::MovieRepository;
+    use crate::repositories::access_policy::in_memory::InMemoryTitleAccess;
     use crate::repositories::contract::fixture::CollectionRepositoryFixture;
     use crate::repositories::movie::in_memory::InMemoryMovieRepository;
+    use crate::repositories::show::in_memory::InMemoryShowRepository;
+    use crate::repositories::{MovieRepository, ShowRepository};
 
-    /// The hermetic instantiation of the collection contract.
-    #[derive(Debug, Default)]
+    /// The hermetic instantiation of the collection contract, the
+    /// collection double reading the title doubles to apply a policy.
+    #[derive(Debug)]
     pub struct InMemoryFixture {
         repo: InMemoryCollectionRepository,
-        movies: InMemoryMovieRepository,
+        movies: Arc<InMemoryMovieRepository>,
+        shows: Arc<InMemoryShowRepository>,
     }
 
+    impl Default for InMemoryFixture {
+        fn default() -> Self {
+            let movies = Arc::new(InMemoryMovieRepository::default());
+            let shows = Arc::new(InMemoryShowRepository::default());
+            Self {
+                repo: InMemoryCollectionRepository::with_titles(InMemoryTitleAccess::new(
+                    movies.clone(),
+                    shows.clone(),
+                )),
+                movies,
+                shows,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
     impl CollectionRepositoryFixture for InMemoryFixture {
         fn repo(&self) -> &dyn CollectionRepository {
             &self.repo
         }
 
         fn movies(&self) -> &dyn MovieRepository {
-            &self.movies
+            self.movies.as_ref()
+        }
+
+        fn shows(&self) -> &dyn ShowRepository {
+            self.shows.as_ref()
+        }
+
+        async fn new_library(&self) -> Uuid {
+            Uuid::new_v4()
         }
     }
 }

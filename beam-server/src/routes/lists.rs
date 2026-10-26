@@ -16,7 +16,7 @@ use beam_domain::models::user_list::UserList;
 
 use crate::models::UserListConnection;
 use crate::routes::api_error::{InternalError, ListMembershipError, ListPageError, SessionAuth};
-use crate::routes::playback::parse_user_id;
+use crate::routes::playback::{caller_access, hides, media_not_found};
 use crate::routes::tags::Playback;
 use crate::services::lists::ListError;
 use crate::state::AppState;
@@ -79,13 +79,28 @@ impl From<ListError> for ListPageError {
     }
 }
 
+/// The session's user, once `id` is known not to name something their
+/// access policy hides (issue #328): a hidden title, or a season or episode
+/// of one, answers exactly as an id naming nothing.
+async fn visible_to_caller(
+    auth: &SessionAuth,
+    state: &AppState,
+    id: Uuid,
+) -> Result<Uuid, ListMembershipError> {
+    let (user_id, policy) = caller_access(state, auth).await?;
+    if hides(state, &policy, id).await? {
+        return Err(ListMembershipError::MediaNotFound(media_not_found(id)));
+    }
+    Ok(user_id)
+}
+
 async fn add(
     auth: &SessionAuth,
     state: &AppState,
     list: UserList,
     id: Uuid,
 ) -> Result<NoContent, ListMembershipError> {
-    let user_id = parse_user_id(&auth.0.user_id)?;
+    let user_id = visible_to_caller(auth, state, id).await?;
     state.services.lists.add(user_id, list, id).await?;
     Ok(NoContent)
 }
@@ -96,7 +111,7 @@ async fn remove(
     list: UserList,
     id: Uuid,
 ) -> Result<NoContent, ListMembershipError> {
-    let user_id = parse_user_id(&auth.0.user_id)?;
+    let user_id = visible_to_caller(auth, state, id).await?;
     state.services.lists.remove(user_id, list, id).await?;
     Ok(NoContent)
 }
@@ -107,12 +122,12 @@ async fn page(
     list: UserList,
     query: ListQuery,
 ) -> Result<Json<UserListConnection>, ListPageError> {
-    let user_id = parse_user_id(&auth.0.user_id)?;
+    let (user_id, policy) = caller_access(state, auth).await?;
     let ListQuery { first, after } = query;
     let connection = state
         .services
         .lists
-        .page(user_id, list, first, after)
+        .page(user_id, &policy, list, first, after)
         .await?;
     Ok(Json(connection))
 }
@@ -120,7 +135,8 @@ async fn page(
 /// Put a movie or a show on the caller's watchlist.
 ///
 /// One already there keeps its place. A season or an episode is refused:
-/// put its show on the list instead.
+/// put its show on the list instead. A title the caller's access policy
+/// hides answers `404`, as an id naming nothing does.
 #[kynos::put("/watchlist/{id}", tag = Playback, operation_id = "addToWatchlist")]
 pub async fn add_to_watchlist(
     auth: SessionAuth,
@@ -132,6 +148,9 @@ pub async fn add_to_watchlist(
 
 /// Take a movie or a show off the caller's watchlist. One not on it changes
 /// nothing.
+///
+/// A title the caller's access policy hides answers `404`, as an id naming
+/// nothing does.
 #[kynos::delete(
     "/watchlist/{id}",
     tag = Playback,
@@ -146,6 +165,10 @@ pub async fn remove_from_watchlist(
 }
 
 /// The caller's watchlist, most recently added first, a page at a time.
+///
+/// Titles the caller's access policy hides are left out of every page and
+/// of `total`; they stay on the list, and appear again once the policy
+/// admits them.
 #[kynos::get("/watchlist", tag = Playback, operation_id = "getWatchlist")]
 pub async fn get_watchlist(
     auth: SessionAuth,
@@ -158,7 +181,8 @@ pub async fn get_watchlist(
 /// Mark a movie or a show as one of the caller's favourites.
 ///
 /// One already a favourite keeps its place. A season or an episode is
-/// refused: favourite its show instead.
+/// refused: favourite its show instead. A title the caller's access policy
+/// hides answers `404`, as an id naming nothing does.
 #[kynos::put("/favourites/{id}", tag = Playback, operation_id = "addToFavourites")]
 pub async fn add_to_favourites(
     auth: SessionAuth,
@@ -170,6 +194,9 @@ pub async fn add_to_favourites(
 
 /// Take a movie or a show out of the caller's favourites. One not among
 /// them changes nothing.
+///
+/// A title the caller's access policy hides answers `404`, as an id naming
+/// nothing does.
 #[kynos::delete(
     "/favourites/{id}",
     tag = Playback,
@@ -184,6 +211,10 @@ pub async fn remove_from_favourites(
 }
 
 /// The caller's favourites, most recently added first, a page at a time.
+///
+/// Titles the caller's access policy hides are left out of every page and
+/// of `total`; they stay among the favourites, and appear again once the
+/// policy admits them.
 #[kynos::get("/favourites", tag = Playback, operation_id = "getFavourites")]
 pub async fn get_favourites(
     auth: SessionAuth,

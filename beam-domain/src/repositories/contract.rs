@@ -178,11 +178,15 @@ pub mod fixture {
     /// Everything the [`crate::genre_repository_contract`] suite needs: the
     /// repository under contract and the title repositories over the same
     /// store, since a real Postgres enforces the junction tables' foreign keys.
+    #[async_trait::async_trait]
     pub trait GenreRepositoryFixture: Send + Sync {
         /// The repository under contract.
         fn repo(&self) -> &dyn crate::repositories::GenreRepository;
         fn movies(&self) -> &dyn crate::repositories::MovieRepository;
         fn shows(&self) -> &dyn crate::repositories::ShowRepository;
+
+        /// A library that exists as far as the backing store is concerned.
+        async fn new_library(&self) -> Uuid;
     }
 
     /// Everything the [`crate::person_repository_contract`] suite needs: the
@@ -190,11 +194,15 @@ pub mod fixture {
     /// store, since a real Postgres holds a credit to its title by a foreign
     /// key. Search and count are global, so a Postgres fixture must give each
     /// test a store of its own.
+    #[async_trait::async_trait]
     pub trait PersonRepositoryFixture: Send + Sync {
         /// The repository under contract, empty.
         fn repo(&self) -> &dyn crate::repositories::PersonRepository;
         fn movies(&self) -> &dyn crate::repositories::MovieRepository;
         fn shows(&self) -> &dyn crate::repositories::ShowRepository;
+
+        /// A library that exists as far as the backing store is concerned.
+        async fn new_library(&self) -> Uuid;
     }
 
     /// Everything the [`crate::user_list_repository_contract`] suite needs
@@ -209,6 +217,11 @@ pub mod fixture {
         /// The clock the repository stamps `added_at` from.
         fn clock(&self) -> &TestClock;
 
+        /// The title repositories over the same store, which an access
+        /// policy is applied through.
+        fn movies(&self) -> &dyn crate::repositories::MovieRepository;
+        fn shows(&self) -> &dyn crate::repositories::ShowRepository;
+
         /// A user that exists as far as the backing store is concerned.
         async fn new_user(&self) -> Uuid;
 
@@ -217,6 +230,9 @@ pub mod fixture {
 
         /// A show's id.
         async fn new_show(&self) -> Uuid;
+
+        /// A library that exists as far as the backing store is concerned.
+        async fn new_library(&self) -> Uuid;
     }
 
     /// Everything the [`crate::collection_repository_contract`] suite needs:
@@ -224,10 +240,15 @@ pub mod fixture {
     /// store, since a real Postgres holds a membership to its movie by a
     /// foreign key. Listing and counting are global, so a Postgres fixture
     /// must give each test a store of its own.
+    #[async_trait::async_trait]
     pub trait CollectionRepositoryFixture: Send + Sync {
         /// The repository under contract, empty.
         fn repo(&self) -> &dyn crate::repositories::CollectionRepository;
         fn movies(&self) -> &dyn crate::repositories::MovieRepository;
+        fn shows(&self) -> &dyn crate::repositories::ShowRepository;
+
+        /// A library that exists as far as the backing store is concerned.
+        async fn new_library(&self) -> Uuid;
     }
 
     /// Everything the [`crate::playback_telemetry_repository_contract`] suite
@@ -331,6 +352,133 @@ pub mod fixture {
 
         /// A video file that exists as far as the backing store is concerned.
         async fn new_file(&self) -> Uuid;
+    }
+
+    /// The titles the list, collection, people and genre contracts apply an
+    /// access policy to (issue #328): in the library `kids` a `PG` movie
+    /// and a `TV-PG` show, in `grown` an `R` movie and a `TV-MA` show.
+    ///
+    /// Every restricted policy here names its libraries, so what it admits
+    /// is the scenario's own titles alone, even over a store other tests
+    /// write to at the same time.
+    #[derive(Debug, Clone, Copy)]
+    pub struct AccessScenario {
+        pub kids: Uuid,
+        pub grown: Uuid,
+        pub kids_movie: Uuid,
+        pub kids_show: Uuid,
+        pub grown_movie: Uuid,
+        pub grown_show: Uuid,
+    }
+
+    impl AccessScenario {
+        /// The four titles, created through `movies` and `shows` in the
+        /// libraries `kids` and `grown`, which must exist.
+        pub async fn build(
+            movies: &dyn crate::repositories::MovieRepository,
+            shows: &dyn crate::repositories::ShowRepository,
+            kids: Uuid,
+            grown: Uuid,
+        ) -> Self {
+            Self {
+                kids,
+                grown,
+                kids_movie: certified_movie(movies, kids, "PG").await,
+                kids_show: certified_show(shows, kids, "TV-PG").await,
+                grown_movie: certified_movie(movies, grown, "R").await,
+                grown_show: certified_show(shows, grown, "TV-MA").await,
+            }
+        }
+
+        /// The `kids` library alone: its titles, whatever their rating.
+        pub fn kids_only(&self) -> crate::models::access::AccessPolicy {
+            crate::models::access::AccessPolicy {
+                libraries: crate::models::access::LibraryAccess::Only([self.kids].into()),
+                max_rating: None,
+            }
+        }
+
+        /// Both libraries under a parental-guidance ceiling: the `kids`
+        /// titles again, this time for their rating.
+        pub fn both_under_parental_guidance(&self) -> crate::models::access::AccessPolicy {
+            crate::models::access::AccessPolicy {
+                libraries: crate::models::access::LibraryAccess::Only(
+                    [self.kids, self.grown].into(),
+                ),
+                max_rating: Some(crate::models::access::ContentRating::ParentalGuidance),
+            }
+        }
+
+        /// The `grown` library under a teen ceiling, which nothing in it is
+        /// within: no title at all.
+        pub fn grown_under_teen(&self) -> crate::models::access::AccessPolicy {
+            crate::models::access::AccessPolicy {
+                libraries: crate::models::access::LibraryAccess::Only([self.grown].into()),
+                max_rating: Some(crate::models::access::ContentRating::Teen),
+            }
+        }
+    }
+
+    async fn certified_movie(
+        movies: &dyn crate::repositories::MovieRepository,
+        library_id: Uuid,
+        certification: &str,
+    ) -> Uuid {
+        let title = format!("{certification} movie {}", Uuid::new_v4());
+        let movie = movies
+            .find_or_create_by_identity(crate::models::movie::CreateMovie::new(
+                title.clone(),
+                None,
+                None,
+            ))
+            .await
+            .expect("create a movie");
+        movies
+            .apply_enrichment(
+                movie.id,
+                &crate::providers::enrichment::MovieEnrichment {
+                    title,
+                    content_rating: Some(certification.to_string()),
+                    ..Default::default()
+                },
+                &crate::models::enrichment::FieldLocks::none(),
+            )
+            .await
+            .expect("certify the movie");
+        movies
+            .ensure_library_association(library_id, movie.id)
+            .await
+            .expect("associate the movie");
+        movie.id
+    }
+
+    async fn certified_show(
+        shows: &dyn crate::repositories::ShowRepository,
+        library_id: Uuid,
+        certification: &str,
+    ) -> Uuid {
+        let title = format!("{certification} show {}", Uuid::new_v4());
+        let show = shows
+            .find_or_create_by_identity(crate::models::show::CreateShow::new(title.clone(), None))
+            .await
+            .expect("create a show");
+        shows
+            .apply_enrichment(
+                show.id,
+                &crate::providers::enrichment::ShowEnrichment {
+                    title,
+                    content_rating: Some(certification.to_string()),
+                    ..Default::default()
+                },
+                &crate::models::enrichment::FieldLocks::none(),
+            )
+            .await
+            .expect("certify the show");
+        shows
+            .ensure_library_association(library_id, show.id)
+            .await
+            .expect("associate the show");
+        show.id
     }
 }
 
@@ -7756,6 +7904,68 @@ macro_rules! genre_repository_contract {
                 1
             );
         }
+
+        /// The genres a policy lets a caller see are those its titles carry:
+        /// one only hidden titles carry is left out, and so is one no title
+        /// carries any more (issue #328).
+        #[tokio::test]
+        async fn the_carried_genres_are_those_of_the_titles_the_policy_admits() {
+            use ::std::collections::BTreeSet;
+
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let (kids, grown) = (fixture.new_library().await, fixture.new_library().await);
+            let scenario = $crate::repositories::contract::fixture::AccessScenario::build(
+                fixture.movies(),
+                fixture.shows(),
+                kids,
+                grown,
+            )
+            .await;
+            let unique = Uuid::new_v4().simple().to_string();
+            let genre = |name: &str| format!("{name} {unique}");
+            repo.set_movie_genres(scenario.kids_movie, &[genre("Family")])
+                .await
+                .unwrap();
+            repo.set_show_genres(scenario.kids_show, &[genre("Animation")])
+                .await
+                .unwrap();
+            repo.set_movie_genres(scenario.grown_movie, &[genre("Crime"), genre("Family")])
+                .await
+                .unwrap();
+            repo.set_show_genres(scenario.grown_show, &[genre("Orphaned")])
+                .await
+                .unwrap();
+            repo.set_show_genres(scenario.grown_show, &[genre("Noir")])
+                .await
+                .unwrap();
+
+            let suffix = unique.as_str();
+            let carried = |access: $crate::models::access::AccessPolicy| async move {
+                repo.find_carried(&access)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|g| g.name)
+                    .filter(|name| name.ends_with(suffix))
+                    .collect::<BTreeSet<String>>()
+            };
+            let named = |names: &[&str]| names.iter().map(|n| genre(n)).collect::<BTreeSet<_>>();
+            assert_eq!(
+                carried(scenario.kids_only()).await,
+                named(&["Animation", "Family"])
+            );
+            assert_eq!(
+                carried(scenario.both_under_parental_guidance()).await,
+                named(&["Animation", "Family"])
+            );
+            assert_eq!(carried(scenario.grown_under_teen()).await, named(&[]));
+            assert_eq!(
+                carried($crate::models::access::AccessPolicy::unrestricted()).await,
+                named(&["Animation", "Crime", "Family", "Noir"]),
+                "a genre no title carries any more is not listed"
+            );
+        }
     };
 }
 
@@ -7823,6 +8033,11 @@ macro_rules! person_repository_contract {
                     department: Some("Directing".to_string()),
                 },
             }
+        }
+
+        /// A policy nobody restricted.
+        fn open() -> $crate::models::access::AccessPolicy {
+            $crate::models::access::AccessPolicy::unrestricted()
         }
 
         /// `(provider id, role)` of each credit, sorted, for comparing sets.
@@ -7977,7 +8192,7 @@ macro_rules! person_repository_contract {
 
             let person = repo.movie_credits(movie).await.unwrap()[0].person.id;
             let mut filmography: Vec<(TitleKind, Uuid, String)> = repo
-                .filmography(person)
+                .filmography(person, &open())
                 .await
                 .unwrap()
                 .into_iter()
@@ -8006,7 +8221,12 @@ macro_rules! person_repository_contract {
                         && *id == series
                         && role.contains("Narrator"))
             );
-            assert!(repo.filmography(Uuid::new_v4()).await.unwrap().is_empty());
+            assert!(
+                repo.filmography(Uuid::new_v4(), &open())
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
         }
 
         #[tokio::test]
@@ -8041,33 +8261,148 @@ macro_rules! person_repository_contract {
                 people.into_iter().map(|p| p.name).collect()
             };
             assert_eq!(
-                names(repo.search(Some("SMITH"), 10, 0).await.unwrap()),
+                names(repo.search(Some("SMITH"), &open(), 10, 0).await.unwrap()),
                 ["Adam Smithers", "zoe Smith"],
                 "a case-insensitive substring, ordered by name ignoring case"
             );
-            assert_eq!(repo.count(Some("smith")).await.unwrap(), 2);
+            assert_eq!(repo.count(Some("smith"), &open()).await.unwrap(), 2);
             assert_eq!(
-                names(repo.search(None, 2, 0).await.unwrap()),
+                names(repo.search(None, &open(), 2, 0).await.unwrap()),
                 ["100%_Real", "Adam Smithers"]
             );
             assert_eq!(
-                names(repo.search(None, 2, 2).await.unwrap()),
+                names(repo.search(None, &open(), 2, 2).await.unwrap()),
                 ["Mia Jones", "zoe Smith"]
             );
             assert_eq!(
-                names(repo.search(None, 2, 4).await.unwrap()),
+                names(repo.search(None, &open(), 2, 4).await.unwrap()),
                 ["Éva Green", "édith Piaf"],
                 "ordered by code point once only ASCII case is folded"
             );
-            assert!(repo.search(None, 2, 6).await.unwrap().is_empty());
-            assert_eq!(repo.count(None).await.unwrap(), 6);
+            assert!(repo.search(None, &open(), 2, 6).await.unwrap().is_empty());
+            assert_eq!(repo.count(None, &open()).await.unwrap(), 6);
             assert_eq!(
-                names(repo.search(Some("%_"), 10, 0).await.unwrap()),
+                names(repo.search(Some("%_"), &open(), 10, 0).await.unwrap()),
                 ["100%_Real"],
                 "`%` and `_` match only themselves"
             );
-            assert_eq!(repo.count(Some("_")).await.unwrap(), 1);
-            assert!(repo.search(Some("nobody"), 10, 0).await.unwrap().is_empty());
+            assert_eq!(repo.count(Some("_"), &open()).await.unwrap(), 1);
+            assert!(
+                repo.search(Some("nobody"), &open(), 10, 0)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+
+        /// Search, its count and a filmography hold only what a policy
+        /// admits: a person credited only on hidden titles is not found, and
+        /// one credited on both keeps only their visible credits
+        /// (issue #328).
+        #[tokio::test]
+        async fn search_and_a_filmography_hold_only_the_titles_the_policy_admits() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let (kids, grown) = (fixture.new_library().await, fixture.new_library().await);
+            let scenario = $crate::repositories::contract::fixture::AccessScenario::build(
+                fixture.movies(),
+                fixture.shows(),
+                kids,
+                grown,
+            )
+            .await;
+            repo.set_movie_credits(
+                scenario.kids_movie,
+                &[
+                    cast("40", "Kid Actor", "A", 0),
+                    crew("41", "Shared Director", "Director"),
+                ],
+            )
+            .await
+            .unwrap();
+            repo.set_movie_credits(
+                scenario.grown_movie,
+                &[
+                    cast("42", "Grown Actor", "B", 0),
+                    crew("41", "Shared Director", "Director"),
+                ],
+            )
+            .await
+            .unwrap();
+            repo.set_show_credits(scenario.kids_show, &[cast("43", "Show Kid", "C", 0)])
+                .await
+                .unwrap();
+            repo.set_show_credits(scenario.grown_show, &[cast("44", "Show Grown", "D", 0)])
+                .await
+                .unwrap();
+            let person_of = |credits: Vec<$crate::models::person::TitleCredit>, name: &str| {
+                credits
+                    .into_iter()
+                    .find(|c| c.person.name == name)
+                    .expect("the credited person")
+                    .person
+                    .id
+            };
+            let director = person_of(
+                repo.movie_credits(scenario.kids_movie).await.unwrap(),
+                "Shared Director",
+            );
+            let grown_actor = person_of(
+                repo.movie_credits(scenario.grown_movie).await.unwrap(),
+                "Grown Actor",
+            );
+
+            let names = |people: Vec<$crate::models::person::Person>| {
+                people.into_iter().map(|p| p.name).collect::<Vec<_>>()
+            };
+            for policy in [
+                scenario.kids_only(),
+                scenario.both_under_parental_guidance(),
+            ] {
+                assert_eq!(
+                    names(repo.search(None, &policy, 2, 0).await.unwrap()),
+                    ["Kid Actor", "Shared Director"],
+                    "{policy:?}"
+                );
+                assert_eq!(
+                    names(repo.search(None, &policy, 2, 2).await.unwrap()),
+                    ["Show Kid"],
+                    "{policy:?}"
+                );
+                assert_eq!(repo.count(None, &policy).await.unwrap(), 3, "{policy:?}");
+                assert!(
+                    repo.search(Some("grown"), &policy, 10, 0)
+                        .await
+                        .unwrap()
+                        .is_empty(),
+                    "{policy:?}"
+                );
+                assert_eq!(repo.count(Some("grown"), &policy).await.unwrap(), 0);
+                let credits: Vec<(TitleKind, Uuid)> = repo
+                    .filmography(director, &policy)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|c| (c.title_kind, c.title_id))
+                    .collect();
+                assert_eq!(
+                    credits,
+                    [(TitleKind::Movie, scenario.kids_movie)],
+                    "{policy:?}"
+                );
+                assert!(
+                    repo.filmography(grown_actor, &policy)
+                        .await
+                        .unwrap()
+                        .is_empty(),
+                    "{policy:?}"
+                );
+            }
+            let nothing = scenario.grown_under_teen();
+            assert!(repo.search(None, &nothing, 10, 0).await.unwrap().is_empty());
+            assert_eq!(repo.count(None, &nothing).await.unwrap(), 0);
+            assert_eq!(repo.count(None, &open()).await.unwrap(), 5);
+            assert_eq!(repo.filmography(director, &open()).await.unwrap().len(), 2);
         }
     };
 }
@@ -8519,6 +8854,103 @@ macro_rules! user_list_repository_contract {
             entries.iter().map(|e| e.title).collect()
         }
 
+        /// A policy nobody restricted.
+        fn open() -> $crate::models::access::AccessPolicy {
+            $crate::models::access::AccessPolicy::unrestricted()
+        }
+
+        /// A page and the count leave out the titles a policy hides, so a
+        /// page holds `limit` visible entries however many hidden ones fall
+        /// between them (issue #328).
+        #[tokio::test]
+        async fn a_page_and_its_count_hold_only_the_titles_the_policy_admits() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let user = fixture.new_user().await;
+            let (kids, grown) = (fixture.new_library().await, fixture.new_library().await);
+            let scenario = $crate::repositories::contract::fixture::AccessScenario::build(
+                fixture.movies(),
+                fixture.shows(),
+                kids,
+                grown,
+            )
+            .await;
+            // Newest first: a hidden entry between every two visible ones.
+            for title in [
+                TitleRef::Movie(scenario.kids_movie),
+                TitleRef::Movie(scenario.grown_movie),
+                TitleRef::Show(scenario.kids_show),
+                TitleRef::Show(scenario.grown_show),
+            ] {
+                repo.add(user, UserList::Watchlist, title).await.unwrap();
+                fixture.clock().advance(Duration::from_secs(1));
+            }
+            let visible = [
+                TitleRef::Show(scenario.kids_show),
+                TitleRef::Movie(scenario.kids_movie),
+            ];
+
+            for policy in [
+                scenario.kids_only(),
+                scenario.both_under_parental_guidance(),
+            ] {
+                let first = repo
+                    .find_page(user, UserList::Watchlist, &policy, None, 1)
+                    .await
+                    .unwrap();
+                assert_eq!(titles(&first), visible[..1], "{policy:?}");
+                let after = first.last().map(UserListPosition::from);
+                let second = repo
+                    .find_page(user, UserList::Watchlist, &policy, after, 1)
+                    .await
+                    .unwrap();
+                assert_eq!(titles(&second), visible[1..], "{policy:?}");
+                let after = second.last().map(UserListPosition::from);
+                assert!(
+                    repo.find_page(user, UserList::Watchlist, &policy, after, 1)
+                        .await
+                        .unwrap()
+                        .is_empty(),
+                    "{policy:?}"
+                );
+                assert_eq!(
+                    repo.count(user, UserList::Watchlist, &policy)
+                        .await
+                        .unwrap(),
+                    2,
+                    "{policy:?}"
+                );
+            }
+
+            let nothing = scenario.grown_under_teen();
+            assert!(
+                repo.find_page(user, UserList::Watchlist, &nothing, None, 10)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(
+                repo.count(user, UserList::Watchlist, &nothing)
+                    .await
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                repo.find_page(user, UserList::Watchlist, &open(), None, 10)
+                    .await
+                    .unwrap()
+                    .len(),
+                4,
+                "a hidden title's entry is kept, not removed"
+            );
+            assert_eq!(
+                repo.count(user, UserList::Watchlist, &open())
+                    .await
+                    .unwrap(),
+                4
+            );
+        }
+
         #[tokio::test]
         async fn adding_a_title_twice_keeps_its_first_entry() {
             let fixture = $setup().await;
@@ -8535,7 +8967,12 @@ macro_rules! user_list_repository_contract {
             let again = repo.add(user, UserList::Watchlist, movie).await.unwrap();
 
             assert_eq!(again, first, "the same entry, added when it first was");
-            assert_eq!(repo.count(user, UserList::Watchlist).await.unwrap(), 1);
+            assert_eq!(
+                repo.count(user, UserList::Watchlist, &open())
+                    .await
+                    .unwrap(),
+                1
+            );
         }
 
         #[tokio::test]
@@ -8557,23 +8994,28 @@ macro_rules! user_list_repository_contract {
             added.reverse();
 
             let first = repo
-                .find_page(user, UserList::Favourites, None, 2)
+                .find_page(user, UserList::Favourites, &open(), None, 2)
                 .await
                 .unwrap();
             assert_eq!(titles(&first), added[..2]);
             let after = first.last().map(UserListPosition::from);
             let second = repo
-                .find_page(user, UserList::Favourites, after, 2)
+                .find_page(user, UserList::Favourites, &open(), after, 2)
                 .await
                 .unwrap();
             assert_eq!(titles(&second), added[2..4]);
             let after = second.last().map(UserListPosition::from);
             let third = repo
-                .find_page(user, UserList::Favourites, after, 2)
+                .find_page(user, UserList::Favourites, &open(), after, 2)
                 .await
                 .unwrap();
             assert_eq!(titles(&third), added[4..]);
-            assert_eq!(repo.count(user, UserList::Favourites).await.unwrap(), 5);
+            assert_eq!(
+                repo.count(user, UserList::Favourites, &open())
+                    .await
+                    .unwrap(),
+                5
+            );
         }
 
         #[tokio::test]
@@ -8594,7 +9036,7 @@ macro_rules! user_list_repository_contract {
             let mut after = None;
             loop {
                 let page = repo
-                    .find_page(user, UserList::Watchlist, after, 1)
+                    .find_page(user, UserList::Watchlist, &open(), after, 1)
                     .await
                     .unwrap();
                 let Some(last) = page.last() else {
@@ -8619,13 +9061,16 @@ macro_rules! user_list_repository_contract {
             repo.add(bob, UserList::Favourites, movie).await.unwrap();
 
             let page = |user, list| async move {
-                titles(&repo.find_page(user, list, None, 10).await.unwrap())
+                titles(&repo.find_page(user, list, &open(), None, 10).await.unwrap())
             };
             assert_eq!(page(alice, UserList::Watchlist).await, [movie]);
             assert_eq!(page(alice, UserList::Favourites).await, [series]);
             assert_eq!(page(bob, UserList::Favourites).await, [movie]);
             assert!(page(bob, UserList::Watchlist).await.is_empty());
-            assert_eq!(repo.count(bob, UserList::Watchlist).await.unwrap(), 0);
+            assert_eq!(
+                repo.count(bob, UserList::Watchlist, &open()).await.unwrap(),
+                0
+            );
         }
 
         #[tokio::test]
@@ -8671,7 +9116,12 @@ macro_rules! user_list_repository_contract {
                 repo.lists_of(user, movie).await.unwrap(),
                 [UserList::Favourites]
             );
-            assert_eq!(repo.count(user, UserList::Watchlist).await.unwrap(), 0);
+            assert_eq!(
+                repo.count(user, UserList::Watchlist, &open())
+                    .await
+                    .unwrap(),
+                0
+            );
         }
 
         #[tokio::test]
@@ -8694,7 +9144,7 @@ macro_rules! user_list_repository_contract {
             assert!(repo.lists_of(alice, loser).await.unwrap().is_empty());
             assert!(repo.lists_of(bob, loser).await.unwrap().is_empty());
             let alices = repo
-                .find_page(alice, UserList::Watchlist, None, 10)
+                .find_page(alice, UserList::Watchlist, &open(), None, 10)
                 .await
                 .unwrap();
             assert_eq!(titles(&alices), [survivor], "one entry, not two");
@@ -8777,6 +9227,11 @@ macro_rules! collection_repository_contract {
             ids
         }
 
+        /// A policy nobody restricted.
+        fn open() -> $crate::models::access::AccessPolicy {
+            $crate::models::access::AccessPolicy::unrestricted()
+        }
+
         #[tokio::test]
         async fn movies_reporting_one_collection_share_one_row() {
             let fixture = $setup().await;
@@ -8811,11 +9266,16 @@ macro_rules! collection_repository_contract {
                 Some(of_first.clone())
             );
             assert_eq!(
-                sorted(repo.movie_ids(of_first.id).await.unwrap()),
+                sorted(repo.movie_ids(of_first.id, &open()).await.unwrap()),
                 sorted(vec![first, second])
             );
             assert!(repo.find_by_id(Uuid::new_v4()).await.unwrap().is_none());
-            assert!(repo.movie_ids(Uuid::new_v4()).await.unwrap().is_empty());
+            assert!(
+                repo.movie_ids(Uuid::new_v4(), &open())
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
         }
 
         #[tokio::test]
@@ -8854,7 +9314,7 @@ macro_rules! collection_repository_contract {
                 "Another",
                 "a movie is in one collection at a time"
             );
-            assert_eq!(repo.movie_ids(original.id).await.unwrap(), [other]);
+            assert_eq!(repo.movie_ids(original.id, &open()).await.unwrap(), [other]);
 
             repo.set_movie_collection(movie, None).await.unwrap();
             assert!(repo.movie_collection(movie).await.unwrap().is_none());
@@ -8894,18 +9354,100 @@ macro_rules! collection_repository_contract {
                     .collect::<Vec<_>>()
             };
             assert_eq!(
-                names(repo.list(2, 0).await.unwrap()),
+                names(repo.list(&open(), 2, 0).await.unwrap()),
                 [
                     ("Alien Collection".to_string(), 2),
                     ("Mad Max Collection".to_string(), 1)
                 ]
             );
             assert_eq!(
-                names(repo.list(2, 2).await.unwrap()),
+                names(repo.list(&open(), 2, 2).await.unwrap()),
                 [("zeta Saga".to_string(), 1), ("Évasion".to_string(), 1)]
             );
-            assert!(repo.list(2, 4).await.unwrap().is_empty());
-            assert_eq!(repo.count().await.unwrap(), 4);
+            assert!(repo.list(&open(), 2, 4).await.unwrap().is_empty());
+            assert_eq!(repo.count(&open()).await.unwrap(), 4);
+        }
+
+        /// The listing, its count and a collection's movies hold only the
+        /// movies a policy admits: a collection whose every movie it hides
+        /// is not listed, and one partly hidden counts what is left
+        /// (issue #328).
+        #[tokio::test]
+        async fn the_listing_and_a_collections_movies_hold_only_what_the_policy_admits() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let (kids, grown) = (fixture.new_library().await, fixture.new_library().await);
+            let scenario = $crate::repositories::contract::fixture::AccessScenario::build(
+                fixture.movies(),
+                fixture.shows(),
+                kids,
+                grown,
+            )
+            .await;
+            let grown_sequel = $crate::repositories::contract::fixture::AccessScenario::build(
+                fixture.movies(),
+                fixture.shows(),
+                kids,
+                grown,
+            )
+            .await
+            .grown_movie;
+            let mixed = collection("20", "A Mixed Saga");
+            let grown_only = collection("21", "B Grown Saga");
+            repo.set_movie_collection(scenario.kids_movie, Some(&mixed))
+                .await
+                .unwrap();
+            repo.set_movie_collection(scenario.grown_movie, Some(&mixed))
+                .await
+                .unwrap();
+            repo.set_movie_collection(grown_sequel, Some(&grown_only))
+                .await
+                .unwrap();
+            let mixed_id = repo
+                .movie_collection(scenario.kids_movie)
+                .await
+                .unwrap()
+                .unwrap()
+                .id;
+            let grown_id = repo
+                .movie_collection(grown_sequel)
+                .await
+                .unwrap()
+                .unwrap()
+                .id;
+
+            let names = |page: Vec<$crate::models::collection::CollectionSummary>| {
+                page.into_iter()
+                    .map(|s| (s.collection.name, s.movie_count))
+                    .collect::<Vec<_>>()
+            };
+            for policy in [
+                scenario.kids_only(),
+                scenario.both_under_parental_guidance(),
+            ] {
+                assert_eq!(
+                    names(repo.list(&policy, 10, 0).await.unwrap()),
+                    [("A Mixed Saga".to_string(), 1)],
+                    "{policy:?}"
+                );
+                assert_eq!(repo.count(&policy).await.unwrap(), 1, "{policy:?}");
+                assert_eq!(
+                    repo.movie_ids(mixed_id, &policy).await.unwrap(),
+                    [scenario.kids_movie],
+                    "{policy:?}"
+                );
+                assert!(
+                    repo.movie_ids(grown_id, &policy).await.unwrap().is_empty(),
+                    "{policy:?}"
+                );
+            }
+            let nothing = scenario.grown_under_teen();
+            assert!(repo.list(&nothing, 10, 0).await.unwrap().is_empty());
+            assert_eq!(repo.count(&nothing).await.unwrap(), 0);
+            assert_eq!(
+                sorted(repo.movie_ids(mixed_id, &open()).await.unwrap()),
+                sorted(vec![scenario.kids_movie, scenario.grown_movie])
+            );
         }
     };
 }

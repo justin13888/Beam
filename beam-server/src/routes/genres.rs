@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::models::PageInfo;
 use crate::routes::api_error::{InternalError, SessionAuth};
+use crate::routes::playback::caller_access;
 use crate::routes::tags::Media;
 use crate::state::AppState;
 
@@ -25,18 +26,22 @@ pub struct GenreConnection {
 
 /// List the distinct genres in the library, sorted for stable presentation.
 ///
+/// Only the genres of titles the caller may see are listed: one carried only
+/// by titles their access policy hides, or by no title any more, is not.
+///
 /// Taking `SessionAuth` is what puts `BeamSession` in this operation's
 /// `security` and its 401 in `responses`; the previous `require_auth(req,
 /// state)` call did the same work where no describer could see it.
 #[kynos::get("/genres", tag = Media, operation_id = "listGenres")]
 pub async fn list_genres(
-    _auth: SessionAuth,
+    auth: SessionAuth,
     Inject(state): Inject<AppState>,
 ) -> Result<Json<GenreConnection>, InternalError> {
+    let (_, policy) = caller_access(&state, &auth).await?;
     let mut genres: Vec<String> = state
         .services
         .genre_repo
-        .find_all()
+        .find_carried(&policy)
         .await
         .map_err(|e| InternalError::Internal(e.to_string()))?
         .into_iter()

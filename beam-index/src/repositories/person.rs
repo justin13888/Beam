@@ -9,12 +9,15 @@ use sea_orm::{
 };
 use uuid::Uuid;
 
+use beam_domain::models::access::AccessPolicy;
 use beam_domain::models::catalog::TitleKind;
 use beam_domain::models::person::{CreditRole, Person, PersonCredit, TitleCredit};
 use beam_domain::providers::enrichment::CreditEnrichment;
 use beam_domain::repositories::PersonRepository;
 use beam_domain::repositories::person::distinct_credits;
 use beam_entity::{credit, person};
+
+use crate::repositories::access_sql::AccessConditions;
 
 /// SQL-based implementation of the PersonRepository trait.
 #[derive(Debug, Clone)]
@@ -222,16 +225,38 @@ pub(crate) fn contains_pattern(query: &str) -> String {
     pattern
 }
 
-/// The `WHERE` clause people search reads, and its binds: credited people,
-/// and with a query only those whose name contains it.
-fn search_filter(query: Option<&str>) -> (String, Vec<Value>) {
-    let credited = "EXISTS (SELECT 1 FROM credits c WHERE c.person_id = people.id)";
+/// That a credit `c` is on a title `access` admits (issue #328), binding its
+/// values after those already in `values`: `None` for an unrestricted policy.
+fn visible_credit(access: &AccessPolicy, values: &mut Vec<Value>) -> Option<String> {
+    AccessConditions::bind(access, |value| {
+        values.push(value);
+        format!("${}", values.len())
+    })
+    .on_either("c.movie_id", "c.show_id")
+}
+
+/// The `WHERE` clause people search reads, and its binds: people credited on
+/// a title `access` admits, and with a query only those whose name contains
+/// it.
+fn search_filter(query: Option<&str>, access: &AccessPolicy) -> (String, Vec<Value>) {
+    let mut values = Vec::new();
+    let visible = visible_credit(access, &mut values)
+        .map(|visible| format!(" AND {visible}"))
+        .unwrap_or_default();
+    let credited =
+        format!("EXISTS (SELECT 1 FROM credits c WHERE c.person_id = people.id{visible})");
     match query {
-        Some(query) => (
-            format!("{credited} AND people.name ILIKE $1 ESCAPE '\\'"),
-            vec![contains_pattern(query).into()],
-        ),
-        None => (credited.to_string(), Vec::new()),
+        Some(query) => {
+            values.push(contains_pattern(query).into());
+            (
+                format!(
+                    "{credited} AND people.name ILIKE ${} ESCAPE '\\'",
+                    values.len()
+                ),
+                values,
+            )
+        }
+        None => (credited, values),
     }
 }
 
@@ -269,11 +294,22 @@ impl PersonRepository for SqlPersonRepository {
             .map(Person::from))
     }
 
-    async fn filmography(&self, person_id: Uuid) -> Result<Vec<PersonCredit>, DbErr> {
-        let rows = credit::Entity::find()
-            .filter(credit::Column::PersonId.eq(person_id))
-            .all(self.db.as_ref())
-            .await?;
+    async fn filmography(
+        &self,
+        person_id: Uuid,
+        access: &AccessPolicy,
+    ) -> Result<Vec<PersonCredit>, DbErr> {
+        let mut values: Vec<Value> = vec![person_id.into()];
+        let visible = visible_credit(access, &mut values)
+            .map(|visible| format!(" AND {visible}"))
+            .unwrap_or_default();
+        let rows = credit::Model::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            format!("SELECT c.* FROM credits c WHERE c.person_id = $1{visible}"),
+            values,
+        ))
+        .all(self.db.as_ref())
+        .await?;
         rows.into_iter()
             .map(|credit| {
                 let (title_kind, title_id) = match (credit.movie_id, credit.show_id) {
@@ -298,10 +334,11 @@ impl PersonRepository for SqlPersonRepository {
     async fn search(
         &self,
         query: Option<&str>,
+        access: &AccessPolicy,
         limit: u64,
         offset: u64,
     ) -> Result<Vec<Person>, DbErr> {
-        let (filter, mut values) = search_filter(query);
+        let (filter, mut values) = search_filter(query, access);
         let limit_at = values.len() + 1;
         // Applied to the name, `COLLATE "C"` makes `lower` fold ASCII
         // letters only -- whatever the database's locale -- and orders the
@@ -328,13 +365,13 @@ impl PersonRepository for SqlPersonRepository {
         Ok(rows.into_iter().map(Person::from).collect())
     }
 
-    async fn count(&self, query: Option<&str>) -> Result<u64, DbErr> {
+    async fn count(&self, query: Option<&str>, access: &AccessPolicy) -> Result<u64, DbErr> {
         #[derive(Debug, FromQueryResult)]
         struct Counted {
             count: i64,
         }
 
-        let (filter, values) = search_filter(query);
+        let (filter, values) = search_filter(query, access);
         let counted = Counted::find_by_statement(Statement::from_sql_and_values(
             DbBackend::Postgres,
             format!("SELECT count(*) AS count FROM people WHERE {filter}"),

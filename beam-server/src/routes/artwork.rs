@@ -21,6 +21,7 @@
 //! an id and two enum variants -- so there is no allowlist to maintain and no
 //! bypass to find.
 
+use beam_domain::models::access::AccessPolicy;
 use beam_domain::providers::artwork::ArtworkFetchError;
 use kynos::http::etag::ETag;
 use kynos::prelude::*;
@@ -31,7 +32,7 @@ use tracing::error;
 use uuid::Uuid;
 
 use crate::models::media::{ArtworkKind, ArtworkSize, ArtworkVariant};
-use crate::routes::api_error::{ArtworkError, SessionAuth};
+use crate::routes::api_error::{ArtworkError, InternalError, SessionAuth};
 use crate::routes::delivery::{AnyMedia, MediaRanges, RuntimeDelivery};
 use crate::routes::playback::{caller_access, hides};
 use crate::routes::tags::Media;
@@ -76,10 +77,13 @@ pub type ArtworkDelivery = RuntimeDelivery<ArtworkRanges>;
 /// `None` covers three cases that are one answer to a client: the title does
 /// not exist, it exists but has no art yet, and the variant does not apply to
 /// this kind of title. An id that is not an id at all is not among them: the
-/// `Path` extractor answers it 400 before the handler runs.
+/// `Path` extractor answers it 400 before the handler runs. A portrait or a
+/// collection's art is `None` too when `policy` hides every title its person
+/// or collection is on (issue #328).
 async fn upstream_url(
     state: &AppState,
     path: &ArtworkPath,
+    policy: &AccessPolicy,
 ) -> Result<Option<String>, ArtworkError> {
     let id = path.id;
     let services = &state.services;
@@ -119,13 +123,13 @@ async fn upstream_url(
             .and_then(|episode| episode.thumbnail_url),
         (ArtworkKind::Person, ArtworkVariant::Profile) => services
             .people
-            .find_person(id)
+            .find_person(id, policy)
             .await
             .map_err(lookup_failed)?
             .and_then(|person| person.profile_url),
         (ArtworkKind::Collection, variant) => services
             .collections
-            .find_collection(id)
+            .find_collection(id, policy)
             .await
             .map_err(lookup_failed)?
             .and_then(|collection| match variant {
@@ -156,25 +160,25 @@ async fn deliver(
 ) -> Result<ArtworkDelivery, ArtworkError> {
     // The art of a title the caller may not see is the art of a title that
     // does not exist (issue #263). A person's portrait and a collection's art
-    // belong to no one title.
+    // belong to no one title: they are served while the policy admits one
+    // title the person or collection is on (issue #328).
+    let access_failed = |err: InternalError| {
+        error!(%err, "artwork access lookup failed");
+        ArtworkError::Internal("Failed to look up artwork".into())
+    };
+    let (_, policy) = caller_access(state, auth).await.map_err(access_failed)?;
     let of_a_title = matches!(
         path.kind,
         ArtworkKind::Movie | ArtworkKind::Show | ArtworkKind::Season | ArtworkKind::Episode
     );
-    if of_a_title {
-        let hidden = match caller_access(state, auth).await {
-            Ok((_, policy)) => hides(state, &policy, path.id).await,
-            Err(err) => Err(err),
-        }
-        .map_err(|err| {
-            error!(%err, "artwork access lookup failed");
-            ArtworkError::Internal("Failed to look up artwork".into())
-        })?;
-        if hidden {
-            return Err(ArtworkError::NotFound("No artwork for this title".into()));
-        }
+    if of_a_title
+        && hides(state, &policy, path.id)
+            .await
+            .map_err(access_failed)?
+    {
+        return Err(ArtworkError::NotFound("No artwork for this title".into()));
     }
-    let Some(url) = upstream_url(state, path).await? else {
+    let Some(url) = upstream_url(state, path, &policy).await? else {
         return Err(ArtworkError::NotFound("No artwork for this title".into()));
     };
 

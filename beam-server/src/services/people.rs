@@ -9,6 +9,7 @@ use std::sync::Arc;
 use sea_orm::DbErr;
 use uuid::Uuid;
 
+use beam_domain::models::access::AccessPolicy;
 use beam_domain::models::catalog::TitleKind as CatalogTitleKind;
 use beam_domain::models::person::{
     CreditRole, Person as StoredPerson, TitleCredit, compare_title_credits,
@@ -133,25 +134,31 @@ impl PeopleService {
     }
 
     /// The stored person `id` names, portrait URL and all: what the artwork
-    /// route fetches a portrait by. `Ok(None)` for a person no title credits
-    /// any more, whom search no longer lists either -- their row outlives
-    /// their last credit, but nothing of theirs is served once it has gone.
-    pub async fn find_person(&self, id: Uuid) -> Result<Option<StoredPerson>, DbErr> {
+    /// route fetches a portrait by. `Ok(None)` for a person no title
+    /// `access` admits credits any more, whom search no longer lists either
+    /// -- their row outlives their last credit, but nothing of theirs is
+    /// served once it has gone, or while the policy hides it (issue #328).
+    pub async fn find_person(
+        &self,
+        id: Uuid,
+        access: &AccessPolicy,
+    ) -> Result<Option<StoredPerson>, DbErr> {
         let Some(person) = self.people.find_by_id(id).await? else {
             return Ok(None);
         };
-        if self.people.filmography(id).await?.is_empty() {
+        if self.people.filmography(id, access).await?.is_empty() {
             return Ok(None);
         }
         Ok(Some(person))
     }
 
-    /// One page of the people credited in the library, by name: those whose
-    /// name contains `query`, ignoring case, or everyone without one. A
-    /// blank query is no query.
+    /// One page of the people credited in the library on a title `access`
+    /// admits, by name: those whose name contains `query`, ignoring case, or
+    /// everyone without one. A blank query is no query.
     pub async fn search(
         &self,
         query: Option<String>,
+        access: &AccessPolicy,
         first: Option<u32>,
         after: Option<String>,
     ) -> Result<PersonConnection, PeopleError> {
@@ -180,10 +187,10 @@ impl PeopleService {
 
         let people = self
             .people
-            .search(query, u64::from(size.get()), offset)
+            .search(query, access, u64::from(size.get()), offset)
             .await
             .map_err(internal)?;
-        let total = self.people.count(query).await.map_err(internal)?;
+        let total = self.people.count(query, access).await.map_err(internal)?;
         Ok(PersonConnection {
             page_info: offset_cursor::page_info(OffsetList::People, offset, people.len(), total),
             items: people
@@ -198,14 +205,24 @@ impl PeopleService {
         })
     }
 
-    /// One person with every credit they have, `Ok(None)` when no person has
-    /// that id or no title credits them any more (as search no longer lists
-    /// them). A credit on a title that has since gone is left out.
-    pub async fn detail(&self, id: Uuid) -> Result<Option<PersonDetail>, PeopleError> {
+    /// One person with every credit they have on a title `access` admits,
+    /// `Ok(None)` when no person has that id or no such title credits them
+    /// any more (as search no longer lists them): a person credited only on
+    /// hidden titles answers as one that does not exist. A credit on a title
+    /// that has since gone is left out.
+    pub async fn detail(
+        &self,
+        id: Uuid,
+        access: &AccessPolicy,
+    ) -> Result<Option<PersonDetail>, PeopleError> {
         let Some(person) = self.people.find_by_id(id).await.map_err(internal)? else {
             return Ok(None);
         };
-        let credits = self.people.filmography(id).await.map_err(internal)?;
+        let credits = self
+            .people
+            .filmography(id, access)
+            .await
+            .map_err(internal)?;
         if credits.is_empty() {
             return Ok(None);
         }

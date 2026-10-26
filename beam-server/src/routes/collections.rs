@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::models::{CollectionConnection, CollectionDetail};
 use crate::routes::api_error::{CollectionListError, CollectionLookupError, SessionAuth};
-use crate::routes::playback::parse_user_id;
+use crate::routes::playback::caller_access;
 use crate::routes::tags::Media;
 use crate::services::collections::CollectionError;
 use crate::state::AppState;
@@ -37,15 +37,19 @@ pub struct CollectionPath {
 ///
 /// Collections come from provider enrichment: TMDB groups a franchise's
 /// movies into one. A collection none of the library's movies is in is not
-/// listed.
+/// listed, and neither is one whose every movie the caller's access policy
+/// hides; `movie_count` and `total` count only what the caller may see.
 #[kynos::get("/collections", tag = Media, operation_id = "listCollections")]
 pub async fn list_collections(
-    _auth: SessionAuth,
+    auth: SessionAuth,
     Query(params): Query<CollectionQuery>,
     Inject(state): Inject<AppState>,
 ) -> Result<Json<CollectionConnection>, CollectionListError> {
     let CollectionQuery { first, after } = params;
-    match state.services.collections.list(first, after).await {
+    let (_, policy) = caller_access(&state, &auth)
+        .await
+        .map_err(|err| CollectionListError::Internal(err.to_string()))?;
+    match state.services.collections.list(&policy, first, after).await {
         Ok(connection) => Ok(Json(connection)),
         Err(CollectionError::InvalidCursor(detail)) => {
             Err(CollectionListError::InvalidCursor(detail))
@@ -59,17 +63,26 @@ pub async fn list_collections(
 
 /// One collection and every movie of the library in it, in release order,
 /// with the caller's state for each.
+///
+/// Movies the caller's access policy hides are left out, and a collection
+/// whose every movie it hides answers `404`, as an unknown id does.
 #[kynos::get("/collections/{id}", tag = Media, operation_id = "getCollection")]
 pub async fn get_collection(
     auth: SessionAuth,
     Path(path): Path<CollectionPath>,
     Inject(state): Inject<AppState>,
 ) -> Result<Json<CollectionDetail>, CollectionLookupError> {
-    let user_id = parse_user_id(&auth.0.user_id)
+    let (user_id, policy) = caller_access(&state, &auth)
+        .await
         .map_err(|err| CollectionLookupError::Internal(err.to_string()))?;
     // A failed read is a 500: answering 404 would tell the client the
     // collection is gone when the server only failed to read it.
-    match state.services.collections.detail(user_id, path.id).await {
+    match state
+        .services
+        .collections
+        .detail(user_id, &policy, path.id)
+        .await
+    {
         Ok(Some(detail)) => Ok(Json(detail)),
         Ok(None) => Err(CollectionLookupError::CollectionNotFound(format!(
             "collection {} not found",
