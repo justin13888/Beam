@@ -287,10 +287,11 @@ export function decodesEfficiently(quality: DecodingQuality): boolean {
 }
 
 /** The notice for a pick that decodes in software here, worded as the core's
- * `Playability::Software` detail is. */
-export function softwareDecodeDetail(source: MediaSource): string {
-	const codec = source.video_tracks[0]?.codec ?? "This file";
-	return `${codec.toUpperCase()} decodes in software here and may stutter`;
+ * `Playability::Software` detail is. `videoCodec` is the codec of the video
+ * track the decoding query asked about: a quality exists only for a source
+ * with one, so the caller always has it. */
+export function softwareDecodeDetail(videoCodec: string): string {
+	return `${videoCodec.toUpperCase()} decodes in software here and may stutter`;
 }
 
 /** The part of `navigator.mediaCapabilities` this module asks. */

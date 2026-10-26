@@ -313,9 +313,13 @@ export function MediaDetailPage({
 		: undefined;
 	// The pick plays, but this browser decodes it in software: the core's
 	// `Playability::Software` case, which is said rather than hidden.
+	// A quality is reported only for a source with a first video track (the
+	// decoding query is built from it), so `selectedVideo` is present whenever
+	// `choice.quality` is.
+	const selectedVideo = selectedSource?.video_tracks[0];
 	const softwareDecodeNotice =
-		selectedSource && choice.quality && !decodesEfficiently(choice.quality)
-			? softwareDecodeDetail(selectedSource)
+		selectedVideo && choice.quality && !decodesEfficiently(choice.quality)
+			? softwareDecodeDetail(selectedVideo.codec)
 			: null;
 	const hasNextPart = partIndex < parts.length - 1;
 

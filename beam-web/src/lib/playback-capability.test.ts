@@ -613,7 +613,7 @@ describe("decodingQualities", () => {
 
 describe("softwareDecodeDetail", () => {
 	it("names the video codec, as the core's Software detail does", () => {
-		expect(softwareDecodeDetail(src("a", { video: "hevc" }))).toBe(
+		expect(softwareDecodeDetail("hevc")).toBe(
 			"HEVC decodes in software here and may stutter",
 		);
 	});
