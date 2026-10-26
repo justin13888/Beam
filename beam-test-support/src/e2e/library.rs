@@ -100,6 +100,7 @@ impl FixtureLibrary {
             fs::write(library.path(&rel), bytes)
                 .unwrap_or_else(|e| panic!("write {}: {e}", rel.display()));
         });
+        self.record_parents(&rel);
         self.record_file(&rel);
     }
 
@@ -110,6 +111,7 @@ impl FixtureLibrary {
             library.create_parents(&rel);
             video.render(&library.path(&rel));
         });
+        self.record_parents(&rel);
         self.record_file(&rel);
     }
 
@@ -130,6 +132,7 @@ impl FixtureLibrary {
             file.set_len(len)
                 .unwrap_or_else(|e| panic!("size {}: {e}", rel.display()));
         });
+        self.record_parents(&rel);
         self.record_file(&rel);
     }
 
@@ -140,6 +143,7 @@ impl FixtureLibrary {
             fs::create_dir_all(library.path(&rel))
                 .unwrap_or_else(|e| panic!("create {}: {e}", rel.display()));
         });
+        self.record_dir_and_ancestors(&rel);
     }
 
     /// Make `rel` a symbolic link to `target`, which may be anywhere.
@@ -150,6 +154,7 @@ impl FixtureLibrary {
             std::os::unix::fs::symlink(target, library.path(&rel))
                 .unwrap_or_else(|e| panic!("link {} -> {}: {e}", rel.display(), target.display()));
         });
+        self.record_parents(&rel);
         self.manifest.insert(
             rel,
             Entry::Symlink {
@@ -183,7 +188,7 @@ impl FixtureLibrary {
             };
             self.manifest.insert(renamed, entry);
         }
-        self.record_dirs();
+        self.record_parents(&to);
     }
 
     /// Exchange the names of the files `a` and `b`.
@@ -228,13 +233,13 @@ impl FixtureLibrary {
         self.manifest.remove(&rel);
     }
 
-    /// Run `edit` with the tree writable, then seal it again and record the
-    /// directories the edit left.
+    /// Run `edit` with the tree writable, then seal it again. The caller
+    /// records what the edit made; nothing is read back from the tree, so a
+    /// path the server wrote is never absorbed into the record.
     fn change(&mut self, edit: impl FnOnce(&Self)) {
         self.unseal();
         edit(self);
         self.seal();
-        self.record_dirs();
     }
 
     fn create_parents(&self, rel: &Path) {
@@ -250,15 +255,24 @@ impl FixtureLibrary {
         self.manifest.insert(rel.to_path_buf(), entry);
     }
 
-    /// Record every directory now in the tree, and forget any that is gone.
-    /// Directories carry nothing but their existence, so reading them back
-    /// is the record.
-    fn record_dirs(&mut self) {
-        self.manifest.retain(|_, entry| *entry != Entry::Dir);
-        for (rel, entry) in walk(&self.video_dir()) {
-            if entry == Entry::Dir {
-                self.manifest.insert(rel, entry);
+    /// Record the directories above `rel`, which the edit created where they
+    /// did not already exist.
+    fn record_parents(&mut self, rel: &Path) {
+        if let Some(parent) = rel.parent() {
+            self.record_dir_and_ancestors(parent);
+        }
+    }
+
+    /// Record `rel` as a directory, and every directory above it. Only the
+    /// paths the edit named are recorded -- never a walk of the tree -- so a
+    /// directory the server created between two edits stays out of the
+    /// record and [`Self::assert_untouched`] reports it.
+    fn record_dir_and_ancestors(&mut self, rel: &Path) {
+        for dir in rel.ancestors() {
+            if dir.as_os_str().is_empty() {
+                break;
             }
+            self.manifest.insert(dir.to_path_buf(), Entry::Dir);
         }
     }
 
