@@ -303,8 +303,9 @@ pub struct ArtworkCache {
     passthrough: Mutex<HashSet<CacheKey>>,
     /// Bounds how many resizes run at once. Each holds a decoded poster in
     /// memory and a blocking thread busy, and a cold grid asks for dozens of
-    /// different posters at the same moment.
-    resizes: Semaphore,
+    /// different posters at the same moment. `Arc` so a permit can be owned by
+    /// the blocking decode itself rather than by the request awaiting it.
+    resizes: Arc<Semaphore>,
 }
 
 impl ArtworkCache {
@@ -327,9 +328,9 @@ impl ArtworkCache {
             negative: Mutex::new(HashMap::new()),
             lanes: Mutex::new(HashMap::new()),
             passthrough: Mutex::new(HashSet::new()),
-            resizes: Semaphore::new(
+            resizes: Arc::new(Semaphore::new(
                 std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get),
-            ),
+            )),
         }
     }
 
@@ -484,8 +485,7 @@ impl ArtworkCache {
 
         // One resize per key at a time, as one fetch per key is: a grid of
         // viewers asking for the same cold size decode it once.
-        let lane = self.lane(&key);
-        let _held = lane.lock().await;
+        let held = self.lane(&key).lock_owned().await;
 
         if self.is_passthrough(&key) {
             return self.get(url).await;
@@ -495,15 +495,32 @@ impl ArtworkCache {
         }
 
         let original = self.get(url).await?;
-        let outcome = {
-            let _permit = self
-                .resizes
-                .acquire()
-                .await
-                .expect("the resize semaphore is never closed");
-            let bytes = original.bytes.clone();
-            let format = original.format;
-            tokio::task::spawn_blocking(move || downscale(&bytes, format, width)).await
+        let permit = Arc::clone(&self.resizes)
+            .acquire_owned()
+            .await
+            .expect("the resize semaphore is never closed");
+        let bytes = original.bytes.clone();
+        let format = original.format;
+        // The permit and the lane guard move into the blocking task, because a
+        // spawned blocking task runs to completion even when the request
+        // awaiting it is dropped -- a client disconnect. Held by the request,
+        // both would be released at that moment while the decode carried on,
+        // letting cancelled requests exceed the concurrency bound and a retry
+        // start a second decode of the same key. The permit is released as the
+        // decode ends; the guard comes back out so the lane stays held through
+        // the store below, and is dropped with the task's output if nobody is
+        // left to receive it.
+        let outcome = tokio::task::spawn_blocking(move || {
+            let downscaled = downscale(&bytes, format, width);
+            drop(permit);
+            (downscaled, held)
+        })
+        .await;
+        // On a panic the guard was dropped while unwinding, which releases the
+        // lane; a Tokio mutex is not poisoned by it.
+        let (outcome, _held) = match outcome {
+            Ok((downscaled, held)) => (Ok(downscaled), Some(held)),
+            Err(err) => (Err(err), None),
         };
 
         match outcome {
