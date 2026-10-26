@@ -18,7 +18,7 @@ use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
 use beam_domain::repositories::trickplay::in_memory::InMemoryTrickplayRepository;
 use beam_domain::services::TestClock;
 use beam_index::probe::metadata::MetadataError;
-use beam_index::probe::trickplay::TrickplaySpec;
+use beam_index::probe::trickplay::{TrickplayError, TrickplaySpec};
 
 /// What the stand-in generator does with the next file.
 #[derive(Debug, Clone, Copy)]
@@ -31,6 +31,10 @@ enum Outcome {
     Undecodable,
     /// Fail to write Beam's own folder.
     WriteFails,
+    /// Fail to rewind the file before reading it.
+    RewindFails,
+    /// Fail to read the file part-way, as a flaky network mount does.
+    ReadFails,
 }
 
 /// A generator that writes `{n}.jpg` stand-ins, counting its calls.
@@ -90,6 +94,12 @@ impl TrickplayGenerator for StandInGenerator {
                 "not a container".into(),
             ))),
             Outcome::WriteFails => Err(TrickplayError::Write(std::io::Error::other("disk full"))),
+            Outcome::RewindFails => Err(TrickplayError::Open(MetadataError::UnknownError(
+                "Failed to rewind".into(),
+            ))),
+            Outcome::ReadFails => Err(TrickplayError::Read(std::io::Error::from_raw_os_error(
+                5, // EIO
+            ))),
         }
     }
 }
@@ -294,18 +304,24 @@ async fn a_file_that_gives_no_sheets_is_recorded_so_and_not_tried_again() {
 }
 
 #[tokio::test]
-async fn a_failure_to_write_beams_own_folder_is_retried_rather_than_recorded() {
-    let h = Harness::new(Outcome::WriteFails).await;
-    let file = h.file("Film (2001).mkv", 9).await;
+async fn a_failure_that_says_nothing_about_the_file_is_retried_rather_than_recorded() {
+    for outcome in [
+        Outcome::WriteFails,
+        Outcome::RewindFails,
+        Outcome::ReadFails,
+    ] {
+        let h = Harness::new(outcome).await;
+        let file = h.file("Film (2001).mkv", 9).await;
 
-    let report = h.service.run_pass().await.unwrap();
+        let report = h.service.run_pass().await.unwrap();
 
-    assert_eq!(report.deferred, 1);
-    assert_eq!(h.records.find(file.id).await.unwrap(), None);
-    assert!(h.versions(&file).is_empty());
+        assert_eq!(report.deferred, 1, "{outcome:?}");
+        assert_eq!(h.records.find(file.id).await.unwrap(), None, "{outcome:?}");
+        assert!(h.versions(&file).is_empty(), "{outcome:?}");
 
-    h.generator.set(Outcome::Sheets(1));
-    assert_eq!(h.service.run_pass().await.unwrap().made, 1);
+        h.generator.set(Outcome::Sheets(1));
+        assert_eq!(h.service.run_pass().await.unwrap().made, 1, "{outcome:?}");
+    }
 }
 
 #[tokio::test]

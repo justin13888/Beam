@@ -22,6 +22,7 @@
 //! a second native audio-encode + interleave pipeline here.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Mutex, Once};
 
 use ffmpeg_next as ffmpeg;
@@ -98,6 +99,15 @@ fn synth_fixture_with(
     nb_frames: i64,
     chapters: &[SynthChapter],
 ) -> PathBuf {
+    synth_cached(name, |tmp| {
+        encode_video_with(tmp, codec_id, nb_frames, chapters)
+    })
+}
+
+/// The live-synthesised fixture `name`, made by `encode` -- which writes the
+/// path it is given -- once for the build. `name` is the cache key, and
+/// carries the container extension the muxer is inferred from.
+fn synth_cached(name: &str, encode: impl FnOnce(&Path) -> Result<(), ffmpeg::Error>) -> PathBuf {
     init_ffmpeg();
     let path = synth_dir().join(name);
 
@@ -109,7 +119,7 @@ fn synth_fixture_with(
         // Write to a sibling temp path that keeps the container extension so
         // muxer inference still works, then rename into place atomically.
         let tmp = synth_dir().join(format!("partial-{name}"));
-        encode_video_with(&tmp, codec_id, nb_frames, chapters).expect("synthesise fixture");
+        encode(&tmp).expect("synthesise fixture");
         std::fs::rename(&tmp, &path).expect("publish synth fixture");
     }
     path
@@ -132,6 +142,19 @@ fn encode_video_with(
     codec_id: ffmpeg::codec::Id,
     nb_frames: i64,
     chapters: &[SynthChapter],
+) -> Result<(), ffmpeg::Error> {
+    encode_video_from(path, codec_id, nb_frames, chapters, 0, fill_frame)
+}
+
+/// [`encode_video_with`], its first frame stamped `first_pts` (in frames)
+/// rather than 0, and each frame `i` painted by `fill(frame, i)`.
+fn encode_video_from(
+    path: &Path,
+    codec_id: ffmpeg::codec::Id,
+    nb_frames: i64,
+    chapters: &[SynthChapter],
+    first_pts: i64,
+    fill: fn(&mut ffmpeg::frame::Video, i64),
 ) -> Result<(), ffmpeg::Error> {
     use ffmpeg::{Packet, Rational, codec, encoder, format, frame};
 
@@ -173,8 +196,8 @@ fn encode_video_with(
 
     for i in 0..nb_frames {
         let mut frame = frame::Video::new(format::Pixel::YUV420P, W, H);
-        fill_frame(&mut frame, i);
-        frame.set_pts(Some(i));
+        fill(&mut frame, i);
+        frame.set_pts(Some(first_pts + i));
         enc.send_frame(&frame)?;
 
         let mut packet = Packet::empty();
@@ -348,7 +371,7 @@ fn trickplay_sheets_tile_the_files_frames_into_jpegs() {
         max_tiles: 100,
     };
 
-    let layout = generate_sheets(file, out.path(), &spec)
+    let layout = generate_sheets(file, out.path(), &spec, &AtomicBool::new(false))
         .expect("sheets are made")
         .expect("a video file has a layout");
 
@@ -394,8 +417,160 @@ fn trickplay_of_a_file_that_is_not_media_is_an_error_and_writes_nothing() {
     let out = tempfile::tempdir().expect("an output directory");
     let file = LibraryFile::open(dir.path(), &path).expect("open the file");
 
-    assert!(generate_sheets(file, out.path(), &TrickplaySpec::default()).is_err());
+    let error = generate_sheets(
+        file,
+        out.path(),
+        &TrickplaySpec::default(),
+        &AtomicBool::new(false),
+    )
+    .expect_err("noise is not media");
+    // Recorded as giving no sheets, rather than retried every pass.
+    assert!(error.is_content_fault(), "{error:?}");
     assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn trickplay_cancelled_before_a_tile_stops_and_writes_nothing() {
+    use crate::probe::trickplay::{TrickplayError, TrickplaySpec, generate_sheets};
+
+    let path = chaptered_fixture();
+    let out = tempfile::tempdir().expect("an output directory");
+    let root = path.parent().expect("a file has a folder");
+    let file = LibraryFile::open(root, &path).expect("open the fixture");
+
+    let error = generate_sheets(
+        file,
+        out.path(),
+        &TrickplaySpec::default(),
+        &AtomicBool::new(true),
+    )
+    .expect_err("cancelled");
+
+    assert!(matches!(error, TrickplayError::Cancelled), "{error:?}");
+    // A cancellation says nothing about the file: it is tried again.
+    assert!(!error.is_content_fault());
+    assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 0);
+}
+
+/// Six seconds of MPEG-2 in MPEG-TS whose timestamps start at ten seconds,
+/// as a broadcast recording's do; frame `i` is a flat grey of luma `16 + i`,
+/// so a tile's brightness says which frame it shows.
+fn offset_start_fixture() -> PathBuf {
+    synth_cached("mpeg2video-6s-start10s-ramp.ts", |tmp| {
+        encode_video_from(
+            tmp,
+            ffmpeg::codec::Id::MPEG2VIDEO,
+            150,
+            &[],
+            250,
+            fill_flat_ramp,
+        )
+    })
+}
+
+/// Paint frame `i` a flat grey of limited-range luma `16 + i`.
+fn fill_flat_ramp(frame: &mut ffmpeg::frame::Video, i: i64) {
+    let luma = u8::try_from(16 + i).expect("a ramp within luma's range");
+    for (plane, value) in [(0, luma), (1, 128), (2, 128)] {
+        frame.data_mut(plane).fill(value);
+    }
+}
+
+/// The luma plane of the JPEG at `path`, decoded: its width, height and
+/// rows of `width` bytes.
+fn decode_luma(path: &Path) -> (usize, usize, Vec<u8>) {
+    let mut input = ffmpeg::format::input(path).expect("open the sheet");
+    let stream = input
+        .streams()
+        .best(ffmpeg::media::Type::Video)
+        .expect("a sheet is a picture");
+    let index = stream.index();
+    let mut decoder = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
+        .unwrap()
+        .decoder()
+        .video()
+        .unwrap();
+    let mut frame = ffmpeg::frame::Video::empty();
+    for (stream, packet) in input.packets() {
+        if stream.index() != index {
+            continue;
+        }
+        decoder.send_packet(&packet).unwrap();
+        if decoder.receive_frame(&mut frame).is_ok() {
+            break;
+        }
+    }
+    let _ = decoder.send_eof();
+    if frame.width() == 0 {
+        decoder.receive_frame(&mut frame).expect("a sheet decodes");
+    }
+    let (width, height) = (frame.width() as usize, frame.height() as usize);
+    let stride = frame.stride(0);
+    let plane = frame.data(0);
+    let rows = (0..height)
+        .flat_map(|row| plane[row * stride..row * stride + width].iter().copied())
+        .collect();
+    (width, height, rows)
+}
+
+#[test]
+fn trickplay_tiles_are_timed_from_the_files_start_not_timestamp_zero() {
+    use crate::probe::trickplay::{TrickplaySpec, generate_sheets};
+
+    let path = offset_start_fixture();
+    // The fixture really does start late: its video's first timestamp is
+    // ten seconds in.
+    let meta = probe(&path).expect("probe the offset fixture");
+    match &meta.streams[meta.best_video_stream.expect("a video stream")] {
+        StreamMetadata::Video(v) => {
+            let start_s = v.start_time as f64 * f64::from(*v.time_base.numer())
+                / f64::from(*v.time_base.denom());
+            assert!(start_s >= 9.9, "the fixture starts at {start_s}s");
+        }
+        other => panic!("{other:?}"),
+    }
+
+    let out = tempfile::tempdir().expect("an output directory");
+    let root = path.parent().expect("a file has a folder");
+    let file = LibraryFile::open(root, &path).expect("open the fixture");
+    let spec = TrickplaySpec {
+        interval_ms: 2_000,
+        tile_width: 32,
+        columns: 3,
+        rows: 1,
+        max_tiles: 3,
+    };
+    let layout = generate_sheets(file, out.path(), &spec, &AtomicBool::new(false))
+        .expect("sheets are made")
+        .expect("a video file has a layout");
+    assert_eq!(layout.tile_count, 3);
+
+    let (width, height, luma) = decode_luma(&out.path().join("0.jpg"));
+    assert_eq!((width, height), (96, 32));
+    // The sheet is full-range: limited-range luma `16 + i` reads `i * 255 / 219`.
+    let full_range = |frame: i64| frame as f64 * 255.0 / 219.0;
+    for tile in 0..3_usize {
+        let pixels: Vec<u8> = (0..height)
+            .flat_map(|row| {
+                let from = row * width + tile * 32;
+                luma[from..from + 32].iter().copied()
+            })
+            .collect();
+        let mean = pixels.iter().map(|&p| f64::from(p)).sum::<f64>() / pixels.len() as f64;
+        // Tile `n` is two seconds -- fifty frames -- into the file. The frame
+        // shown is the keyframe at or before that, within one group of
+        // pictures (12 frames); a tile timed from timestamp zero instead
+        // fails every seek and shows one of the first frames read.
+        let at = 50 * tile as i64;
+        let (low, high) = (
+            full_range((at - 12).max(0)) - 8.0,
+            full_range(at + 12) + 8.0,
+        );
+        assert!(
+            (low..=high).contains(&mean),
+            "tile {tile}: mean luma {mean:.1}, wanted {low:.1}..={high:.1}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

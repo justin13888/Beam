@@ -12,6 +12,7 @@
 //! never the library (FR-202).
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use ffmpeg_next as ffmpeg;
 use thiserror::Error;
@@ -59,8 +60,49 @@ pub enum TrickplayError {
     Ffmpeg(#[from] ffmpeg::Error),
     #[error("failed to open the file: {0}")]
     Open(#[from] MetadataError),
+    #[error("failed to read the file: {0}")]
+    Read(std::io::Error),
     #[error("failed to write a sheet: {0}")]
     Write(#[from] std::io::Error),
+    #[error("making the sheets was cancelled")]
+    Cancelled,
+}
+
+impl TrickplayError {
+    /// Whether the error is a property of the file's content -- it is not
+    /// media FFmpeg can demux, or its video has no decoder -- and so will
+    /// recur until the content changes. Anything else (a failed rewind, a
+    /// read error from a flaky mount, Beam's own folder not written, a
+    /// cancellation) says nothing about the file, and is worth another try.
+    pub fn is_content_fault(&self) -> bool {
+        fn of_content(error: &ffmpeg::Error) -> bool {
+            matches!(
+                error,
+                ffmpeg::Error::InvalidData
+                    | ffmpeg::Error::DemuxerNotFound
+                    | ffmpeg::Error::DecoderNotFound
+                    | ffmpeg::Error::StreamNotFound
+            )
+        }
+        match self {
+            TrickplayError::Ffmpeg(error) => of_content(error),
+            TrickplayError::Open(MetadataError::FfmpegError(error)) => of_content(error),
+            TrickplayError::Open(MetadataError::InvalidMetadata(_)) => true,
+            TrickplayError::Open(MetadataError::UnknownError(_))
+            | TrickplayError::Read(_)
+            | TrickplayError::Write(_)
+            | TrickplayError::Cancelled => false,
+        }
+    }
+}
+
+/// A demuxer read error as the I/O error it is: FFmpeg's `AVERROR(errno)`
+/// back to its `errno`, anything else wrapped.
+fn read_error(error: ffmpeg::Error) -> std::io::Error {
+    match error {
+        ffmpeg::Error::Other { errno } => std::io::Error::from_raw_os_error(errno),
+        other => std::io::Error::other(other),
+    }
 }
 
 /// The largest number of packets read after a seek while waiting for the
@@ -100,10 +142,15 @@ fn tile_count(duration_ms: u64, spec: &TrickplaySpec) -> u32 {
 /// return their layout -- or `None` for a file with no video stream to make
 /// them from, or no duration to space them over. Blocking: run it off the
 /// async runtime.
+///
+/// `cancel` is read before each tile: once it is set the work stops there
+/// with [`TrickplayError::Cancelled`], so a server shutting down waits for
+/// one tile rather than a whole file's sheets.
 pub fn generate_sheets(
     file: LibraryFile,
     out_dir: &Path,
     spec: &TrickplaySpec,
+    cancel: &AtomicBool,
 ) -> Result<Option<TrickplayLayout>, TrickplayError> {
     let (mut input, _metadata, path) = open_input(file)?;
     trace!(path = %path.display(), "making trickplay sheets");
@@ -152,6 +199,16 @@ pub fn generate_sheets(
         tile_count: tile_count(duration_ms, spec),
     };
 
+    // Tile times are from the file's start, which for MPEG-TS and M2TS is
+    // seldom timestamp zero: seek targets are offset by the container's
+    // start time, as `ffmpeg -ss` offsets them.
+    // SAFETY: `input` owns a live `AVFormatContext`; `start_time` is a plain
+    // integer field, `AV_NOPTS_VALUE` when the demuxer found none.
+    let start_us = match unsafe { (*input.as_ptr()).start_time } {
+        ffmpeg::ffi::AV_NOPTS_VALUE => 0,
+        start => start,
+    };
+
     let mut tiles = TileSheets::new(layout)?;
     let mut scaler: Option<ffmpeg::software::scaling::Context> = None;
     let mut decoded = ffmpeg::frame::Video::empty();
@@ -159,7 +216,12 @@ pub fn generate_sheets(
     let mut have_frame = false;
 
     for tile in 0..layout.tile_count {
-        let target_us = i64::from(tile) * i64::from(layout.interval_ms) * 1_000;
+        if cancel.load(Ordering::Relaxed) {
+            debug!(path = %path.display(), tile, "making trickplay sheets cancelled");
+            return Err(TrickplayError::Cancelled);
+        }
+        let target_us =
+            start_us.saturating_add(i64::from(tile) * i64::from(layout.interval_ms) * 1_000);
         // Back to the keyframe at or before the tile's time: the range's end
         // is `avformat_seek_file`'s inclusive `max_ts`. A seek that fails
         // keeps whatever the demuxer was reading, and the next frame decoded
@@ -227,7 +289,7 @@ fn next_frame(
             }
             // One corrupt packet: the demuxer resyncs past it.
             Err(ffmpeg::Error::InvalidData) => continue,
-            Err(err) => return Err(err.into()),
+            Err(err) => return Err(TrickplayError::Read(read_error(err))),
         }
         if packet.stream() != stream_index {
             continue;

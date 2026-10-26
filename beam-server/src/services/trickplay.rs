@@ -5,7 +5,9 @@
 //! since its sheets were made -- one file at a time, so a library being
 //! imported does not compete with playback for more than one core. A file
 //! that gives no sheets (no video stream, frames that do not decode) is
-//! recorded as such and not tried again until its content changes.
+//! recorded as such and not tried again until its content changes; one that
+//! could not be read just now is left for the next pass, unrecorded
+//! ([`beam_index::probe::trickplay::TrickplayError::is_content_fault`]).
 //!
 //! Everything is written under `{BEAM_DATA_DIR}/trickplay`, never beside the
 //! library's files (FR-202; `AppServices::build` refuses a data directory
@@ -35,7 +37,7 @@ use beam_domain::models::{Library, MediaFile};
 use beam_domain::repositories::{FileRepository, LibraryRepository, TrickplayRepository};
 use beam_domain::services::Clock;
 use beam_index::library_file::LibraryFile;
-use beam_index::probe::trickplay::{TrickplayError, TrickplaySpec};
+use beam_index::probe::trickplay::TrickplaySpec;
 use beam_index::services::trickplay::TrickplayGenerator;
 
 /// How long the worker rests between passes. A file indexed just after a
@@ -65,8 +67,8 @@ pub struct PassReport {
     pub made: u32,
     /// Files recorded as giving none.
     pub without_sheets: u32,
-    /// Files left for the next pass: they could not be opened, or their
-    /// sheets could not be written.
+    /// Files left for the next pass: they could not be opened or read, or
+    /// their sheets could not be written.
     pub deferred: u32,
 }
 
@@ -279,16 +281,21 @@ impl TrickplayService {
                 }
             },
             Ok(None) => None,
-            // Beam's own folder could not be written: the file is not at
-            // fault, so it is tried again rather than recorded.
-            Err(TrickplayError::Write(error)) => {
-                warn!(path = %file.path.display(), %error, "could not write trickplay sheets");
-                let _ = tokio::fs::remove_dir_all(&partial).await;
-                return Ok(Made::Deferred);
-            }
-            Err(error) => {
+            // The content itself gives no sheets: recorded, and not tried
+            // again until it changes.
+            Err(error) if error.is_content_fault() => {
                 warn!(path = %file.path.display(), %error, "no trickplay sheets for this file");
                 None
+            }
+            // Anything else -- the file could not be rewound or read just
+            // now, Beam's own folder could not be written, the work was
+            // cancelled -- says nothing about the file, so it is tried again
+            // rather than recorded: a flaky mount must not cost a file its
+            // sheets until its content changes.
+            Err(error) => {
+                warn!(path = %file.path.display(), %error, "trickplay sheets left for a later pass");
+                let _ = tokio::fs::remove_dir_all(&partial).await;
+                return Ok(Made::Deferred);
             }
         };
         if layout.is_none() {

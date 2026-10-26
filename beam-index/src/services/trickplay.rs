@@ -1,4 +1,6 @@
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use beam_domain::models::trickplay::TrickplayLayout;
 
@@ -24,8 +26,22 @@ pub trait TrickplayGenerator: Send + Sync + std::fmt::Debug {
 }
 
 /// The FFmpeg generator, on a blocking thread.
+///
+/// Dropping the future cancels the generation between two tiles. A runtime
+/// shutting down drops its tasks' futures and then waits, without a bound,
+/// for its blocking threads: without the cancel, a server told to stop would
+/// sit until the current file's sheets were done, past its shutdown timeout.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LocalTrickplayGenerator;
+
+/// Sets its flag when dropped.
+struct CancelOnDrop(Arc<AtomicBool>);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
 
 #[async_trait::async_trait]
 impl TrickplayGenerator for LocalTrickplayGenerator {
@@ -35,7 +51,9 @@ impl TrickplayGenerator for LocalTrickplayGenerator {
         out_dir: PathBuf,
         spec: TrickplaySpec,
     ) -> Result<Option<TrickplayLayout>, TrickplayError> {
-        tokio::task::spawn_blocking(move || generate_sheets(file, &out_dir, &spec))
+        let cancel = Arc::new(AtomicBool::new(false));
+        let _cancel_on_drop = CancelOnDrop(Arc::clone(&cancel));
+        tokio::task::spawn_blocking(move || generate_sheets(file, &out_dir, &spec, &cancel))
             .await
             .map_err(|err| TrickplayError::Write(std::io::Error::other(err)))?
     }
