@@ -256,9 +256,11 @@ async fn deliver(
 /// The URL is stable across re-enrichment; the strong `ETag` is what changes
 /// when a title's artwork does, so clients revalidate rather than re-download.
 /// `size` asks for a narrower rendition, resized once and cached beside the
-/// original; each size has its own `ETag`. A title with no art, an id that does not exist, and a variant that does not
-/// apply to this kind of title are all `404` -- every client already renders a
-/// placeholder for that. An id that is not a UUID is a `400`, as on every
+/// original; each size has its own `ETag`.
+///
+/// A title with no art, an id that does not exist, and a variant that does
+/// not apply to this kind of title are all `404` -- every client already
+/// renders a placeholder for that. An id that is not a UUID is a `400`, as on every
 /// other route that takes a media id.
 #[kynos::get("/artwork/{kind}/{id}/{variant}", tag = Media, operation_id = "getArtwork")]
 #[tracing::instrument(skip_all)]
