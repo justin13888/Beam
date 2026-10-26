@@ -8,12 +8,13 @@ use uuid::Uuid;
 use super::{CursorError, decode, encode};
 use crate::models::search::{MediaSortField, SortOrder};
 
-const FIELDS: [MediaSortField; 5] = [
+const FIELDS: [MediaSortField; 6] = [
     MediaSortField::Title,
     MediaSortField::Year,
     MediaSortField::Rating,
     MediaSortField::DateAdded,
     MediaSortField::Runtime,
+    MediaSortField::Relevance,
 ];
 
 fn any_field() -> impl Strategy<Value = MediaSortField> {
@@ -40,6 +41,12 @@ fn any_key(field: MediaSortField) -> BoxedStrategy<SortKey> {
         )
         .prop_map(SortKey::Rating)
         .boxed(),
+        // Any `f32` a store could compute, not only the 0-1 of a distance:
+        // the cursor carries the key, it does not judge it.
+        MediaSortField::Relevance => any::<f32>()
+            .prop_filter("a distance is a number", |d| d.is_finite())
+            .prop_map(SortKey::Relevance)
+            .boxed(),
         MediaSortField::DateAdded => (0_i64..4_102_444_800, 0_u32..1_000_000_000)
             .prop_map(|(secs, nanos)| {
                 SortKey::DateAdded(DateTime::<Utc>::from_timestamp(secs, nanos).expect("in range"))
@@ -131,6 +138,20 @@ fn a_cursor_the_server_did_not_write_is_malformed() {
                 r#"{{"v":1,"sort":"rating","order":"asc","kind":"movie","id":"{id}","key":0.1}}"#
             )),
             MediaSortField::Rating,
+        ),
+        // A distance no `f32` holds, and a missing one: every title has a
+        // distance from the query.
+        (
+            raw(&format!(
+                r#"{{"v":1,"sort":"relevance","order":"asc","kind":"movie","id":"{id}","key":0.1}}"#
+            )),
+            MediaSortField::Relevance,
+        ),
+        (
+            raw(&format!(
+                r#"{{"v":1,"sort":"relevance","order":"asc","kind":"movie","id":"{id}","key":null}}"#
+            )),
+            MediaSortField::Relevance,
         ),
         (
             raw(&format!(

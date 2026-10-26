@@ -135,7 +135,8 @@ pub enum MediaBrowseError {
     )]
     InvalidPagination(String),
 
-    /// `query` holds a NUL character, which no title can contain.
+    /// `query` holds a NUL character, which no title can contain, or
+    /// `sort_by=relevance` was asked for with no `query` to rank by.
     #[error("{0}")]
     #[problem(
         status = 400,

@@ -110,6 +110,35 @@ pub async fn get_subtitle(
     conditions: Conditions,
     Inject(state): Inject<AppState>,
 ) -> Result<RuntimeDelivery<StoredSubtitleRanges>, SubtitleDeliveryError> {
+    deliver_stored(&state, &path, &conditions).await
+}
+
+/// The same fields with no body, for a player checking a subtitle's size and
+/// validator before it fetches it, as the stream routes allow.
+///
+/// Declared rather than synthesised: Kynos does not derive a `HEAD` from a
+/// `GET`, because the two are separate operations in the description.
+#[kynos::head(
+    "/files/{file_id}/subtitles/{subtitle_id}",
+    tag = Playback,
+    operation_id = "headSubtitle"
+)]
+#[tracing::instrument(skip_all)]
+pub async fn head_subtitle(
+    _auth: SessionAuth,
+    Path(path): Path<SubtitlePath>,
+    conditions: Conditions,
+    Inject(state): Inject<AppState>,
+) -> Result<RuntimeDelivery<StoredSubtitleRanges>, SubtitleDeliveryError> {
+    deliver_stored(&state, &path, &conditions).await
+}
+
+/// What both methods on a stored subtitle answer; a `HEAD` drops the body.
+async fn deliver_stored(
+    state: &AppState,
+    path: &SubtitlePath,
+    conditions: &Conditions,
+) -> Result<RuntimeDelivery<StoredSubtitleRanges>, SubtitleDeliveryError> {
     let LocatedSubtitle {
         path: file_path,
         library_root,
@@ -130,7 +159,7 @@ pub async fn get_subtitle(
         .etag(ETag::strong(validator_tag(modified, length)))
         .last_modified(modified)
         .cache_control("public, max-age=3600")
-        .deliver(&conditions)
+        .deliver(conditions)
         .await
         .map_err(|err| {
             error!(?err, "failed to read subtitle file span");
@@ -159,6 +188,33 @@ pub async fn get_subtitle_webvtt(
     conditions: Conditions,
     Inject(state): Inject<AppState>,
 ) -> Result<RuntimeDelivery<WebVttRanges>, SubtitleDeliveryError> {
+    deliver_webvtt(&state, &path, &conditions).await
+}
+
+/// The same fields with no body. The rendition is still rendered: its length
+/// and validator are the rendered text's, so a `HEAD` cannot report them
+/// without it.
+#[kynos::head(
+    "/files/{file_id}/subtitles/{subtitle_id}/webvtt",
+    tag = Playback,
+    operation_id = "headSubtitleWebVtt"
+)]
+#[tracing::instrument(skip_all)]
+pub async fn head_subtitle_webvtt(
+    _auth: SessionAuth,
+    Path(path): Path<SubtitlePath>,
+    conditions: Conditions,
+    Inject(state): Inject<AppState>,
+) -> Result<RuntimeDelivery<WebVttRanges>, SubtitleDeliveryError> {
+    deliver_webvtt(&state, &path, &conditions).await
+}
+
+/// What both methods on a WebVTT rendition answer; a `HEAD` drops the body.
+async fn deliver_webvtt(
+    state: &AppState,
+    path: &SubtitlePath,
+    conditions: &Conditions,
+) -> Result<RuntimeDelivery<WebVttRanges>, SubtitleDeliveryError> {
     let WebVttRendition {
         text,
         modified,
@@ -179,7 +235,7 @@ pub async fn get_subtitle_webvtt(
         .etag(etag)
         .last_modified(modified)
         .cache_control("public, max-age=3600")
-        .deliver(&conditions)
+        .deliver(conditions)
         .await
     {
         Ok(delivery) => delivery,

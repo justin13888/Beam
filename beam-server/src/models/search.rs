@@ -26,6 +26,9 @@ pub enum MediaSortField {
     DateAdded,
     /// Sort by runtime/duration
     Runtime,
+    /// Sort by how closely the title matches `query`, best match first in
+    /// ascending order. Needs a `query`.
+    Relevance,
 }
 
 /// Sort order.
@@ -133,6 +136,7 @@ impl MediaSortField {
             Self::Rating => "rating",
             Self::DateAdded => "date_added",
             Self::Runtime => "runtime",
+            Self::Relevance => "relevance",
         }
     }
 }
@@ -185,8 +189,9 @@ impl std::str::FromStr for MediaSortField {
             "rating" => Ok(Self::Rating),
             "date_added" => Ok(Self::DateAdded),
             "runtime" => Ok(Self::Runtime),
+            "relevance" => Ok(Self::Relevance),
             other => Err(UnknownVariant {
-                expected: "title, year, rating, date_added, runtime",
+                expected: "title, year, rating, date_added, runtime, relevance",
                 got: other.to_owned(),
             }),
         }
@@ -247,6 +252,7 @@ mod tests {
             MediaSortField::Rating,
             MediaSortField::DateAdded,
             MediaSortField::Runtime,
+            MediaSortField::Relevance,
         ] {
             let json = serde_json::to_string(&field).expect("serializes");
             let wire = json.trim_matches('"');

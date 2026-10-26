@@ -36,7 +36,8 @@ pub trait MetadataService: Send + Sync + std::fmt::Debug {
     /// Fails with [`MetadataError::InvalidPagination`] for a page request the
     /// server does not answer, [`MetadataError::InvalidCursor`] for a cursor
     /// it did not issue for this sort, [`MetadataError::InvalidSearchQuery`]
-    /// for a search text no title can contain, and
+    /// for a search text no title can contain or a relevance sort without
+    /// one, and
     /// [`MetadataError::InternalError`] when the store fails -- never with an
     /// empty page.
     async fn search_media(&self, request: BrowseRequest) -> Result<MediaConnection, MetadataError>;
@@ -567,6 +568,7 @@ impl From<MediaSortField> for CatalogSortField {
             MediaSortField::Rating => Self::Rating,
             MediaSortField::DateAdded => Self::DateAdded,
             MediaSortField::Runtime => Self::Runtime,
+            MediaSortField::Relevance => Self::Relevance,
         }
     }
 }
@@ -696,6 +698,14 @@ impl MetadataService for DbMetadataService {
         {
             return Err(MetadataError::InvalidSearchQuery(
                 "query must not contain a NUL character".to_string(),
+            ));
+        }
+        // Relevance is closeness to a query; without one there is nothing to
+        // rank by, and the store would refuse the listing as a 500.
+        if sort_by == MediaSortField::Relevance && filters.query.is_none() {
+            return Err(MetadataError::InvalidSearchQuery(
+                "sort_by=relevance ranks titles by how closely they match `query`; pass one"
+                    .to_string(),
             ));
         }
 
@@ -891,7 +901,8 @@ pub enum MetadataError {
     /// outside `1..=MAX_PAGE_SIZE`.
     #[error("invalid pagination: {0}")]
     InvalidPagination(String),
-    /// A search text no title can contain: one holding a NUL character.
+    /// A search text no title can contain -- one holding a NUL character --
+    /// or a relevance sort with no search text to rank by.
     #[error("invalid search query: {0}")]
     InvalidSearchQuery(String),
     /// A numeric filter outside the range it can take: a year the catalogue's

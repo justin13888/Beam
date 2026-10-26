@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use sea_orm::DbErr;
 
-use crate::models::catalog::{CatalogPosition, CatalogQuery};
+use crate::models::catalog::{CatalogPosition, CatalogQuery, CatalogSortField};
 
 /// The catalogue read model: browse and search over movies and shows together
 /// (issue #187).
@@ -19,7 +19,11 @@ use crate::models::catalog::{CatalogPosition, CatalogQuery};
 /// position need not be a listed title any more -- a page after a title that
 /// has since left the listing continues exactly where it was.
 ///
-/// A seek position whose key is not a value of `query.sort.field` is refused.
+/// A seek position whose key is not a value of `query.sort.field` is refused,
+/// and so is a [`CatalogSortField::Relevance`] sort with no `query` filter to
+/// rank by.
+///
+/// [`CatalogSortField::Relevance`]: crate::models::catalog::CatalogSortField::Relevance
 #[cfg_attr(any(test, feature = "test-utils"), mockall::automock)]
 #[async_trait]
 pub trait CatalogRepository: Send + Sync + std::fmt::Debug {
@@ -40,13 +44,21 @@ pub fn mismatched_position(query: &CatalogQuery) -> Option<DbErr> {
     })
 }
 
+/// The error a relevance sort with nothing to rank by is refused with.
+#[must_use]
+pub fn unranked_relevance(query: &CatalogQuery) -> Option<DbErr> {
+    (query.sort.field == CatalogSortField::Relevance && query.filters.query.is_none()).then(|| {
+        DbErr::Custom("a listing sorted by relevance needs a query to rank by".to_string())
+    })
+}
+
 #[mutants::skip]
 #[cfg(any(test, feature = "test-utils"))]
 pub mod in_memory {
     use std::sync::Arc;
 
     use super::*;
-    use crate::models::catalog::{CatalogFilters, CatalogSortField, Seek, SortKey, TitleKind};
+    use crate::models::catalog::{CatalogFilters, Seek, SortKey, TitleKind};
     use crate::models::search::title_match_score;
     use crate::repositories::genre::in_memory::InMemoryGenreRepository;
     use crate::repositories::movie::in_memory::InMemoryMovieRepository;
@@ -112,8 +124,15 @@ pub mod in_memory {
             && min_rating.is_none_or(|min| candidate.rating.unwrap_or(0.0) >= min)
     }
 
-    fn key(candidate: &Candidate, field: CatalogSortField) -> SortKey {
+    fn key(candidate: &Candidate, field: CatalogSortField, query: Option<&str>) -> SortKey {
         match field {
+            // Not trigram distance, but a distance in the same sense: an
+            // exact title at 0, then a prefix, then a title that only
+            // contains the query. `unranked_relevance` has already refused a
+            // relevance sort with no query.
+            CatalogSortField::Relevance => SortKey::Relevance(
+                1.0 - (title_match_score(&candidate.title, query.unwrap_or_default()) / 3.0) as f32,
+            ),
             CatalogSortField::Title => SortKey::Title(candidate.title.to_lowercase()),
             CatalogSortField::Year => SortKey::Year(candidate.year.map(|y| y as i32)),
             CatalogSortField::Rating => SortKey::Rating(candidate.rating),
@@ -125,7 +144,7 @@ pub mod in_memory {
     #[async_trait]
     impl CatalogRepository for InMemoryCatalogRepository {
         async fn browse(&self, query: &CatalogQuery) -> Result<Vec<CatalogPosition>, DbErr> {
-            if let Some(err) = mismatched_position(query) {
+            if let Some(err) = mismatched_position(query).or_else(|| unranked_relevance(query)) {
                 return Err(err);
             }
 
@@ -186,7 +205,7 @@ pub mod in_memory {
                 .map(|c| CatalogPosition {
                     kind: c.kind,
                     id: c.id,
-                    key: key(c, query.sort.field),
+                    key: key(c, query.sort.field, query.filters.query.as_deref()),
                 })
                 .collect();
             positions.sort_by(|a, b| a.display_cmp(b, direction));

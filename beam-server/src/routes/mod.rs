@@ -110,7 +110,9 @@ pub fn rest_routes() -> Router<AppState, Propagate, (), RestScopes> {
         ])
         .mount(kynos::routes![
             subtitle::get_subtitle,
+            subtitle::head_subtitle,
             subtitle::get_subtitle_webvtt,
+            subtitle::head_subtitle_webvtt,
         ])
         .mount(kynos::routes![
             admin::list_libraries,

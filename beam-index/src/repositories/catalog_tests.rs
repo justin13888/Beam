@@ -16,7 +16,7 @@ use beam_domain::repositories::{
     CatalogRepository, GenreRepository, MovieRepository, ShowRepository,
 };
 use proptest::prelude::*;
-use sea_orm::{DatabaseConnection, DbBackend, MockDatabase, Statement, Value};
+use sea_orm::{DatabaseConnection, DbBackend, MockDatabase, MockExecResult, Statement, Value};
 use uuid::Uuid;
 
 use super::{Binds, SqlCatalogRepository, browse_statement, keyset, sort_tuple};
@@ -24,7 +24,15 @@ use crate::repositories::{SqlGenreRepository, SqlMovieRepository, SqlShowReposit
 
 fn empty_mock() -> MockDatabase {
     let no_rows: Vec<Vec<BTreeMap<String, Value>>> = (0..4).map(|_| Vec::new()).collect();
-    MockDatabase::new(DbBackend::Postgres).append_query_results(no_rows)
+    with_setting(MockDatabase::new(DbBackend::Postgres).append_query_results(no_rows))
+}
+
+/// What a search's `SET LOCAL` answers with.
+fn with_setting(mock: MockDatabase) -> MockDatabase {
+    mock.append_exec_results([MockExecResult {
+        last_insert_id: 0,
+        rows_affected: 0,
+    }])
 }
 
 fn statements(db: Arc<DatabaseConnection>) -> Vec<Statement> {
@@ -57,19 +65,215 @@ fn by(field: CatalogSortField, direction: SortDirection) -> CatalogSort {
     CatalogSort { field, direction }
 }
 
-fn statement_for(q: &CatalogQuery) -> Statement {
-    browse_statement(q).expect("a statement")
+/// The id the mock's genre lookup answers with.
+const GENRE: Uuid = Uuid::from_u128(0x6e);
+
+fn genre_row(id: Uuid) -> BTreeMap<String, Value> {
+    BTreeMap::from([("id".to_string(), Value::from(id))])
 }
 
-/// The one statement `browse` sends for `q`.
-async fn sent(q: CatalogQuery) -> Statement {
-    let db = Arc::new(empty_mock().into_connection());
+/// A mock answering `q`'s genre lookup with [`GENRE`], if it has one, then
+/// the page with no rows.
+fn mock_for(q: &CatalogQuery) -> MockDatabase {
+    let mock = MockDatabase::new(DbBackend::Postgres);
+    let mock = if q.filters.genre_slug.is_some() {
+        mock.append_query_results([vec![genre_row(GENRE)]])
+    } else {
+        mock
+    };
+    let no_rows: Vec<Vec<BTreeMap<String, Value>>> = (0..4).map(|_| Vec::new()).collect();
+    with_setting(mock.append_query_results(no_rows))
+}
+
+fn statement_for(q: &CatalogQuery) -> Statement {
+    browse_statement(q, q.filters.genre_slug.as_ref().map(|_| GENRE)).expect("a statement")
+}
+
+/// Every statement `browse` sends for `q`, in order.
+async fn sent_all(q: &CatalogQuery) -> Vec<Statement> {
+    let db = Arc::new(mock_for(q).into_connection());
     let repo = SqlCatalogRepository::new(db.clone());
-    repo.browse(&q).await.expect("browse against no rows");
+    repo.browse(q).await.expect("browse against no rows");
     drop(repo);
-    let mut sql = statements(db);
-    assert_eq!(sql.len(), 1, "one statement per page: {sql:?}");
-    sql.remove(0)
+    statements(db)
+}
+
+/// The one query `browse` sends for `q`: after its genre lookup, if it has
+/// one, and alone, or for a filtered page between the `BEGIN` and the
+/// settings before it and the `COMMIT` after it.
+async fn sent(q: CatalogQuery) -> Statement {
+    let mut sql = sent_all(&q).await;
+    let lookup = usize::from(q.filters.genre_slug.is_some());
+    let (expected, at) = if SqlCatalogRepository::setting(&q).is_some() {
+        (4, 2)
+    } else {
+        (1, 0)
+    };
+    assert_eq!(sql.len(), lookup + expected, "one query per page: {sql:?}");
+    sql.remove(lookup + at)
+}
+
+/// A genre filter is read by the id its slug names, looked up first, so the
+/// page's own statement compares the junction's `genre_id` to a bound id the
+/// planner can read statistics for -- and a slug naming no genre lists
+/// nothing without running the page at all.
+#[tokio::test]
+async fn a_genre_is_looked_up_by_slug_then_filtered_by_id() {
+    let by_genre = query(
+        CatalogFilters {
+            genre_slug: Some("science-fiction".to_string()),
+            ..Default::default()
+        },
+        by(CatalogSortField::Title, SortDirection::Asc),
+        Seek::Forward(None),
+        20,
+    );
+    let sql = sent_all(&by_genre).await;
+    assert!(
+        sql[0].sql.contains("FROM genres WHERE slug = $1"),
+        "{}",
+        sql[0].sql
+    );
+    assert_eq!(values(&sql[0]), [Value::from("science-fiction")]);
+    let page = &sent(by_genre.clone()).await;
+    assert_eq!(
+        values(page)
+            .iter()
+            .filter(|v| **v == Value::from(GENRE))
+            .count(),
+        1,
+        "the id is bound once: {page:?}"
+    );
+    assert!(
+        !values(page).contains(&Value::from("science-fiction")),
+        "the slug is not the page's to read: {page:?}"
+    );
+
+    let db = Arc::new(
+        MockDatabase::new(DbBackend::Postgres)
+            .append_query_results([Vec::<BTreeMap<String, Value>>::new()])
+            .into_connection(),
+    );
+    let repo = SqlCatalogRepository::new(db.clone());
+    let page = repo
+        .browse(&by_genre)
+        .await
+        .expect("browse an unknown genre");
+    assert!(page.is_empty());
+    drop(repo);
+    let sql = statements(db);
+    assert_eq!(sql.len(), 1, "only the lookup runs: {sql:?}");
+}
+
+/// The statement never drops a genre filter it was not given the id of, nor
+/// filters by an id no slug asked for.
+#[test]
+fn a_genre_filter_and_its_id_come_together() {
+    let page = |genre_slug: Option<&str>| {
+        query(
+            CatalogFilters {
+                genre_slug: genre_slug.map(str::to_string),
+                ..Default::default()
+            },
+            by(CatalogSortField::Title, SortDirection::Asc),
+            Seek::Forward(None),
+            20,
+        )
+    };
+    assert!(browse_statement(&page(Some("drama")), None).is_err());
+    assert!(browse_statement(&page(None), Some(GENRE)).is_err());
+    assert!(browse_statement(&page(Some("drama")), Some(GENRE)).is_ok());
+    assert!(browse_statement(&page(None), None).is_ok());
+}
+
+/// A filtered page runs inside one transaction of its own, so its settings
+/// end with it: planned for its own values, and a search at its similarity
+/// threshold too. An unfiltered or kind-only page sends its query alone.
+#[tokio::test]
+async fn a_filtered_page_runs_under_its_settings_in_its_own_transaction() {
+    use super::{CUSTOM_PLAN, SIMILARITY_THRESHOLD};
+
+    let page = |filters| {
+        query(
+            filters,
+            by(CatalogSortField::Title, SortDirection::Asc),
+            Seek::Forward(None),
+            20,
+        )
+    };
+    let search = CatalogFilters {
+        query: Some("matrix".to_string()),
+        ..Default::default()
+    };
+    let searched = format!("{CUSTOM_PLAN}; {SIMILARITY_THRESHOLD}");
+    let mut cases = vec![(search, searched.as_str(), "movies.title % $1")];
+    for (filters, reads) in [
+        (
+            CatalogFilters {
+                year: Some(1999),
+                ..Default::default()
+            },
+            "movies.year = $1",
+        ),
+        (
+            CatalogFilters {
+                year_from: Some(1999),
+                ..Default::default()
+            },
+            "movies.year >= $1",
+        ),
+        (
+            CatalogFilters {
+                year_to: Some(1999),
+                ..Default::default()
+            },
+            "movies.year <= $1",
+        ),
+        (
+            CatalogFilters {
+                min_rating: Some(7.0),
+                ..Default::default()
+            },
+            "COALESCE(movies.rating_tmdb, 0) >= $1",
+        ),
+    ] {
+        cases.push((filters, CUSTOM_PLAN, reads));
+    }
+    for (filters, settings, reads) in cases {
+        let q = page(filters);
+        let db = Arc::new(mock_for(&q).into_connection());
+        let repo = SqlCatalogRepository::new(db.clone());
+        repo.browse(&q).await.expect("browse against no rows");
+        drop(repo);
+        let log = Arc::try_unwrap(db)
+            .expect("the repository is dropped")
+            .into_transaction_log();
+        assert_eq!(log.len(), 1, "one transaction: {log:?}");
+        let sql: Vec<&str> = log[0]
+            .statements()
+            .iter()
+            .map(|statement| statement.sql.as_str())
+            .collect();
+        assert_eq!(sql.len(), 4, "{sql:?}");
+        assert_eq!(sql[0], "BEGIN");
+        assert_eq!(sql[1], settings, "{:?}", q.filters);
+        assert!(sql[2].contains(reads), "{sql:?}");
+        assert_eq!(sql[3], "COMMIT");
+    }
+    assert!(SIMILARITY_THRESHOLD.starts_with("SET LOCAL "));
+    assert!(CUSTOM_PLAN.starts_with("SET LOCAL "));
+
+    for filters in [
+        CatalogFilters::default(),
+        CatalogFilters {
+            kind: Some(TitleKind::Movie),
+            ..Default::default()
+        },
+    ] {
+        let sql = sent_all(&page(filters)).await;
+        assert_eq!(sql.len(), 1, "{sql:?}");
+        assert!(!sql[0].sql.contains("SET "), "{}", sql[0].sql);
+    }
 }
 
 #[tokio::test]
@@ -133,7 +337,7 @@ async fn both_branches_keep_only_titles_with_a_present_file() {
 }
 
 /// Every filter binds its value once, and both branches read that one
-/// placeholder -- the genre slug through each kind's own junction table, the
+/// placeholder -- the genre's id through each kind's own junction table, the
 /// minimum rating against each kind's own rating.
 #[tokio::test]
 async fn each_filter_binds_once_and_both_branches_read_it() {
@@ -152,25 +356,32 @@ async fn each_filter_binds_once_and_both_branches_read_it() {
     .await;
     let sql = &statement.sql;
     let bound = values(&statement);
-    let slug_at = bound
+    let genre_at = bound
         .iter()
-        .position(|v| *v == Value::from("science-fiction"))
-        .expect("the slug is bound")
+        .position(|v| *v == Value::from(GENRE))
+        .expect("the genre's id is bound")
         + 1;
     assert_eq!(
-        bound
-            .iter()
-            .filter(|v| **v == Value::from("science-fiction"))
-            .count(),
+        bound.iter().filter(|v| **v == Value::from(GENRE)).count(),
         1
     );
     assert_eq!(
-        sql.matches(&format!("g.slug = ${slug_at}")).count(),
+        sql.matches(&format!("j.genre_id = ${genre_at}")).count(),
         2,
         "{sql}"
     );
-    assert!(sql.contains("FROM movie_genres j"), "{sql}");
-    assert!(sql.contains("FROM show_genres j"), "{sql}");
+    assert!(
+        sql.contains("FROM movie_genres j WHERE j.movie_id = movies.id"),
+        "{sql}"
+    );
+    assert!(
+        sql.contains("FROM show_genres j WHERE j.show_id = shows.id"),
+        "{sql}"
+    );
+    assert!(
+        !sql.contains("JOIN genres"),
+        "never joined from the slug: {sql}"
+    );
 
     let rating_at = bound
         .iter()
@@ -222,6 +433,117 @@ async fn the_limit_is_the_last_value_and_closes_the_statement() {
         "{}",
         statement.sql
     );
+}
+
+/// A relevance page orders and seeks each branch on its title's distance from
+/// the one bound query, the distance compared as the `real` `<->` yields.
+#[tokio::test]
+async fn a_relevance_page_ranks_each_branch_by_distance_from_the_one_query() {
+    let statement = sent(query(
+        CatalogFilters {
+            query: Some("matrix".to_string()),
+            ..Default::default()
+        },
+        by(CatalogSortField::Relevance, SortDirection::Asc),
+        Seek::Forward(Some(CatalogPosition {
+            kind: TitleKind::Movie,
+            id: Uuid::from_u128(7),
+            key: SortKey::Relevance(0.25),
+        })),
+        21,
+    ))
+    .await;
+    let sql = &statement.sql;
+    let bound = values(&statement);
+    assert_eq!(
+        bound
+            .iter()
+            .filter(|v| **v == Value::from("matrix"))
+            .count(),
+        1,
+        "the query is bound once: {bound:?}"
+    );
+    let q = bound
+        .iter()
+        .position(|v| *v == Value::from("matrix"))
+        .expect("the query is bound")
+        + 1;
+    let distance = bound
+        .iter()
+        .position(|v| *v == Value::from(0.25_f32))
+        .expect("the position's distance is bound as a real")
+        + 1;
+    for table in ["movies", "shows"] {
+        let ranked = format!("({table}.title <-> ${q})");
+        assert!(
+            sql.contains(&format!("ORDER BY {ranked} ASC, {table}.id ASC")),
+            "{table} orders by its distance: {sql}"
+        );
+        assert!(
+            sql.contains(&format!("({ranked}, {table}.id) ")),
+            "{table} seeks on its distance: {sql}"
+        );
+        assert!(
+            sql.contains(&format!("{ranked} AS relevance")),
+            "{table} projects its distance: {sql}"
+        );
+    }
+    assert!(sql.contains(&format!("${distance}, ")), "{sql}");
+    assert!(
+        sql.contains("ORDER BY t.relevance ASC, t.id ASC, t.kind ASC"),
+        "{sql}"
+    );
+}
+
+/// A relevance sort with no query has nothing to rank by: refused before any
+/// statement is built, never ordered by an arbitrary key.
+#[tokio::test]
+async fn a_relevance_sort_without_a_query_sends_nothing() {
+    let unranked = query(
+        CatalogFilters::default(),
+        by(CatalogSortField::Relevance, SortDirection::Asc),
+        Seek::Forward(None),
+        20,
+    );
+    assert!(browse_statement(&unranked, None).is_err());
+    let db = Arc::new(empty_mock().into_connection());
+    let repo = SqlCatalogRepository::new(db.clone());
+    assert!(repo.browse(&unranked).await.is_err());
+    drop(repo);
+    assert!(statements(db).is_empty());
+}
+
+/// A ranked row the store sent without its distance is an error, not a
+/// guessed key a cursor would then carry.
+#[tokio::test]
+async fn a_ranked_row_without_its_distance_is_an_error() {
+    for distance in [Some(0.5_f32), None] {
+        let mut row = catalog_row("movie", 1, "alpha");
+        row.insert("relevance".to_string(), Value::Float(distance));
+        let db = Arc::new(
+            with_setting(MockDatabase::new(DbBackend::Postgres).append_query_results([vec![row]]))
+                .into_connection(),
+        );
+        let repo = SqlCatalogRepository::new(db);
+        let result = repo
+            .browse(&query(
+                CatalogFilters {
+                    query: Some("alpha".to_string()),
+                    ..Default::default()
+                },
+                by(CatalogSortField::Relevance, SortDirection::Asc),
+                Seek::Forward(None),
+                2,
+            ))
+            .await;
+        match distance {
+            Some(distance) => assert_eq!(
+                result.expect("a ranked row").pop().map(|p| p.key),
+                Some(SortKey::Relevance(distance))
+            ),
+            None => assert!(result.is_err()),
+        }
+    }
 }
 
 /// Which way a page scans: the display direction, flipped for a page before a
@@ -401,6 +723,7 @@ fn catalog_row(kind: &str, id: u128, title: &str) -> BTreeMap<String, Value> {
         ("rating", Value::Float(None)),
         ("created_at", Value::from(created)),
         ("runtime", Value::Int(None)),
+        ("relevance", Value::Float(None)),
     ]
     .into_iter()
     .map(|(name, value)| (name.to_string(), value))
@@ -511,6 +834,7 @@ fn any_sort() -> impl Strategy<Value = CatalogSort> {
             Just(CatalogSortField::Rating),
             Just(CatalogSortField::DateAdded),
             Just(CatalogSortField::Runtime),
+            Just(CatalogSortField::Relevance),
         ],
         prop_oneof![Just(SortDirection::Asc), Just(SortDirection::Desc)],
     )
@@ -524,6 +848,7 @@ fn key_for(field: CatalogSortField, present: bool, n: i32) -> SortKey {
         CatalogSortField::Rating => SortKey::Rating(present.then_some(n as f32 / 10.0)),
         CatalogSortField::DateAdded => SortKey::DateAdded(chrono::DateTime::UNIX_EPOCH),
         CatalogSortField::Runtime => SortKey::Runtime(present.then_some(n)),
+        CatalogSortField::Relevance => SortKey::Relevance(n.unsigned_abs() as f32 / 10.0),
     }
 }
 
@@ -554,6 +879,11 @@ fn any_query() -> impl Strategy<Value = CatalogQuery> {
                     id: Uuid::from_u128(n.unsigned_abs().into()),
                     key: key_for(sort.field, present, n),
                 });
+                // A relevance sort ranks by a query, so it always has one.
+                let text = match sort.field {
+                    CatalogSortField::Relevance => text.or_else(|| Some("q".to_string())),
+                    _ => text,
+                };
                 CatalogQuery {
                     filters: CatalogFilters {
                         kind,

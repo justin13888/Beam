@@ -620,6 +620,71 @@ async fn following_end_cursor_visits_every_title_once_in_order() {
     assert_eq!(seen, expected);
 }
 
+/// `sort_by=relevance` lists the best match first and pages on through its
+/// own cursors, the cursor carrying the distance it was issued at (#247).
+#[tokio::test]
+async fn a_relevance_sort_lists_the_best_match_first_and_pages_by_cursor() {
+    let library = Library::new();
+    let mut expected = Vec::new();
+    for title in ["Matrix", "Matrix Reloaded", "The Matrix"] {
+        expected.push(
+            indexed_movie(&library.movies, &library.files, title)
+                .await
+                .0,
+        );
+    }
+    indexed_movie(&library.movies, &library.files, "Arrival").await;
+    let (client, token) = signed_in_to(real_service(library)).await;
+
+    let mut seen = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let mut url = "/v1/media?query=matrix&sort_by=relevance&first=1".to_string();
+        if let Some(cursor) = &after {
+            url.push_str(&format!("&after={cursor}"));
+        }
+        let response = client.get(&url).cookie("beam_session", &token).send().await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let page: MediaConnection = response.json();
+        seen.extend(page.items.iter().map(item_id));
+        if !page.page_info.has_next_page {
+            break;
+        }
+        after = page.page_info.end_cursor;
+    }
+    assert_eq!(seen, expected, "best match first, Arrival not at all");
+
+    // A relevance cursor pages only a relevance listing.
+    let response = client
+        .get(&format!(
+            "/v1/media?query=matrix&sort_by=title&after={}",
+            after.expect("a cursor past the first page")
+        ))
+        .cookie("beam_session", &token)
+        .send()
+        .await;
+    response
+        .assert_status(StatusCode::BAD_REQUEST)
+        .assert_problem_type("https://beam.justinchung.net/reference/errors/#invalid-cursor");
+}
+
+/// Relevance is closeness to a `query`; asked for without one it is the
+/// caller's error, not an arbitrary order and not the store's 500.
+#[tokio::test]
+async fn a_relevance_sort_without_a_query_is_a_400_invalid_search_query() {
+    let library = Library::new();
+    indexed_movie(&library.movies, &library.files, "Matrix").await;
+    let (client, token) = signed_in_to(real_service(library)).await;
+
+    client
+        .get("/v1/media?sort_by=relevance")
+        .cookie("beam_session", &token)
+        .send()
+        .await
+        .assert_status(StatusCode::BAD_REQUEST)
+        .assert_problem_type("https://beam.justinchung.net/reference/errors/#invalid-search-query");
+}
+
 #[tokio::test]
 async fn a_cursor_the_server_did_not_issue_is_a_400_invalid_cursor() {
     let (client, token) = signed_in_to(real_service(Library::new())).await;

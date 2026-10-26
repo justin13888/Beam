@@ -6186,6 +6186,9 @@ macro_rules! catalog_repository_contract {
                         CatalogSortField::Runtime => {
                             SortKey::Runtime(movie.runtime.map(|d| (d.as_secs() / 60) as i32))
                         }
+                        CatalogSortField::Relevance => {
+                            unreachable!("a relevance key is the store's, not the title's")
+                        }
                     }
                 }
                 TitleKind::Show => {
@@ -6196,6 +6199,9 @@ macro_rules! catalog_repository_contract {
                         CatalogSortField::Rating => SortKey::Rating(show.rating_tmdb),
                         CatalogSortField::DateAdded => SortKey::DateAdded(show.created_at),
                         CatalogSortField::Runtime => SortKey::Runtime(None),
+                        CatalogSortField::Relevance => {
+                            unreachable!("a relevance key is the store's, not the title's")
+                        }
                     }
                 }
             }
@@ -6627,6 +6633,109 @@ macro_rules! catalog_repository_contract {
                         id: Uuid::new_v4(),
                         key: SortKey::Year(Some(2001)),
                     })),
+                    limit: NonZeroU32::MIN,
+                })
+                .await;
+            assert!(result.is_err());
+        }
+
+        /// The titles `relevance_ranks_the_closest_title_first` searches,
+        /// in the order a search for `matrix` ranks them: the same text as
+        /// the query (twice, one of each kind), the query and a suffix, the
+        /// query behind a prefix. `zulu` matches nothing and is never listed.
+        async fn seed_matches(
+            fixture: &impl CatalogRepositoryFixture,
+        ) -> Vec<(Uuid, &'static str)> {
+            vec![
+                (movie(fixture, "Matrix", None, None, None, true).await.id, "Matrix"),
+                (show(fixture, "matrix", None, None, 1, true).await.0, "matrix"),
+                (show(fixture, "Matrixes", None, None, 1, true).await.0, "Matrixes"),
+                (movie(fixture, "Thematrix", None, None, None, true).await.id, "Thematrix"),
+                (movie(fixture, "zulu", None, None, None, true).await.id, "zulu"),
+            ]
+        }
+
+        fn matching(query: &str) -> CatalogFilters {
+            CatalogFilters { query: Some(query.to_string()), ..Default::default() }
+        }
+
+        /// A relevance sort puts the title closest to the query first
+        /// ascending and last descending, ties broken by `(id, kind)` as in
+        /// every sort, and pages from a position either way without a title
+        /// repeated or skipped (issue #247).
+        #[tokio::test]
+        async fn relevance_ranks_the_closest_title_first() {
+            use SortDirection::{Asc, Desc};
+            let fixture = $setup().await;
+            let made = seed_matches(&fixture).await;
+
+            let by_relevance = |direction| sorted(CatalogSortField::Relevance, direction);
+
+            let asc = everything(&fixture, matching("matrix"), by_relevance(Asc)).await;
+            assert_grouped(
+                &names(&asc, &made),
+                &[&["Matrix", "matrix"], &["Matrixes"], &["Thematrix"]],
+            );
+            assert_eq!(
+                asc[0].key,
+                SortKey::Relevance(0.0),
+                "the same text is no distance away"
+            );
+            for pair in asc.windows(2) {
+                assert!(
+                    pair[0].display_cmp(&pair[1], Asc).is_lt(),
+                    "{:?} before {:?}",
+                    pair[0],
+                    pair[1]
+                );
+            }
+            let desc = everything(&fixture, matching("matrix"), by_relevance(Desc)).await;
+            let mut reversed = asc.clone();
+            reversed.reverse();
+            assert_eq!(desc, reversed, "descending is ascending reversed, ties included");
+
+            for direction in [Asc, Desc] {
+                let sort = by_relevance(direction);
+                let whole = everything(&fixture, matching("matrix"), sort).await;
+                let mut forward = Vec::new();
+                let mut after = None;
+                loop {
+                    let seek = Seek::Forward(after);
+                    let page = browse(&fixture, matching("matrix"), sort, seek, 1).await;
+                    let Some(last) = page.last().cloned() else {
+                        break;
+                    };
+                    forward.extend(page);
+                    after = Some(last);
+                }
+                assert_eq!(forward, whole, "{direction:?} forwards");
+                let mut backward = Vec::new();
+                let mut before = None;
+                loop {
+                    let seek = Seek::Backward(before);
+                    let page = browse(&fixture, matching("matrix"), sort, seek, 1).await;
+                    let Some(first) = page.first().cloned() else {
+                        break;
+                    };
+                    backward.splice(0..0, page);
+                    before = Some(first);
+                }
+                assert_eq!(backward, whole, "{direction:?} backwards");
+            }
+        }
+
+        /// Relevance is distance from a query, so a listing with none has
+        /// nothing to rank by and is refused rather than ordered arbitrarily.
+        #[tokio::test]
+        async fn relevance_without_a_query_is_refused() {
+            let fixture = $setup().await;
+            seed_matches(&fixture).await;
+            let result = fixture
+                .repo()
+                .browse(&CatalogQuery {
+                    filters: CatalogFilters::default(),
+                    sort: sorted(CatalogSortField::Relevance, SortDirection::Asc),
+                    seek: Seek::Forward(None),
                     limit: NonZeroU32::MIN,
                 })
                 .await;

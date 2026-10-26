@@ -22,7 +22,9 @@ use kynos::test::TestClient;
 use tempfile::TempDir;
 use uuid::Uuid;
 
-use crate::routes::subtitle::{get_subtitle, get_subtitle_webvtt};
+use crate::routes::subtitle::{
+    get_subtitle, get_subtitle_webvtt, head_subtitle, head_subtitle_webvtt,
+};
 use crate::routes::test_support::make_app_state;
 use crate::services::sources::SUBTITLE_CONVERT_MAX_BYTES;
 use crate::services::subtitle::DbSubtitleService;
@@ -102,7 +104,12 @@ impl Fixture {
         let service = Router::new()
             .nest(
                 "/v1",
-                Router::new().mount(kynos::routes![get_subtitle, get_subtitle_webvtt]),
+                Router::new().mount(kynos::routes![
+                    get_subtitle,
+                    head_subtitle,
+                    get_subtitle_webvtt,
+                    head_subtitle_webvtt
+                ]),
             )
             .build(self.state.clone())
             .expect("the subtitle router describes itself");
@@ -574,6 +581,108 @@ async fn subtitles_require_a_session() {
     for path in [url(video, srt), format!("{}/webvtt", url(video, srt))] {
         let response = f.client().get(&path).send().await;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
+        let response = f.client().head(&path).send().await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "HEAD {path}");
+    }
+}
+
+// ─── HEAD ──────────────────────────────────────────────────────────────────
+
+/// A `HEAD` of a stored subtitle reports what its `GET` would send -- the
+/// type, the length, the validator -- with no body (issue #247).
+#[tokio::test]
+async fn head_of_a_stored_subtitle_reports_its_get_without_the_body() {
+    let f = fixture().await;
+    let video = f.video();
+    let srt = f.sidecar(video, "Movie.en.srt", SRT).await;
+    let token = f.session().await;
+    let client = f.client();
+
+    let got = client
+        .get(&url(video, srt))
+        .cookie("beam_session", &token)
+        .send()
+        .await;
+    let head = client
+        .head(&url(video, srt))
+        .cookie("beam_session", &token)
+        .send()
+        .await;
+
+    assert_eq!(head.status(), StatusCode::OK);
+    assert_eq!(head.header("content-type"), Some("application/x-subrip"));
+    assert_eq!(
+        head.header("content-length"),
+        Some(SRT.len().to_string().as_str())
+    );
+    assert_eq!(head.header("accept-ranges"), Some("bytes"));
+    assert!(head.header("etag").is_some(), "a validator");
+    assert_eq!(head.header("etag"), got.header("etag"));
+    assert!(head.bytes().is_empty(), "a HEAD sends no content");
+}
+
+/// A `HEAD` of a rendition reports the rendered text's length and the
+/// rendition's own validator, and revalidates as its `GET` does.
+#[tokio::test]
+async fn head_of_a_webvtt_rendition_reports_its_get_without_the_body() {
+    let f = fixture().await;
+    let video = f.video();
+    let srt = f.sidecar(video, "Movie.en.srt", SRT).await;
+    let token = f.session().await;
+    let client = f.client();
+    let rendition = format!("{}/webvtt", url(video, srt));
+
+    let got = client
+        .get(&rendition)
+        .cookie("beam_session", &token)
+        .send()
+        .await;
+    let head = client
+        .head(&rendition)
+        .cookie("beam_session", &token)
+        .send()
+        .await;
+
+    assert_eq!(head.status(), StatusCode::OK);
+    assert_eq!(head.header("content-type"), Some("text/vtt; charset=utf-8"));
+    assert_eq!(
+        head.header("content-length"),
+        Some(SRT_AS_WEBVTT.len().to_string().as_str())
+    );
+    let etag = head.header("etag").expect("a validator").to_owned();
+    assert_eq!(got.header("etag"), Some(etag.as_str()));
+    assert!(head.bytes().is_empty(), "a HEAD sends no content");
+
+    let again = client
+        .head(&rendition)
+        .cookie("beam_session", &token)
+        .header("if-none-match", &etag)
+        .send()
+        .await;
+    assert_eq!(again.status(), StatusCode::NOT_MODIFIED);
+}
+
+/// A `HEAD` fails exactly where its `GET` does: an unknown subtitle, and a
+/// rendition the subtitle's format does not have.
+#[tokio::test]
+async fn head_fails_where_its_get_fails() {
+    let f = fixture().await;
+    let video = f.video();
+    let ass = f.sidecar(video, "Movie.en.ass", b"[Script Info]\n").await;
+    let token = f.session().await;
+
+    for path in [
+        url(video, Uuid::new_v4()),
+        format!("{}/webvtt", url(video, ass)),
+    ] {
+        let response = f
+            .client()
+            .head(&path)
+            .cookie("beam_session", &token)
+            .send()
+            .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        assert!(response.bytes().is_empty(), "a HEAD sends no content");
     }
 }
 
