@@ -907,6 +907,19 @@ mod tests {
         Arc<InMemoryNotificationService>,
         Arc<InMemoryPersonRepository>,
     ) {
+        full_harness_storing_credits(provider, |people| people)
+    }
+
+    /// [`full_harness`], with the service writing credits through the store
+    /// `credit_store` wraps the in-memory one in.
+    fn full_harness_storing_credits(
+        provider: InMemoryEnrichmentProvider,
+        credit_store: impl FnOnce(Arc<InMemoryPersonRepository>) -> Arc<dyn PersonRepository>,
+    ) -> (
+        Harness,
+        Arc<InMemoryNotificationService>,
+        Arc<InMemoryPersonRepository>,
+    ) {
         let people = Arc::new(InMemoryPersonRepository::default());
         let notifications = Arc::new(InMemoryNotificationService::new());
         let movie_repo = Arc::new(InMemoryMovieRepository::default());
@@ -924,7 +937,7 @@ mod tests {
             movie_repo.clone(),
             show_repo.clone(),
             genre_repo.clone(),
-            people.clone(),
+            credit_store(people.clone()),
             Arc::new(provider),
             admin_log,
             notifications.clone(),
@@ -1088,6 +1101,184 @@ mod tests {
         assert_eq!(credits.len(), 1);
         assert_eq!(credits[0].person.name, "Bryan Cranston");
         assert_eq!(credits[0].role, lead("Walter White"));
+    }
+
+    /// A person store whose credit writes fail, its reads answered by the
+    /// in-memory store it wraps.
+    #[derive(Debug)]
+    struct FailingCreditWrites(Arc<InMemoryPersonRepository>);
+
+    #[async_trait::async_trait]
+    impl PersonRepository for FailingCreditWrites {
+        async fn set_movie_credits(
+            &self,
+            _: uuid::Uuid,
+            _: &[CreditEnrichment],
+        ) -> Result<(), sea_orm::DbErr> {
+            Err(sea_orm::DbErr::Custom(
+                "credits store unavailable".to_string(),
+            ))
+        }
+        async fn set_show_credits(
+            &self,
+            _: uuid::Uuid,
+            _: &[CreditEnrichment],
+        ) -> Result<(), sea_orm::DbErr> {
+            Err(sea_orm::DbErr::Custom(
+                "credits store unavailable".to_string(),
+            ))
+        }
+        async fn movie_credits(
+            &self,
+            movie_id: uuid::Uuid,
+        ) -> Result<Vec<beam_domain::models::person::TitleCredit>, sea_orm::DbErr> {
+            self.0.movie_credits(movie_id).await
+        }
+        async fn show_credits(
+            &self,
+            show_id: uuid::Uuid,
+        ) -> Result<Vec<beam_domain::models::person::TitleCredit>, sea_orm::DbErr> {
+            self.0.show_credits(show_id).await
+        }
+        async fn find_by_id(
+            &self,
+            id: uuid::Uuid,
+        ) -> Result<Option<beam_domain::models::person::Person>, sea_orm::DbErr> {
+            self.0.find_by_id(id).await
+        }
+        async fn filmography(
+            &self,
+            person_id: uuid::Uuid,
+        ) -> Result<Vec<beam_domain::models::person::PersonCredit>, sea_orm::DbErr> {
+            self.0.filmography(person_id).await
+        }
+        async fn search(
+            &self,
+            query: Option<&str>,
+            limit: u64,
+            offset: u64,
+        ) -> Result<Vec<beam_domain::models::person::Person>, sea_orm::DbErr> {
+            self.0.search(query, limit, offset).await
+        }
+        async fn count(&self, query: Option<&str>) -> Result<u64, sea_orm::DbErr> {
+            self.0.count(query).await
+        }
+    }
+
+    fn failing_credit_writes(people: Arc<InMemoryPersonRepository>) -> Arc<dyn PersonRepository> {
+        Arc::new(FailingCreditWrites(people))
+    }
+
+    /// The row enrichment leaves for `target`: enriched, and matched to
+    /// `matched`.
+    async fn assert_enriched_as(
+        state_repo: &InMemoryEnrichmentStateRepository,
+        target: EnrichmentTargetId,
+        matched: &str,
+    ) {
+        let row = state_repo.find_by_target(target).await.unwrap().unwrap();
+        assert_eq!(row.status, EnrichmentStatus::Enriched, "{row:?}");
+        assert_eq!(row.matched_ref.as_deref(), Some(matched));
+    }
+
+    #[tokio::test]
+    async fn a_movie_whose_credits_fail_to_store_is_enriched_and_keeps_its_old_ones() {
+        let hit = MovieSearchHit {
+            external_ref: ExternalMediaRef::new("tmdb", "603"),
+            title: "The Matrix".to_string(),
+            original_title: None,
+            year: Some(1999),
+            popularity: None,
+            vote_average: None,
+        };
+        let provider = InMemoryEnrichmentProvider::new(&["tmdb"])
+            .with_movie_search("The Matrix", vec![hit])
+            .with_movie_enrichment(MovieEnrichment {
+                tmdb_id: Some(603),
+                title: "The Matrix".to_string(),
+                year: Some(1999),
+                credits: Some(vec![credit("6384", "Keanu Reeves", lead("Neo"))]),
+                ..Default::default()
+            });
+        let ((service, movie_repo, _shows, state_repo, _genres, _clock), _events, people) =
+            full_harness_storing_credits(provider, failing_credit_writes);
+        let movie = movie_repo
+            .find_or_create_by_identity(CreateMovie::new(
+                "The Matrix".to_string(),
+                Some(1999),
+                None,
+            ))
+            .await
+            .unwrap();
+        people
+            .set_movie_credits(movie.id, &[credit("1", "Stale Credit", lead("Old"))])
+            .await
+            .unwrap();
+        let target = EnrichmentTargetId::Movie(movie.id);
+        state_repo.ensure_pending(target).await.unwrap();
+
+        assert_eq!(service.sweep_once().await.enriched, 1);
+        assert_enriched_as(&state_repo, target, "tmdb:603").await;
+        let names: Vec<String> = people
+            .movie_credits(movie.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| c.person.name)
+            .collect();
+        assert_eq!(names, ["Stale Credit"]);
+    }
+
+    #[tokio::test]
+    async fn a_show_whose_credits_fail_to_store_is_enriched_and_keeps_its_old_ones() {
+        let show_ref = ExternalMediaRef::new("tmdb", "1396");
+        let hit = ShowSearchHit {
+            external_ref: show_ref.clone(),
+            title: "Breaking Bad".to_string(),
+            original_title: None,
+            year: Some(2008),
+            popularity: None,
+            vote_average: None,
+        };
+        let provider = InMemoryEnrichmentProvider::new(&["tmdb"])
+            .with_show_search("Breaking Bad", vec![hit])
+            .with_show_enrichment(
+                show_ref,
+                ShowEnrichment {
+                    tmdb_id: Some(1396),
+                    title: "Breaking Bad".to_string(),
+                    year: Some(2008),
+                    credits: Some(vec![credit(
+                        "17419",
+                        "Bryan Cranston",
+                        lead("Walter White"),
+                    )]),
+                    ..Default::default()
+                },
+            );
+        let ((service, _movies, show_repo, state_repo, _genres, _clock), _events, people) =
+            full_harness_storing_credits(provider, failing_credit_writes);
+        let show = show_repo
+            .find_or_create_by_identity(CreateShow::new("Breaking Bad".to_string(), Some(2008)))
+            .await
+            .unwrap();
+        people
+            .set_show_credits(show.id, &[credit("1", "Stale Credit", lead("Old"))])
+            .await
+            .unwrap();
+        let target = EnrichmentTargetId::Show(show.id);
+        state_repo.ensure_pending(target).await.unwrap();
+
+        assert_eq!(service.sweep_once().await.enriched, 1);
+        assert_enriched_as(&state_repo, target, "tmdb:1396").await;
+        let names: Vec<String> = people
+            .show_credits(show.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| c.person.name)
+            .collect();
+        assert_eq!(names, ["Stale Credit"]);
     }
 
     #[tokio::test]
