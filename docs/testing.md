@@ -323,6 +323,70 @@ Two gaps are deliberate:
   decoders, and the cross-browser matrix is a separate question
   ([#139](https://github.com/justin13888/beam/issues/139)).
 
+## The server end-to-end tier
+
+The browser tier proves the pieces agree for one fixture and one scan. It does not watch the
+database reconcile as a library changes under a running server -- which is most of what an
+operator's library does -- and it reaches the server only through an SPA that lags the `/v1`
+contract. `beam-server/tests/e2e_server.rs` is the tier that does.
+
+Each test starts the `beam-server` binary -- the process an operator runs, which reads its
+environment, migrates and starts the background indexer -- over a real Postgres database of its own
+and a real Dex, signs in through Dex's own login form, and drives the frozen `/v1` contract with the
+generated client in `beam-client-core`, the one the native apps link. A response the document does
+not describe therefore fails to decode here exactly as it would on a phone. Only the byte-range
+media endpoints, which the generated client deliberately omits, are requested raw.
+
+What it covers, file by file under `beam-server/tests/e2e_server/`:
+
+- **`sign_in.rs`** -- the RFC 8628 device grant a native client uses and the browser's
+  Authorization Code + PKCE flow, both through Dex; admin rights from the IdP's claim alone.
+- **`catalog.rs`** -- add a library, scan it, browse, search, detail and sources, and stream by
+  range, byte for byte; library roots outside the video directory or overlapping another refused.
+- **`scan.rs`** -- a scan is a `202` job polled to its end, and a concurrent one is a `409`.
+- **`reconciliation.rs`** -- the filesystem changes under the server and both the API and the
+  database follow: add, delete (soft-deleted for a grace period, then purged), rename, move and a
+  same-size swap that keep each file's id and progress, an emptied root, a root that disappears and
+  returns, and links that are never followed.
+- **`metadata.rs`** -- NFO pins and container tags, multi-part stacking, and a dated folder with
+  `Disc N` subfolders.
+- **`playback.rs`** -- progress and continue-watching, watched state, resume across sources,
+  next-up and last-part completion, and subtitle delivery including SubRip to WebVTT.
+- **`admin.rs`** -- fix-match and field locks, and the admin guards on them.
+
+**The source media is never written (FR-202).** The library is a `FixtureLibrary`
+(`beam-test-support/src/e2e/library.rs`): every directory, file and link in it is recorded as the
+test writes it -- bytes by SHA-256, modification times, link targets -- the tree is sealed read-only
+(`0555`/`0444`) while the server runs, the closest a test process gets to the deployment's `:ro`
+mount, and every test ends by walking the tree and comparing it with that record. A sidecar, a lock
+file, a rename or a touched timestamp fails the test that caused it.
+
+The fixture media is rendered per run by the FFmpeg CLI -- synthetic `testsrc2` video and a `sine`
+tone, single-threaded and bit-exact -- so nothing is committed and two videos that differ only in a
+tag of the same length are the same size, which the same-size swap needs. The committed probe
+fixtures in `beam-index/tests/fixtures` are reused as they are.
+
+`mise run e2e:server` is the entry point. It composes Postgres and Dex from
+`compose.dependencies.yaml` as their own compose project (`beam-e2e-server`), from empty volumes,
+runs the suite, and tears both down; `mise run e2e:server reconciliation` runs the tests whose names
+contain that word. It needs a container runtime and an FFmpeg CLI with libx264, so like
+`rust:test:pg` it is outside `mise run ci` and the pre-push hook (NFR-201), and it compiles to
+nothing unless the `e2e-server` feature is on. CI runs it in the `server-e2e` job, which `ci-ok`
+requires. Dex's static client registers only `http://localhost:8000/v1/auth/callback`, so the
+browser sign-in test takes port 8000, and a `dev:up` Dex on 5556 has to be stopped first.
+
+Two gaps are deliberate:
+
+- **No metadata provider is reached.** Enrichment would fetch from TMDB or AniList over the
+  internet and rename fixture titles to whatever a provider matched, and neither provider's address
+  is configurable. The tier proves what the server decides before any fetch -- an NFO's pin, a
+  fixed match pinned over it (with TMDB configured behind an HTTPS proxy nothing listens on, so the
+  queued fetch fails at once), the refusals, field locks -- and the fetch itself stays with the
+  hermetic suite's programmable provider fake.
+- **No filesystem watcher.** The server runs with `BEAM_WATCH_ENABLED=false` and every change is
+  observed through an explicit scan, so a test waits on a job the server reports rather than on a
+  debounce timer it cannot see.
+
 ## Contract testing
 
 Clients are generated from the server's OpenAPI document, so the generator's output is what checks
@@ -462,4 +526,4 @@ A line-coverage percentage says a line executed; it says nothing about assertion
 nothing about the integrations deliberately excluded from the hermetic layer above. Treat the gate
 as a floor against undertested code, not as validation of the real external round-trips -- assertion
 quality is what the mutation-testing loop measures, and the real round-trips are what the
-`pg-integration` tier and the browser end-to-end tier cover.
+`pg-integration` tier and the two end-to-end tiers cover.

@@ -262,6 +262,58 @@ cargo test --package beam-auth --features "pg-integration,test-utils" --test pg_
 cargo test --package beam-migration --features pg-integration --test pg_integration
 '''
 
+[tasks."e2e:server"]
+description = "Opt-in tier: the server end to end over Postgres, Dex and a changing library (needs a container runtime)"
+# The server end-to-end suite (#191, beam-server/tests/e2e_server.rs): the
+# beam-server binary over a real Postgres and a real Dex, signed in to through
+# the device grant and the browser flow, driven through the generated client
+# the native apps link, over an FFmpeg-generated library the suite changes
+# under it -- and proving afterwards the library tree is byte-identical to
+# what the suite wrote (FR-202).
+#
+# Deliberately outside `ci`, like `rust:test:pg` and `ts:e2e`: it needs a
+# container runtime, and NFR-201 says the default run must not. It also needs
+# an FFmpeg CLI with libx264 on PATH, which renders the fixture media.
+#
+# The dependencies run as their own compose project, `beam-e2e-server`, so they
+# never mix with `dev:up`'s or `ts:e2e`'s, and are torn down, volumes and all,
+# before and after every run. Postgres is published on BEAM_E2E_POSTGRES_PORT
+# (default 55432) so a `dev:up` database on 5432 is never the one tested; Dex
+# keeps 5556, which its issuer string fixes, so a running `dev:up` Dex has to
+# be stopped first. Dex's static client registers only
+# http://localhost:8000/v1/auth/callback, so the browser sign-in test takes
+# port 8000 for its server. The root `.env` is not read (`--env-file
+# /dev/null`) for the same reason `ts:e2e` gives.
+#
+# Each test then starts its own beam-server process over a database of its own
+# (`beam_e2e_<uuid>`, dropped once it passes). The optional argument filters
+# the tests by name, as `cargo test` does: `mise run e2e:server reconciliation`.
+usage = '''
+arg "[filter]" help="Run only the tests whose names contain this"
+'''
+run = '''
+set -eu
+. scripts/compose.sh
+
+deps() {
+    compose -p beam-e2e-server --env-file /dev/null \
+        -f compose.dependencies.yaml --profile dev-idp "$@"
+}
+
+port=${BEAM_E2E_POSTGRES_PORT:-55432}
+export POSTGRES_HOST_PORT="$port"
+deps down -v >/dev/null 2>&1 || true
+trap 'deps down -v >/dev/null 2>&1 || true' EXIT
+deps up -d --wait postgres dex
+
+export BEAM_E2E_DATABASE_URL="postgres://beam:password@localhost:$port/beam"
+features="beam-server/e2e-server"
+case "${BEAM_CARGO_FEATURES:-}" in
+    *vendored-ffmpeg*) features="$features,beam-server/vendored-ffmpeg" ;;
+esac
+cargo test --package beam-server --features "$features" --test e2e_server -- ${usage_filter:+"$usage_filter"}
+'''
+
 [tasks."rust:coverage:report"]
 description = "Report per-file line/region/function coverage with no threshold (calibration)"
 # No gate: this is what you calibrate rust:coverage's thresholds against, and

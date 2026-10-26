@@ -420,6 +420,39 @@ jobs:
       # tier that needs infrastructure, and NFR-201 says the default run must not.
       - run: mise run rust:test:pg
 
+  # The server end-to-end tier (#191): the beam-server binary over a real
+  # Postgres and Dex, driven through the generated client over a library the
+  # suite changes under it. An infrastructure tier, so like rust-test-pg it
+  # stays out of `mise run ci` (NFR-201) and has a job of its own. It reads the
+  # server and the compose topology (Postgres and Dex come from
+  # compose.dependencies.yaml), so either filter runs it.
+  server-e2e:
+    name: Server end-to-end tier
+    needs: [changes, ffmpeg]
+    if: >-
+      needs.changes.outputs.rust == 'true' ||
+      needs.changes.outputs.compose == 'true'
+    runs-on: ubuntu-latest
+    # A backstop for a run that hangs, which would otherwise hold the runner
+    # for GitHub's six-hour default.
+    timeout-minutes: 60
+    env:
+      BEAM_CARGO_FEATURES: ""
+      # The runner has podman as well as docker, and scripts/compose.sh would
+      # pick podman; docker is the engine the runner's daemon serves.
+      BEAM_COMPOSE: docker compose
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+      - uses: ./.github/actions/install-rust-build-deps
+      # Also puts the FFmpeg CLI, with libx264, on PATH: the tier renders its
+      # fixture media with it.
+      - uses: ./.github/actions/setup-ffmpeg
+      - run: mise run e2e:server
+
   openapi:
     name: OpenAPI spec is current
     needs: [changes, ffmpeg]
@@ -826,6 +859,7 @@ jobs:
       - rust-clippy
       - rust-test
       - rust-test-pg
+      - server-e2e
       - openapi
       - ts-check
       - ts-typecheck

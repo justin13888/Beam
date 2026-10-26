@@ -53,6 +53,9 @@ beam-domain = { path = "../beam-domain", features = ["test-utils"] }
 beam-index = { path = "../beam-index", features = ["test-utils"] }
 metrics-util = { workspace = true }
 mockall = "0.15.0"
+# The harness of the opt-in `e2e-server` tier (tests/e2e_server.rs). An empty
+# library unless that feature is on.
+beam-test-support = { path = "../beam-test-support" }
 proptest = "1.11.0"
 
 # A FIFO put in a subtitle file's place, which delivery must refuse without
@@ -62,6 +65,10 @@ rustix = { version = "1.1", features = ["fs"] }
 
 [features]
 test-utils = ["beam-domain/test-utils", "beam-index/test-utils"]
+# The server end-to-end tier (#191): `tests/e2e_server.rs` against a composed
+# Postgres and Dex. Off by default so `cargo test --workspace` needs no
+# infrastructure (NFR-201); `mise run e2e:server` turns it on.
+e2e-server = ["beam-test-support/e2e-server"]
 vendored-ffmpeg = ["beam-index/vendored-ffmpeg"]
 # The feature set cargo-mutants builds this package with.
 #
