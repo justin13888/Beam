@@ -283,6 +283,18 @@ styling and positioning WebVTT cannot carry, or it is larger than 8 MiB.
 has a WebVTT rendition says so with a `webvtt_url`; a client that only requests one when it is
 present never sees this code.
 
+### trickplay-not-found
+
+**404.** The video file exists, and has no scrub-preview sheet with that number. Beam has not made
+its sheets yet -- they are made in the background, a while after the file is indexed or changes --
+the file gives none (it has no video stream, or its frames do not decode), or the number is past
+its last sheet.
+
+**What to do.** Show the scrub bar without previews. Fetch the title's sources again later and use
+the `sheet_urls` a source's `trickplay` carries; a source with no `trickplay` has no sheets yet,
+and a client that only requests the URLs listed never sees this code for a file whose content has
+not changed since.
+
 ### artwork-not-found
 
 **404.** No image for this title.

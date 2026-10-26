@@ -52,6 +52,24 @@ the first preferred language a source carries). A language is sent as `en`, `eng
 `en-GB` alike and answered as the code tracks carry, `eng`. With no preference that a source can
 meet, the file's own default track is chosen.
 
+## Chapters, skip markers and scrub previews
+
+Each source, and each of its parts, carries its file's `chapters` as the container lists them --
+`start_ms`, `end_ms` and a `title` where the file names one -- and `markers`, the spans a player
+offers to skip, read from the chapters titled for them: `recap` (`Previously On`, `Recap`),
+`intro` (`Opening`, `Intro`, `OP`), `credits` (`Ending`, `End Credits`, `ED`) and `preview`
+(`Next Episode`, `Preview`), at most one of each, in the order they start. A file without such
+chapters has no markers. All times are milliseconds on that file's own timeline, so the parts of a
+multi-part movie each carry their own.
+
+`trickplay`, once present, describes the file's scrub-preview thumbnails: JPEG sheets of tiles,
+`columns` by `rows` to a sheet, each `tile_width` by `tile_height` pixels, tile `n` the frame at
+`n * interval_ms`, laid left to right and then top to bottom. Fetch each sheet from its entry in
+`sheet_urls` (`GET /v1/files/{file_id}/trickplay/{sheet}`). Beam makes the sheets in the
+background, a tile every 10 seconds, so a file indexed or changed recently has no `trickplay` for a
+while; a file with no video stream, or whose frames do not decode, never has one. The sheets live in
+Beam's own data directory, never beside the library's files.
+
 ## Watched state
 
 Progress is kept per movie and per episode, not per file. `PUT /v1/files/{file_id}/progress`

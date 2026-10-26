@@ -489,6 +489,36 @@ Indexes on `file_id` and `library_id`. A row no scan finds any more, or whose vi
 indexed, is deleted outright: nothing references it. Purging a video's `files` row takes its
 subtitles with it.
 
+### `file_chapters`
+A video file's chapters as its container lists them (issue #265), written whole -- in one
+transaction, deleted and reinserted -- each time the file is probed; a changed file whose probe
+fails is left with none. `GET /v1/media/{id}/sources` lists them on the file's source and part, and
+reads the recap, intro, credits and preview markers from their titles
+(`beam_domain::models::chapter::markers_from_chapters`): markers are not stored. A file indexed
+before this table has none until its next probe.
+
+| Column | Type | Nullable | Notes |
+|---|---|---|---|
+| `file_id` | UUID | no | PK (with `chapter_index`); FK → `files.id`, cascade |
+| `chapter_index` | INTEGER | no | PK; the chapter's position among the file's, from 0 (`CHECK >= 0`) |
+| `start_ms` / `end_ms` | BIGINT | no | milliseconds from the file's start; `CHECK (start_ms >= 0 AND end_ms >= start_ms)` (`file_chapters_span`) |
+| `title` | TEXT | yes | the chapter's own title |
+
+### `file_trickplay`
+What Beam made of one video file's scrub-preview sheets (issue #265), for the content it made them
+from. Written by the background trickplay worker (`beam-server/src/services/trickplay.rs`), which
+makes the sheets of every present, classified file with a duration whose record is missing or names
+another `file_hash` -- one file at a time -- under `BEAM_DATA_DIR/trickplay/{file_id}/{hash}/`, never
+beside the library's files (FR-202). Read by the sources route, which offers `trickplay` only when
+`file_hash` is the file's current `hash_xxh3`, and by `GET /v1/files/{file_id}/trickplay/{sheet}`.
+
+| Column | Type | Nullable | Notes |
+|---|---|---|---|
+| `file_id` | UUID | no | PK; FK → `files.id`, cascade -- the sheets' folder is swept once the row is gone |
+| `file_hash` | BIGINT | no | the `files.hash_xxh3` bits the sheets were made from |
+| `interval_ms` / `tile_width` / `tile_height` / `columns` / `rows` / `tile_count` | INTEGER | yes | the layout; all set and positive, or all `NULL` for a file that gave no sheets -- no video stream, or frames that do not decode -- which is not tried again until its content changes (`file_trickplay_layout`) |
+| `generated_at` | TIMESTAMPTZ | no | |
+
 ### `applied_nfos`
 What each NFO beside the media held when the indexer last applied it (issue #184, FR-219). An NFO
 is re-applied exactly when its size or content hash differs from its row, never by comparing its
