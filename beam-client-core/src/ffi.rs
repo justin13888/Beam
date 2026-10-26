@@ -113,6 +113,104 @@ pub struct PlaybackHttpConfig {
     pub pinned_host: String,
 }
 
+/// Everything the platform player needs to play one source, part by part.
+///
+/// A multi-part movie (issue #233) is one source whose parts the player queues
+/// as consecutive items; a whole file is a plan of one part. Every part is a
+/// direct play of one file -- the server never joins them (ADR-0004) -- and
+/// progress is reported against the part that is playing, at the position
+/// within it.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct PlaybackPlan {
+    /// The files to queue, in order. Never empty.
+    pub parts: Vec<PlaybackPart>,
+    /// Which part to start in: the one the request named, which for a resume
+    /// is the part the viewer was last in.
+    pub start_part_index: u32,
+    /// Headers every part's request carries, including the session cookie.
+    pub headers: HashMap<String, String>,
+    /// Certificates the user has accepted for this server; see
+    /// [`PlaybackHttpConfig::trusted_fingerprints`].
+    pub trusted_fingerprints: Vec<String>,
+    /// The host those fingerprints apply to.
+    pub pinned_host: String,
+}
+
+/// One file of a [`PlaybackPlan`].
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct PlaybackPart {
+    /// The file, which its progress is reported against.
+    pub file_id: String,
+    /// Absolute URL to stream it from.
+    pub url: String,
+    /// Its duration, where probing determined one.
+    pub duration_secs: Option<f64>,
+    /// The subtitle files beside it (issue #189), each with a URL to fetch it
+    /// from. A file's own subtitle streams are not listed: the player's
+    /// extractor finds those in the file.
+    pub sidecar_subtitles: Vec<crate::capability::select::SubtitleTrackView>,
+}
+
+/// The parts to queue for `file_id`, and which of them to start in.
+///
+/// From the source that holds `file_id` as its first file or any part. Where
+/// there is no such source -- the lookup failed, or the file is not among
+/// them -- the plan is the one file alone, at `single_url`: exactly what
+/// the player played before a source knew its parts, so nothing that played
+/// then stops playing now.
+fn plan_parts(
+    sources: &[MediaSourceView],
+    file_id: &str,
+    single_url: String,
+) -> (Vec<PlaybackPart>, u32) {
+    use crate::capability::select::SubtitleOrigin;
+    let sidecars = |tracks: &[crate::capability::select::SubtitleTrackView]| {
+        tracks
+            .iter()
+            .filter(|track| track.origin == SubtitleOrigin::Sidecar && track.url.is_some())
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let Some(source) = sources.iter().find(|source| source.contains_file(file_id)) else {
+        return (
+            vec![PlaybackPart {
+                file_id: file_id.to_owned(),
+                url: single_url,
+                duration_secs: None,
+                sidecar_subtitles: Vec::new(),
+            }],
+            0,
+        );
+    };
+    if source.parts.is_empty() {
+        return (
+            vec![PlaybackPart {
+                file_id: source.file_id.clone(),
+                url: source.stream_url.clone(),
+                duration_secs: source.duration_secs,
+                sidecar_subtitles: sidecars(&source.subtitle_tracks),
+            }],
+            0,
+        );
+    }
+    let parts: Vec<PlaybackPart> = source
+        .parts
+        .iter()
+        .map(|part| PlaybackPart {
+            file_id: part.file_id.clone(),
+            url: part.stream_url.clone(),
+            duration_secs: part.duration_secs,
+            sidecar_subtitles: sidecars(&part.subtitle_tracks),
+        })
+        .collect();
+    let start = parts
+        .iter()
+        .position(|part| part.file_id == file_id)
+        .and_then(|index| u32::try_from(index).ok())
+        .unwrap_or(0);
+    (parts, start)
+}
+
 /// The one live copy of a server's session cookie.
 ///
 /// The generated client reads it through a [`crate::api::Credential::Provider`]
@@ -869,6 +967,51 @@ impl BeamClient {
             headers,
             trusted_fingerprints,
             pinned_host: host,
+        })
+    }
+
+    /// Everything the platform player needs to play `file_id` with the rest
+    /// of its source: every part, in order, and which to start in.
+    ///
+    /// `title_id` is the movie or episode the file belongs to, which is where
+    /// its source -- and so its parts -- are listed. Without one, or when the
+    /// lookup fails, the plan is the file alone: a downloaded file played
+    /// with no connection is exactly that, and a failed lookup must not stop
+    /// a file that would play from playing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::Unauthenticated`] when there is no session, and
+    /// [`BeamError::NoActiveServer`] when no server is selected.
+    pub async fn playback_plan(
+        &self,
+        title_id: Option<String>,
+        file_id: String,
+    ) -> Result<PlaybackPlan, BeamError> {
+        let PlaybackHttpConfig {
+            url,
+            headers,
+            trusted_fingerprints,
+            pinned_host,
+        } = self.playback_config(file_id.clone())?;
+
+        let sources = match title_id {
+            Some(title_id) => match self.media_sources(title_id).await {
+                Ok(sources) => sources,
+                Err(error) => {
+                    tracing::warn!(%error, "playing one file alone: its source could not be listed");
+                    Vec::new()
+                }
+            },
+            None => Vec::new(),
+        };
+        let (parts, start_part_index) = plan_parts(&sources, &file_id, url);
+        Ok(PlaybackPlan {
+            parts,
+            start_part_index,
+            headers,
+            trusted_fingerprints,
+            pinned_host,
         })
     }
 
@@ -3385,14 +3528,9 @@ mod tests {
         assert_eq!((other.width, other.height), (None, None));
     }
 
-    /// A multi-part source (issue #233) carries every part in the server's
-    /// order with its own absolute stream URL and its own sidecars, a disc rip
-    /// (issue #234) its structure, and a sidecar subtitle (issue #189) the
-    /// URLs the player fetches it from -- resolved, so the player needs no
-    /// base URL of its own.
-    #[tokio::test]
-    async fn a_multi_part_disc_source_carries_its_parts_structure_and_sidecars() {
-        const SOURCES: &str = r#"{"items":[
+    /// A Blu-ray rip of one film across two clips, the second with a forced
+    /// Spanish sidecar, and an embedded image subtitle in the first.
+    const MULTI_PART_SOURCES: &str = r#"{"items":[
             {"file_id":"c1c1c1c1-0000-4000-8000-000000000001","is_primary":true,
              "edition":null,"episode_span":null,"disc_structure":"blu_ray",
              "parts":[
@@ -3427,7 +3565,15 @@ mod tests {
         ],
         "page_info":{"has_next_page":false,"has_previous_page":false,
                      "start_cursor":null,"end_cursor":null}}"#;
-        let client = client_answering_sources(SOURCES).await;
+
+    /// A multi-part source (issue #233) carries every part in the server's
+    /// order with its own absolute stream URL and its own sidecars, a disc rip
+    /// (issue #234) its structure, and a sidecar subtitle (issue #189) the
+    /// URLs the player fetches it from -- resolved, so the player needs no
+    /// base URL of its own.
+    #[tokio::test]
+    async fn a_multi_part_disc_source_carries_its_parts_structure_and_sidecars() {
+        let client = client_answering_sources(MULTI_PART_SOURCES).await;
 
         let views = client
             .media_sources(MEDIA_ID.to_owned())
@@ -3505,6 +3651,107 @@ mod tests {
                 "https://beam.test/v1/files/c2c2c2c2-0000-4000-8000-000000000002/subtitles/5d5d5d5d-0000-4000-8000-000000000002"
             )
         );
+    }
+
+    /// Resuming a multi-part movie in its second part queues every part and
+    /// starts in the second, each part with only its own subtitle files.
+    #[tokio::test]
+    async fn a_plan_queues_every_part_and_starts_in_the_one_named() {
+        let client = client_answering_sources(MULTI_PART_SOURCES).await;
+
+        let plan = client
+            .playback_plan(
+                Some(MEDIA_ID.to_owned()),
+                "c2c2c2c2-0000-4000-8000-000000000002".to_owned(),
+            )
+            .await
+            .expect("signed in, with a source to plan from");
+
+        let files: Vec<&str> = plan.parts.iter().map(|p| p.file_id.as_str()).collect();
+        assert_eq!(
+            files,
+            vec![
+                "c1c1c1c1-0000-4000-8000-000000000001",
+                "c2c2c2c2-0000-4000-8000-000000000002"
+            ]
+        );
+        assert_eq!(plan.start_part_index, 1);
+        assert_eq!(
+            plan.parts[1].url,
+            "https://beam.test/v1/files/c2c2c2c2-0000-4000-8000-000000000002/stream"
+        );
+        assert_eq!(plan.parts[0].duration_secs, Some(3000.0));
+        assert!(plan.parts[0].sidecar_subtitles.is_empty());
+        assert_eq!(
+            plan.parts[1].sidecar_subtitles[0].language.as_deref(),
+            Some("spa")
+        );
+        assert_eq!(
+            plan.headers.get("Cookie").map(String::as_str),
+            Some("beam_session=opaque-value")
+        );
+        assert_eq!(plan.pinned_host, "beam.test");
+    }
+
+    /// A plan never lists a file's own streams as files to fetch: only a
+    /// sidecar with a URL is something the player loads beside the media.
+    #[test]
+    fn only_fetchable_sidecars_reach_the_plan() {
+        use crate::capability::builders::MediaSourceBuilder;
+        use crate::capability::select::{SubtitleOrigin, SubtitleTrackView};
+        let track = |origin, url: Option<&str>| SubtitleTrackView {
+            origin,
+            index: None,
+            sidecar_id: None,
+            codec: "subrip".to_owned(),
+            language: None,
+            title: None,
+            is_default: false,
+            is_forced: false,
+            is_hearing_impaired: false,
+            is_text: true,
+            url: url.map(str::to_owned),
+            webvtt_url: None,
+        };
+        let mut source = MediaSourceBuilder::new("whole").build();
+        source.subtitle_tracks = vec![
+            track(SubtitleOrigin::Embedded, None),
+            track(SubtitleOrigin::Sidecar, Some("https://beam.test/s.srt")),
+            track(SubtitleOrigin::Sidecar, None),
+        ];
+
+        let (parts, start) = plan_parts(&[source], "whole", "unused".to_owned());
+
+        assert_eq!(start, 0);
+        assert_eq!(parts.len(), 1, "a whole file is a plan of one part");
+        assert_eq!(parts[0].url, "/v1/files/whole/stream");
+        let urls: Vec<Option<&str>> = parts[0]
+            .sidecar_subtitles
+            .iter()
+            .map(|t| t.url.as_deref())
+            .collect();
+        assert_eq!(urls, vec![Some("https://beam.test/s.srt")]);
+    }
+
+    /// A downloaded file played with no connection cannot list its source,
+    /// and still plays: alone, from the URL the player would have used.
+    #[tokio::test]
+    async fn a_plan_whose_source_cannot_be_listed_is_the_file_alone() {
+        let (client, _) = client_answering(
+            500,
+            r#"{"type":"https://beam.justinchung.net/reference/errors/#internal","status":500}"#,
+        )
+        .await;
+
+        let plan = client
+            .playback_plan(Some(MEDIA_ID.to_owned()), "f-1".to_owned())
+            .await
+            .expect("a failed lookup is not a failed plan");
+
+        assert_eq!(plan.parts.len(), 1);
+        assert_eq!(plan.parts[0].file_id, "f-1");
+        assert_eq!(plan.parts[0].url, "https://beam.test/v1/files/f-1/stream");
+        assert_eq!(plan.start_part_index, 0);
     }
 
     /// Two H.264 versions of one title: a 1080p file at 8 Mbps and a 720p
