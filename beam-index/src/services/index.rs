@@ -21,6 +21,7 @@ use crate::services::admin_log::AdminLogService;
 use crate::services::filesystem_probe::{FilesystemKind, FilesystemProbe, StatfsFilesystemProbe};
 use crate::services::hash::HashService;
 use crate::services::media_info::MediaInfoService;
+use crate::services::mime::container_mime_type;
 use crate::services::notification::{AdminEvent, EventCategory, NotificationService};
 use crate::services::scan::{
     CANCELLED, CatalogExclusive, ProgressThrottle, SCAN_STOP_TIMEOUT, ScanCoordinator, ScanEvent,
@@ -2113,7 +2114,7 @@ impl LocalIndexService {
                 size_bytes: size,
                 mtime,
                 identity,
-                mime_type: Some(format!("video/{}", metadata.format_name)),
+                mime_type: Some(container_mime_type(&metadata.format_name, path).to_owned()),
                 duration: Some(duration),
                 container_format: Some(metadata.format_name.clone()),
                 content,
@@ -2613,7 +2614,7 @@ impl LocalIndexService {
                         mtime,
                         identity,
                         probe: ProbeUpdate::Set {
-                            mime_type: format!("video/{}", metadata.format_name),
+                            mime_type: container_mime_type(&metadata.format_name, path).to_owned(),
                             duration,
                             container_format: metadata.format_name.clone(),
                             container_tags: tags.clone(),

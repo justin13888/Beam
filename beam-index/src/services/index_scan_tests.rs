@@ -73,8 +73,9 @@ impl HashService for ScriptedHasher {
     }
 }
 
-/// A prober that either reports an hour-long matroska file or fails, as the
-/// test says, counting its calls.
+/// A prober that either reports an hour-long matroska file -- named by the
+/// demuxer list FFmpeg reports for one -- or fails, as the test says,
+/// counting its calls.
 #[derive(Debug, Default)]
 struct ScriptedProber {
     calls: AtomicUsize,
@@ -101,8 +102,8 @@ impl MediaInfoService for ScriptedProber {
             best_subtitle_stream: None,
             duration: Duration::from_secs(60 * 60).as_micros() as i64,
             streams: vec![],
-            format_name: "matroska".to_string(),
-            format_long_name: "Matroska".to_string(),
+            format_name: "matroska,webm".to_string(),
+            format_long_name: "Matroska / WebM".to_string(),
             file_size: 1024,
             bit_rate: 1000,
             probe_score: 100,
@@ -858,6 +859,42 @@ async fn a_file_whose_probe_failed_is_classified_once_a_later_probe_succeeds() {
     assert_eq!(probed.hash, unprobed.hash);
     assert_eq!(h.hashes(), 1, "an unchanged file is not rehashed");
     assert_eq!(progress.changed, 1);
+}
+
+/// A probed file is stored with the registered media type of its container
+/// (issue #311), not `video/` and FFmpeg's demuxer list: on its first scan,
+/// and again when its content changes and it is probed afresh. FFmpeg's one
+/// `matroska,webm` demuxer reads both, so the file name tells them apart.
+#[tokio::test]
+async fn a_probed_file_is_stored_with_its_containers_registered_mime_type() {
+    let h = Harness::settled().await;
+    let matroska = h.write("Heat (1995).mkv");
+    let webm = h.write("Ronin (1998).webm");
+
+    h.scan().await;
+
+    let first = (h.row(&matroska).await.unwrap(), h.row(&webm).await.unwrap());
+    assert_eq!(first.0.mime_type.as_deref(), Some("video/x-matroska"));
+    assert_eq!(first.1.mime_type.as_deref(), Some("video/webm"));
+    assert_eq!(
+        first.1.container_format.as_deref(),
+        Some("matroska,webm"),
+        "the container keeps FFmpeg's own name"
+    );
+
+    std::fs::write(&webm, b"a rewrite that still probes").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&webm)
+        .unwrap()
+        .set_modified(written_at().into())
+        .unwrap();
+    let progress = h.scan().await;
+
+    assert_eq!(progress.changed, 1);
+    let reprobed = h.row(&webm).await.unwrap();
+    assert_ne!(reprobed.hash, first.1.hash, "the change was reconciled");
+    assert_eq!(reprobed.mime_type.as_deref(), Some("video/webm"));
 }
 
 /// A file that still does not probe is tried on every visit, and its row is
