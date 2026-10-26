@@ -19,7 +19,7 @@ function serveContinueWatching(
 ) {
 	server.use(
 		http.get(`${BASE_URL}/v1/continue-watching`, () =>
-			HttpResponse.json(items),
+			HttpResponse.json(factory.connection(items)),
 		),
 		http.get(`${BASE_URL}/v1/media/:id`, ({ params }) => {
 			const found = media[String(params.id)];

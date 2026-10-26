@@ -13,12 +13,12 @@ import {
 	Play,
 	RotateCcw,
 } from "lucide-react";
-import { useState } from "react";
 import { toast } from "sonner";
 import type { components } from "@/api.gen";
 import { useAuth } from "@/hooks/auth";
 import { apiClient } from "@/lib/apiClient";
 import { artworkSrc } from "@/lib/artwork";
+import { useCursorPages } from "@/lib/cursorPages";
 import { apiError } from "@/lib/problem";
 
 type HistoryItem = components["schemas"]["HistoryItem"];
@@ -84,13 +84,13 @@ function episodeLabel(show: ShowMetadata, episodeId: string): string {
 export function HistoryPage() {
 	const { isAuthenticated } = useAuth();
 	const navigate = useNavigate();
-	const [page, setPage] = useState(0);
+	const pages = useCursorPages();
 
 	const { data, isLoading, error } = useQuery({
-		queryKey: ["history", page],
+		queryKey: ["history", pages.after ?? null],
 		queryFn: async () => {
 			const { data, error } = await apiClient.GET("/v1/history", {
-				params: { query: { limit: PAGE_SIZE, offset: page * PAGE_SIZE } },
+				params: { query: { first: PAGE_SIZE, after: pages.after } },
 				credentials: "include",
 			});
 			if (error || data === undefined) {
@@ -138,8 +138,11 @@ export function HistoryPage() {
 	};
 
 	const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
-	const hasPrev = page > 0;
-	const hasNext = (page + 1) * PAGE_SIZE < total;
+	const hasPrev = pages.page > 0;
+	const endCursor = data?.page_info.has_next_page
+		? data.page_info.end_cursor
+		: null;
+	const hasNext = endCursor != null;
 
 	// Rows whose media metadata has resolved; stale/loading ones are omitted
 	// rather than rendered blank (same policy as ContinueWatchingRow).
@@ -214,9 +217,9 @@ export function HistoryPage() {
 											)}
 										</div>
 										<p className="mt-0.5 text-xs text-gray-500">
-											Watched {formatRelative(item.updated_at)}
+											Watched {formatRelative(item.last_played_at)}
 										</p>
-										{item.completed ? (
+										{item.played ? (
 											<span className="mt-1.5 inline-flex items-center gap-1 text-xs font-medium text-emerald-400">
 												<CheckCircle2 size={12} />
 												Completed
@@ -255,11 +258,11 @@ export function HistoryPage() {
 						})}
 					</ul>
 
-					{totalPages > 1 && (
+					{(hasPrev || hasNext) && (
 						<div className="mt-6 flex items-center justify-between">
 							<button
 								type="button"
-								onClick={() => setPage((p) => Math.max(0, p - 1))}
+								onClick={pages.prev}
 								disabled={!hasPrev}
 								className="inline-flex items-center gap-1 rounded-md border border-gray-700 bg-gray-800 px-3 py-1.5 text-sm font-medium text-gray-300 transition-colors hover:bg-gray-700 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
 							>
@@ -267,11 +270,11 @@ export function HistoryPage() {
 								Prev
 							</button>
 							<span className="text-xs text-gray-500">
-								Page {page + 1} of {totalPages}
+								Page {pages.page + 1} of {totalPages}
 							</span>
 							<button
 								type="button"
-								onClick={() => setPage((p) => p + 1)}
+								onClick={() => endCursor != null && pages.next(endCursor)}
 								disabled={!hasNext}
 								className="inline-flex items-center gap-1 rounded-md border border-gray-700 bg-gray-800 px-3 py-1.5 text-sm font-medium text-gray-300 transition-colors hover:bg-gray-700 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
 							>
