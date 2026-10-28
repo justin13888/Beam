@@ -221,8 +221,11 @@ run = "bun install --frozen-lockfile && rm -f node_modules/.beam-deps-js*.stamp 
 # Fetch the FFmpeg source the vendored build compiles, once per host, into
 # BEAM_FFMPEG_SOURCE_MIRROR (see [env] above for why and how build.rs is
 # pointed at it). A no-op without network once the branch is there, and a
-# no-op outright when BEAM_CARGO_FEATURES does not vendor FFmpeg, so CI's
-# system-FFmpeg jobs never fetch it.
+# no-op outright when the build it precedes does not vendor FFmpeg, so CI's
+# system-FFmpeg jobs never fetch it. That build is BEAM_CARGO_FEATURES' by
+# default; the rust:mutants* tasks pass `--mutants` because cargo-mutants
+# builds with BEAM_MUTANTS_FEATURES instead, and `mutation-testing` vendors
+# FFmpeg even where BEAM_CARGO_FEATURES is "" (mutants.yml).
 #
 # The branch is not a second pin: it is derived from the ffmpeg-sys-next
 # version Cargo.lock resolves, because that minor is what build.rs clones
@@ -240,9 +243,46 @@ run = "bun install --frozen-lockfile && rm -f node_modules/.beam-deps-js*.stamp 
 # branch is checked again -- usually finding the other one's fetch done.
 [tasks."deps:ffmpeg-source"]
 description = "Fetch the vendored FFmpeg build's source once per host, with retries"
+usage = '''
+flag "--mutants" help="Decide from BEAM_MUTANTS_FEATURES, which the rust:mutants* tasks build with, instead of BEAM_CARGO_FEATURES"
+'''
 run = '''
 set -eu
-case "${BEAM_CARGO_FEATURES:-}" in
+features="${BEAM_CARGO_FEATURES:-}"
+if [ "${usage_mutants:-false}" = "true" ]; then
+    # cargo-mutants builds with BEAM_MUTANTS_FEATURES, whose unqualified names
+    # (`mutation-testing`) reach vendored-ffmpeg only through the [features]
+    # tables of the two crates that vendor it. Expand them through those tables
+    # rather than restating here which names vendor FFmpeg, so mutants.yml --
+    # BEAM_CARGO_FEATURES="" but every scratch build vendored -- still fetches.
+    features=$(awk -v want="${BEAM_MUTANTS_FEATURES:-}" '
+        FNR == 1 { files[++nfiles] = FILENAME; section = "" }
+        /^\[/ { section = $0; next }
+        section == "[features]" && /^[A-Za-z0-9_-]+ = \[/ {
+            v = $0; sub(/^[^[]*\[/, "", v); sub(/\].*$/, "", v); gsub(/[" ]/, "", v)
+            deps[FILENAME, $1] = v
+        }
+        END {
+            gsub(/[ ]+/, ",", want)
+            for (fi = 1; fi <= nfiles; fi++) {
+                file = files[fi]
+                delete seen
+                n = split(want, queue, ",")
+                for (i = 1; i <= n; i++) {
+                    f = queue[i]
+                    if (f == "" || (f in seen)) continue
+                    seen[f] = 1
+                    printf "%s,", f
+                    if ((file, f) in deps) {
+                        m = split(deps[file, f], d, ",")
+                        for (j = 1; j <= m; j++) queue[++n] = d[j]
+                    }
+                }
+            }
+        }
+    ' beam-index/Cargo.toml beam-server/Cargo.toml)
+fi
+case "$features" in
     *vendored-ffmpeg*) ;;
     *) exit 0 ;;
 esac
@@ -475,12 +515,12 @@ run = 'cargo mutants --list ${BEAM_MUTANTS_FEATURES:+--features "$BEAM_MUTANTS_F
 
 [tasks."rust:mutants"]
 description = "Mutation-test the whole workspace (hours -- prefer :diff or :crate)"
-depends = ["deps:ffmpeg-source"]
+depends = ["deps:ffmpeg-source --mutants"]
 run = 'cargo mutants --workspace ${BEAM_MUTANTS_FEATURES:+--features "$BEAM_MUTANTS_FEATURES"} --jobs "${BEAM_MUTANTS_JOBS:-2}"'
 
 [tasks."rust:mutants:diff"]
 description = "Mutation-test only the Rust code this branch changed"
-depends = ["deps:ffmpeg-source"]
+depends = ["deps:ffmpeg-source --mutants"]
 # The diff must be merge-base..HEAD (three dots). cargo-mutants matches it
 # against the *new* side, so a two-dot diff describes a tree that is not the one
 # on disk and it exits 5. Only code under test is matched, never test code, so a
@@ -506,7 +546,7 @@ cargo mutants --in-diff "$diff_file" \
 
 [tasks."rust:mutants:crate"]
 description = "Mutation-test one crate, e.g. mise run rust:mutants:crate beam-domain"
-depends = ["deps:ffmpeg-source"]
+depends = ["deps:ffmpeg-source --mutants"]
 # This is the task the hardening loop actually runs. --iterate skips everything
 # caught or unviable last time, which makes second and later passes cheap;
 # finish with one run without it, because --iterate assumes your edits never
@@ -540,7 +580,7 @@ cargo mutants --file "$usage_crate/**/*.rs" $iterate \
 
 [tasks."rust:mutants:shard"]
 description = "Run one shard of the full mutation suite, e.g. rust:mutants:shard 3/16"
-depends = ["deps:ffmpeg-source"]
+depends = ["deps:ffmpeg-source --mutants"]
 # k is 0-based. The sharding method is left at cargo-mutants' default of `slice`
 # rather than round-robin: slice hands each shard a contiguous run of mutants,
 # which in this workspace means one crate at a time and therefore maximal
