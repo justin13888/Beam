@@ -171,6 +171,33 @@ spec:
                   key: tmdb-api-token
                   {{- end }}
             {{- end }}
+            {{- if .Values.tvdb.existingSecret }}
+            - name: BEAM_TVDB_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.tvdb.existingSecret }}
+                  key: {{ .Values.tvdb.existingSecretKey }}
+            # A licensed project key has no PIN, so the Secret may omit it.
+            - name: BEAM_TVDB_PIN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.tvdb.existingSecret }}
+                  key: {{ .Values.tvdb.existingSecretPinKey }}
+                  optional: true
+            {{- else if .Values.tvdb.apiKey }}
+            - name: BEAM_TVDB_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "beam.secretName" . }}
+                  key: tvdb-api-key
+            {{- if .Values.tvdb.pin }}
+            - name: BEAM_TVDB_PIN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "beam.secretName" . }}
+                  key: tvdb-pin
+            {{- end }}
+            {{- end }}
             {{- if or .Values.telemetry.existingSecret .Values.telemetry.url }}
             - name: BEAM_TELEMETRY_URL
               valueFrom:

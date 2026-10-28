@@ -25,6 +25,8 @@ oidc:
   adminValue: beam-admin
 tmdb:
   existingSecret: beam-tmdb
+tvdb:
+  existingSecret: beam-tvdb
 telemetry:
   existingSecret: beam-telemetry
 libraries:

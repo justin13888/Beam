@@ -88,12 +88,17 @@ check_var "BEAM_WATCH_DEBOUNCE_MS"
 check_var "BEAM_WATCH_POLL_INTERVAL_SECS"
 echo ""
 
-echo "Checking Metadata Enrichment Configuration (cameo -> TMDB/AniList):"
+echo "Checking Metadata Enrichment Configuration (cameo -> TMDB/AniList, then TheTVDB):"
 check_var "BEAM_ENRICH_INTERVAL_SECS"
 check_secret "BEAM_TMDB_API_TOKEN"
 check_var "BEAM_ANILIST_ENABLED"
-if [ -z "$BEAM_TMDB_API_TOKEN" ] && [ "${BEAM_ANILIST_ENABLED:-true}" = "false" ]; then
-    echo "⚠️  No TMDB token and AniList disabled -- metadata enrichment will be entirely disabled"
+check_secret "BEAM_TVDB_API_KEY"
+check_secret "BEAM_TVDB_PIN"
+if [ -n "${BEAM_TVDB_PIN:-}" ] && [ -z "${BEAM_TVDB_API_KEY:-}" ]; then
+    echo "⚠️  BEAM_TVDB_PIN is set without BEAM_TVDB_API_KEY -- the PIN has no effect"
+fi
+if [ -z "$BEAM_TMDB_API_TOKEN" ] && [ "${BEAM_ANILIST_ENABLED:-true}" = "false" ] && [ -z "${BEAM_TVDB_API_KEY:-}" ]; then
+    echo "⚠️  No TMDB token, AniList disabled and no TheTVDB key -- metadata enrichment will be entirely disabled"
 fi
 echo ""
 
