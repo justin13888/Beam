@@ -42,6 +42,12 @@ images and CI continue to dynamically link a system-provided FFmpeg.
 - The first build with `vendored-ffmpeg` enabled compiles FFmpeg from source, which is slow (minutes,
   not seconds) — mitigated by normal Cargo build-artifact caching across subsequent builds, but a real
   cost on a clean checkout or CI cache miss.
+- `ffmpeg-sys-next`'s build script fetches that source with a `git clone` from GitHub into each
+  fresh build directory, so every new worktree or cleaned `target/` once needed the network, and one
+  dropped connection failed the build. Mitigated (#281): `mise run deps:ffmpeg-source`, which every
+  Rust task depends on, fetches the branch once per host into a cache with retries, and a git
+  `url.insteadOf` rewrite in `mise.toml`'s `[env]` points the build script's clone at it. The
+  compile itself is still repeated per build directory.
 - Static-linking FFmpeg into a *distributed* artifact (a container image, a release binary) has
   different licensing implications than a developer's local test binary — specifically, this ADR does
   **not** extend to container images or CI, which deliberately keep dynamically linking a
