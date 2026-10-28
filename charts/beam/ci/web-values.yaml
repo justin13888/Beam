@@ -10,6 +10,9 @@ oidc:
   clientSecret: not-a-real-secret
 tmdb:
   apiToken: not-a-real-token
+tvdb:
+  apiKey: not-a-real-key
+  pin: not-a-real-pin
 telemetry:
   url: https://collector.example.test/v1/metrics
 persistence:

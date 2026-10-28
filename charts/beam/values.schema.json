@@ -116,6 +116,8 @@
                 "BEAM_OIDC_ADMIN_CLAIM",
                 "BEAM_OIDC_ADMIN_VALUE",
                 "BEAM_TMDB_API_TOKEN",
+                "BEAM_TVDB_API_KEY",
+                "BEAM_TVDB_PIN",
                 "BEAM_TELEMETRY_URL",
                 "RUST_LOG"
               ]
@@ -190,6 +192,47 @@
         },
         "required": ["apiToken", "existingSecret"]
       }
+    },
+    "tvdb": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "apiKey": { "type": "string" },
+        "pin": { "type": "string" },
+        "existingSecret": { "type": "string" },
+        "existingSecretKey": { "$ref": "#/definitions/nonEmptyString" },
+        "existingSecretPinKey": { "$ref": "#/definitions/nonEmptyString" }
+      },
+      "allOf": [
+        {
+          "not": {
+            "properties": {
+              "apiKey": { "minLength": 1 },
+              "existingSecret": { "minLength": 1 }
+            },
+            "required": ["apiKey", "existingSecret"]
+          }
+        },
+        {
+          "not": {
+            "properties": {
+              "pin": { "minLength": 1 },
+              "existingSecret": { "minLength": 1 }
+            },
+            "required": ["pin", "existingSecret"]
+          }
+        },
+        {
+          "if": {
+            "properties": { "pin": { "minLength": 1 } },
+            "required": ["pin"]
+          },
+          "then": {
+            "properties": { "apiKey": { "minLength": 1 } },
+            "required": ["apiKey"]
+          }
+        }
+      ]
     },
     "telemetry": {
       "type": "object",

@@ -99,6 +99,20 @@ tmdb:
   existingSecret: ""
   existingSecretKey: api-token
 
+# TheTVDB enrichment (BEAM_TVDB_API_KEY / BEAM_TVDB_PIN): series with their
+# specials and absolute episode numbering, and movies, asked after TMDB and
+# AniList. Without a key TheTVDB is not asked. The PIN is the subscriber PIN
+# TheTVDB issues with a user-supported key; a licensed project key has none.
+# Both are kept in a Secret: inline here, or an existing Secret holding the key
+# under existingSecretKey and, optionally, the PIN under existingSecretPinKey
+# (a Secret without that entry leaves the PIN unset).
+tvdb:
+  apiKey: ""
+  pin: ""
+  existingSecret: ""
+  existingSecretKey: api-key
+  existingSecretPinKey: pin
+
 # BEAM_TELEMETRY_URL: the opt-in anonymous library report (ADR-0019). Empty
 # sends nothing; there is no default collector. The URL may carry the
 # collector's credentials (a query token or user:password@), so it is kept in
