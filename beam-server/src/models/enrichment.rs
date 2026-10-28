@@ -316,6 +316,11 @@ pub struct RefreshQueued {
 }
 
 /// A metadata provider enrichment can use.
+///
+/// Closed at the providers `/v1` was frozen with (ADR-0021): a value added
+/// to an enumeration a response carries breaks every client that decodes
+/// it strictly. A provider added since -- TheTVDB (issue #267) -- is
+/// reported in the admin status's `metadata_providers` alone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Schema)]
 #[serde(rename_all = "snake_case")]
 pub enum MetadataProvider {
@@ -324,7 +329,7 @@ pub enum MetadataProvider {
 }
 
 impl MetadataProvider {
-    /// Every provider, in the order enrichment asks them.
+    /// Every provider of the frozen set, in the order enrichment asks them.
     pub const ALL: [MetadataProvider; 2] = [MetadataProvider::Tmdb, MetadataProvider::Anilist];
 
     /// The name `available_providers` reports it by.
@@ -356,6 +361,41 @@ pub struct EnrichmentProviderStatus {
     pub state: EnrichmentProviderState,
     /// What to do about it, when it is not configured or unavailable.
     pub detail: Option<String>,
+}
+
+/// One metadata provider's configuration, for the admin status (FR-307):
+/// every provider this server has, where [`EnrichmentProviderStatus`] has
+/// the frozen set alone.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Schema)]
+pub struct MetadataProviderStatus {
+    /// The provider's name, as a match names it -- `tmdb` in `tmdb:603`:
+    /// `tmdb`, `anilist` or `tvdb` today. A string, not an enumeration, so
+    /// a provider a later release adds is no breaking change; show one you
+    /// do not recognise by its name.
+    pub provider: String,
+    pub state: EnrichmentProviderState,
+    /// What to do about it, when it is not configured or unavailable.
+    pub detail: Option<String>,
+}
+
+impl MetadataProviderStatus {
+    /// The same status in the frozen list, for a provider that list has.
+    #[must_use]
+    pub fn frozen(&self) -> Option<EnrichmentProviderStatus> {
+        let Self {
+            provider,
+            state,
+            detail,
+        } = self;
+        let provider = MetadataProvider::ALL
+            .into_iter()
+            .find(|known| known.as_str() == provider)?;
+        Some(EnrichmentProviderStatus {
+            provider,
+            state: *state,
+            detail: detail.clone(),
+        })
+    }
 }
 
 /// The title an `enrichment` admin event reports on (FR-309).

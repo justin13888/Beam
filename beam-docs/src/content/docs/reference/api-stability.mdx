@@ -8,11 +8,10 @@ import { Aside } from "@astrojs/starlight/components";
 This page is the contract between Beam's server and the clients built on its [API](/reference/api/):
 the web app, the native apps, and anything you write yourself.
 
-<Aside type="caution" title="Not in force yet">
-`/v1` is not frozen. Its shapes are still being made consistent (issue
-[#190](https://github.com/justin13888/beam/issues/190)), and until that work closes, any of it may
-change without notice or a deprecation period. The rules below take effect when the freeze is
-recorded; until then, read them as the direction of travel.
+<Aside type="note" title="In force">
+`/v1` is frozen
+([ADR-0021](https://github.com/justin13888/beam/blob/master/docs/architecture/decisions/ADR-0021-v1-frozen.md),
+issue [#190](https://github.com/justin13888/beam/issues/190)). Every rule below applies to it.
 </Aside>
 
 ## What is covered
@@ -60,7 +59,10 @@ Anything a correct `/v1` client could notice as breakage:
 - **Adding a value to an enumeration that appears in a response.** Beam's own native client core
   decodes responses strictly and rejects a value it was not generated with, so a new value would
   break every app released before it. (A new value in an enumeration that appears only in requests
-  is compatible.)
+  is compatible.) A set that grows within `/v1` is carried as a string instead, and a new list
+  field beside the frozen one: the admin status lists every metadata provider in
+  `metadata_providers`, whose `provider` is a string, while `enrichment_providers` keeps the
+  `tmdb` and `anilist` values it was frozen with.
 - Changing a status code, or the problem `type` for a condition that already had a specific one.
 - **Adding a problem `type` to an operation**, even for a condition that was answered with
   `about:blank` or a less specific `type`, with the status code unchanged. The native client core

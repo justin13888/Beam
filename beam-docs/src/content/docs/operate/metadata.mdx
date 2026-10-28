@@ -15,11 +15,32 @@ immediately and looks bare for a while.
 |---|---|---|
 | AniList | No | Anime |
 | TMDB | Yes — `BEAM_TMDB_API_TOKEN` | Film and TV generally |
+| TheTVDB | Yes — `BEAM_TVDB_API_KEY` (and `BEAM_TVDB_PIN` for a user-supported key) | TV, including specials and absolute episode numbering; also movies |
 
 AniList is enabled by default and needs no credentials, so a stock install already enriches anime.
 TMDB requires a token; **without one, titles that would have matched TMDB are simply left
 un-enriched.** Scans do not fail over it, and nothing in the UI breaks — you just get no artwork
-for those titles.
+for those titles. TheTVDB is optional in the same way: unset, it is never asked.
+
+With several configured, a search asks each in turn — TMDB, then AniList, then TheTVDB — and the
+best-scoring match wins whichever provider it came from; on an exact tie the earlier provider wins.
+TheTVDB metadata is read in English, falling back to the record's own language;
+`BEAM_METADATA_LANGUAGE` applies to TMDB only.
+
+## Absolute episode numbers and specials
+
+A file numbered absolutely, such as `[Group] Show - 030.mkv`, is indexed as episode 30 of season 1
+(or of its season folder's season; see [Managing libraries](/operate/libraries/)). When the matched
+provider's season has no episode 30, enrichment reads 30 as a place in the provider's **absolute
+order** and gives the file the metadata of the episode there — say, season 2 episode 5:
+
+- TheTVDB numbers its episodes absolutely itself, and its numbers are used.
+- For another provider, the order is its regular seasons one after another.
+- Specials (season 0) are outside the order either way, and keep their own numbers.
+
+An episode in a season folder is mapped only when the order puts it in that same season; one the
+order cannot place is left as indexed. The file keeps its place in Beam's season list, under the
+number it was indexed with; only its title, description, air date, runtime and still change.
 
 <Aside type="caution" title="A default install talks to AniList">
 Because `BEAM_ANILIST_ENABLED` defaults to true, a Beam server contacts `graphql.anilist.co`
@@ -48,7 +69,9 @@ parses to, however the provider spells it. See
 The admin **Status** tab shows each title's enrichment state, so you can tell "not tried yet"
 apart from "tried and found nothing", and whether each provider is configured: TMDB shows as
 `not_configured` until `BEAM_TMDB_API_TOKEN` is set, and a provider that is set but whose client
-could not start shows as `unavailable` (the server log says why).
+could not start shows as `unavailable` (the server log says why). `GET /v1/admin/status` lists
+every provider in `metadata_providers`; its older `enrichment_providers` list carries TMDB and
+AniList only.
 
 `GET /v1/admin/enrichment?status=unmatched` (or `failed`) lists the titles to fix, newest first,
 each with the reason it was left that way.
@@ -61,11 +84,11 @@ in this order:
 
 1. A match an administrator chose for the title comes first (see [Fixing a wrong match](#fixing-a-wrong-match)).
    It is itself a pin, the administrator's, fetched by its id.
-2. A **TMDB or AniList** pin, for a provider you have configured, is fetched directly by its id —
-   no search, no confidence threshold. This is the fix for a title search keeps getting wrong:
-   write its id into an NFO.
-3. Anything else is searched for as usual. An **IMDb or TheTVDB** pin — or a pin for a provider
-   you have not configured — is checked against the match: a match that carries a different id of
+2. A **TMDB, AniList or TheTVDB** pin, for a provider you have configured, is fetched directly by
+   its id — no search, no confidence threshold. This is the fix for a title search keeps getting
+   wrong: write its id into an NFO.
+3. Anything else is searched for as usual. An **IMDb** pin — or a pin for a provider you have not
+   configured — is checked against the match: a match that carries a different id of
    the pinned provider is rejected and the title is left unmatched, with the reason in its
    enrichment state. A match carrying no id of that provider cannot be checked, and is kept.
 

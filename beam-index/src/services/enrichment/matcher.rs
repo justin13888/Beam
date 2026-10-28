@@ -1,7 +1,10 @@
 //! Pure, offline scoring of enrichment-provider search results against a
-//! parsed local title. No I/O -- fully unit-testable without a provider.
+//! parsed local title, and of where an absolutely numbered episode sits in
+//! a provider's seasons. No I/O -- fully unit-testable without a provider.
 
-use beam_domain::providers::enrichment::{MovieSearchHit, ShowSearchHit};
+use beam_domain::providers::enrichment::{
+    EpisodeEnrichment, MovieSearchHit, SeasonEnrichment, ShowSearchHit,
+};
 
 /// A hit is accepted only when it clears both bars: a low total score can
 /// still slip through on a strong year match alone otherwise. The total-score
@@ -281,6 +284,51 @@ pub fn top_show_candidates(
     scored
 }
 
+/// The season a provider files its specials under. Specials sit outside
+/// the absolute order: a running number counts the regular episodes only.
+pub const SPECIALS_SEASON: u32 = 0;
+
+/// The episode a provider places at `absolute` in its absolute order, and
+/// the season it is in (issue #267): what an absolutely numbered file
+/// (`Show - 030`) is, in that provider's seasons.
+///
+/// `seasons` are the provider's seasons, in any order. A provider that
+/// numbers its episodes absolutely itself (TheTVDB) is read by those
+/// numbers, and only by them: an episode it gives no number is not in its
+/// order. Otherwise the order is the regular seasons one after another, by
+/// season then episode number. Either way the specials season is left out,
+/// and nothing is at `0`.
+pub fn absolute_episode(
+    seasons: &[SeasonEnrichment],
+    absolute: u32,
+) -> Option<(u32, &EpisodeEnrichment)> {
+    if absolute == 0 {
+        return None;
+    }
+    let mut regular: Vec<&SeasonEnrichment> = seasons
+        .iter()
+        .filter(|season| season.season_number != SPECIALS_SEASON)
+        .collect();
+    regular.sort_by_key(|season| season.season_number);
+    let mut order = regular.into_iter().flat_map(|season| {
+        let mut episodes: Vec<&EpisodeEnrichment> = season.episodes.iter().collect();
+        episodes.sort_by_key(|episode| episode.episode_number);
+        episodes
+            .into_iter()
+            .map(move |episode| (season.season_number, episode))
+    });
+    let numbered = seasons
+        .iter()
+        .filter(|season| season.season_number != SPECIALS_SEASON)
+        .flat_map(|season| &season.episodes)
+        .any(|episode| episode.absolute_number.is_some());
+    if numbered {
+        order.find(|(_, episode)| episode.absolute_number == Some(absolute))
+    } else {
+        order.nth((absolute - 1) as usize)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -446,5 +494,121 @@ mod tests {
         let top = top_show_candidates("Arcane", Some(2021), &hits, 5);
         assert_eq!(top.len(), 2);
         assert!(top[0].1.total_score >= top[1].1.total_score);
+    }
+
+    mod absolute_order {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn episode(number: u32, absolute: Option<u32>) -> EpisodeEnrichment {
+            EpisodeEnrichment {
+                episode_number: number,
+                absolute_number: absolute,
+                title: Some(format!("e{number}")),
+                ..Default::default()
+            }
+        }
+
+        /// A season of `count` episodes, unnumbered absolutely.
+        fn season(number: u32, count: u32) -> SeasonEnrichment {
+            SeasonEnrichment {
+                season_number: number,
+                episodes: (1..=count).map(|n| episode(n, None)).collect(),
+                ..Default::default()
+            }
+        }
+
+        fn placed(seasons: &[SeasonEnrichment], absolute: u32) -> Option<(u32, u32)> {
+            absolute_episode(seasons, absolute)
+                .map(|(season, episode)| (season, episode.episode_number))
+        }
+
+        #[test]
+        fn the_order_runs_through_the_regular_seasons_and_skips_the_specials() {
+            // Listed out of order, with specials first, as a provider may.
+            let seasons = [season(2, 3), season(0, 4), season(1, 12)];
+            for (absolute, expected) in [
+                (1, Some((1, 1))),
+                (12, Some((1, 12))),
+                (13, Some((2, 1))),
+                (15, Some((2, 3))),
+                (16, None),
+                (0, None),
+            ] {
+                assert_eq!(placed(&seasons, absolute), expected, "absolute {absolute}");
+            }
+        }
+
+        #[test]
+        fn a_season_with_a_gap_in_its_numbers_is_ordered_by_number() {
+            let seasons = [SeasonEnrichment {
+                season_number: 1,
+                episodes: vec![episode(5, None), episode(1, None), episode(2, None)],
+                ..Default::default()
+            }];
+            assert_eq!(placed(&seasons, 3), Some((1, 5)));
+        }
+
+        #[test]
+        fn a_provider_numbering_absolutely_is_read_by_its_own_numbers() {
+            // TheTVDB counts across seasons itself, and its count need not be
+            // the seasons' positions: here a double-length season-one finale
+            // takes two numbers.
+            let seasons = [
+                SeasonEnrichment {
+                    season_number: 1,
+                    episodes: vec![episode(1, Some(1)), episode(2, Some(2))],
+                    ..Default::default()
+                },
+                SeasonEnrichment {
+                    season_number: 2,
+                    episodes: vec![episode(1, Some(4)), episode(2, Some(5))],
+                    ..Default::default()
+                },
+                // A special carrying an absolute number is still outside the
+                // order.
+                SeasonEnrichment {
+                    season_number: SPECIALS_SEASON,
+                    episodes: vec![episode(1, Some(3))],
+                    ..Default::default()
+                },
+            ];
+            assert_eq!(placed(&seasons, 4), Some((2, 1)));
+            assert_eq!(placed(&seasons, 5), Some((2, 2)));
+            assert_eq!(placed(&seasons, 3), None, "no regular episode is 3");
+        }
+
+        #[test]
+        fn the_placed_episode_carries_the_providers_metadata() {
+            let seasons = [season(1, 2), season(2, 2)];
+            let (_, episode) = absolute_episode(&seasons, 3).expect("in the order");
+            assert_eq!(episode.title.as_deref(), Some("e1"));
+        }
+
+        proptest! {
+            /// The positional order is the seasons laid end to end: every
+            /// number from 1 to the regular episode count places exactly one
+            /// episode, in season-then-episode order, and none past it does.
+            #[test]
+            fn the_positional_order_is_a_bijection_onto_the_regular_episodes(
+                counts in proptest::collection::vec(0u32..30, 0..8),
+                specials in 0u32..10,
+            ) {
+                let mut seasons: Vec<SeasonEnrichment> = counts
+                    .iter()
+                    .enumerate()
+                    .map(|(index, count)| season(index as u32 + 1, *count))
+                    .collect();
+                seasons.push(season(SPECIALS_SEASON, specials));
+                let total: u32 = counts.iter().sum();
+
+                let order: Vec<(u32, u32)> =
+                    (1..=total).filter_map(|n| placed(&seasons, n)).collect();
+                prop_assert_eq!(order.len(), total as usize);
+                prop_assert!(order.windows(2).all(|pair| pair[0] < pair[1]));
+                prop_assert!(order.iter().all(|(season, _)| *season != SPECIALS_SEASON));
+                prop_assert_eq!(placed(&seasons, total + 1), None);
+            }
+        }
     }
 }

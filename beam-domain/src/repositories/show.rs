@@ -690,6 +690,7 @@ pub mod in_memory {
                 show.tmdb_id = enrichment.tmdb_id;
                 show.imdb_id = enrichment.imdb_id.clone();
                 show.anilist_id = enrichment.anilist_id;
+                show.tvdb_id = enrichment.tvdb_id;
                 if open(MetadataField::Rating) {
                     show.rating_tmdb = enrichment.rating;
                 }

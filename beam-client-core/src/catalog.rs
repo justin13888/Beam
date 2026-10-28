@@ -1163,6 +1163,7 @@ impl AdminStatus {
             // Which metadata providers are configured (issue #185) is an operator
             // diagnostic the native admin screens do not show yet.
             enrichment_providers: _,
+            metadata_providers: _,
             recent_scans,
             uptime_secs,
             version,

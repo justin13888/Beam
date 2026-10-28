@@ -17,7 +17,9 @@ use beam_domain::repositories::LanguagePreferenceRepository;
 use beam_domain::services::{Clock, RealClock};
 use beam_index::providers::artwork::{ArtworkFetchLimits, ReqwestArtworkFetcher};
 use beam_index::providers::cameo::{CameoEnrichmentProvider, CameoWiringConfig};
+use beam_index::providers::composite::CompositeEnrichmentProvider;
 use beam_index::providers::telemetry::ReqwestTelemetrySink;
+use beam_index::providers::tvdb::{TvdbEnrichmentProvider, TvdbWiringConfig};
 use beam_index::runtime::LibraryWatches;
 use beam_index::services::enrichment::control::{EnrichmentControl, EnrichmentControlDeps};
 use beam_index::services::enrichment::{EnrichmentPolicy, MetadataEnrichmentService};
@@ -26,7 +28,7 @@ use beam_index::services::watch_status::WatchStatus;
 use metrics_exporter_prometheus::PrometheusHandle;
 
 use crate::models::enrichment::{
-    EnrichmentProviderState, EnrichmentProviderStatus, MetadataProvider,
+    EnrichmentProviderState, MetadataProvider, MetadataProviderStatus,
 };
 use crate::{
     config::ServerConfig,
@@ -406,7 +408,7 @@ impl AppServices {
             .with_user_list_repo(user_list_repo.clone()),
         );
 
-        let enrichment_provider = build_enrichment_provider(config)?;
+        let enrichment_provider = build_enrichment_provider(config, clock.clone())?;
 
         let enrichment_service = Arc::new(
             MetadataEnrichmentService::new(
@@ -633,15 +635,52 @@ impl AppServices {
 /// an explicit knob must never be silently ignored on a headless server,
 /// matching the fail-fast precedent of `validate_values` and the
 /// cookie-Secure verdict.
+///
+/// TheTVDB (issue #267) is its own client beside cameo's, which has none
+/// (justin13888/cameo#60): with `BEAM_TVDB_API_KEY` set the two are asked
+/// together, cameo's providers first.
 pub(crate) fn build_enrichment_provider(
     config: &ServerConfig,
+    clock: Arc<dyn Clock>,
 ) -> eyre::Result<Arc<dyn EnrichmentProvider>> {
     let built = beam_index::providers::cameo::build_client(CameoWiringConfig {
         tmdb_api_token: config.tmdb_api_token.clone(),
         anilist_enabled: config.anilist_enabled,
         metadata_language: config.metadata_language.clone(),
     });
-    provider_from_build(built, config.metadata_language.as_deref())
+    let cameo = provider_from_build(built, config.metadata_language.as_deref())?;
+    let tvdb = match beam_index::providers::tvdb::build_client(
+        TvdbWiringConfig {
+            api_key: config.tvdb_api_key.clone(),
+            pin: config.tvdb_pin.clone(),
+        },
+        clock,
+    ) {
+        Ok(tvdb) => tvdb,
+        Err(e) => {
+            // Reported as unavailable in the admin status; the other
+            // providers enrich as they would without it.
+            tracing::warn!(error = %e, "failed to build the TheTVDB client; TheTVDB enrichment disabled");
+            None
+        }
+    };
+    Ok(combine_providers(cameo, tvdb))
+}
+
+/// The cameo-backed provider and TheTVDB's, as one: whichever is
+/// configured alone, or both in priority order.
+fn combine_providers(
+    cameo: Arc<dyn EnrichmentProvider>,
+    tvdb: Option<TvdbEnrichmentProvider>,
+) -> Arc<dyn EnrichmentProvider> {
+    match tvdb {
+        None => cameo,
+        Some(tvdb) if cameo.available_providers().is_empty() => Arc::new(tvdb),
+        Some(tvdb) => Arc::new(CompositeEnrichmentProvider::new(vec![
+            cameo,
+            Arc::new(tvdb),
+        ])),
+    }
 }
 
 /// The decision [`build_enrichment_provider`] makes about a build outcome,
@@ -679,49 +718,49 @@ pub(crate) fn provider_from_build(
 pub(crate) fn provider_statuses(
     config: &ServerConfig,
     available: &[String],
-) -> Vec<EnrichmentProviderStatus> {
-    MetadataProvider::ALL
-        .into_iter()
-        .map(|provider| {
-            let requested = match provider {
-                MetadataProvider::Tmdb => config
-                    .tmdb_api_token
-                    .as_deref()
-                    .is_some_and(|token| !token.is_empty()),
-                MetadataProvider::Anilist => config.anilist_enabled,
-            };
-            let in_use = available.iter().any(|name| name == provider.as_str());
-            let (state, detail) = match (in_use, requested) {
-                (true, _) => (EnrichmentProviderState::Configured, None),
-                (false, true) => (
-                    EnrichmentProviderState::Unavailable,
-                    Some(
-                        "configured, but its client could not be built; the server log says why"
-                            .to_owned(),
-                    ),
-                ),
-                (false, false) => (
-                    EnrichmentProviderState::NotConfigured,
-                    Some(
-                        match provider {
-                            MetadataProvider::Tmdb => {
-                                "set BEAM_TMDB_API_TOKEN to enrich titles from TMDB"
-                            }
-                            MetadataProvider::Anilist => {
-                                "set BEAM_ANILIST_ENABLED=true to enrich titles from AniList"
-                            }
-                        }
+) -> Vec<MetadataProviderStatus> {
+    let set = |value: &Option<String>| value.as_deref().is_some_and(|value| !value.is_empty());
+    [
+        (
+            MetadataProvider::Tmdb.as_str(),
+            set(&config.tmdb_api_token),
+            "set BEAM_TMDB_API_TOKEN to enrich titles from TMDB",
+        ),
+        (
+            MetadataProvider::Anilist.as_str(),
+            config.anilist_enabled,
+            "set BEAM_ANILIST_ENABLED=true to enrich titles from AniList",
+        ),
+        (
+            beam_index::providers::tvdb::PROVIDER,
+            set(&config.tvdb_api_key),
+            "set BEAM_TVDB_API_KEY to enrich titles from TheTVDB",
+        ),
+    ]
+    .into_iter()
+    .map(|(provider, requested, hint)| {
+        let in_use = available.iter().any(|name| name == provider);
+        let (state, detail) = match (in_use, requested) {
+            (true, _) => (EnrichmentProviderState::Configured, None),
+            (false, true) => (
+                EnrichmentProviderState::Unavailable,
+                Some(
+                    "configured, but its client could not be built; the server log says why"
                         .to_owned(),
-                    ),
                 ),
-            };
-            EnrichmentProviderStatus {
-                provider,
-                state,
-                detail,
-            }
-        })
-        .collect()
+            ),
+            (false, false) => (
+                EnrichmentProviderState::NotConfigured,
+                Some(hint.to_owned()),
+            ),
+        };
+        MetadataProviderStatus {
+            provider: provider.to_owned(),
+            state,
+            detail,
+        }
+    })
+    .collect()
 }
 
 #[cfg(test)]

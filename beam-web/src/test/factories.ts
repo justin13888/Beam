@@ -277,6 +277,7 @@ export function adminStatus(overrides: Partial<AdminStatus> = {}): AdminStatus {
 		counts: { users: 1, libraries: 1, files: 0 },
 		enrichment: { pending: 0, enriched: 0, unmatched: 0, failed: 0 },
 		enrichment_providers: [],
+		metadata_providers: [],
 		recent_scans: [],
 		watcher: {
 			enabled: true,

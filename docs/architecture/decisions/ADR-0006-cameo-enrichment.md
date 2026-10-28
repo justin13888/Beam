@@ -67,3 +67,9 @@ Re-enrichment of a title is available as a user-triggerable admin action.
   AniList 90/min, with automatic retry) absorb the resulting extra request volume. Revisit if a
   future cameo release decouples the cache feature's sqlite version, or if sea-orm-migration's CLI
   dependency stops requiring every sqlx backend.
+- TheTVDB (issue #267) is not in cameo 0.2.0, the latest release
+  ([justin13888/cameo#60](https://github.com/justin13888/cameo/issues/60)), so `beam-index` carries
+  its own TheTVDB v4 adapter (`providers/tvdb.rs`) behind the same `EnrichmentProvider` trait, and a
+  composite (`providers/composite.rs`) asks it after cameo's providers. TheTVDB has no built-in rate
+  limiting there: a `429` is the sweep's ordinary rate-limit backoff. When a cameo release carries a
+  TheTVDB client, the adapter and the composite go, and TheTVDB is registered with the facade.

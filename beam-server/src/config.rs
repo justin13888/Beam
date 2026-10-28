@@ -164,6 +164,17 @@ pub struct ServerConfig {
     #[config(env = "BEAM_ANILIST_ENABLED", default = true)]
     pub anilist_enabled: bool,
 
+    /// TheTVDB v4 API key, for TheTVDB-sourced enrichment (issue #267):
+    /// series with their specials and absolute episode numbering, and
+    /// movies. If absent, TheTVDB is not asked, and nothing else changes.
+    #[config(env = "BEAM_TVDB_API_KEY")]
+    pub tvdb_api_key: Option<String>,
+
+    /// The subscriber PIN TheTVDB issues with a user-supported API key.
+    /// Unset for a licensed project key, which has none.
+    #[config(env = "BEAM_TVDB_PIN")]
+    pub tvdb_pin: Option<String>,
+
     /// Preferred language for provider metadata, as a BCP-47 tag like `en`
     /// or `en-US` (lowercase language, uppercase region). Applied to the
     /// TMDB client only -- AniList has no language concept. Unset -> the
@@ -386,6 +397,8 @@ impl fmt::Debug for ServerConfig {
             enrich_min_confidence,
             tmdb_api_token,
             anilist_enabled,
+            tvdb_api_key,
+            tvdb_pin,
             metadata_language,
             artwork_cache_max_bytes,
             artwork_fetch_timeout_secs,
@@ -436,6 +449,8 @@ impl fmt::Debug for ServerConfig {
             .field("enrich_min_confidence", enrich_min_confidence)
             .field("tmdb_api_token", &redact_option(tmdb_api_token))
             .field("anilist_enabled", anilist_enabled)
+            .field("tvdb_api_key", &redact_option(tvdb_api_key))
+            .field("tvdb_pin", &redact_option(tvdb_pin))
             .field("metadata_language", metadata_language)
             .field("artwork_cache_max_bytes", artwork_cache_max_bytes)
             .field("artwork_fetch_timeout_secs", artwork_fetch_timeout_secs)
@@ -726,6 +741,8 @@ impl ServerConfig {
         }
 
         self.metadata_language = empty_to_none(self.metadata_language.take());
+        self.tvdb_api_key = empty_to_none(self.tvdb_api_key.take());
+        self.tvdb_pin = empty_to_none(self.tvdb_pin.take());
         // `list_by_comma` splits without trimming: `a, b` is `["a", " b"]`,
         // and a trailing comma leaves an empty pattern.
         self.scan_ignore = std::mem::take(&mut self.scan_ignore)
@@ -874,6 +891,8 @@ mod tests {
             data_dir: PathBuf::from("/cache"),
             database_url: "postgres://beam:db-secret-pw@localhost:5432/beam".to_string(),
             tmdb_api_token: Some("tmdb-secret-token".to_string()),
+            tvdb_api_key: Some("tvdb-secret-key".to_string()),
+            tvdb_pin: Some("tvdb-secret-pin".to_string()),
             oidc_issuer: Some("https://idp.example.com".to_string()),
             oidc_client_id: Some("beam-client".to_string()),
             oidc_client_secret: Some("oidc-secret-value".to_string()),
@@ -891,6 +910,7 @@ mod tests {
 
         assert!(!output.contains("db-secret-pw"), "output: {output}");
         assert!(!output.contains("tmdb-secret-token"), "output: {output}");
+        assert!(!output.contains("tvdb-secret"), "output: {output}");
         assert!(!output.contains("oidc-secret-value"), "output: {output}");
         assert!(output.contains("<redacted>"), "output: {output}");
         // Non-secret fields stay visible for operator debugging.
@@ -1730,6 +1750,27 @@ mod tests {
                 expected,
                 "raw value {raw:?} normalized incorrectly"
             );
+        }
+    }
+
+    #[test]
+    fn a_blank_tvdb_credential_is_no_credential() {
+        // `BEAM_TVDB_API_KEY=` in a compose file must leave TheTVDB
+        // unconfigured, not configured with an empty key it refuses.
+        for (raw, expected) in [
+            (Some(""), None),
+            (Some("  "), None),
+            (Some(" key "), Some("key")),
+            (None, None),
+        ] {
+            let mut config = ServerConfig {
+                tvdb_api_key: raw.map(str::to_string),
+                tvdb_pin: raw.map(str::to_string),
+                ..config_with_secrets()
+            };
+            config.normalize_values();
+            assert_eq!(config.tvdb_api_key.as_deref(), expected, "{raw:?}");
+            assert_eq!(config.tvdb_pin.as_deref(), expected, "{raw:?}");
         }
     }
 

@@ -7,9 +7,56 @@ use crate::config::ServerConfig;
 /// enrichment is effectively off, which is how `NoopEnrichmentProvider`
 /// identifies itself.
 fn providers_for(config: ServerConfig) -> Vec<String> {
-    build_enrichment_provider(&config)
+    build_enrichment_provider(&config, test_clock())
         .expect("this configuration must not fail startup")
         .available_providers()
+}
+
+fn test_clock() -> Arc<dyn Clock> {
+    Arc::new(beam_domain::services::TestClock::new())
+}
+
+#[test]
+fn a_tvdb_api_key_alone_enables_tvdb_only() {
+    let providers = providers_for(ServerConfig {
+        tmdb_api_token: None,
+        anilist_enabled: false,
+        tvdb_api_key: Some("tvdb-key".to_string()),
+        ..Default::default()
+    });
+    assert_eq!(providers, vec!["tvdb".to_string()]);
+}
+
+#[test]
+fn tvdb_is_asked_after_the_cameo_providers() {
+    let providers = providers_for(ServerConfig {
+        tmdb_api_token: Some("tmdb-token".to_string()),
+        anilist_enabled: true,
+        tvdb_api_key: Some("tvdb-key".to_string()),
+        tvdb_pin: Some("1234".to_string()),
+        ..Default::default()
+    });
+    assert_eq!(providers, ["tmdb", "anilist", "tvdb"]);
+}
+
+#[test]
+fn an_explicit_metadata_language_that_cannot_be_built_fails_startup_with_tvdb_too() {
+    // TheTVDB being configured does not soften the fail-fast on a knob
+    // cameo cannot honour.
+    let error = build_enrichment_provider(
+        &ServerConfig {
+            tmdb_api_token: Some("tmdb-token".to_string()),
+            tvdb_api_key: Some("tvdb-key".to_string()),
+            metadata_language: Some("not a bcp-47 tag".to_string()),
+            ..Default::default()
+        },
+        test_clock(),
+    )
+    .expect_err("an invalid explicit language tag must fail startup");
+    assert!(
+        error.to_string().contains("BEAM_METADATA_LANGUAGE"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -75,12 +122,15 @@ fn both_configured_enables_both_with_tmdb_first() {
 fn an_explicit_metadata_language_that_cannot_be_built_fails_startup() {
     // The asymmetry that matters: an operator who set BEAM_METADATA_LANGUAGE
     // must not have it silently ignored on a headless server.
-    let error = build_enrichment_provider(&ServerConfig {
-        tmdb_api_token: Some("tmdb-token".to_string()),
-        anilist_enabled: false,
-        metadata_language: Some("not a bcp-47 tag".to_string()),
-        ..Default::default()
-    })
+    let error = build_enrichment_provider(
+        &ServerConfig {
+            tmdb_api_token: Some("tmdb-token".to_string()),
+            anilist_enabled: false,
+            metadata_language: Some("not a bcp-47 tag".to_string()),
+            ..Default::default()
+        },
+        test_clock(),
+    )
     .expect_err("an invalid explicit language tag must fail startup");
 
     assert!(
@@ -195,54 +245,66 @@ mod uptime {
 fn each_providers_status_follows_what_is_asked_for_and_what_is_in_use() {
     use crate::models::enrichment::{EnrichmentProviderState as State, MetadataProvider};
 
-    let config = |token: Option<&str>, anilist: bool| ServerConfig {
+    let config = |token: Option<&str>, anilist: bool, tvdb: Option<&str>| ServerConfig {
         tmdb_api_token: token.map(str::to_owned),
         anilist_enabled: anilist,
+        tvdb_api_key: tvdb.map(str::to_owned),
         ..Default::default()
     };
     let in_use = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
-    for (config, available, tmdb, anilist) in [
+    for (config, available, tmdb, anilist, tvdb) in [
         (
-            config(None, false),
+            config(None, false, None),
             in_use(&[]),
             State::NotConfigured,
             State::NotConfigured,
+            State::NotConfigured,
         ),
         (
-            config(Some(""), true),
+            config(Some(""), true, Some("")),
             in_use(&["anilist"]),
             State::NotConfigured,
             State::Configured,
+            State::NotConfigured,
         ),
         (
-            config(Some("t"), true),
-            in_use(&["tmdb", "anilist"]),
+            config(Some("t"), true, Some("k")),
+            in_use(&["tmdb", "anilist", "tvdb"]),
+            State::Configured,
             State::Configured,
             State::Configured,
         ),
         // Asked for, but the client could not be built: enrichment is off.
         (
-            config(Some("t"), true),
+            config(Some("t"), true, Some("k")),
             in_use(&[]),
+            State::Unavailable,
             State::Unavailable,
             State::Unavailable,
         ),
         (
-            config(Some("t"), false),
+            config(Some("t"), false, None),
             in_use(&["tmdb"]),
             State::Configured,
             State::NotConfigured,
+            State::NotConfigured,
+        ),
+        (
+            config(None, false, Some("k")),
+            in_use(&["tvdb"]),
+            State::NotConfigured,
+            State::NotConfigured,
+            State::Configured,
         ),
     ] {
         let statuses = provider_statuses(&config, &available);
-        let states: Vec<(MetadataProvider, State)> =
-            statuses.iter().map(|s| (s.provider, s.state)).collect();
+        let states: Vec<(&str, State)> = statuses
+            .iter()
+            .map(|s| (s.provider.as_str(), s.state))
+            .collect();
         assert_eq!(
             states,
-            vec![
-                (MetadataProvider::Tmdb, tmdb),
-                (MetadataProvider::Anilist, anilist)
-            ],
+            vec![("tmdb", tmdb), ("anilist", anilist), ("tvdb", tvdb)],
             "{available:?}"
         );
         for status in &statuses {
@@ -252,20 +314,25 @@ fn each_providers_status_follows_what_is_asked_for_and_what_is_in_use() {
                 "only a provider that is not in use says what to do: {status:?}"
             );
         }
+        // The frozen list is the same statuses, for TMDB and AniList alone:
+        // TheTVDB is no value of its enumeration.
+        let frozen: Vec<(MetadataProvider, State)> = statuses
+            .iter()
+            .filter_map(MetadataProviderStatus::frozen)
+            .map(|s| (s.provider, s.state))
+            .collect();
+        assert_eq!(
+            frozen,
+            vec![
+                (MetadataProvider::Tmdb, tmdb),
+                (MetadataProvider::Anilist, anilist)
+            ],
+            "{available:?}"
+        );
     }
-    let unset = provider_statuses(&config(None, false), &[]);
-    assert!(
-        unset[0]
-            .detail
-            .as_deref()
-            .unwrap()
-            .contains("BEAM_TMDB_API_TOKEN")
-    );
-    assert!(
-        unset[1]
-            .detail
-            .as_deref()
-            .unwrap()
-            .contains("BEAM_ANILIST_ENABLED")
-    );
+    let unset = provider_statuses(&config(None, false, None), &[]);
+    let hint = |index: usize| unset[index].detail.clone().unwrap();
+    assert!(hint(0).contains("BEAM_TMDB_API_TOKEN"));
+    assert!(hint(1).contains("BEAM_ANILIST_ENABLED"));
+    assert!(hint(2).contains("BEAM_TVDB_API_KEY"));
 }

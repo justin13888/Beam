@@ -2240,6 +2240,34 @@ async fn the_status_endpoint_reports_counts_queue_state_and_recent_scans() {
             .as_deref()
             .is_some_and(|detail| detail.contains("BEAM_TMDB_API_TOKEN"))
     );
+    // Issue #267: every provider, TheTVDB included, in the list that is no
+    // frozen enumeration.
+    assert_eq!(
+        body.metadata_providers
+            .iter()
+            .map(|status| (status.provider.as_str(), status.state))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                "tmdb",
+                crate::models::EnrichmentProviderState::NotConfigured
+            ),
+            (
+                "anilist",
+                crate::models::EnrichmentProviderState::NotConfigured
+            ),
+            (
+                "tvdb",
+                crate::models::EnrichmentProviderState::NotConfigured
+            ),
+        ]
+    );
+    assert!(
+        body.metadata_providers[2]
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("BEAM_TVDB_API_KEY"))
+    );
 
     let messages: Vec<&str> = body
         .recent_scans
