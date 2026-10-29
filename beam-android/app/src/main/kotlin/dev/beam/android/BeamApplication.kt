@@ -7,6 +7,9 @@ import coil3.SingletonImageLoader
 import dagger.hilt.android.HiltAndroidApp
 import dev.beam.android.core.media.http.BeamImageLoader
 import dev.beam.android.core.media.http.ServerCallFactory
+import dev.beam.android.sync.ProgressFlusher
+import kotlinx.coroutines.MainScope
+import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 /** The application. */
@@ -25,6 +28,17 @@ public class BeamApplication :
      */
     @Inject
     internal lateinit var serverCalls: ServerCallFactory
+
+    /** Sends positions recorded while offline, for as long as the process lives. */
+    @Inject
+    internal lateinit var progressFlusher: ProgressFlusher
+
+    override fun onCreate() {
+        super.onCreate()
+        // Process-wide rather than tied to a screen: a reconnect while the app
+        // sits in the background is as good a moment to drain as any.
+        MainScope().launch { progressFlusher.run() }
+    }
 
     override fun newImageLoader(context: PlatformContext): ImageLoader =
         BeamImageLoader.build(
