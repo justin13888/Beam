@@ -137,7 +137,10 @@ lists them; `mise run ci` runs everything CI does except coverage and image buil
 
 On hosts without system FFmpeg development libraries, the Rust tasks statically vendor an LGPL-only
 FFmpeg, assembled with the `nasm` mise installs -- see
-[ADR-0007](docs/architecture/decisions/ADR-0007-vendored-ffmpeg-local-dev.md). If you do have the
+[ADR-0007](docs/architecture/decisions/ADR-0007-vendored-ffmpeg-local-dev.md). Its source is fetched
+once per host, into `beam/ffmpeg-source` under mise's `xdg_cache_home` (the
+`BEAM_FFMPEG_SOURCE_MIRROR` that `mise env` prints), and every later build directory clones it from
+there; delete that directory to refetch. If you do have the
 system libraries, set `BEAM_CARGO_FEATURES = ""` in a `mise.local.toml` to link against them
 instead.
 
