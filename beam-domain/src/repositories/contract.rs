@@ -9538,6 +9538,75 @@ macro_rules! enrichment_state_repository_contract {
             );
         }
 
+        /// Issue #347: a limited sweep takes the same rows from every store.
+        /// Never-attempted rows come first -- a newly indexed title is not
+        /// starved behind a retry queue -- then the earliest retry, the id
+        /// settling a tie; a retry not yet due, and a row that is no longer
+        /// `Pending`, is never taken.
+        #[tokio::test]
+        async fn due_rows_are_taken_never_attempted_first_then_oldest_retry_up_to_the_limit() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let now = at(100);
+
+            let mut fresh = Vec::new();
+            for _ in 0..2 {
+                let movie = new_movie(&fixture).await;
+                fresh.push(queued(&fixture, movie).await);
+            }
+            let show = new_show(&fixture).await;
+            fresh.push(queued(&fixture, show).await);
+            fresh.sort();
+
+            // Queued in the reverse of the order they are due, so neither
+            // insertion order nor id order can pass for the retry order.
+            let later_retry = queued(&fixture, new_movie(&fixture).await).await;
+            repo.mark_retrying(later_retry, "busy", 2, now)
+                .await
+                .unwrap();
+            let earlier_retry = queued(&fixture, new_movie(&fixture).await).await;
+            repo.mark_retrying(earlier_retry, "busy", 1, at(10))
+                .await
+                .unwrap();
+
+            let not_yet = queued(&fixture, new_movie(&fixture).await).await;
+            repo.mark_retrying(not_yet, "busy", 1, at(101))
+                .await
+                .unwrap();
+            let failed = queued(&fixture, new_movie(&fixture).await).await;
+            repo.mark_failed(failed, "gave up", at(0)).await.unwrap();
+            let enriched = queued(&fixture, new_movie(&fixture).await).await;
+            repo.mark_enriched(enriched, "tmdb:603", 0.9, at(0))
+                .await
+                .unwrap();
+            let unmatched = queued(&fixture, new_movie(&fixture).await).await;
+            repo.mark_unmatched(unmatched, "no hit", at(0))
+                .await
+                .unwrap();
+
+            let ids = |rows: Vec<$crate::models::enrichment::EnrichmentState>| {
+                rows.into_iter().map(|row| row.id).collect::<Vec<Uuid>>()
+            };
+            let mut every_due = fresh.clone();
+            every_due.extend([earlier_retry, later_retry]);
+            assert_eq!(
+                ids(repo.fetch_due(now, 50).await.unwrap()),
+                every_due,
+                "never attempted by id, then the earliest retry; a retry due \
+                 exactly now is due"
+            );
+            assert_eq!(
+                ids(repo.fetch_due(now, 4).await.unwrap()),
+                every_due[..4],
+                "the limit cuts the same order, never-attempted rows first"
+            );
+            assert_eq!(
+                ids(repo.fetch_due(now, 2).await.unwrap()),
+                fresh[..2],
+                "a limit below the never-attempted count takes the lowest ids"
+            );
+        }
+
         #[tokio::test]
         async fn every_field_can_be_locked_and_reads_back() {
             let fixture = $setup().await;
