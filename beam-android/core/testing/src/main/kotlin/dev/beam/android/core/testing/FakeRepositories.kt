@@ -10,8 +10,9 @@ import dev.beam.android.core.ffi.repository.TelemetryRepository
 import dev.beam.android.core.model.UserPreferences
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.asSharedFlow
 import uniffi.beam_client_core.AdminEvent
 import uniffi.beam_client_core.AdminLogEntry
 import uniffi.beam_client_core.AdminLogPage
@@ -363,12 +364,18 @@ public class FakeServerRepository(
     private var registry: List<ServerSummary> = sorted(stored)
 
     /**
-     * What the repository last re-published. Null until the first
-     * publication, as the real flow replays nothing before [restore].
+     * What the repository re-publishes. A replaying shared flow, as the real
+     * `ServerChanges` is: it replays nothing before [restore], and it emits
+     * every re-publication, an unchanged list included -- which a state flow
+     * would drop. Unbounded rather than suspending, so [expire] can publish
+     * without a coroutine; every subscriber still sees every list.
      */
-    private val published = MutableStateFlow(if (restored) registry else null)
+    private val published =
+        MutableSharedFlow<List<ServerSummary>>(replay = 1, extraBufferCapacity = Int.MAX_VALUE).apply {
+            if (restored) tryEmit(registry)
+        }
 
-    override val servers: Flow<List<ServerSummary>> = published.filterNotNull()
+    override val servers: Flow<List<ServerSummary>> = published.asSharedFlow()
 
     /** The cookie last handed to [completeLogin]. */
     public var capturedCookie: String? = null
@@ -378,7 +385,7 @@ public class FakeServerRepository(
 
     override suspend fun restore(): List<ServerSummary> {
         failWith?.let { throw it }
-        return registry.also { published.value = it }
+        return registry.also { published.tryEmit(it) }
     }
 
     /**
@@ -509,7 +516,10 @@ public class FakeServerRepository(
             failOnce?.also { failOnce = null }
                 ?: failWith
         if (failure != null) {
-            if (failure !is BeamException.UntrustedCertificate) setState(serverId, SessionState.LoggedOut)
+            // Whatever the failure, an untrusted certificate included: the
+            // core's `adopt_session` applies `IdentityRejected` on any error
+            // from `/v1/me`.
+            setState(serverId, SessionState.LoggedOut)
             throw failure
         }
         val user = Fixtures.user()
@@ -575,7 +585,7 @@ public class FakeServerRepository(
     override suspend fun activeServer(): ServerSummary? = registry.firstOrNull { it.isActive }
 
     private fun republish() {
-        published.value = registry
+        published.tryEmit(registry)
     }
 
     private fun activate(serverId: String) {
