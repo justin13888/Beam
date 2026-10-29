@@ -576,3 +576,181 @@ fn a_set_one_of_whose_discs_cannot_be_read_is_not_read() {
         }
     );
 }
+
+/// A DVD title set's IFO is `VTS_nn_0.IFO`, in any case, `nn` two digits
+/// from 01: the disc's own `VIDEO_TS.IFO`, a title set's menu or part, and
+/// its `.BUP` backup describe no title set.
+#[test]
+fn a_title_sets_ifo_is_named_vts_nn_0_in_any_case() {
+    for (name, set) in [
+        ("VTS_01_0.IFO", Some(1)),
+        ("vts_02_0.ifo", Some(2)),
+        ("Vts_99_0.Ifo", Some(99)),
+        ("VIDEO_TS.IFO", None),
+        ("VTS_00_0.IFO", None),
+        ("VTS_1_0.IFO", None),
+        ("VTS_001_0.IFO", None),
+        ("VTS_AB_0.IFO", None),
+        ("VTS_01_1.IFO", None),
+        ("VTS_01_0.BUP", None),
+        ("VTS_01_0.VOB", None),
+        ("VTS_01_0.IFO.part", None),
+    ] {
+        assert_eq!(dvd_ifo_title_set(name), set, "{name}");
+    }
+}
+
+/// What describes a disc's titles: a title set's IFO directly in a DVD's
+/// `VIDEO_TS/`, and a playlist directly in a Blu-ray's `PLAYLIST/` in any
+/// case -- not the same names elsewhere on the disc, nor a hidden file such
+/// as the `._` sidecar macOS leaves beside a copied one.
+#[test]
+fn only_a_discs_own_ifos_and_playlists_describe_its_titles() {
+    let dvd = Path::new("/library/Heat (1995)/VIDEO_TS");
+    for (rel, expected) in [
+        ("VTS_01_0.IFO", true),
+        ("vts_01_0.ifo", true),
+        ("VIDEO_TS.IFO", false),
+        ("VTS_01_1.VOB", false),
+        ("Extras/VTS_01_0.IFO", false),
+    ] {
+        assert_eq!(
+            is_title_metadata(DiscKind::Dvd, dvd, &dvd.join(rel)),
+            expected,
+            "DVD {rel}"
+        );
+    }
+    let blu_ray = Path::new("/library/Heat (1995)/BDMV");
+    for (rel, expected) in [
+        ("PLAYLIST/00800.mpls", true),
+        ("playlist/00800.MPLS", true),
+        ("PLAYLIST/._00800.mpls", false),
+        ("PLAYLIST/00800.clpi", false),
+        ("00800.mpls", false),
+        ("BACKUP/PLAYLIST/00800.mpls", false),
+    ] {
+        assert_eq!(
+            is_title_metadata(DiscKind::BluRay, blu_ray, &blu_ray.join(rel)),
+            expected,
+            "Blu-ray {rel}"
+        );
+    }
+}
+
+/// A file is read whole up to its cap and not at all past it; one that is
+/// gone, or is no regular file of the library, reads as nothing.
+#[cfg(unix)]
+#[test]
+fn a_capped_read_takes_a_file_up_to_its_cap_and_nothing_past_it() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    let path = root.join("VTS_01_0.IFO");
+    std::fs::write(&path, b"0123456789").unwrap();
+    std::os::unix::fs::symlink(&path, root.join("link.IFO")).unwrap();
+
+    assert_eq!(
+        read_capped(root, &path, 10).unwrap().as_deref(),
+        Some(&b"0123456789"[..])
+    );
+    assert_eq!(read_capped(root, &path, 9).unwrap(), None);
+    assert_eq!(read_capped(root, &root.join("gone.IFO"), 10).unwrap(), None);
+    assert_eq!(read_capped(root, &root.join("link.IFO"), 10).unwrap(), None);
+}
+
+/// Grow the file at `path` to `size` bytes, with zeros after what it holds.
+fn pad_to(path: &Path, size: u64) {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_len(size)
+        .unwrap();
+}
+
+/// A title set's IFO is read up to [`MAX_IFO_BYTES`]: one padded to exactly
+/// that still decides the main title by its duration; one a byte larger is
+/// no IFO, and the main title is the largest title set.
+#[test]
+fn an_ifo_past_its_size_cap_is_not_read() {
+    for (size, expected) in [
+        (MAX_IFO_BYTES, ["VTS_02_1.VOB"]),
+        (MAX_IFO_BYTES + 1, ["VTS_01_1.VOB"]),
+    ] {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        let disc = write_dvd(
+            &root.join("Heat (1995)"),
+            &[
+                TitleSet {
+                    set: 1,
+                    parts: &[4000],
+                    duration: Some(10 * MINUTE),
+                },
+                TitleSet {
+                    set: 2,
+                    parts: &[1000],
+                    duration: Some(170 * MINUTE),
+                },
+            ],
+        );
+        pad_to(&disc.join("VTS_02_0.IFO"), size);
+
+        let found = read(root, &disc, DiscKind::Dvd);
+
+        assert_eq!(names(&found.title), expected, "an IFO of {size} bytes");
+        assert!(!found.failed);
+    }
+}
+
+/// A playlist is read up to [`MAX_PLAYLIST_BYTES`]: the film's, padded to
+/// exactly that, is still the longest; a byte larger it is passed over for
+/// the trailer's.
+#[test]
+fn a_playlist_past_its_size_cap_is_not_read() {
+    for (size, expected) in [
+        (MAX_PLAYLIST_BYTES, ["00001.m2ts"]),
+        (MAX_PLAYLIST_BYTES + 1, ["00002.m2ts"]),
+    ] {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        let disc = write_blu_ray(
+            &root.join("Heat (1995)"),
+            &[("00001", 3000), ("00002", 2000)],
+            &[
+                ("00000.mpls", mpls(&[("00002", 0, ticks(120))])),
+                ("00800.mpls", mpls(&[("00001", 0, ticks(6000))])),
+            ],
+        );
+        pad_to(&disc.join("PLAYLIST/00800.mpls"), size);
+
+        let found = read(root, &disc, DiscKind::BluRay);
+
+        assert_eq!(names(&found.title), expected, "a playlist of {size} bytes");
+        assert!(!found.failed);
+    }
+}
+
+/// Reading a disc -- its IFOs, playlists and streams -- and reading the set
+/// it is one disc of write nothing into the library (FR-202).
+#[test]
+fn reading_a_disc_or_its_set_writes_nothing() {
+    use crate::library_file::test_support::snapshot;
+
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    let heat = root.join("Heat (1995)");
+    let first = one_disc(&heat.join("Disc 1"), 1000);
+    write_blu_ray(
+        &heat.join("Disc 2"),
+        &[("00001", 3000)],
+        &[("00800.mpls", mpls(&[("00001", 0, ticks(6000))]))],
+    );
+    let before = snapshot(root);
+
+    let dvd = read(root, &first, DiscKind::Dvd);
+    let set = source(root, &first, DiscKind::Dvd);
+
+    assert_eq!(names(&dvd.title), ["VTS_01_1.VOB"]);
+    assert_eq!(names(&set.files), ["VTS_01_1.VOB", "00001.m2ts"]);
+    assert_eq!(snapshot(root), before);
+}

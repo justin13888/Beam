@@ -733,3 +733,234 @@ mod description_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod conversion_tests {
+    use super::*;
+
+    /// Every pixel format the linked FFmpeg describes, with its descriptor.
+    fn every_pixel_format() -> Vec<(
+        ffmpeg::format::Pixel,
+        &'static ffmpeg::ffi::AVPixFmtDescriptor,
+    )> {
+        let mut formats = Vec::new();
+        let mut desc: *const ffmpeg::ffi::AVPixFmtDescriptor = std::ptr::null();
+        loop {
+            // SAFETY: `av_pix_fmt_desc_next` takes null or a descriptor it
+            // returned, and returns the next of FFmpeg's static table, or null
+            // after the last; a descriptor lives as long as the process.
+            desc = unsafe { ffmpeg::ffi::av_pix_fmt_desc_next(desc) };
+            // SAFETY: as above -- null, or a pointer into the static table.
+            let Some(descriptor) = (unsafe { desc.as_ref() }) else {
+                break;
+            };
+            // SAFETY: `desc` is one of FFmpeg's own descriptors.
+            let id = unsafe { ffmpeg::ffi::av_pix_fmt_desc_get_id(desc) };
+            formats.push((ffmpeg::format::Pixel::from(id), descriptor));
+        }
+        formats
+    }
+
+    /// A pixel format's bit depth is the depth FFmpeg's own descriptor gives
+    /// its first component -- 8, 9, 10, 12 or 16 bits -- for every software
+    /// format Beam names; a hardware surface (`AV_PIX_FMT_FLAG_HWACCEL`) has
+    /// none, and is the only kind counted as hardware. The expectation is
+    /// FFmpeg's, so a format given the wrong depth here is caught however
+    /// the table in [`PixelFormat::bit_depth`] is edited.
+    #[test]
+    fn every_named_pixel_format_has_the_bit_depth_ffmpeg_describes() {
+        let mut depths = std::collections::BTreeSet::new();
+        for (pixel, descriptor) in every_pixel_format() {
+            let format = PixelFormat::from(pixel);
+            let hwaccel = u64::try_from(ffmpeg::ffi::AV_PIX_FMT_FLAG_HWACCEL).unwrap();
+            let hardware = descriptor.flags & hwaccel != 0;
+            match format {
+                PixelFormat::Other(raw) => {
+                    assert_eq!(
+                        raw,
+                        ffmpeg::ffi::AVPixelFormat::from(pixel),
+                        "an unnamed format carries its own value"
+                    );
+                    assert_eq!(format.bit_depth(), None, "{pixel:?}");
+                }
+                PixelFormat::None => panic!("{pixel:?} is a described format, not none"),
+                named if hardware => {
+                    assert!(named.is_hardware(), "{pixel:?}");
+                    assert_eq!(named.bit_depth(), None, "{pixel:?}");
+                }
+                named => {
+                    let depth = u8::try_from(descriptor.comp[0].depth).unwrap();
+                    assert!(!named.is_hardware(), "{pixel:?}");
+                    assert_eq!(named.bit_depth(), Some(depth), "{pixel:?}");
+                    depths.insert(depth);
+                }
+            }
+        }
+        assert_eq!(
+            depths.into_iter().collect::<Vec<_>>(),
+            [8, 9, 10, 12, 16],
+            "every depth Beam names a format at is checked"
+        );
+    }
+
+    /// No two pixel formats FFmpeg describes convert to one Beam value: a
+    /// 10-bit format read as its 8-bit sibling, or one byte order as the
+    /// other, would misreport a file.
+    #[test]
+    fn no_two_pixel_formats_convert_to_one() {
+        let mut seen = std::collections::HashMap::new();
+        for (pixel, _) in every_pixel_format() {
+            if let Some(previous) = seen.insert(PixelFormat::from(pixel), pixel) {
+                panic!(
+                    "{previous:?} and {pixel:?} both convert to {:?}",
+                    PixelFormat::from(pixel)
+                );
+            }
+        }
+    }
+
+    /// Each value converted from FFmpeg's is described as itself: none of
+    /// FFmpeg's named values reads as "Unknown", and no two of them -- save
+    /// the reserved code points -- share a description.
+    fn described_distinctly<T: std::fmt::Debug + Copy, B>(
+        values: &[T],
+        convert: impl Fn(T) -> B,
+        describe: impl Fn(&B) -> &'static str,
+    ) {
+        let mut seen: std::collections::HashMap<&'static str, String> =
+            std::collections::HashMap::new();
+        for value in values {
+            let description = describe(&convert(*value));
+            assert_ne!(description, "Unknown", "{value:?}");
+            if let Some(previous) = seen.insert(description, format!("{value:?}")) {
+                assert_eq!(
+                    description, "Reserved",
+                    "{value:?} and {previous} both describe as {description:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_colour_space_ffmpeg_names_is_described_as_itself() {
+        use ffmpeg::color::Space;
+        described_distinctly(
+            &[
+                Space::RGB,
+                Space::BT709,
+                Space::Unspecified,
+                Space::Reserved,
+                Space::FCC,
+                Space::BT470BG,
+                Space::SMPTE170M,
+                Space::SMPTE240M,
+                Space::YCGCO,
+                Space::BT2020NCL,
+                Space::BT2020CL,
+                Space::SMPTE2085,
+                Space::ChromaDerivedNCL,
+                Space::ChromaDerivedCL,
+                Space::ICTCP,
+            ],
+            ColorSpace::from,
+            ColorSpace::description,
+        );
+    }
+
+    #[test]
+    fn every_colour_primaries_ffmpeg_names_is_described_as_itself() {
+        use ffmpeg::color::Primaries;
+        described_distinctly(
+            &[
+                Primaries::Reserved0,
+                Primaries::BT709,
+                Primaries::Unspecified,
+                Primaries::Reserved,
+                Primaries::BT470M,
+                Primaries::BT470BG,
+                Primaries::SMPTE170M,
+                Primaries::SMPTE240M,
+                Primaries::Film,
+                Primaries::BT2020,
+                Primaries::SMPTE428,
+                Primaries::SMPTE431,
+                Primaries::SMPTE432,
+                Primaries::EBU3213,
+            ],
+            ColorPrimaries::from,
+            ColorPrimaries::description,
+        );
+    }
+
+    #[test]
+    fn every_transfer_characteristic_ffmpeg_names_is_described_as_itself() {
+        use ffmpeg::color::TransferCharacteristic as Transfer;
+        described_distinctly(
+            &[
+                Transfer::Reserved0,
+                Transfer::BT709,
+                Transfer::Unspecified,
+                Transfer::Reserved,
+                Transfer::GAMMA22,
+                Transfer::GAMMA28,
+                Transfer::SMPTE170M,
+                Transfer::SMPTE240M,
+                Transfer::Linear,
+                Transfer::Log,
+                Transfer::LogSqrt,
+                Transfer::IEC61966_2_4,
+                Transfer::BT1361_ECG,
+                Transfer::IEC61966_2_1,
+                Transfer::BT2020_10,
+                Transfer::BT2020_12,
+                Transfer::SMPTE2084,
+                Transfer::SMPTE428,
+                Transfer::ARIB_STD_B67,
+            ],
+            ColorTransferCharacteristic::from,
+            ColorTransferCharacteristic::description,
+        );
+    }
+
+    /// Only the two transfer curves FFmpeg names `smpte2084` (PQ) and
+    /// `arib-std-b67` (HLG) are HDR.
+    #[test]
+    fn a_transfer_is_hdr_exactly_when_ffmpeg_names_it_pq_or_hlg() {
+        use ffmpeg::color::TransferCharacteristic as Transfer;
+        for transfer in [
+            Transfer::BT709,
+            Transfer::GAMMA22,
+            Transfer::Linear,
+            Transfer::IEC61966_2_1,
+            Transfer::BT2020_10,
+            Transfer::BT2020_12,
+            Transfer::SMPTE2084,
+            Transfer::SMPTE428,
+            Transfer::ARIB_STD_B67,
+        ] {
+            let hdr = matches!(transfer.name(), Some("smpte2084" | "arib-std-b67"));
+            assert_eq!(
+                ColorTransferCharacteristic::from(transfer).is_hdr(),
+                hdr,
+                "{transfer:?}"
+            );
+        }
+    }
+
+    /// A range is described as FFmpeg names it: `tv` is the limited range a
+    /// television signal uses, `pc` the full one.
+    #[test]
+    fn a_colour_range_is_described_as_ffmpeg_names_it() {
+        use ffmpeg::color::Range;
+        for range in [Range::MPEG, Range::JPEG, Range::Unspecified] {
+            let description = ColorRange::from(range).description();
+            match range.name() {
+                Some(name) => assert!(
+                    description.contains(&format!("({})", name.to_ascii_uppercase())),
+                    "{range:?} ({name}) is described as {description:?}"
+                ),
+                None => assert_eq!(description, "Unspecified", "{range:?}"),
+            }
+        }
+    }
+}
