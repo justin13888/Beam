@@ -1004,7 +1004,37 @@ mod tests {
             },
         )
         .expect_err("must not fall back");
-        assert!(rejections.iter().any(|r| r.file_id == "uhd"));
+        let picked: Vec<_> = rejections.iter().filter(|r| r.file_id == "uhd").collect();
+        assert_eq!(
+            picked.len(),
+            1,
+            "the pick is rejected once, for its own reason"
+        );
+        assert_ne!(picked[0].reason, RejectionReason::ExcludedByPolicy);
+    }
+
+    /// A pick that names no source the server listed -- it was removed since
+    /// the picker was drawn -- is refused as no longer available.
+    #[test]
+    fn a_specific_pick_of_a_vanished_source_is_no_longer_available() {
+        // One listed source this device cannot play, so the pick is told
+        // apart from a rejection that is already there.
+        let profile = DeviceProfileBuilder::budget_h264_only().build();
+
+        let rejections = select_source(
+            &[uhd_hevc(), hd_h264()],
+            &profile,
+            &QualityPolicy::Specific {
+                file_id: "gone".to_owned(),
+            },
+        )
+        .expect_err("nothing to play");
+
+        let gone = rejections
+            .iter()
+            .find(|r| r.file_id == "gone")
+            .expect("the pick is named");
+        assert_eq!(gone.reason, RejectionReason::ExcludedByPolicy);
     }
 
     #[test]
@@ -1236,7 +1266,33 @@ mod tests {
         let tone_mapping = DeviceProfileBuilder::flagship_av1_hdr()
             .display(1920, 1080)
             .build();
-        assert!(select_source(&[hdr], &tone_mapping, &QualityPolicy::Highest).is_ok());
+        assert!(
+            select_source(
+                std::slice::from_ref(&hdr),
+                &tone_mapping,
+                &QualityPolicy::Highest
+            )
+            .is_ok()
+        );
+
+        // Either capability alone carries HDR10: a Main10 decoder that does not
+        // advertise the HDR10 profile, and one that advertises it alone.
+        for (hdr10, ten_bit) in [(false, true), (true, false)] {
+            let mut profile = DeviceProfileBuilder::phone_h264_hevc().build();
+            for decoder in &mut profile.video_decoders {
+                decoder.supports_hdr10 = hdr10;
+                decoder.supports_10_bit = ten_bit;
+            }
+            assert!(
+                select_source(
+                    std::slice::from_ref(&hdr),
+                    &profile,
+                    &QualityPolicy::Highest
+                )
+                .is_ok(),
+                "hdr10 {hdr10}, 10-bit {ten_bit}"
+            );
+        }
     }
 
     #[test]

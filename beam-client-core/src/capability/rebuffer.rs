@@ -172,6 +172,21 @@ mod tests {
         assert!(!stall(&mut detector, 20_000, 2_000));
     }
 
+    /// The window is the last minute, open at its start: a stall that was
+    /// over by the instant the window opens is history, not one of its three.
+    #[test]
+    fn a_stall_over_as_the_window_opens_is_outside_it() {
+        let mut detector = RebufferDetector::new();
+        detector.stall_started(10_000);
+        detector.stall_ended(10_000);
+        stall(&mut detector, 40_000, 1_000);
+
+        assert!(
+            !detector.stall_started(10_000 + WINDOW_MS),
+            "only two stalls began within the minute ending now"
+        );
+    }
+
     #[test]
     fn the_third_stall_within_a_minute_trips_it() {
         let mut detector = RebufferDetector::new();
