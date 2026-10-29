@@ -187,13 +187,129 @@ fn plan_missing_shields_every_row_after_an_unscoped_walk_failure() {
 /// clock, and not the service default, so a test cannot pass by accident.
 const GRACE: Duration = Duration::from_secs(3 * 24 * 60 * 60);
 
+/// The in-memory file store, answering every call through it, except that a
+/// test can make marking rows missing, or purging them, fail (NFR-205).
+#[derive(Debug)]
+struct FaultableFiles {
+    inner: Arc<InMemoryFileRepository>,
+    fail_marking: AtomicBool,
+    fail_purging: AtomicBool,
+}
+
+fn database_down() -> DbErr {
+    DbErr::Custom("the database is down".to_string())
+}
+
+#[async_trait::async_trait]
+impl FileRepository for FaultableFiles {
+    async fn find_by_id(&self, id: Uuid) -> Result<Option<MediaFile>, DbErr> {
+        self.inner.find_by_id(id).await
+    }
+    async fn find_by_path(&self, path: &str) -> Result<Option<MediaFile>, DbErr> {
+        self.inner.find_by_path(path).await
+    }
+    async fn find_by_hash(&self, hash: u64) -> Result<Vec<MediaFile>, DbErr> {
+        self.inner.find_by_hash(hash).await
+    }
+    async fn find_all_by_library(&self, library_id: Uuid) -> Result<Vec<MediaFile>, DbErr> {
+        self.inner.find_all_by_library(library_id).await
+    }
+    async fn find_page_by_library(
+        &self,
+        library_id: Uuid,
+        after: Option<beam_domain::models::file::LibraryFilePosition>,
+        limit: std::num::NonZeroU32,
+    ) -> Result<Vec<MediaFile>, DbErr> {
+        self.inner
+            .find_page_by_library(library_id, after, limit)
+            .await
+    }
+    async fn find_all_by_library_including_missing(
+        &self,
+        library_id: Uuid,
+    ) -> Result<Vec<MediaFile>, DbErr> {
+        self.inner
+            .find_all_by_library_including_missing(library_id)
+            .await
+    }
+    async fn find_all_under(&self, library_id: Uuid, dir: &Path) -> Result<Vec<MediaFile>, DbErr> {
+        self.inner.find_all_under(library_id, dir).await
+    }
+    async fn find_by_library_and_hash_including_missing(
+        &self,
+        library_id: Uuid,
+        hash: u64,
+    ) -> Result<Vec<MediaFile>, DbErr> {
+        self.inner
+            .find_by_library_and_hash_including_missing(library_id, hash)
+            .await
+    }
+    async fn find_beneath_including_missing(
+        &self,
+        library_id: Uuid,
+        dir: &Path,
+    ) -> Result<Vec<MediaFile>, DbErr> {
+        self.inner
+            .find_beneath_including_missing(library_id, dir)
+            .await
+    }
+    async fn find_by_movie_entry_id(&self, movie_entry_id: Uuid) -> Result<Vec<MediaFile>, DbErr> {
+        self.inner.find_by_movie_entry_id(movie_entry_id).await
+    }
+    async fn find_by_episode_id(&self, episode_id: Uuid) -> Result<Vec<MediaFile>, DbErr> {
+        self.inner.find_by_episode_id(episode_id).await
+    }
+    async fn create(&self, create: CreateMediaFile) -> Result<MediaFile, DbErr> {
+        self.inner.create(create).await
+    }
+    async fn update(&self, update: UpdateMediaFile) -> Result<MediaFile, DbErr> {
+        self.inner.update(update).await
+    }
+    async fn set_classification(
+        &self,
+        id: Uuid,
+        classification: FileClassification,
+    ) -> Result<MediaFile, DbErr> {
+        self.inner.set_classification(id, classification).await
+    }
+    async fn mark_missing(&self, ids: Vec<Uuid>, at: DateTime<Utc>) -> Result<u64, DbErr> {
+        if self.fail_marking.load(Ordering::SeqCst) {
+            return Err(database_down());
+        }
+        self.inner.mark_missing(ids, at).await
+    }
+    async fn relink(
+        &self,
+        relinks: Vec<FileRelink>,
+        displaced: Vec<Uuid>,
+        at: DateTime<Utc>,
+    ) -> Result<(), DbErr> {
+        self.inner.relink(relinks, displaced, at).await
+    }
+    async fn restore(&self, id: Uuid) -> Result<(), DbErr> {
+        self.inner.restore(id).await
+    }
+    async fn purge_missing(&self, ids: Vec<Uuid>) -> Result<u64, DbErr> {
+        if self.fail_purging.load(Ordering::SeqCst) {
+            return Err(database_down());
+        }
+        self.inner.purge_missing(ids).await
+    }
+    async fn count_all(&self) -> Result<u64, DbErr> {
+        self.inner.count_all().await
+    }
+}
+
 struct Harness {
     /// Holds the library root (`<dir>/library`) and, beside it, a parking
     /// place a file can be moved to and back without changing its mtime.
     dir: TempDir,
     root: PathBuf,
     library: Library,
+    library_repo: Arc<InMemoryLibraryRepository>,
     file_repo: Arc<InMemoryFileRepository>,
+    /// What the service writes files through; its switches fail a write.
+    files: Arc<FaultableFiles>,
     notifications: Arc<InMemoryNotificationService>,
     admin_log_repo: Arc<InMemoryAdminLogRepository>,
     clock: Arc<TestClock>,
@@ -213,6 +329,11 @@ impl Harness {
 
         let lib_repo = Arc::new(InMemoryLibraryRepository::default());
         let file_repo = Arc::new(InMemoryFileRepository::default());
+        let files = Arc::new(FaultableFiles {
+            inner: file_repo.clone(),
+            fail_marking: AtomicBool::new(false),
+            fail_purging: AtomicBool::new(false),
+        });
         let notifications = Arc::new(InMemoryNotificationService::new());
         let admin_log_repo = Arc::new(InMemoryAdminLogRepository::default());
         let clock = Arc::new(TestClock::starting_at(instant(0)));
@@ -227,8 +348,8 @@ impl Harness {
         // No hasher or prober expectations: every file here is either already
         // indexed and unchanged, or gone. Reaching either would be a rehash.
         let service = LocalIndexService::new(
-            lib_repo,
-            file_repo.clone(),
+            lib_repo.clone(),
+            files.clone(),
             Arc::new(InMemoryMovieRepository::default()),
             Arc::new(InMemoryShowRepository::default()),
             Arc::new(InMemoryMediaStreamRepository::default()),
@@ -247,7 +368,9 @@ impl Harness {
             dir,
             root,
             library,
+            library_repo: lib_repo,
             file_repo,
+            files,
             notifications,
             admin_log_repo,
             clock,
@@ -418,6 +541,117 @@ async fn a_zero_grace_purges_at_the_first_healthy_scan() {
         h.stored(&gone).await.is_none(),
         "stamped and purged in one scan: purge only removes stamped rows"
     );
+}
+
+/// NFR-205: a scan that cannot stamp the rows it no longer sees fails, and
+/// fails before purging: a row already missing for the whole grace is not
+/// purged by a scan that could not finish, and the library records no
+/// finished scan.
+#[tokio::test]
+async fn a_scan_that_cannot_mark_rows_missing_fails_and_purges_nothing() {
+    let h = Harness::new().await;
+    let kept = h.index_on_disk("kept.mp4");
+    let long_gone = h.index_on_disk("long-gone.mp4");
+    h.park(&long_gone);
+    h.scan().await.unwrap();
+    let finished = h
+        .library_repo
+        .find_by_id(h.library.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .last_scan_finished_at;
+    let newly_gone = h.index_on_disk("newly-gone.mp4");
+    h.park(&newly_gone);
+    h.clock.advance(GRACE);
+    h.files.fail_marking.store(true, Ordering::SeqCst);
+
+    let scanned = h.scan().await;
+
+    assert!(matches!(scanned, Err(IndexError::Db(_))), "{scanned:?}");
+    assert_eq!(
+        h.stored(&newly_gone).await.unwrap().missing_since,
+        None,
+        "nothing was stamped"
+    );
+    assert_eq!(
+        h.stored(&long_gone)
+            .await
+            .expect("not purged")
+            .missing_since,
+        Some(instant(0))
+    );
+    let mut visible = vec![kept.id, newly_gone.id];
+    visible.sort();
+    assert_eq!(h.visible_ids().await, visible);
+    assert_eq!(
+        h.library_repo
+            .find_by_id(h.library.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .last_scan_finished_at,
+        finished,
+        "the failed scan records no finish"
+    );
+}
+
+/// NFR-205: a scan whose purge fails fails too, but keeps the stamps it
+/// already wrote -- the next scan purges from them, it does not start the
+/// grace again.
+#[tokio::test]
+async fn a_scan_that_cannot_purge_fails_and_keeps_what_it_marked() {
+    let h = Harness::new().await;
+    h.index_on_disk("kept.mp4");
+    let long_gone = h.index_on_disk("long-gone.mp4");
+    h.park(&long_gone);
+    h.scan().await.unwrap();
+    let newly_gone = h.index_on_disk("newly-gone.mp4");
+    h.park(&newly_gone);
+    h.clock.advance(GRACE);
+    h.files.fail_purging.store(true, Ordering::SeqCst);
+
+    let scanned = h.scan().await;
+
+    assert!(matches!(scanned, Err(IndexError::Db(_))), "{scanned:?}");
+    assert_eq!(
+        h.stored(&newly_gone).await.unwrap().missing_since,
+        Some(instant(GRACE.as_secs() as i64)),
+        "stamped before the purge failed"
+    );
+    assert!(h.stored(&long_gone).await.is_some(), "not purged");
+
+    h.files.fail_purging.store(false, Ordering::SeqCst);
+    h.scan().await.unwrap();
+    assert!(
+        h.stored(&long_gone).await.is_none(),
+        "purged by the next scan"
+    );
+    assert!(
+        h.stored(&newly_gone).await.is_some(),
+        "its grace runs from the stamp the failed scan wrote"
+    );
+}
+
+/// NFR-205: a watcher removal that cannot be recorded is an error, and the
+/// row stays visible -- the next scan will mark it.
+#[tokio::test]
+async fn a_watcher_removal_that_cannot_be_recorded_fails_and_leaves_the_row() {
+    let h = Harness::new().await;
+    let row = h.index_on_disk("show.mkv");
+    h.park(&row);
+    h.files.fail_marking.store(true, Ordering::SeqCst);
+
+    let reconciled = h
+        .service
+        .reconcile_path(h.library.id, row.path.clone(), FsEventKind::Removed)
+        .await;
+
+    assert!(
+        matches!(reconciled, Err(IndexError::Db(_))),
+        "{reconciled:?}"
+    );
+    assert_eq!(h.visible_ids().await, vec![row.id]);
 }
 
 #[tokio::test]

@@ -9143,6 +9143,23 @@ mod tests {
         );
     }
 
+    /// Both thresholds must be cleared: three hours against three hours five
+    /// minutes differ by 300s -- past the 240s floor -- but by under 3%, far
+    /// under the 15% ratio, so a long film's cut is not reported.
+    #[tokio::test]
+    async fn test_divergence_delta_past_the_floor_with_the_ratio_under_no_warning() {
+        let (service, notification, admin_log_repo, file_a) =
+            seed_two_movie_renditions(Some(180.0 * 60.0), Some(185.0 * 60.0)).await;
+
+        service.check_and_report_runtime_divergence(&file_a).await;
+
+        assert!(
+            notification.published_events().is_empty(),
+            "a small relative difference must not warn, however many seconds"
+        );
+        assert!(admin_log_repo.list(100, 0).await.unwrap().is_empty());
+    }
+
     #[tokio::test]
     async fn test_divergence_short_content_guard_no_warning() {
         // Two episodes at 2 min vs 3 min: the ratio (0.33) clears the relative
