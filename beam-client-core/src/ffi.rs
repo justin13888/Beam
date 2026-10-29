@@ -826,9 +826,17 @@ impl BeamClient {
                 if !effects.contains(&SessionEffect::PersistCookie) {
                     // The machine ignored the confirmation: the user signed
                     // out while `/v1/me` was in flight. Whatever this sign-in wrote is withdrawn, so a
-                    // cold start does not sign the device back in.
-                    self.storage.remove_secret(session_key(&server_id)).await?;
-                    self.storage.remove_secret(identity_key(&server_id)).await?;
+                    // cold start does not sign the device back in. A refused
+                    // delete is swallowed: the answer is still that nobody is
+                    // signed in, and the session is marked abandoned so a
+                    // restore drops it instead of signing back in with it.
+                    if let Err(error) = self.clear_stored_session(&server_id).await {
+                        tracing::warn!(
+                            server_id,
+                            %error,
+                            "could not withdraw a sign-in confirmed after sign-out"
+                        );
+                    }
                     return Err(BeamError::Unauthenticated);
                 }
                 self.perform(&server_id, &effects, Some(&captured)).await?;
@@ -2305,13 +2313,7 @@ impl BeamClient {
                     self.with_context(server_id, |context| context.set_session(cookie))?;
                 }
                 SessionEffect::ClearCookie => {
-                    // Removing an absent key succeeds, so this asks no
-                    // question the caller would have to answer twice. The
-                    // cookie goes first: it is the credential, and an identity
-                    // left without one restores nothing.
-                    self.storage.remove_secret(session_key(server_id)).await?;
-                    self.forget_abandoned(server_id);
-                    self.storage.remove_secret(identity_key(server_id)).await?;
+                    self.clear_stored_session(server_id).await?;
                 }
                 // Performed by the call site, which has what the effect needs
                 // and this does not: the confirmed cookie for `PersistCookie`,
@@ -2328,6 +2330,37 @@ impl BeamClient {
             }
         }
         Ok(())
+    }
+
+    /// Delete this server's stored session -- its cookie and the identity a
+    /// cold start restores from -- or, where the keystore refuses, mark it
+    /// abandoned so `restore` does not sign the device back in with it.
+    ///
+    /// Every path that withdraws a stored session goes through here, so no
+    /// failed delete can leave a session on disk unmarked.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::Storage`] when either delete fails; the mark is
+    /// set by then, so a caller may swallow it.
+    async fn clear_stored_session(&self, server_id: &str) -> Result<(), BeamError> {
+        // Removing an absent key succeeds, so this asks no question the
+        // caller would have to answer twice. The cookie goes first: it is the
+        // credential, and an identity left without one restores nothing.
+        let cleared = match self.storage.remove_secret(session_key(server_id)).await {
+            Ok(()) => self.storage.remove_secret(identity_key(server_id)).await,
+            Err(error) => Err(error),
+        };
+        match cleared {
+            Ok(()) => {
+                self.forget_abandoned(server_id);
+                Ok(())
+            }
+            Err(error) => {
+                self.abandon_session(server_id);
+                Err(error.into())
+            }
+        }
     }
 
     /// Note that this server's stored cookie could not be deleted.
@@ -2532,11 +2565,11 @@ impl BeamClient {
             let expired = effects.contains(&SessionEffect::InstallCookie(false));
             if let Err(error) = self.perform(server_id, &effects, None).await {
                 // Swallowed: the caller's error is the expired session, which
-                // stands, and the credential is already off the client. Marked,
-                // because the cookie the server rejected is still in the
-                // keystore and a restore would otherwise send it again.
+                // stands, and the credential is already off the client. The
+                // cookie the server rejected is still in the keystore, but
+                // `ClearCookie` has marked it abandoned, so a restore does not
+                // send it again.
                 tracing::warn!(server_id, %error, "could not delete the rejected session cookie");
-                self.abandon_session(server_id);
             }
             if expired {
                 return BeamError::SessionExpired;
@@ -2731,6 +2764,7 @@ fn subtitle_views(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::StorageError;
     use crate::ports::kv::{FailureMode, InMemoryKeyValueStore};
     use crate::transport::CannedBackend;
 
@@ -2959,6 +2993,100 @@ mod tests {
         );
         assert!(!storage.has_secret(&session_key(&id)));
         assert!(!storage.has_secret(&identity_key(&id)));
+    }
+
+    /// The same late confirmation over a keystore that refuses the withdrawal.
+    /// The cookie and identity this sign-in wrote stay on disk, so the session
+    /// is marked abandoned: the next `restore` drops it rather than signing
+    /// the device back in as the user who signed out.
+    #[tokio::test]
+    async fn a_late_sign_in_the_keystore_will_not_withdraw_is_not_restored() {
+        let inner = Arc::new(InMemoryKeyValueStore::new());
+        let storage = Arc::new(RefusesStoredSecretRemoval {
+            inner: Arc::clone(&inner),
+        });
+        let client = BeamClient::new(storage as Arc<dyn KeyValueStore>);
+        let id = client
+            .add_server("https://beam.test".to_owned(), None)
+            .await
+            .expect("added")
+            .id;
+        let backend = Arc::new(SignsOutDuringMe {
+            client: Arc::downgrade(&client),
+            server_id: id.clone(),
+        });
+        client
+            .use_transport(&id, backend as Arc<dyn crate::api::HttpBackend>)
+            .expect("the server is registered");
+
+        assert_eq!(
+            client.complete_login(id.clone(), "late".to_owned()).await,
+            Err(BeamError::Unauthenticated),
+            "a refused delete does not change the answer"
+        );
+        assert!(
+            inner.has_secret(&session_key(&id)) && inner.has_secret(&identity_key(&id)),
+            "the deletes really did fail, which is what the mark is for"
+        );
+
+        client
+            .restore()
+            .await
+            .expect("the registry itself is still readable");
+
+        assert_eq!(
+            client.session_state(id.clone()).expect("known"),
+            SessionState::LoggedOut,
+            "the stranded session is not restored"
+        );
+        assert!(
+            matches!(client.server_http_config(), Err(BeamError::Unauthenticated)),
+            "nor its cookie handed to the player"
+        );
+    }
+
+    /// A keystore that refuses to delete a secret it holds. Deleting an absent
+    /// key still succeeds, so the sign-out that races the sign-in -- which runs
+    /// before anything is stored -- goes through.
+    #[derive(Debug)]
+    struct RefusesStoredSecretRemoval {
+        inner: Arc<InMemoryKeyValueStore>,
+    }
+
+    #[async_trait::async_trait]
+    impl KeyValueStore for RefusesStoredSecretRemoval {
+        async fn get(&self, key: String) -> Result<Option<String>, StorageError> {
+            self.inner.get(key).await
+        }
+
+        async fn put(&self, key: String, value: String) -> Result<(), StorageError> {
+            self.inner.put(key, value).await
+        }
+
+        async fn remove(&self, key: String) -> Result<(), StorageError> {
+            self.inner.remove(key).await
+        }
+
+        async fn list_keys(&self, prefix: String) -> Result<Vec<String>, StorageError> {
+            self.inner.list_keys(prefix).await
+        }
+
+        async fn get_secret(&self, key: String) -> Result<Option<String>, StorageError> {
+            self.inner.get_secret(key).await
+        }
+
+        async fn put_secret(&self, key: String, value: String) -> Result<(), StorageError> {
+            self.inner.put_secret(key, value).await
+        }
+
+        async fn remove_secret(&self, key: String) -> Result<(), StorageError> {
+            if self.inner.has_secret(&key) {
+                return Err(StorageError::Unavailable {
+                    detail: "keystore locked".to_owned(),
+                });
+            }
+            self.inner.remove_secret(key).await
+        }
     }
 
     /// A transport that, asked for `/v1/me`, signs the user out before it
