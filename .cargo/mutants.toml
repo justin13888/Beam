@@ -126,6 +126,13 @@ exclude_globs = [
     # reason the `test-utils` doubles carry `#[mutants::skip]`.
     "beam-test-support/**/*.rs",
 
+    # The bindings generator's entry point: one call into
+    # `uniffi::uniffi_bindgen_main`, run by `mise run core:bindgen` and never by
+    # a test. It decides nothing, so its only mutant (`main` -> `()`) could
+    # never be caught, and the bindings it writes are exercised by the Android
+    # build instead.
+    "beam-client-core/src/bin/uniffi-bindgen.rs",
+
     # The process entry point. `main` composes already-tested pieces, and
     # `wait_for_shutdown_signal` waits on real SIGTERM/ctrl-c -- which cannot
     # be delivered in-process without killing the test runner. Everything here

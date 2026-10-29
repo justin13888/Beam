@@ -242,6 +242,9 @@ mod tests {
         };
         assert!(decoder.accepts_size(1920, 1080));
         assert!(!decoder.accepts_size(3840, 2160));
+        // Each axis on its own: an ultrawide too wide, a portrait too tall.
+        assert!(!decoder.accepts_size(3840, 1080));
+        assert!(!decoder.accepts_size(1920, 2160));
         assert!(decoder.accepts_bitrate(20_000_000));
         assert!(!decoder.accepts_bitrate(80_000_000));
     }

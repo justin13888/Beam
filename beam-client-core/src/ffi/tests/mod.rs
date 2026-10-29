@@ -32,6 +32,33 @@ async fn client_with_server() -> (Arc<BeamClient>, String) {
     (client, id)
 }
 
+/// The cookie holder's `Debug` says whether a credential is held and never
+/// what it is: the value is the session itself.
+#[test]
+fn a_held_cookie_debugs_as_registered_and_never_as_its_value() {
+    let held = SessionCookie::new(Some(SecretString::from("opaque-value")));
+    let printed = format!("{held:?}");
+    assert_eq!(printed, r#"SessionCookie("registered")"#);
+    assert!(!printed.contains("opaque-value"));
+
+    held.set(None);
+    assert_eq!(format!("{held:?}"), r#"SessionCookie("none")"#);
+}
+
+/// A signed-in server's context `Debug`s as its record and state, and
+/// carries the session cookie nowhere.
+#[tokio::test]
+async fn a_signed_in_server_debugs_without_its_cookie() {
+    let (client, id, _) = signed_in_client().await;
+    let printed = client
+        .with_context(&id, |context| format!("{context:?}"))
+        .expect("the server is registered");
+    assert!(printed.starts_with("ServerContext"), "{printed}");
+    assert!(printed.contains(&id), "{printed}");
+    assert!(printed.contains("Authenticated"), "{printed}");
+    assert!(!printed.contains("opaque-value"), "{printed}");
+}
+
 #[tokio::test]
 async fn a_new_client_knows_no_servers() {
     let client = client();
@@ -1368,6 +1395,50 @@ async fn a_cookie_that_could_not_be_deleted_is_not_registered_again() {
     );
 }
 
+/// A sign-in after a failed delete overwrites the stranded cookie with one
+/// the server confirmed, so the mark is lifted and a cold start restores
+/// the new session rather than deleting it as the rejected one.
+#[tokio::test]
+async fn signing_in_again_after_a_failed_delete_is_restored_at_the_next_start() {
+    let storage = Arc::new(InMemoryKeyValueStore::new());
+    let (client, id, _) = signed_in_client_over(Arc::clone(&storage)).await;
+    client
+        .use_transport(
+            &id,
+            Arc::new(CannedBackend::answering(
+                401,
+                "application/problem+json",
+                r#"{"type":"about:blank","status":401}"#,
+            )),
+        )
+        .expect("the server is registered");
+    storage.set_failure(FailureMode::FailWrites);
+    let _ = client.media_sources(MEDIA_ID.to_owned()).await;
+    storage.set_failure(FailureMode::None);
+
+    client
+        .use_transport(&id, Arc::new(CannedBackend::answering(200, JSON, ME)))
+        .expect("the server is registered");
+    client
+        .complete_login(id.clone(), "second-value".to_owned())
+        .await
+        .expect("the canned /v1/me confirms the new cookie");
+
+    client.restore().await.expect("the registry is readable");
+
+    assert!(
+        matches!(
+            client.session_state(id.clone()).expect("known"),
+            SessionState::Authenticated { .. }
+        ),
+        "the confirmed sign-in survives the restart"
+    );
+    assert!(
+        storage.has_secret(&format!("session/{id}")),
+        "and its cookie is still stored"
+    );
+}
+
 /// A 401 whose failure is dropped -- a request that never passed through
 /// [`BeamClient::send`] -- leaves the middleware's flag set with nothing
 /// to consume it.
@@ -2077,6 +2148,36 @@ async fn health_is_the_servers_own_report() {
         }
     );
     assert_eq!(the_request(&backend).url.path(), "/v1/health");
+}
+
+#[tokio::test]
+async fn the_signed_in_devices_are_the_servers_list() {
+    let body: &'static str = Box::leak(
+        format!(
+            r#"{{"items":[
+                {{"id":"5e551011-0000-4000-8000-000000000001","device_hash":"d1","ip":"127.0.0.1",
+                  "created_at":"2023-11-14T22:13:20Z","last_active_at":"2023-11-15T00:13:20Z"}},
+                {{"id":"5e551011-0000-4000-8000-000000000002","device_hash":"d2","ip":"127.0.0.2",
+                  "created_at":"2023-11-14T22:13:20Z","last_active_at":"2023-11-15T00:13:20Z"}}],
+               {NO_PAGES}}}"#
+        )
+        .into_boxed_str(),
+    );
+    let (client, backend) = one_answer(200, body).await;
+
+    let sessions = client.sessions().await.expect("answered");
+
+    let ids: Vec<&str> = sessions.iter().map(|session| session.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec![
+            "5e551011-0000-4000-8000-000000000001",
+            "5e551011-0000-4000-8000-000000000002"
+        ]
+    );
+    let request = the_request(&backend);
+    assert_eq!(request.method, reqwest::Method::GET);
+    assert_eq!(request.url.path(), "/v1/sessions");
 }
 
 #[tokio::test]
