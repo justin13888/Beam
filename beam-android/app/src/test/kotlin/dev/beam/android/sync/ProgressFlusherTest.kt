@@ -91,6 +91,36 @@ class ProgressFlusherTest {
         }
 
     @Test
+    fun a_drain_that_throws_is_retried_on_the_backoff_with_no_trigger() =
+        runTest {
+            val servers = FakeServerRepository(listOf(Fixtures.server(id = "home", isActive = true)))
+            val playback =
+                FakePlaybackRepository().apply {
+                    pending = 1u
+                    failWith = BeamException.Storage("the queue is locked")
+                }
+            val network = Network(initial = true)
+            backgroundScope.launch { ProgressFlusher(servers, playback, network).run() }
+
+            testScheduler.runCurrent()
+            assertEquals(1, playback.flushCalls)
+
+            testScheduler.advanceTimeBy(1.seconds)
+            testScheduler.runCurrent()
+            assertEquals("no retry before the first backoff step", 1, playback.flushCalls)
+
+            playback.failWith = null
+            testScheduler.advanceTimeBy(1.seconds)
+            testScheduler.runCurrent()
+            assertEquals("a thrown drain is retried 2 s later with no network change", 2, playback.flushCalls)
+            assertEquals(0u, playback.pending)
+
+            testScheduler.advanceTimeBy(1.hours)
+            testScheduler.runCurrent()
+            assertEquals("the drained queue is not asked again", 2, playback.flushCalls)
+        }
+
+    @Test
     fun a_server_that_recovers_while_the_device_stays_online_gets_the_queue_on_the_backoff() =
         runTest {
             val servers = FakeServerRepository(listOf(Fixtures.server(id = "home", isActive = true)))
