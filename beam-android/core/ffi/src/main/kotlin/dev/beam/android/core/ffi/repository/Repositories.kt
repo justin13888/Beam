@@ -199,6 +199,13 @@ public interface PlaybackRepository {
      * how many landed.
      */
     public suspend fun flushProgress(): UInt
+
+    /**
+     * How many positions are still queued for the active server. A drain
+     * stops at the first failed send, so this -- not [flushProgress]'s count
+     * -- is what says whether anything is left to retry.
+     */
+    public suspend fun pendingProgressCount(): UInt
 }
 
 /**
