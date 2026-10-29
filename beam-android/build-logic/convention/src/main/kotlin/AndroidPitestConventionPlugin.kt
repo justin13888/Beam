@@ -44,8 +44,11 @@ class AndroidPitestConventionPlugin : Plugin<Project> {
                         "uniffi.*",
                         // Hilt and Dagger output: components, factories,
                         // injectors and the aggregated-deps markers. None of it
-                        // is written by hand, and the @Module classes under
-                        // `di` packages only bind the real implementations.
+                        // is written by hand. The hand-written @Module classes
+                        // under `di` packages stay targets: they carry real
+                        // decisions (ExoPlayer's decoder fallback, the image
+                        // loader's signed-out path), and only the factories
+                        // Dagger generates from them are excluded here.
                         "hilt_aggregated_deps.*",
                         "dagger.*",
                         "*.Hilt_*",
@@ -55,7 +58,6 @@ class AndroidPitestConventionPlugin : Plugin<Project> {
                         "*_GeneratedInjector",
                         "*_Factory",
                         "*_MembersInjector",
-                        "dev.beam.android.*.di.*",
                         // Test scaffolding. :core:testing's fakes are on every
                         // feature's test classpath and match the target glob,
                         // but they are doubles -- never the subject (see
