@@ -210,12 +210,7 @@ public class BeamDownloadManager internal constructor(
                     context,
                     StandaloneDatabaseProvider(context),
                     cache,
-                    beamDataSourceFactory(
-                        context,
-                        clients,
-                        server.headers,
-                        server.trustedFingerprints,
-                    ),
+                    beamDataSourceFactory(context, clients, server),
                     Executors.newFixedThreadPool(PARALLEL_DOWNLOADS),
                 ).apply {
                     maxParallelDownloads = PARALLEL_DOWNLOADS

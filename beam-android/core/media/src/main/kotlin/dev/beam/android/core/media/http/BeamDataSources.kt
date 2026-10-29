@@ -11,8 +11,10 @@ import android.content.Context
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DefaultDataSource
+import androidx.media3.datasource.HttpDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import okhttp3.OkHttpClient
+import uniffi.beam_client_core.ServerHttpConfig
 import java.util.concurrent.TimeUnit
 
 /**
@@ -32,12 +34,20 @@ import java.util.concurrent.TimeUnit
  */
 internal class BeamHttpClientFactory(
     private val shared: OkHttpClient,
+    private val pins: PinnedCertificatePolicy = CorePinnedCertificatePolicy,
 ) {
-    fun trusting(fingerprints: List<String>): OkHttpClient {
+    /**
+     * A client that also accepts the certificates the user pinned for [host],
+     * on connections to [host] alone.
+     */
+    fun trusting(
+        fingerprints: List<String>,
+        host: String,
+    ): OkHttpClient {
         if (fingerprints.isEmpty()) return shared
 
         val platform = TofuTrustManager.platformTrustManager()
-        val manager = TofuTrustManager(platform, fingerprints)
+        val manager = TofuTrustManager(platform, fingerprints, host, pins)
         return shared
             .newBuilder()
             .sslSocketFactory(TofuTrustManager.socketFactory(manager), manager)
@@ -71,19 +81,27 @@ internal class BeamHttpClientFactory(
  * resolve too -- without it, a completed download would be unplayable, because
  * an HTTP-only factory cannot open a local file.
  *
- * Takes the credential and trust decision rather than a whole config, because
- * downloads and playback need the same factory built from different shapes:
- * a download manager is constructed once, before any file is chosen.
+ * Takes the server's config rather than one file's, because downloads and
+ * playback share it: a download manager is constructed once, before any file
+ * is chosen.
  */
 internal fun beamDataSourceFactory(
     context: Context,
     clients: BeamHttpClientFactory,
-    headers: Map<String, String>,
-    trustedFingerprints: List<String>,
-): DataSource.Factory {
-    val http =
-        OkHttpDataSource
-            .Factory(clients.trusting(trustedFingerprints))
-            .setDefaultRequestProperties(headers)
-    return DefaultDataSource.Factory(context, http)
-}
+    server: ServerHttpConfig,
+): DataSource.Factory = DefaultDataSource.Factory(context, beamHttpDataSourceFactory(clients, server))
+
+/**
+ * The HTTP half of [beamDataSourceFactory]: requests go out through a
+ * [ServerCallFactory], so the session and the pins apply on [server]'s origin
+ * and nowhere else.
+ *
+ * Not `setDefaultRequestProperties`: those headers go on every request the
+ * data source makes, to whatever host a media URL or a redirect names. The
+ * cookie is a bearer credential, so it is attached per hop, and only on hops
+ * to the server's own origin.
+ */
+internal fun beamHttpDataSourceFactory(
+    clients: BeamHttpClientFactory,
+    server: ServerHttpConfig,
+): HttpDataSource.Factory = OkHttpDataSource.Factory(ServerCallFactory(clients) { server })

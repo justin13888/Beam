@@ -74,6 +74,9 @@ class BeamImageLoaderTest {
     /** What the core reports: the active server and its session, or none. */
     private var active: ServerHttpConfig? = null
 
+    /** The core's pin rule, answering yes: what is asked of it is the point. */
+    private val pins = RecordingPinPolicy(accepts = true)
+
     private lateinit var loader: ImageLoader
 
     @Before
@@ -90,7 +93,7 @@ class BeamImageLoaderTest {
         loader =
             BeamImageLoader.build(
                 context = context,
-                calls = ServerCallFactory(BeamHttpClientFactory(BeamHttpClientFactory.shared())) { active },
+                calls = ServerCallFactory(BeamHttpClientFactory(BeamHttpClientFactory.shared(), pins)) { active },
                 diskCacheDirectory = temp.newFolder("artwork"),
             )
     }
@@ -204,11 +207,17 @@ class BeamImageLoaderTest {
             )
             secure.dispatcher = BeamServer()
             secure.start(InetAddress.getByName(SERVER_HOST), 0)
-            signIn(server = secure, trustedFingerprints = listOf(fingerprintOf(certificate.certificate)))
+            signIn(server = secure, trustedFingerprints = listOf(PINNED))
 
             val result = render(secure.url("/v1/artwork/media/m1/poster"))
 
             assertTrue("rendered, got $result", result is SuccessResult)
+            // The core was asked about this server's certificate, for this
+            // server's host, with the pins the core handed over.
+            val asked = pins.asked.first()
+            assertTrue(asked.der.contentEquals(certificate.certificate.encoded))
+            assertEquals(SERVER_HOST, asked.host)
+            assertEquals(listOf(PINNED), asked.trustedFingerprints)
         }
 
     private fun signIn(
@@ -283,6 +292,7 @@ class BeamImageLoaderTest {
 
     private companion object {
         const val SESSION = "beam_session=s3cret"
+        const val PINNED = "AB:CD:EF"
         const val TIMEOUT_SECONDS = 5L
 
         const val SERVER_HOST = "localhost"

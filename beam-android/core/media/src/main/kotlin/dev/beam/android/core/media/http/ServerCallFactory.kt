@@ -49,7 +49,7 @@ public class ServerCallFactory internal constructor(
         val config = server()
         val origin = config?.let { it.baseUrl.toHttpUrlOrNull() }
         if (config == null || origin == null || !request.url.sameOrigin(origin)) {
-            return clients.trusting(emptyList()).newCall(request)
+            return clients.trusting(emptyList(), host = "").newCall(request)
         }
         return clientFor(config, origin).newCall(request)
     }
@@ -61,7 +61,10 @@ public class ServerCallFactory internal constructor(
         authenticated?.let { (cachedConfig, client) -> if (cachedConfig == config) return client }
         val client =
             clients
-                .trusting(config.trustedFingerprints)
+                // The pins hold only on connections to the host the core
+                // recorded them for, so a redirect that leaves the server
+                // meets the platform's verdict alone.
+                .trusting(config.trustedFingerprints, config.host)
                 .newBuilder()
                 .addNetworkInterceptor(CredentialInterceptor(origin, config.headers))
                 .build()
