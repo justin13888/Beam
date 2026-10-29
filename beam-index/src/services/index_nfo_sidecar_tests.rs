@@ -9,6 +9,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 
 use super::*;
+use crate::library_file::test_support::snapshot;
 use crate::probe::metadata::{ChapterMetadata, MetadataError};
 use crate::services::admin_log::LocalAdminLogService;
 use crate::services::hash::{HashService, LocalHashService, MockHashService};
@@ -1512,27 +1513,6 @@ async fn a_rescan_writes_nothing_for_a_subtitle_with_a_sub_microsecond_mtime() {
         rows[0].updated_at, marker,
         "the unchanged row is not rewritten"
     );
-}
-
-/// Every regular file under `root`, with its bytes, modification time and
-/// permissions; and every directory, with its modification time.
-fn snapshot(root: &Path) -> Vec<(PathBuf, Option<Vec<u8>>, std::time::SystemTime, bool)> {
-    let mut entries: Vec<_> = walkdir::WalkDir::new(root)
-        .into_iter()
-        .map(|entry| {
-            let entry = entry.unwrap();
-            let meta = std::fs::symlink_metadata(entry.path()).unwrap();
-            let bytes = meta.is_file().then(|| std::fs::read(entry.path()).unwrap());
-            (
-                entry.path().to_path_buf(),
-                bytes,
-                meta.modified().unwrap(),
-                meta.permissions().readonly(),
-            )
-        })
-        .collect();
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
-    entries
 }
 
 /// A library with everything the scan reads beside the media.
