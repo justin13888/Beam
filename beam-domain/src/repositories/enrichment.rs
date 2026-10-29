@@ -44,13 +44,15 @@ pub trait EnrichmentStateRepository: Send + Sync + std::fmt::Debug {
 
     /// Record a transient failure and schedule the next attempt. The row
     /// stays `Pending`; only exhausted attempts (decided by the caller)
-    /// terminate into `mark_failed`.
+    /// terminate into `mark_failed`. The row's change is stamped at `now`,
+    /// as every other status change is.
     async fn mark_retrying(
         &self,
         id: Uuid,
         error: &str,
         attempts: u32,
         next_attempt_at: DateTime<Utc>,
+        now: DateTime<Utc>,
     ) -> Result<(), DbErr>;
 
     /// Terminal failure: attempts exhausted.
@@ -249,13 +251,14 @@ pub mod in_memory {
             error: &str,
             attempts: u32,
             next_attempt_at: DateTime<Utc>,
+            now: DateTime<Utc>,
         ) -> Result<(), DbErr> {
             if let Some(row) = self.rows.write().get_mut(&id) {
                 row.status = EnrichmentStatus::Pending;
                 row.attempts = attempts;
                 row.next_attempt_at = Some(next_attempt_at);
                 row.last_error = Some(error.to_string());
-                row.updated_at = Utc::now();
+                row.updated_at = now;
             }
             Ok(())
         }

@@ -901,7 +901,8 @@ impl MetadataEnrichmentService {
         match err {
             EnrichmentError::RateLimited { retry_after } => {
                 let delay = retry_after.unwrap_or(Duration::from_secs(60));
-                let next_attempt_at = self.clock.now()
+                let now = self.clock.now();
+                let next_attempt_at = now
                     + chrono::Duration::from_std(delay).unwrap_or(chrono::Duration::seconds(60));
                 let _ = self
                     .state_repo
@@ -910,6 +911,7 @@ impl MetadataEnrichmentService {
                         "rate limited by provider",
                         row.attempts,
                         next_attempt_at,
+                        now,
                     )
                     .await;
                 ProcessOutcome::RateLimited
@@ -948,11 +950,12 @@ impl MetadataEnrichmentService {
             };
         }
         let delay = self.policy.backoff_for(attempts);
-        let next_attempt_at = self.clock.now()
-            + chrono::Duration::from_std(delay).unwrap_or(chrono::Duration::seconds(60));
+        let now = self.clock.now();
+        let next_attempt_at =
+            now + chrono::Duration::from_std(delay).unwrap_or(chrono::Duration::seconds(60));
         let _ = self
             .state_repo
-            .mark_retrying(row.id, reason, attempts, next_attempt_at)
+            .mark_retrying(row.id, reason, attempts, next_attempt_at, now)
             .await;
         ProcessOutcome::Retrying
     }

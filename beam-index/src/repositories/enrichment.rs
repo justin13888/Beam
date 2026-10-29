@@ -260,6 +260,7 @@ impl EnrichmentStateRepository for SqlEnrichmentStateRepository {
         error: &str,
         attempts: u32,
         next_attempt_at: DateTime<Utc>,
+        now: DateTime<Utc>,
     ) -> Result<(), DbErr> {
         use beam_entity::metadata_enrichment;
         use sea_orm::{ActiveModelTrait, EntityTrait, Set};
@@ -273,7 +274,7 @@ impl EnrichmentStateRepository for SqlEnrichmentStateRepository {
             active.attempts = Set(attempts as i32);
             active.next_attempt_at = Set(Some(next_attempt_at.into()));
             active.last_error = Set(Some(error.to_string()));
-            active.updated_at = Set(Utc::now().into());
+            active.updated_at = Set(now.into());
             active.update(self.db.as_ref()).await?;
         }
         Ok(())
