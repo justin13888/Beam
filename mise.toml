@@ -2105,6 +2105,21 @@ depends = ["android:sdk"]
 # libraries.
 run = "cd beam-android && exec ./gradlew assembleRelease"
 
+[tasks."android:mutants"]
+description = "Mutation-test the Android modules with PIT (advisory; outside ci)"
+depends = ["android:sdk"]
+# The Android counterpart of `rust:mutants*` (ADR-0011), and advisory for the
+# same reason: it is deliberately absent from `ci`'s depends list, and the
+# Mutants workflow runs it `continue-on-error`. A surviving mutant is a prompt
+# to harden the code, never a broken build.
+#
+# `pitestDebug` runs in every module that applies `beam.android.pitest` -- the
+# app, :core:ffi, :core:media and every :feature:* module -- over the debug
+# variant, the one the other unit-test gates use. That convention plugin is
+# where the exclusions live (UniFFI bindings, Hilt output, :core:testing's
+# fakes). Each module's report lands in build/reports/pitest/.
+run = "cd beam-android && exec ./gradlew pitestDebug"
+
 # ---------------------------------------------------------------------------
 # Apple client (#66, ADR-0013)
 #
