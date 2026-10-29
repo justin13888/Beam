@@ -793,9 +793,11 @@ mod enrichment {
         assert_filters(&sql[0], "metadata_enrichment", "next_attempt_at", "IS NULL");
         assert_filters(&sql[0], "metadata_enrichment", "next_attempt_at", "<=");
         assert_contains(&sql[0], " OR ");
+        // Never-attempted rows first: Postgres would otherwise put the NULLs
+        // last and diverge from the in-memory double under a limit.
         assert_contains(
             &sql[0],
-            r#"ORDER BY "metadata_enrichment"."next_attempt_at" ASC"#,
+            r#"ORDER BY "metadata_enrichment"."next_attempt_at" ASC NULLS FIRST, "metadata_enrichment"."id" ASC"#,
         );
         assert_bound(&sql[0], "25");
     }

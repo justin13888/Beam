@@ -170,6 +170,7 @@ impl EnrichmentStateRepository for SqlEnrichmentStateRepository {
         limit: u32,
     ) -> Result<Vec<EnrichmentState>, DbErr> {
         use beam_entity::metadata_enrichment;
+        use sea_orm::sea_query::NullOrdering;
         use sea_orm::{
             ColumnTrait, Condition, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect,
         };
@@ -184,7 +185,16 @@ impl EnrichmentStateRepository for SqlEnrichmentStateRepository {
                     .add(metadata_enrichment::Column::NextAttemptAt.is_null())
                     .add(metadata_enrichment::Column::NextAttemptAt.lte(now)),
             )
-            .order_by(metadata_enrichment::Column::NextAttemptAt, Order::Asc)
+            // Never-attempted rows first -- Postgres puts NULLs last in an
+            // ascending order unless told otherwise -- then the oldest retry,
+            // and the id settles a tie, so a limited batch is the same rows
+            // here and in the in-memory double.
+            .order_by_with_nulls(
+                metadata_enrichment::Column::NextAttemptAt,
+                Order::Asc,
+                NullOrdering::First,
+            )
+            .order_by(metadata_enrichment::Column::Id, Order::Asc)
             .limit(limit as u64)
             .all(self.db.as_ref())
             .await?;

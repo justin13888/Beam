@@ -15,7 +15,10 @@ pub trait EnrichmentStateRepository: Send + Sync + std::fmt::Debug {
     /// exists, regardless of its current status).
     async fn ensure_pending(&self, target: EnrichmentTargetId) -> Result<(), DbErr>;
 
-    /// Fetch up to `limit` rows that are due for (re-)enrichment as of `now`.
+    /// Fetch up to `limit` `Pending` rows that are due for (re-)enrichment as
+    /// of `now`: never-attempted rows first, then by earliest
+    /// `next_attempt_at`, ties broken by id -- so a limited batch is the same
+    /// rows whichever store answers.
     async fn fetch_due(
         &self,
         now: DateTime<Utc>,
@@ -186,7 +189,8 @@ pub mod in_memory {
                 .filter(|r| r.next_attempt_at.is_none_or(|t| t <= now))
                 .cloned()
                 .collect();
-            due.sort_by_key(|r| r.next_attempt_at);
+            // `None` sorts first, as `NULLS FIRST` does in the SQL store.
+            due.sort_by_key(|r| (r.next_attempt_at, r.id));
             due.truncate(limit as usize);
             Ok(due)
         }

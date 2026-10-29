@@ -129,6 +129,13 @@ pub fn score(
     }
 }
 
+/// A provider's popularity as the ranking reads it: a missing or non-finite
+/// one (`NaN`, an infinity) counts as no popularity at all, so a malformed
+/// figure neither panics the ranking nor outranks every real one.
+fn ranked_popularity(popularity: Option<f64>) -> f64 {
+    popularity.filter(|value| value.is_finite()).unwrap_or(0.0)
+}
+
 /// Picks the best-scoring hit that clears both accept thresholds, breaking
 /// ties by: score, then exact title match, then exact year, then popularity,
 /// then provider list order (earlier providers are queried first by the
@@ -153,11 +160,14 @@ pub fn best_movie_match<'a>(
             )
         })
         .filter(|(_, s)| s.accepted(min_confidence))
+        // `max_by` answers the *last* of equal maxima; walking the hits
+        // backwards makes that the earliest, so a full tie goes to the
+        // earlier provider.
+        .rev()
         .max_by(|(a_hit, a_score), (b_hit, b_score)| {
             a_score
                 .total_score
-                .partial_cmp(&b_score.total_score)
-                .unwrap()
+                .total_cmp(&b_score.total_score)
                 .then_with(|| {
                     let a_exact =
                         is_exact_title(query_title, &a_hit.title, a_hit.original_title.as_deref());
@@ -171,11 +181,8 @@ pub fn best_movie_match<'a>(
                     a_year_exact.cmp(&b_year_exact)
                 })
                 .then_with(|| {
-                    a_hit
-                        .popularity
-                        .unwrap_or(0.0)
-                        .partial_cmp(&b_hit.popularity.unwrap_or(0.0))
-                        .unwrap()
+                    ranked_popularity(a_hit.popularity)
+                        .total_cmp(&ranked_popularity(b_hit.popularity))
                 })
         })
 }
@@ -201,11 +208,14 @@ pub fn best_show_match<'a>(
             )
         })
         .filter(|(_, s)| s.accepted(min_confidence))
+        // `max_by` answers the *last* of equal maxima; walking the hits
+        // backwards makes that the earliest, so a full tie goes to the
+        // earlier provider.
+        .rev()
         .max_by(|(a_hit, a_score), (b_hit, b_score)| {
             a_score
                 .total_score
-                .partial_cmp(&b_score.total_score)
-                .unwrap()
+                .total_cmp(&b_score.total_score)
                 .then_with(|| {
                     let a_exact =
                         is_exact_title(query_title, &a_hit.title, a_hit.original_title.as_deref());
@@ -219,11 +229,8 @@ pub fn best_show_match<'a>(
                     a_year_exact.cmp(&b_year_exact)
                 })
                 .then_with(|| {
-                    a_hit
-                        .popularity
-                        .unwrap_or(0.0)
-                        .partial_cmp(&b_hit.popularity.unwrap_or(0.0))
-                        .unwrap()
+                    ranked_popularity(a_hit.popularity)
+                        .total_cmp(&ranked_popularity(b_hit.popularity))
                 })
         })
 }
@@ -251,7 +258,7 @@ pub fn top_movie_candidates(
             )
         })
         .collect();
-    scored.sort_by(|a, b| b.1.total_score.partial_cmp(&a.1.total_score).unwrap());
+    scored.sort_by(|a, b| b.1.total_score.total_cmp(&a.1.total_score));
     scored.truncate(n);
     scored
 }
@@ -279,7 +286,7 @@ pub fn top_show_candidates(
             )
         })
         .collect();
-    scored.sort_by(|a, b| b.1.total_score.partial_cmp(&a.1.total_score).unwrap());
+    scored.sort_by(|a, b| b.1.total_score.total_cmp(&a.1.total_score));
     scored.truncate(n);
     scored
 }
@@ -494,6 +501,69 @@ mod tests {
         let top = top_show_candidates("Arcane", Some(2021), &hits, 5);
         assert_eq!(top.len(), 2);
         assert!(top[0].1.total_score >= top[1].1.total_score);
+    }
+
+    #[test]
+    fn an_earlier_provider_wins_a_full_tie() {
+        // The same title, year and popularity from two providers, in the
+        // order the composite asks them: nothing separates them but that
+        // order, and the earlier one is the one stored.
+        let mut movies = vec![hit("Arrival", Some(2016)), hit("Arrival", Some(2016))];
+        movies[0].external_ref = ExternalMediaRef::new("tmdb", "329865");
+        movies[1].external_ref = ExternalMediaRef::new("tvdb", "1105");
+        let (best, _) = best_movie_match("Arrival", Some(2016), &movies, DEFAULT_MIN_CONFIDENCE)
+            .expect("both hits clear the bar");
+        assert_eq!(best.external_ref.as_str(), "tmdb:329865");
+
+        movies.reverse();
+        let (best, _) = best_movie_match("Arrival", Some(2016), &movies, DEFAULT_MIN_CONFIDENCE)
+            .expect("both hits clear the bar");
+        assert_eq!(best.external_ref.as_str(), "tvdb:1105");
+
+        let mut shows = vec![
+            show_hit("Frieren", Some(2023)),
+            show_hit("Frieren", Some(2023)),
+        ];
+        shows[0].external_ref = ExternalMediaRef::new("tmdb", "209867");
+        shows[1].external_ref = ExternalMediaRef::new("tvdb", "424536");
+        let (best, _) = best_show_match("Frieren", Some(2023), &shows, DEFAULT_MIN_CONFIDENCE)
+            .expect("both hits clear the bar");
+        assert_eq!(best.external_ref.as_str(), "tmdb:209867");
+
+        shows.reverse();
+        let (best, _) = best_show_match("Frieren", Some(2023), &shows, DEFAULT_MIN_CONFIDENCE)
+            .expect("both hits clear the bar");
+        assert_eq!(best.external_ref.as_str(), "tvdb:424536");
+    }
+
+    #[test]
+    fn a_nan_popularity_does_not_panic_the_ranking() {
+        // Otherwise tied hits, so popularity is what decides: a `NaN` (or
+        // an infinity) counts as no popularity, and loses to a real one
+        // wherever it sits in the list.
+        for malformed in [f64::NAN, f64::INFINITY] {
+            let mut movies = vec![hit("Arrival", Some(2016)), hit("Arrival", Some(2016))];
+            movies[0].external_ref = ExternalMediaRef::new("tmdb", "1");
+            movies[0].popularity = Some(malformed);
+            movies[1].external_ref = ExternalMediaRef::new("tvdb", "2");
+            movies[1].popularity = Some(12.5);
+            let (best, _) =
+                best_movie_match("Arrival", Some(2016), &movies, DEFAULT_MIN_CONFIDENCE)
+                    .expect("both hits clear the bar");
+            assert_eq!(best.external_ref.as_str(), "tvdb:2");
+
+            let mut shows = vec![
+                show_hit("Frieren", Some(2023)),
+                show_hit("Frieren", Some(2023)),
+            ];
+            shows[0].external_ref = ExternalMediaRef::new("tmdb", "1");
+            shows[0].popularity = Some(3.0);
+            shows[1].external_ref = ExternalMediaRef::new("tvdb", "2");
+            shows[1].popularity = Some(malformed);
+            let (best, _) = best_show_match("Frieren", Some(2023), &shows, DEFAULT_MIN_CONFIDENCE)
+                .expect("both hits clear the bar");
+            assert_eq!(best.external_ref.as_str(), "tmdb:1");
+        }
     }
 
     mod absolute_order {

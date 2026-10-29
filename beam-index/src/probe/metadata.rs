@@ -30,17 +30,26 @@ fn into_rational(r: ffmpeg::Rational) -> Result<Rational, (i32, i32)> {
     Ok(Ratio::new(numer, denom))
 }
 
+/// Parse duration strings like "00:45:23.000000000" to seconds. A negative,
+/// `NaN` or infinite component -- `f64::parse` accepts all three -- or a
+/// total that overflows to infinity is malformed, and reads as no duration
+/// like any other unparseable tag.
 fn parse_duration_string(duration_str: &str) -> Option<f64> {
-    // Parse duration strings like "00:45:23.000000000"
+    let component = |part: &str| {
+        part.parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite() && *value >= 0.0)
+    };
     let parts: Vec<&str> = duration_str.split(':').collect();
     if parts.len() == 3
-        && let (Ok(hours), Ok(minutes), Ok(seconds)) = (
-            parts[0].parse::<f64>(),
-            parts[1].parse::<f64>(),
-            parts[2].parse::<f64>(),
+        && let (Some(hours), Some(minutes), Some(seconds)) = (
+            component(parts[0]),
+            component(parts[1]),
+            component(parts[2]),
         )
     {
-        return Some(hours * 3600.0 + minutes * 60.0 + seconds);
+        let total = hours * 3600.0 + minutes * 60.0 + seconds;
+        return total.is_finite().then_some(total);
     }
     None
 }
@@ -982,6 +991,54 @@ mod tests {
             ] {
                 assert_eq!(parse_duration_string(bad), None, "for {bad:?}");
             }
+        }
+
+        #[test]
+        fn a_negative_or_non_finite_duration_is_rejected() {
+            for bad in [
+                "-01:00:00",
+                "00:-05:00",
+                "00:00:-1.5",
+                "NaN:00:00",
+                "00:nan:00",
+                "00:00:inf",
+                "-inf:00:00",
+                "00:00:infinity",
+                // Finite components whose total overflows.
+                "1e308:00:00",
+            ] {
+                assert_eq!(parse_duration_string(bad), None, "for {bad:?}");
+            }
+        }
+
+        proptest::proptest! {
+            #[test]
+            fn a_parsed_duration_is_finite_and_never_negative(
+                hours in component(),
+                minutes in component(),
+                seconds in component(),
+            ) {
+                let tag = format!("{hours}:{minutes}:{seconds}");
+                if let Some(duration) = parse_duration_string(&tag) {
+                    proptest::prop_assert!(
+                        duration.is_finite() && duration >= 0.0,
+                        "{tag:?} parsed to {duration}"
+                    );
+                }
+            }
+        }
+
+        /// One component of a duration tag: well-formed, negative, any
+        /// float `f64` prints (`NaN`, `inf` and huge ones included), or the
+        /// spellings `f64::parse` accepts beyond `Display`'s.
+        fn component() -> impl proptest::strategy::Strategy<Value = String> {
+            use proptest::prelude::*;
+            prop_oneof![
+                (0u32..100).prop_map(|value| format!("{value:02}")),
+                any::<f64>().prop_map(|value| value.to_string()),
+                prop::sample::select(vec!["NaN", "nan", "inf", "-inf", "infinity", "-0", "1e308"])
+                    .prop_map(str::to_string),
+            ]
         }
     }
 
