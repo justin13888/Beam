@@ -841,6 +841,92 @@ async fn a_database_failure_reading_a_title_is_a_500_not_a_404() {
         .assert_problem_type("https://beam.justinchung.net/reference/errors/#internal");
 }
 
+/// NFR-108: a 500's `detail` is one fixed sentence, never its cause. The
+/// cause -- here a database driver's message -- goes to the log instead, so
+/// the operator still sees what failed.
+#[tokio::test]
+async fn an_internal_failure_never_echoes_its_cause() {
+    const CAUSE: &str = "connection to 10.0.0.7:5432 reset by peer";
+    fn failing<T>() -> Result<T, sea_orm::DbErr> {
+        Err(sea_orm::DbErr::Custom(CAUSE.to_string()))
+    }
+
+    let library = Library::new();
+    let mut catalog = beam_domain::repositories::catalog::MockCatalogRepository::new();
+    catalog.expect_browse().returning(|_| failing());
+    let browse = signed_in_to(real_service_over(
+        &library,
+        Arc::new(catalog),
+        library.movies.clone(),
+    ))
+    .await;
+
+    let library = Library::new();
+    let mut movies = beam_domain::repositories::movie::MockMovieRepository::new();
+    movies.expect_find_by_id().returning(|_| failing());
+    let read = signed_in_to(real_service_over(
+        &library,
+        Arc::new(beam_domain::repositories::catalog::MockCatalogRepository::new()),
+        Arc::new(movies),
+    ))
+    .await;
+
+    let logs: Arc<std::sync::Mutex<Vec<u8>>> = Arc::default();
+    let _subscriber = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer({
+                let logs = logs.clone();
+                move || LogWriter(logs.clone())
+            })
+            .finish(),
+    );
+
+    for (route, (client, token), path) in [
+        ("browse", browse, "/v1/media".to_owned()),
+        ("title", read, format!("/v1/media/{MOVIE_ID}")),
+    ] {
+        logs.lock().unwrap().clear();
+        let response = client
+            .get(&path)
+            .cookie("beam_session", &token)
+            .send()
+            .await;
+        response
+            .assert_status(StatusCode::INTERNAL_SERVER_ERROR)
+            .assert_problem_type("https://beam.justinchung.net/reference/errors/#internal");
+        let body = response.json::<serde_json::Value>();
+        assert_eq!(
+            body["detail"],
+            crate::routes::api_error::INTERNAL_DETAIL,
+            "{route}"
+        );
+        assert!(
+            !body.to_string().contains("10.0.0.7"),
+            "{route}: the cause reached the wire: {body}"
+        );
+        let logged = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
+        assert!(
+            logged.contains(CAUSE),
+            "{route}: the cause is logged for the operator: {logged}"
+        );
+    }
+}
+
+/// A `tracing` writer appending to a shared buffer.
+struct LogWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// What a browse tile needs of a show is on the wire: genres, rating,
 /// identifiers and counts -- read from the JSON itself, so a field the server
 /// computes but never serializes still fails.
