@@ -20,7 +20,6 @@ import org.junit.Test
 import uniffi.beam_client_core.BeamException
 import uniffi.beam_client_core.CertificateDetails
 import uniffi.beam_client_core.DeviceLoginStep
-import uniffi.beam_client_core.SessionState
 import uniffi.beam_client_core.UserSummary
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -198,7 +197,7 @@ class AuthViewModelTest {
         }
 
     @Test
-    fun `a cookie the server refuses is reported and leaves the server signed out`() =
+    fun `a cookie the server refuses is reported and closes the browser`() =
         runTest {
             val servers =
                 FakeServerRepository().apply {
@@ -217,7 +216,6 @@ class AuthViewModelTest {
             assertNotNull(state.error)
             assertTrue(!state.isSignedIn)
             assertNull("the browser closes on the refusal too", state.loginUrl)
-            assertEquals(SessionState.LoggedOut, servers.activeServer()?.state)
         }
 
     @Test

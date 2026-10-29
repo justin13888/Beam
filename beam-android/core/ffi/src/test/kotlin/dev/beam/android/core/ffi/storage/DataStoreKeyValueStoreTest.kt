@@ -69,19 +69,26 @@ class DataStoreKeyValueStoreTest : KeyValueStoreContract() {
             // what a new lock screen or a restore onto another phone leaves.
             // Each one is a session to sign in again, never a crash.
             val dataStore = files.open()
-            val store = DataStoreKeyValueStore(dataStore, softwareCipher())
+            val cipher = softwareCipher()
+            val store = DataStoreKeyValueStore(dataStore, cipher)
             val otherKey = softwareCipher().encrypt("cookie")
-            val stored =
+            val corrupt =
                 mapOf(
                     "garbage" to "not base64 at all!",
                     "short" to "AAAA",
                     "rekeyed" to otherKey,
                 )
+            // The positive control, written under the same key name: were the
+            // store to read secrets from anywhere else, every entry above
+            // would read as absent for the wrong reason, and this one would
+            // fail.
+            val valid = "valid" to cipher.encrypt("cookie")
             dataStore.edit { preferences ->
-                stored.forEach { (name, value) -> preferences[stringPreferencesKey("secret:$name")] = value }
+                (corrupt + valid).forEach { (name, value) -> preferences[stringPreferencesKey("secret:$name")] = value }
             }
 
-            for (name in stored.keys) {
+            assertEquals("a valid ciphertext written the same way decrypts", "cookie", store.getSecret(valid.first))
+            for (name in corrupt.keys) {
                 assertNull("$name reads as absent", store.getSecret(name))
             }
         }
