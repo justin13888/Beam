@@ -611,6 +611,7 @@ dependencies = [
  "http",
  "matroska-demuxer",
  "mutants",
+ "proptest",
  "rcgen",
  "reqwest 0.12.28",
  "rustls",

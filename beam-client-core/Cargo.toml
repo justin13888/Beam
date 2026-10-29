@@ -103,6 +103,9 @@ features = [
 spargen = "0.5.0"
 
 [dev-dependencies]
+# The invariants the crate's docs state (bounds, idempotence, never-panics on
+# untrusted bytes), checked over generated inputs rather than a few examples.
+proptest = "1.11.0"
 # Real certificates, so the trust tests exercise the actual DER parsing and
 # digest rather than a hand-built struct that cannot disagree with reality.
 rcgen = "0.14.10"
