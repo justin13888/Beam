@@ -395,8 +395,6 @@ async fn a_held_sample_is_throttled_at_the_facade() {
     assert_eq!(json_body(&sent[1])["duration_secs"], 7200.0);
 }
 
-// -- characterization: transport failures through the façade ---------
-
 #[tokio::test]
 async fn an_unreachable_server_queues_progress_and_reports_network() {
     let (client, id, storage, _clock) = clocked_client().await;

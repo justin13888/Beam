@@ -1,8 +1,6 @@
 use super::*;
 use crate::telemetry::{StartFailureCause, SwitchTrigger, TelemetryFlush};
 
-// -- playback telemetry -----------------------------------------------
-
 const TELEMETRY_PATH: &str = "/v1/telemetry/playback";
 
 /// A distinct, well-formed file id per `n`.

@@ -1862,7 +1862,7 @@ async fn a_corrupt_record_is_skipped_and_the_other_servers_restore() {
     assert!(restored[0].is_active);
 }
 
-// -- characterization: progress through the façade -------------------
+// -- fixtures: a clocked client, and what it queued and sent ----------
 
 /// A signed-in client over a clock the test moves and a storage it reads.
 async fn clocked_client() -> (
@@ -1894,6 +1894,8 @@ async fn queued(storage: &InMemoryKeyValueStore, server_id: &str) -> Vec<QueuedP
 fn json_body(request: &crate::transport::RecordedRequest) -> serde_json::Value {
     serde_json::from_slice(&request.body).expect("a JSON body")
 }
+
+// -- characterization: transport failures through the façade ---------
 
 #[tokio::test]
 async fn a_malformed_success_body_is_protocol() {

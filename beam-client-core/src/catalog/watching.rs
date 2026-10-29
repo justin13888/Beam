@@ -442,6 +442,46 @@ mod tests {
         assert!(episode.played);
     }
 
+    fn history_connection(total: i64, end_cursor: &str, has_next_page: bool) -> String {
+        format!(
+            r#"{{"items":[{{"file_id":"00000000-0000-0000-0000-0000000000f1",
+                  "media_id":"00000000-0000-0000-0000-0000000000a1","media_type":"movie",
+                  "played":false,"play_count":1,"position_secs":30.0,"duration_secs":120.0,
+                  "last_played_at":"2026-01-01T00:00:00Z","title":"Arrival"}}],
+                "page_info":{{"has_next_page":{has_next_page},"has_previous_page":false,
+                              "end_cursor":"{end_cursor}"}},
+                "total":{total}}}"#
+        )
+    }
+
+    /// A page of history keeps where it ends and whether another follows, so
+    /// the next request asks for the page after this one, and carries its
+    /// rows and the server's total.
+    #[test]
+    fn a_history_page_carries_its_rows_cursor_and_total() {
+        let connection: wire::HistoryConnection =
+            serde_json::from_str(&history_connection(7, "c2", true)).expect("a valid page");
+        let page = HistoryPage::from_generated(connection, &record());
+        assert_eq!(page.total, 7);
+        assert_eq!(page.end_cursor.as_deref(), Some("c2"));
+        assert!(page.has_next_page);
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].progress_fraction, Some(0.25));
+
+        let last: wire::HistoryConnection =
+            serde_json::from_str(&history_connection(7, "c3", false)).expect("a valid page");
+        assert!(!HistoryPage::from_generated(last, &record()).has_next_page);
+    }
+
+    /// The contract's `uint64` reaches the generated client as `i64`; a
+    /// negative total is nonsense and reads as none rather than wrapping.
+    #[test]
+    fn a_negative_history_total_reads_as_zero() {
+        let connection: wire::HistoryConnection =
+            serde_json::from_str(&history_connection(-1, "c2", true)).expect("a valid page");
+        assert_eq!(HistoryPage::from_generated(connection, &record()).total, 0);
+    }
+
     proptest::proptest! {
         /// A progress bar never runs past either end of its track, whatever
         /// position the server holds -- negative after a seek glitch, or past

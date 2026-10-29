@@ -598,6 +598,66 @@ mod tests {
         serde_json::from_str(&json).expect("a valid admin user")
     }
 
+    fn page_info(end_cursor: &str, has_next_page: bool) -> String {
+        format!(
+            r#"{{"has_next_page":{has_next_page},"has_previous_page":true,
+                 "end_cursor":"{end_cursor}"}}"#
+        )
+    }
+
+    /// A page of accounts keeps its cursor and total, and resolves each row
+    /// against the server that served it.
+    #[test]
+    fn a_page_of_accounts_carries_its_rows_cursor_and_total() {
+        let json = format!(
+            r#"{{"items":[{{"id":"00000000-0000-0000-0000-0000000000b1","display_name":"Bea",
+                  "email":null,"avatar_url":"/avatars/b1.png","is_admin":false,
+                  "disabled":true,"created_at":"2026-01-01T00:00:00Z"}}],
+                "page_info":{},"total":12}}"#,
+            page_info("u9", true)
+        );
+        let connection: wire::AdminUserConnection =
+            serde_json::from_str(&json).expect("a valid page");
+        let page = AdminUserPage::from_generated(connection, &record());
+        assert_eq!(page.total, 12);
+        assert_eq!(page.end_cursor.as_deref(), Some("u9"));
+        assert!(page.has_next_page);
+        let user = page.items.first().expect("the page's one account");
+        assert!(user.disabled);
+        assert_eq!(
+            user.avatar_url.as_deref(),
+            Some("https://beam.local:8000/avatars/b1.png")
+        );
+    }
+
+    /// A page of the log keeps its cursor and total; a negative total, which
+    /// the contract's `uint64` cannot mean, reads as none.
+    #[test]
+    fn a_page_of_the_log_carries_its_cursor_and_a_negative_total_reads_as_zero() {
+        let page = |total: i64, has_next_page: bool| {
+            let json = format!(
+                r#"{{"items":[{{"id":"00000000-0000-0000-0000-000000000001","level":"info",
+                      "category":"library_scan","message":"done",
+                      "created_at":"2026-01-01T12:30:00Z"}}],
+                    "page_info":{},"total":{total}}}"#,
+                page_info("l4", has_next_page)
+            );
+            let connection: wire::AdminLogConnection =
+                serde_json::from_str(&json).expect("a valid page");
+            AdminLogPage::from_generated(connection)
+        };
+        let first = page(40, true);
+        assert_eq!(first.total, 40);
+        assert_eq!(first.end_cursor.as_deref(), Some("l4"));
+        assert!(first.has_next_page);
+        assert_eq!(first.items.len(), 1);
+        assert_eq!(first.items[0].message, "done");
+
+        let last = page(-3, false);
+        assert_eq!(last.total, 0);
+        assert!(!last.has_next_page);
+    }
+
     #[test]
     fn an_admin_user_s_avatar_is_resolved_against_the_serving_server() {
         let user = AdminUser::from_generated(admin_user(r#""/avatars/b1.png""#), &record());
