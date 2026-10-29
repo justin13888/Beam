@@ -143,19 +143,82 @@ impl PixelFormat {
         }
     }
 
-    /// Check if this is a hardware-accelerated pixel format
+    /// Check if this is a hardware-accelerated pixel format.
+    ///
+    /// A format Beam does not name is hardware when FFmpeg's own descriptor
+    /// flags it `AV_PIX_FMT_FLAG_HWACCEL` (DRM PRIME, MediaCodec, OpenCL,
+    /// D3D12 and the like), so a GPU surface is never reported as software
+    /// for want of a variant here.
     pub fn is_hardware(&self) -> bool {
-        matches!(
-            self,
+        match self {
             PixelFormat::VAAPI
-                | PixelFormat::DXVA2_VLD
-                | PixelFormat::VDPAU
-                | PixelFormat::VIDEOTOOLBOX
-                | PixelFormat::D3D11
-                | PixelFormat::CUDA
-                | PixelFormat::QSV
-                | PixelFormat::VULKAN
-        )
+            | PixelFormat::DXVA2_VLD
+            | PixelFormat::VDPAU
+            | PixelFormat::VIDEOTOOLBOX
+            | PixelFormat::D3D11
+            | PixelFormat::CUDA
+            | PixelFormat::QSV
+            | PixelFormat::VULKAN => true,
+            PixelFormat::Other(raw) => {
+                // SAFETY: `av_pix_fmt_desc_get` accepts any pixel format
+                // value and returns null for one it does not describe, or a
+                // pointer into FFmpeg's static descriptor table, which lives
+                // as long as the process.
+                let descriptor = unsafe { ffmpeg::ffi::av_pix_fmt_desc_get(*raw).as_ref() };
+                // The flag is a positive `i32` bit (`1 << 3`), so its
+                // magnitude is the bit.
+                let hwaccel = u64::from(ffmpeg::ffi::AV_PIX_FMT_FLAG_HWACCEL.unsigned_abs());
+                descriptor.is_some_and(|descriptor| descriptor.flags & hwaccel != 0)
+            }
+            PixelFormat::YUV420P
+            | PixelFormat::YUV422P
+            | PixelFormat::YUV444P
+            | PixelFormat::YUV410P
+            | PixelFormat::YUV411P
+            | PixelFormat::YUV440P
+            | PixelFormat::YUVJ420P
+            | PixelFormat::YUVJ422P
+            | PixelFormat::YUVJ444P
+            | PixelFormat::YUVJ440P
+            | PixelFormat::NV12
+            | PixelFormat::NV21
+            | PixelFormat::GRAY8
+            | PixelFormat::RGB24
+            | PixelFormat::BGR24
+            | PixelFormat::ARGB
+            | PixelFormat::RGBA
+            | PixelFormat::ABGR
+            | PixelFormat::BGRA
+            | PixelFormat::YUVA420P
+            | PixelFormat::GBRP
+            | PixelFormat::YUV420P9LE
+            | PixelFormat::YUV420P9BE
+            | PixelFormat::YUV422P9LE
+            | PixelFormat::YUV422P9BE
+            | PixelFormat::YUV444P9LE
+            | PixelFormat::YUV444P9BE
+            | PixelFormat::YUV420P10LE
+            | PixelFormat::YUV420P10BE
+            | PixelFormat::YUV422P10LE
+            | PixelFormat::YUV422P10BE
+            | PixelFormat::YUV444P10LE
+            | PixelFormat::YUV444P10BE
+            | PixelFormat::GBRP10LE
+            | PixelFormat::YUV420P12LE
+            | PixelFormat::YUV420P12BE
+            | PixelFormat::YUV422P12LE
+            | PixelFormat::YUV422P12BE
+            | PixelFormat::YUV444P12LE
+            | PixelFormat::YUV444P12BE
+            | PixelFormat::GBRP12LE
+            | PixelFormat::YUV420P16LE
+            | PixelFormat::YUV420P16BE
+            | PixelFormat::YUV422P16LE
+            | PixelFormat::YUV422P16BE
+            | PixelFormat::YUV444P16LE
+            | PixelFormat::YUV444P16BE
+            | PixelFormat::None => false,
+        }
     }
 }
 
@@ -212,6 +275,7 @@ impl From<ffmpeg::format::Pixel> for PixelFormat {
             // Alpha
             ffmpeg::format::Pixel::YUVA420P => PixelFormat::YUVA420P,
             // Hardware
+            ffmpeg::format::Pixel::VAAPI => PixelFormat::VAAPI,
             ffmpeg::format::Pixel::DXVA2_VLD => PixelFormat::DXVA2_VLD,
             ffmpeg::format::Pixel::VDPAU => PixelFormat::VDPAU,
             ffmpeg::format::Pixel::VIDEOTOOLBOX => PixelFormat::VIDEOTOOLBOX,
@@ -764,12 +828,15 @@ mod conversion_tests {
     /// A pixel format's bit depth is the depth FFmpeg's own descriptor gives
     /// its first component -- 8, 9, 10, 12 or 16 bits -- for every software
     /// format Beam names; a hardware surface (`AV_PIX_FMT_FLAG_HWACCEL`) has
-    /// none, and is the only kind counted as hardware. The expectation is
-    /// FFmpeg's, so a format given the wrong depth here is caught however
-    /// the table in [`PixelFormat::bit_depth`] is edited.
+    /// none, and is the only kind counted as hardware -- named or not. Every
+    /// hardware variant Beam names is reached from FFmpeg's value, so none is
+    /// left to fall through to `Other`. The expectation is FFmpeg's, so a
+    /// format given the wrong depth here is caught however the table in
+    /// [`PixelFormat::bit_depth`] is edited.
     #[test]
     fn every_named_pixel_format_has_the_bit_depth_ffmpeg_describes() {
         let mut depths = std::collections::BTreeSet::new();
+        let mut named_hardware = std::collections::HashSet::new();
         for (pixel, descriptor) in every_pixel_format() {
             let format = PixelFormat::from(pixel);
             let hwaccel = u64::try_from(ffmpeg::ffi::AV_PIX_FMT_FLAG_HWACCEL).unwrap();
@@ -782,11 +849,17 @@ mod conversion_tests {
                         "an unnamed format carries its own value"
                     );
                     assert_eq!(format.bit_depth(), None, "{pixel:?}");
+                    assert_eq!(
+                        format.is_hardware(),
+                        hardware,
+                        "{pixel:?} is hardware exactly when FFmpeg flags it HWACCEL"
+                    );
                 }
                 PixelFormat::None => panic!("{pixel:?} is a described format, not none"),
                 named if hardware => {
                     assert!(named.is_hardware(), "{pixel:?}");
                     assert_eq!(named.bit_depth(), None, "{pixel:?}");
+                    named_hardware.insert(named);
                 }
                 named => {
                     let depth = u8::try_from(descriptor.comp[0].depth).unwrap();
@@ -801,6 +874,21 @@ mod conversion_tests {
             [8, 9, 10, 12, 16],
             "every depth Beam names a format at is checked"
         );
+        for hardware in [
+            PixelFormat::VAAPI,
+            PixelFormat::DXVA2_VLD,
+            PixelFormat::VDPAU,
+            PixelFormat::VIDEOTOOLBOX,
+            PixelFormat::D3D11,
+            PixelFormat::CUDA,
+            PixelFormat::QSV,
+            PixelFormat::VULKAN,
+        ] {
+            assert!(
+                named_hardware.contains(&hardware),
+                "no FFmpeg format converts to {hardware:?}"
+            );
+        }
     }
 
     /// No two pixel formats FFmpeg describes convert to one Beam value: a
