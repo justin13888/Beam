@@ -8,6 +8,8 @@
 //! tells the operator exactly what to do about it.
 
 use super::{AudioCodec, DeviceProfile, VideoCodec};
+use crate::error::BeamError;
+use crate::servers::ServerRecord;
 
 /// The core's view of one playable file, normalised from the generated type.
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
@@ -68,6 +70,199 @@ impl MediaSourceView {
     pub fn contains_file(&self, file_id: &str) -> bool {
         self.file_id == file_id || self.parts.iter().any(|part| part.file_id == file_id)
     }
+
+    /// Normalise a generated `MediaSource` into the core's own view, resolving
+    /// its relative URLs against the server that served it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::InvalidServerUrl`] when one of its URLs cannot be
+    /// resolved against `record`'s origin.
+    pub fn from_generated(
+        source: crate::api::types::MediaSource,
+        record: &ServerRecord,
+    ) -> Result<Self, BeamError> {
+        // JSON Schema has no unsigned integer type, so kynos's `uint32`/`uint64`
+        // formats reach the generated client as `i64`. Narrowing here rather than
+        // widening the core's own types keeps "a size cannot be negative" true in
+        // the one place that reasons about sizes; a nonsensical negative is
+        // treated as absent rather than wrapping into an enormous positive.
+        //
+        // The view describes one picture: the source's first video track, which
+        // the server lists by stream index. The server lists sources primary
+        // first, and this keeps that order.
+        let video = source.video_tracks.into_iter().next();
+        let parts = source
+            .parts
+            .into_iter()
+            .map(|part| {
+                Ok(SourcePartView {
+                    file_id: part.file_id.to_string(),
+                    part_number: part
+                        .part_number
+                        .and_then(|number| u32::try_from(number).ok()),
+                    size_bytes: u64::try_from(part.size_bytes).unwrap_or(0),
+                    duration_secs: part.duration_secs,
+                    stream_url: record.absolute_url(&part.stream_url)?,
+                    subtitle_tracks: subtitle_views(part.subtitle_tracks, record)?,
+                })
+            })
+            .collect::<Result<Vec<_>, BeamError>>()?;
+        Ok(Self {
+            file_id: source.file_id.to_string(),
+            size_bytes: u64::try_from(source.size_bytes).unwrap_or(0),
+            duration_secs: source.duration_secs,
+            container: source.container_format,
+            mime_type: source.mime_type,
+            video_codec: video.as_ref().map(|v| v.codec.clone()),
+            width: video.as_ref().and_then(|v| u32::try_from(v.width).ok()),
+            height: video.as_ref().and_then(|v| u32::try_from(v.height).ok()),
+            bit_rate: video
+                .as_ref()
+                .and_then(|v| v.bit_rate)
+                .and_then(|rate| u64::try_from(rate).ok()),
+            hdr_format: video.as_ref().and_then(|v| v.hdr_format.clone()),
+            audio_tracks: source
+                .audio_tracks
+                .into_iter()
+                .map(|track| AudioTrackView {
+                    codec: track.codec,
+                    language: track.language,
+                    channels: u16::try_from(track.channels).unwrap_or(0),
+                    is_default: track.is_default,
+                })
+                .collect(),
+            stream_url: record.absolute_url(&source.stream_url)?,
+            download_url: record.absolute_url(&source.download_url)?,
+            parts,
+            disc_structure: source.disc_structure.map(|structure| match structure {
+                crate::api::types::MediaSourcediscStructure::Dvd => DiscStructure::Dvd,
+                crate::api::types::MediaSourcediscStructure::BluRay => DiscStructure::BluRay,
+            }),
+            subtitle_tracks: subtitle_views(source.subtitle_tracks, record)?,
+        })
+    }
+}
+
+/// Normalise a file's subtitle tracks, resolving a sidecar's URLs against the
+/// server that served them.
+fn subtitle_views(
+    tracks: Vec<crate::api::types::SubtitleTrack>,
+    record: &ServerRecord,
+) -> Result<Vec<SubtitleTrackView>, BeamError> {
+    tracks
+        .into_iter()
+        .map(|track| {
+            let crate::api::types::SubtitleTrack {
+                origin,
+                index,
+                sidecar_id,
+                codec,
+                language,
+                title,
+                is_default,
+                is_forced,
+                is_hearing_impaired,
+                is_text,
+                url,
+                webvtt_url,
+            } = track;
+            Ok(SubtitleTrackView {
+                origin: match origin {
+                    crate::api::types::SubtitleOrigin::Embedded => SubtitleOrigin::Embedded,
+                    crate::api::types::SubtitleOrigin::Sidecar => SubtitleOrigin::Sidecar,
+                },
+                index: index.and_then(|value| u32::try_from(value).ok()),
+                sidecar_id: sidecar_id.map(|id| id.to_string()),
+                codec,
+                language,
+                title,
+                is_default,
+                is_forced,
+                is_hearing_impaired,
+                is_text,
+                url: url.map(|path| record.absolute_url(&path)).transpose()?,
+                webvtt_url: webvtt_url
+                    .map(|path| record.absolute_url(&path))
+                    .transpose()?,
+            })
+        })
+        .collect()
+}
+
+/// One file of a playback plan: what the platform player queues as one item.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct PlaybackPart {
+    /// The file, which its progress is reported against.
+    pub file_id: String,
+    /// Absolute URL to stream it from.
+    pub url: String,
+    /// Its duration, where probing determined one.
+    pub duration_secs: Option<f64>,
+    /// The subtitle files beside it (issue #189), each with a URL to fetch it
+    /// from. A file's own subtitle streams are not listed: the player's
+    /// extractor finds those in the file.
+    pub sidecar_subtitles: Vec<SubtitleTrackView>,
+}
+
+/// The parts to queue for `file_id`, and which of them to start in.
+///
+/// From the source that holds `file_id` as its first file or any part. Where
+/// there is no such source -- the lookup failed, or the file is not among
+/// them -- the plan is the one file alone, at `single_url`: exactly what
+/// the player played before a source knew its parts, so nothing that played
+/// then stops playing now.
+#[must_use]
+pub fn plan_parts(
+    sources: &[MediaSourceView],
+    file_id: &str,
+    single_url: String,
+) -> (Vec<PlaybackPart>, u32) {
+    let sidecars = |tracks: &[SubtitleTrackView]| {
+        tracks
+            .iter()
+            .filter(|track| track.origin == SubtitleOrigin::Sidecar && track.url.is_some())
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let Some(source) = sources.iter().find(|source| source.contains_file(file_id)) else {
+        return (
+            vec![PlaybackPart {
+                file_id: file_id.to_owned(),
+                url: single_url,
+                duration_secs: None,
+                sidecar_subtitles: Vec::new(),
+            }],
+            0,
+        );
+    };
+    if source.parts.is_empty() {
+        return (
+            vec![PlaybackPart {
+                file_id: source.file_id.clone(),
+                url: source.stream_url.clone(),
+                duration_secs: source.duration_secs,
+                sidecar_subtitles: sidecars(&source.subtitle_tracks),
+            }],
+            0,
+        );
+    }
+    let parts: Vec<PlaybackPart> = source
+        .parts
+        .iter()
+        .map(|part| PlaybackPart {
+            file_id: part.file_id.clone(),
+            url: part.stream_url.clone(),
+            duration_secs: part.duration_secs,
+            sidecar_subtitles: sidecars(&part.subtitle_tracks),
+        })
+        .collect();
+    let start = parts
+        .iter()
+        .position(|part| part.file_id == file_id)
+        .and_then(|index| u32::try_from(index).ok())
+        .unwrap_or(0);
+    (parts, start)
 }
 
 /// One file of a source, played in the order the source lists it.
@@ -1246,6 +1441,44 @@ mod tests {
         let a = select_source(&forward, &profile, &QualityPolicy::Highest).expect("a source");
         let b = select_source(&reversed, &profile, &QualityPolicy::Highest).expect("a source");
         assert_eq!(a.source.file_id, b.source.file_id);
+    }
+
+    /// A plan never lists a file's own streams as files to fetch: only a
+    /// sidecar with a URL is something the player loads beside the media.
+    #[test]
+    fn only_fetchable_sidecars_reach_the_plan() {
+        let track = |origin, url: Option<&str>| SubtitleTrackView {
+            origin,
+            index: None,
+            sidecar_id: None,
+            codec: "subrip".to_owned(),
+            language: None,
+            title: None,
+            is_default: false,
+            is_forced: false,
+            is_hearing_impaired: false,
+            is_text: true,
+            url: url.map(str::to_owned),
+            webvtt_url: None,
+        };
+        let mut source = MediaSourceBuilder::new("whole").build();
+        source.subtitle_tracks = vec![
+            track(SubtitleOrigin::Embedded, None),
+            track(SubtitleOrigin::Sidecar, Some("https://beam.test/s.srt")),
+            track(SubtitleOrigin::Sidecar, None),
+        ];
+
+        let (parts, start) = plan_parts(&[source], "whole", "unused".to_owned());
+
+        assert_eq!(start, 0);
+        assert_eq!(parts.len(), 1, "a whole file is a plan of one part");
+        assert_eq!(parts[0].url, "/v1/files/whole/stream");
+        let urls: Vec<Option<&str>> = parts[0]
+            .sidecar_subtitles
+            .iter()
+            .map(|t| t.url.as_deref())
+            .collect();
+        assert_eq!(urls, vec![Some("https://beam.test/s.srt")]);
     }
 }
 

@@ -12,10 +12,9 @@ use crate::capability::{
     DeviceProfile, MediaSourceView, QualityPolicy, RebufferDetector, SourceSelection,
 };
 use crate::catalog::{
-    AdminEvent, AdminLogEntry, AdminLogPage, AdminStatus, AdminUser, AdminUserPage, BrowseQuery,
-    ContinueWatchingEntry, DeviceSession, EpisodeSummary, HistoryEntry, HistoryPage,
-    LibraryFileSummary, LibrarySummary, MediaDetail, MediaPage, ScanJob, ServerHealth,
-    browse_params,
+    AdminEvent, AdminLogPage, AdminStatus, AdminUserPage, BrowseQuery, ContinueWatchingEntry,
+    DeviceSession, EpisodeSummary, HistoryPage, LibraryFileSummary, LibrarySummary, MediaDetail,
+    MediaPage, ScanJob, ServerHealth, browse_params,
 };
 use crate::clock::{Clock, SystemClock};
 use crate::error::BeamError;
@@ -133,7 +132,7 @@ pub struct PlaybackHttpConfig {
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
 pub struct PlaybackPlan {
     /// The files to queue, in order. Never empty.
-    pub parts: Vec<PlaybackPart>,
+    pub parts: Vec<crate::capability::select::PlaybackPart>,
     /// Which part to start in: the one the request named, which for a resume
     /// is the part the viewer was last in.
     pub start_part_index: u32,
@@ -148,81 +147,6 @@ pub struct PlaybackPlan {
     /// player attaches [`Self::headers`] only to requests for this origin, so
     /// a redirect elsewhere loses the session at the hop that leaves.
     pub base_url: String,
-}
-
-/// One file of a [`PlaybackPlan`].
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
-pub struct PlaybackPart {
-    /// The file, which its progress is reported against.
-    pub file_id: String,
-    /// Absolute URL to stream it from.
-    pub url: String,
-    /// Its duration, where probing determined one.
-    pub duration_secs: Option<f64>,
-    /// The subtitle files beside it (issue #189), each with a URL to fetch it
-    /// from. A file's own subtitle streams are not listed: the player's
-    /// extractor finds those in the file.
-    pub sidecar_subtitles: Vec<crate::capability::select::SubtitleTrackView>,
-}
-
-/// The parts to queue for `file_id`, and which of them to start in.
-///
-/// From the source that holds `file_id` as its first file or any part. Where
-/// there is no such source -- the lookup failed, or the file is not among
-/// them -- the plan is the one file alone, at `single_url`: exactly what
-/// the player played before a source knew its parts, so nothing that played
-/// then stops playing now.
-fn plan_parts(
-    sources: &[MediaSourceView],
-    file_id: &str,
-    single_url: String,
-) -> (Vec<PlaybackPart>, u32) {
-    use crate::capability::select::SubtitleOrigin;
-    let sidecars = |tracks: &[crate::capability::select::SubtitleTrackView]| {
-        tracks
-            .iter()
-            .filter(|track| track.origin == SubtitleOrigin::Sidecar && track.url.is_some())
-            .cloned()
-            .collect::<Vec<_>>()
-    };
-    let Some(source) = sources.iter().find(|source| source.contains_file(file_id)) else {
-        return (
-            vec![PlaybackPart {
-                file_id: file_id.to_owned(),
-                url: single_url,
-                duration_secs: None,
-                sidecar_subtitles: Vec::new(),
-            }],
-            0,
-        );
-    };
-    if source.parts.is_empty() {
-        return (
-            vec![PlaybackPart {
-                file_id: source.file_id.clone(),
-                url: source.stream_url.clone(),
-                duration_secs: source.duration_secs,
-                sidecar_subtitles: sidecars(&source.subtitle_tracks),
-            }],
-            0,
-        );
-    }
-    let parts: Vec<PlaybackPart> = source
-        .parts
-        .iter()
-        .map(|part| PlaybackPart {
-            file_id: part.file_id.clone(),
-            url: part.stream_url.clone(),
-            duration_secs: part.duration_secs,
-            sidecar_subtitles: sidecars(&part.subtitle_tracks),
-        })
-        .collect();
-    let start = parts
-        .iter()
-        .position(|part| part.file_id == file_id)
-        .and_then(|index| u32::try_from(index).ok())
-        .unwrap_or(0);
-    (parts, start)
 }
 
 /// The one live copy of a server's session cookie.
@@ -920,7 +844,7 @@ impl BeamClient {
             .into_inner()
             .items
             .into_iter()
-            .map(|source| to_view(source, &record))
+            .map(|source| MediaSourceView::from_generated(source, &record))
             .collect()
     }
 
@@ -1124,7 +1048,8 @@ impl BeamClient {
             }
             None => Vec::new(),
         };
-        let (parts, start_part_index) = plan_parts(&sources, &file_id, url);
+        let (parts, start_part_index) =
+            crate::capability::select::plan_parts(&sources, &file_id, url);
         Ok(PlaybackPlan {
             parts,
             start_part_index,
@@ -1416,25 +1341,8 @@ impl BeamClient {
             first: first.map(i64::from),
             after,
         };
-        let response = self
-            .send(&server_id, client.get_history(params))
-            .await?
-            .into_inner();
-
-        let total = u64::try_from(response.total).unwrap_or(0);
-        let end_cursor = response.page_info.end_cursor;
-        let has_next_page = response.page_info.has_next_page;
-        let items: Vec<HistoryEntry> = response
-            .items
-            .into_iter()
-            .map(|item| HistoryEntry::from_generated(item, &record))
-            .collect();
-        Ok(HistoryPage {
-            items,
-            total,
-            end_cursor,
-            has_next_page,
-        })
+        let response = self.send(&server_id, client.get_history(params)).await?;
+        Ok(HistoryPage::from_generated(response.into_inner(), &record))
     }
 
     /// Report where the viewer is in a file.
@@ -1895,18 +1803,11 @@ impl BeamClient {
         };
         let response = self
             .send(&server_id, client.list_admin_users(params))
-            .await?
-            .into_inner();
-        Ok(AdminUserPage {
-            total: u64::try_from(response.total).unwrap_or(0),
-            end_cursor: response.page_info.end_cursor,
-            has_next_page: response.page_info.has_next_page,
-            items: response
-                .items
-                .into_iter()
-                .map(|user| AdminUser::from_generated(user, &record))
-                .collect(),
-        })
+            .await?;
+        Ok(AdminUserPage::from_generated(
+            response.into_inner(),
+            &record,
+        ))
     }
 
     /// Block or unblock an account.
@@ -1945,20 +1846,8 @@ impl BeamClient {
             first: first.map(i64::from),
             after,
         };
-        let response = self
-            .send(&server_id, client.get_admin_logs(params))
-            .await?
-            .into_inner();
-        Ok(AdminLogPage {
-            total: u64::try_from(response.total).unwrap_or(0),
-            end_cursor: response.page_info.end_cursor,
-            has_next_page: response.page_info.has_next_page,
-            items: response
-                .items
-                .into_iter()
-                .map(AdminLogEntry::from_generated)
-                .collect(),
-        })
+        let response = self.send(&server_id, client.get_admin_logs(params)).await?;
+        Ok(AdminLogPage::from_generated(response.into_inner()))
     }
 
     /// Recent server events, newest first.
@@ -2664,124 +2553,6 @@ impl BeamClient {
             .await?;
         Ok(())
     }
-}
-
-/// Normalise a generated `MediaSource` into the core's own view, resolving its
-/// relative URLs against the server that served it.
-fn to_view(
-    source: crate::api::types::MediaSource,
-    record: &ServerRecord,
-) -> Result<MediaSourceView, BeamError> {
-    // JSON Schema has no unsigned integer type, so kynos's `uint32`/`uint64`
-    // formats reach the generated client as `i64`. Narrowing here rather than
-    // widening the core's own types keeps "a size cannot be negative" true in
-    // the one place that reasons about sizes; a nonsensical negative is
-    // treated as absent rather than wrapping into an enormous positive.
-    //
-    // The view describes one picture: the source's first video track, which
-    // the server lists by stream index. The server lists sources primary
-    // first, and this keeps that order.
-    let video = source.video_tracks.into_iter().next();
-    let parts = source
-        .parts
-        .into_iter()
-        .map(|part| {
-            Ok(crate::capability::select::SourcePartView {
-                file_id: part.file_id.to_string(),
-                part_number: part
-                    .part_number
-                    .and_then(|number| u32::try_from(number).ok()),
-                size_bytes: u64::try_from(part.size_bytes).unwrap_or(0),
-                duration_secs: part.duration_secs,
-                stream_url: record.absolute_url(&part.stream_url)?,
-                subtitle_tracks: subtitle_views(part.subtitle_tracks, record)?,
-            })
-        })
-        .collect::<Result<Vec<_>, BeamError>>()?;
-    Ok(MediaSourceView {
-        file_id: source.file_id.to_string(),
-        size_bytes: u64::try_from(source.size_bytes).unwrap_or(0),
-        duration_secs: source.duration_secs,
-        container: source.container_format,
-        mime_type: source.mime_type,
-        video_codec: video.as_ref().map(|v| v.codec.clone()),
-        width: video.as_ref().and_then(|v| u32::try_from(v.width).ok()),
-        height: video.as_ref().and_then(|v| u32::try_from(v.height).ok()),
-        bit_rate: video
-            .as_ref()
-            .and_then(|v| v.bit_rate)
-            .and_then(|rate| u64::try_from(rate).ok()),
-        hdr_format: video.as_ref().and_then(|v| v.hdr_format.clone()),
-        audio_tracks: source
-            .audio_tracks
-            .into_iter()
-            .map(|track| crate::capability::select::AudioTrackView {
-                codec: track.codec,
-                language: track.language,
-                channels: u16::try_from(track.channels).unwrap_or(0),
-                is_default: track.is_default,
-            })
-            .collect(),
-        stream_url: record.absolute_url(&source.stream_url)?,
-        download_url: record.absolute_url(&source.download_url)?,
-        parts,
-        disc_structure: source.disc_structure.map(|structure| match structure {
-            crate::api::types::MediaSourcediscStructure::Dvd => {
-                crate::capability::select::DiscStructure::Dvd
-            }
-            crate::api::types::MediaSourcediscStructure::BluRay => {
-                crate::capability::select::DiscStructure::BluRay
-            }
-        }),
-        subtitle_tracks: subtitle_views(source.subtitle_tracks, record)?,
-    })
-}
-
-/// Normalise a file's subtitle tracks, resolving a sidecar's URLs against the
-/// server that served them.
-fn subtitle_views(
-    tracks: Vec<crate::api::types::SubtitleTrack>,
-    record: &ServerRecord,
-) -> Result<Vec<crate::capability::select::SubtitleTrackView>, BeamError> {
-    use crate::capability::select::{SubtitleOrigin, SubtitleTrackView};
-    tracks
-        .into_iter()
-        .map(|track| {
-            let crate::api::types::SubtitleTrack {
-                origin,
-                index,
-                sidecar_id,
-                codec,
-                language,
-                title,
-                is_default,
-                is_forced,
-                is_hearing_impaired,
-                is_text,
-                url,
-                webvtt_url,
-            } = track;
-            Ok(SubtitleTrackView {
-                origin: match origin {
-                    crate::api::types::SubtitleOrigin::Embedded => SubtitleOrigin::Embedded,
-                    crate::api::types::SubtitleOrigin::Sidecar => SubtitleOrigin::Sidecar,
-                },
-                index: index.and_then(|value| u32::try_from(value).ok()),
-                sidecar_id: sidecar_id.map(|id| id.to_string()),
-                codec,
-                language,
-                title,
-                is_default,
-                is_forced,
-                is_hearing_impaired,
-                is_text,
-                url: url.map(|path| record.absolute_url(&path)).transpose()?,
-                webvtt_url: webvtt_url
-                    .map(|path| record.absolute_url(&path))
-                    .transpose()?,
-            })
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -4228,46 +3999,6 @@ mod tests {
                 .iter()
                 .all(|part| part.url.starts_with("https://beam.test/"))
         );
-    }
-
-    /// A plan never lists a file's own streams as files to fetch: only a
-    /// sidecar with a URL is something the player loads beside the media.
-    #[test]
-    fn only_fetchable_sidecars_reach_the_plan() {
-        use crate::capability::builders::MediaSourceBuilder;
-        use crate::capability::select::{SubtitleOrigin, SubtitleTrackView};
-        let track = |origin, url: Option<&str>| SubtitleTrackView {
-            origin,
-            index: None,
-            sidecar_id: None,
-            codec: "subrip".to_owned(),
-            language: None,
-            title: None,
-            is_default: false,
-            is_forced: false,
-            is_hearing_impaired: false,
-            is_text: true,
-            url: url.map(str::to_owned),
-            webvtt_url: None,
-        };
-        let mut source = MediaSourceBuilder::new("whole").build();
-        source.subtitle_tracks = vec![
-            track(SubtitleOrigin::Embedded, None),
-            track(SubtitleOrigin::Sidecar, Some("https://beam.test/s.srt")),
-            track(SubtitleOrigin::Sidecar, None),
-        ];
-
-        let (parts, start) = plan_parts(&[source], "whole", "unused".to_owned());
-
-        assert_eq!(start, 0);
-        assert_eq!(parts.len(), 1, "a whole file is a plan of one part");
-        assert_eq!(parts[0].url, "/v1/files/whole/stream");
-        let urls: Vec<Option<&str>> = parts[0]
-            .sidecar_subtitles
-            .iter()
-            .map(|t| t.url.as_deref())
-            .collect();
-        assert_eq!(urls, vec![Some("https://beam.test/s.srt")]);
     }
 
     /// A downloaded file played with no connection cannot list its source,

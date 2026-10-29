@@ -1121,6 +1121,28 @@ impl HistoryEntry {
     }
 }
 
+impl HistoryPage {
+    /// Normalise a generated page of watch history, keeping its cursor and
+    /// total.
+    #[must_use]
+    pub fn from_generated(connection: wire::HistoryConnection, record: &ServerRecord) -> Self {
+        let wire::HistoryConnection {
+            items,
+            page_info,
+            total,
+        } = connection;
+        Self {
+            items: items
+                .into_iter()
+                .map(|item| HistoryEntry::from_generated(item, record))
+                .collect(),
+            total: u64::try_from(total).unwrap_or(0),
+            end_cursor: page_info.end_cursor,
+            has_next_page: page_info.has_next_page,
+        }
+    }
+}
+
 impl LogLevel {
     /// The server speaks one level for its log and its event stream alike.
     fn from_wire(level: wire::LogLevel) -> Self {
@@ -1246,6 +1268,49 @@ impl AdminLogEntry {
             // rather than being given a shape the server never promised.
             details: details.map(|value| value.to_string()),
             created_at: created_at_rfc3339(&created_at.0),
+        }
+    }
+}
+
+impl AdminUserPage {
+    /// Normalise a generated page of accounts, keeping its cursor and total.
+    #[must_use]
+    pub fn from_generated(connection: wire::AdminUserConnection, record: &ServerRecord) -> Self {
+        let wire::AdminUserConnection {
+            items,
+            page_info,
+            total,
+        } = connection;
+        Self {
+            items: items
+                .into_iter()
+                .map(|user| AdminUser::from_generated(user, record))
+                .collect(),
+            total: u64::try_from(total).unwrap_or(0),
+            end_cursor: page_info.end_cursor,
+            has_next_page: page_info.has_next_page,
+        }
+    }
+}
+
+impl AdminLogPage {
+    /// Normalise a generated page of the operational log, keeping its cursor
+    /// and total.
+    #[must_use]
+    pub fn from_generated(connection: wire::AdminLogConnection) -> Self {
+        let wire::AdminLogConnection {
+            items,
+            page_info,
+            total,
+        } = connection;
+        Self {
+            items: items
+                .into_iter()
+                .map(AdminLogEntry::from_generated)
+                .collect(),
+            total: u64::try_from(total).unwrap_or(0),
+            end_cursor: page_info.end_cursor,
+            has_next_page: page_info.has_next_page,
         }
     }
 }
