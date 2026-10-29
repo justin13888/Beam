@@ -32,7 +32,7 @@ use tracing::error;
 use uuid::Uuid;
 
 use crate::models::media::{ArtworkKind, ArtworkSize, ArtworkVariant};
-use crate::routes::api_error::{ArtworkError, InternalError, SessionAuth};
+use crate::routes::api_error::{ArtworkError, ServerFault, SessionAuth};
 use crate::routes::delivery::{AnyMedia, MediaRanges, RuntimeDelivery};
 use crate::routes::playback::{caller_access, hides};
 use crate::routes::tags::Media;
@@ -147,7 +147,7 @@ async fn upstream_url(
 
 fn lookup_failed(err: sea_orm::DbErr) -> ArtworkError {
     error!(?err, "artwork title lookup failed");
-    ArtworkError::Internal("Failed to look up artwork".into())
+    ArtworkError::Internal(ServerFault::logged("Failed to look up artwork"))
 }
 
 /// Builds the delivery both methods share.
@@ -162,20 +162,14 @@ async fn deliver(
     // does not exist (issue #263). A person's portrait and a collection's art
     // belong to no one title: they are served while the policy admits one
     // title the person or collection is on (issue #328).
-    let access_failed = |err: InternalError| {
-        error!(%err, "artwork access lookup failed");
-        ArtworkError::Internal("Failed to look up artwork".into())
-    };
-    let (_, policy) = caller_access(state, auth).await.map_err(access_failed)?;
+    // Both lookups log their cause where they build the fault, so it moves
+    // across as is.
+    let (_, policy) = caller_access(state, auth).await?;
     let of_a_title = matches!(
         path.kind,
         ArtworkKind::Movie | ArtworkKind::Show | ArtworkKind::Season | ArtworkKind::Episode
     );
-    if of_a_title
-        && hides(state, &policy, path.id)
-            .await
-            .map_err(access_failed)?
-    {
+    if of_a_title && hides(state, &policy, path.id).await? {
         return Err(ArtworkError::NotFound("No artwork for this title".into()));
     }
     let Some(url) = upstream_url(state, path, &policy).await? else {
@@ -205,7 +199,7 @@ async fn deliver(
                 reason,
             } => {
                 error!(%url, %refused, %reason, "stored artwork url refused by the fetcher");
-                ArtworkError::Internal("Failed to fetch artwork".into())
+                ArtworkError::Internal(ServerFault::logged("Failed to fetch artwork"))
             }
             // The provider answered and Beam could not use the answer, or the
             // provider did not answer at all.
@@ -242,7 +236,7 @@ async fn deliver(
 
     let delivery = served.deliver(conditions).await.map_err(|err| {
         error!(?err, "failed to read cached artwork");
-        ArtworkError::Internal("Failed to read artwork".into())
+        ArtworkError::Internal(ServerFault::logged("Failed to read artwork"))
     })?;
 
     Ok(ArtworkDelivery::new(

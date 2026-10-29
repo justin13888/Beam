@@ -47,7 +47,10 @@ use kynos::response::status::{NoContent, Redirect};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::routes::api_error::{InternalError, SESSION_COOKIE, SessionAuth};
+use crate::routes::api_error::{
+    INTERNAL_DETAIL, InternalError, OIDC_UNAVAILABLE_DETAIL, SESSION_COOKIE, ServerFault,
+    SessionAuth,
+};
 use crate::routes::middleware::optional_header;
 use crate::routes::tags::Auth;
 
@@ -323,21 +326,21 @@ impl SetCookie {
 pub enum LoginStartError {
     /// OIDC is not configured, or discovery failed. Distinct from a 500: the
     /// server is working, the identity provider is not reachable.
-    #[error("{0}")]
+    #[error("{}", OIDC_UNAVAILABLE_DETAIL)]
     #[problem(
         status = 503,
         type = "https://beam.justinchung.net/reference/errors/#oidc-unavailable",
         title = "Login unavailable"
     )]
-    OidcUnavailable(String),
+    OidcUnavailable(ServerFault),
 
-    #[error("{0}")]
+    #[error("{}", INTERNAL_DETAIL)]
     #[problem(
         status = 500,
         type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
-    Internal(String),
+    Internal(ServerFault),
 }
 
 /// `GET /v1/auth/callback`.
@@ -380,13 +383,13 @@ pub enum LoginCallbackError {
     )]
     AccountDisabled(String),
 
-    #[error("{0}")]
+    #[error("{}", INTERNAL_DETAIL)]
     #[problem(
         status = 500,
         type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
-    Internal(String),
+    Internal(ServerFault),
 }
 
 /// `POST /v1/auth/device`.
@@ -403,21 +406,21 @@ pub enum DeviceLoginStartError {
     )]
     Unsupported(String),
 
-    #[error("{0}")]
+    #[error("{}", OIDC_UNAVAILABLE_DETAIL)]
     #[problem(
         status = 503,
         type = "https://beam.justinchung.net/reference/errors/#oidc-unavailable",
         title = "Login unavailable"
     )]
-    OidcUnavailable(String),
+    OidcUnavailable(ServerFault),
 
-    #[error("{0}")]
+    #[error("{}", INTERNAL_DETAIL)]
     #[problem(
         status = 500,
         type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
-    Internal(String),
+    Internal(ServerFault),
 }
 
 /// `POST /v1/auth/device/token`.
@@ -474,21 +477,21 @@ pub enum DeviceLoginPollError {
 
     /// The IdP could not be reached or refused Beam itself. The flow is kept:
     /// polling again may succeed.
-    #[error("{0}")]
+    #[error("{}", OIDC_UNAVAILABLE_DETAIL)]
     #[problem(
         status = 503,
         type = "https://beam.justinchung.net/reference/errors/#oidc-unavailable",
         title = "Login unavailable"
     )]
-    OidcUnavailable(String),
+    OidcUnavailable(ServerFault),
 
-    #[error("{0}")]
+    #[error("{}", INTERNAL_DETAIL)]
     #[problem(
         status = 500,
         type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
-    Internal(String),
+    Internal(ServerFault),
 }
 
 /// `GET /v1/me`.
@@ -506,13 +509,13 @@ pub enum CurrentUserError {
     )]
     AccountRemoved(String),
 
-    #[error("{0}")]
+    #[error("{}", INTERNAL_DETAIL)]
     #[problem(
         status = 500,
         type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
-    Internal(String),
+    Internal(ServerFault),
 }
 
 /// `DELETE /v1/sessions/{id}`.
@@ -533,13 +536,13 @@ pub enum SessionRevokeError {
     )]
     SessionNotFound(String),
 
-    #[error("{0}")]
+    #[error("{}", INTERNAL_DETAIL)]
     #[problem(
         status = 500,
         type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
-    Internal(String),
+    Internal(ServerFault),
 }
 
 // A cookie that cannot be rendered is a server fault wherever it happens, so
@@ -547,25 +550,25 @@ pub enum SessionRevokeError {
 
 impl From<CookieEncodingError> for LoginStartError {
     fn from(e: CookieEncodingError) -> Self {
-        Self::Internal(e.to_string())
+        Self::Internal(ServerFault::new(e))
     }
 }
 
 impl From<CookieEncodingError> for LoginCallbackError {
     fn from(e: CookieEncodingError) -> Self {
-        Self::Internal(e.to_string())
+        Self::Internal(ServerFault::new(e))
     }
 }
 
 impl From<CookieEncodingError> for SessionRevokeError {
     fn from(e: CookieEncodingError) -> Self {
-        Self::Internal(e.to_string())
+        Self::Internal(ServerFault::new(e))
     }
 }
 
 impl From<CookieEncodingError> for InternalError {
     fn from(e: CookieEncodingError) -> Self {
-        Self::Internal(e.to_string())
+        Self::Internal(ServerFault::new(e))
     }
 }
 
@@ -670,9 +673,11 @@ pub async fn oidc_login(
 ) -> Result<WithHeaders<Redirect<302>, SetCookie>, LoginStartError> {
     let redirect_path = sanitize_redirect_path(query.redirect.as_deref());
 
-    let begin = oidc_client
-        .begin_auth()
-        .map_err(|e| LoginStartError::OidcUnavailable(format!("OIDC login unavailable: {e}")))?;
+    let begin = oidc_client.begin_auth().map_err(|e| {
+        LoginStartError::OidcUnavailable(ServerFault::new(format_args!(
+            "OIDC login unavailable: {e}"
+        )))
+    })?;
 
     pending_auth_store
         .create(
@@ -685,7 +690,11 @@ pub async fn oidc_login(
             STATE_TTL_SECS,
         )
         .await
-        .map_err(|e| LoginStartError::Internal(format!("Failed to start OIDC login: {e}")))?;
+        .map_err(|e| {
+            LoginStartError::Internal(ServerFault::new(format_args!(
+                "Failed to start OIDC login: {e}"
+            )))
+        })?;
 
     let cookie = build_cookie(
         STATE_COOKIE,
@@ -750,7 +759,7 @@ pub async fn oidc_callback(
     let pending = pending_auth_store
         .consume(&query_state)
         .await
-        .map_err(|e| LoginCallbackError::Internal(e.to_string()))?
+        .map_err(|e| LoginCallbackError::Internal(ServerFault::new(e)))?
         .ok_or_else(|| {
             LoginCallbackError::AttemptInvalid(
                 "Unknown, already-used, or expired login attempt".into(),
@@ -785,7 +794,7 @@ pub async fn oidc_callback(
     .await
     .map_err(|e| match e {
         e @ LoginError::AccountDisabled => LoginCallbackError::AccountDisabled(e.to_string()),
-        LoginError::Internal(message) => LoginCallbackError::Internal(message),
+        LoginError::Internal(message) => LoginCallbackError::Internal(ServerFault::new(message)),
     })?;
 
     let cookie = build_cookie(
@@ -819,7 +828,9 @@ pub async fn start_device_login(
 ) -> Result<WithHeaders<Json<DeviceLoginStart>, NoStore>, DeviceLoginStartError> {
     let started = oidc_client.begin_device_auth().await.map_err(|e| match e {
         OidcError::DeviceFlowUnsupported => DeviceLoginStartError::Unsupported(e.to_string()),
-        other => DeviceLoginStartError::OidcUnavailable(format!("OIDC login unavailable: {other}")),
+        other => DeviceLoginStartError::OidcUnavailable(ServerFault::new(format_args!(
+            "OIDC login unavailable: {other}"
+        ))),
     })?;
 
     let handle = generate_handle();
@@ -840,7 +851,9 @@ pub async fn start_device_login(
         })
         .await
         .map_err(|e| {
-            DeviceLoginStartError::Internal(format!("Failed to start device login: {e}"))
+            DeviceLoginStartError::Internal(ServerFault::new(format_args!(
+                "Failed to start device login: {e}"
+            )))
         })?;
 
     Ok(WithHeaders::new(
@@ -904,7 +917,7 @@ pub async fn poll_device_login(
     Json(body): Json<DeviceLoginPoll>,
 ) -> Result<WithHeaders<DeviceLoginPollReply, NoStore>, DeviceLoginPollError> {
     let internal = |e: beam_auth::utils::device_auth_store::DeviceAuthError| {
-        DeviceLoginPollError::Internal(e.to_string())
+        DeviceLoginPollError::Internal(ServerFault::new(e))
     };
     let handle_hash = hash_handle(&body.device_handle);
 
@@ -995,8 +1008,8 @@ pub async fn poll_device_login(
             | OidcError::Exchange(_)
             | OidcError::DeviceFlowUnsupported),
         ) => {
-            return Err(DeviceLoginPollError::OidcUnavailable(format!(
-                "OIDC login unavailable: {e}"
+            return Err(DeviceLoginPollError::OidcUnavailable(ServerFault::new(
+                format_args!("OIDC login unavailable: {e}"),
             )));
         }
         // An answer that did not verify will not verify on a retry.
@@ -1043,7 +1056,7 @@ pub async fn poll_device_login(
     .await
     .map_err(|e| match e {
         e @ LoginError::AccountDisabled => DeviceLoginPollError::AccountDisabled(e.to_string()),
-        LoginError::Internal(message) => DeviceLoginPollError::Internal(message),
+        LoginError::Internal(message) => DeviceLoginPollError::Internal(ServerFault::new(message)),
     })?;
 
     Ok(WithHeaders::new(
@@ -1062,13 +1075,13 @@ pub async fn oidc_me(
     auth: SessionAuth,
     Inject(user_repo): Inject<Arc<dyn UserRepository>>,
 ) -> Result<Json<CurrentUser>, CurrentUserError> {
-    let user_uuid =
-        Uuid::parse_str(&auth.0.user_id).map_err(|e| CurrentUserError::Internal(e.to_string()))?;
+    let user_uuid = Uuid::parse_str(&auth.0.user_id)
+        .map_err(|e| CurrentUserError::Internal(ServerFault::new(e)))?;
 
     let user = user_repo
         .find_by_id(user_uuid)
         .await
-        .map_err(|e| CurrentUserError::Internal(e.to_string()))?
+        .map_err(|e| CurrentUserError::Internal(ServerFault::new(e)))?
         .ok_or_else(|| CurrentUserError::AccountRemoved("User no longer exists".into()))?;
 
     Ok(Json(me_from(user)))
@@ -1079,13 +1092,20 @@ pub async fn oidc_me(
 /// Deliberately not `SessionAuth`-gated: signing out of a session that has
 /// already expired should succeed rather than answer 401, so the cookie is read
 /// directly and a miss is a no-op.
+///
+/// A store that fails to delete is a 500 that leaves the cookie alone (FR-109).
+/// Answering 204 and clearing it would tell the client it had signed out while
+/// the session stayed valid on the server; keeping the cookie lets it retry.
 #[kynos::post("/logout", tag = Auth, operation_id = "logout")]
 pub async fn oidc_logout(
     Cookies(cookies): Cookies<AuthCookies>,
     Inject(session_store): Inject<Arc<dyn SessionStore>>,
 ) -> Result<WithHeaders<NoContent, SetCookie>, InternalError> {
     if let Some(token) = cookies.beam_session {
-        let _ = session_store.delete(&token).await;
+        session_store
+            .delete(&token)
+            .await
+            .map_err(|e| InternalError::Internal(ServerFault::new(e)))?;
     }
 
     Ok(WithHeaders::new(
@@ -1103,7 +1123,7 @@ pub async fn oidc_logout_all(
     session_store
         .delete_all_for_user(&auth.0.user_id)
         .await
-        .map_err(|e| InternalError::Internal(e.to_string()))?;
+        .map_err(|e| InternalError::Internal(ServerFault::new(e)))?;
 
     Ok(WithHeaders::new(
         NoContent,
@@ -1120,13 +1140,13 @@ pub async fn oidc_list_sessions(
     let sessions = session_store
         .list_for_user(&auth.0.user_id)
         .await
-        .map_err(|e| InternalError::Internal(e.to_string()))?;
+        .map_err(|e| InternalError::Internal(ServerFault::new(e)))?;
 
     let summaries = sessions
         .into_iter()
         .map(|(id, data)| SessionSummary::from_store(id, data))
         .collect::<Result<Vec<_>, _>>()
-        .map_err(InternalError::Internal)?;
+        .map_err(|e| InternalError::Internal(ServerFault::new(e)))?;
     Ok(Json(SessionConnection {
         items: summaries,
         page_info: crate::models::PageInfo::complete(),
@@ -1146,7 +1166,7 @@ pub async fn oidc_delete_session(
     let deleted = session_store
         .delete_by_id(path.id, &auth.0.user_id)
         .await
-        .map_err(|e| SessionRevokeError::Internal(e.to_string()))?;
+        .map_err(|e| SessionRevokeError::Internal(ServerFault::new(e)))?;
 
     if !deleted {
         return Err(SessionRevokeError::SessionNotFound(
@@ -1165,7 +1185,7 @@ pub async fn oidc_delete_session(
         Some(token) => session_store
             .get(&token)
             .await
-            .map_err(|e| SessionRevokeError::Internal(e.to_string()))?
+            .map_err(|e| SessionRevokeError::Internal(ServerFault::new(e)))?
             .is_some(),
         None => false,
     };

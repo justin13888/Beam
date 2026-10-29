@@ -73,7 +73,7 @@ queries, so a page still holds `first` items and every `total` counts only what 
 | `/v1/auth/device/token` | POST | Poll a device login once: `202` while waiting (`authorization_pending` / `slow_down`), `200` with the `beam_session` value on approval |
 | `/v1/me` | GET | Current user |
 | `/v1/me/language-preferences` | GET, PUT | The caller's `LanguagePreferenceSettings` (issue #264): `audio_languages` and `subtitle_languages`, each most preferred first and at most 16, and `subtitle_mode` (`off`, `forced_only`, `on`). A user who set nothing has empty lists and `forced_only`. `PUT` replaces the whole and answers what is stored, every language as its ISO 639-2/B code (`de`, `deu`, `German` and `de-AT` are all `ger`), a repeat keeping its first place; `422` `validation-failed` for an entry naming no language (`/audio_languages/N`, `/subtitle_languages/N`). Read by `/v1/media/{id}/sources` |
-| `/v1/logout`, `/v1/logout-all` | POST | End this session / all sessions |
+| `/v1/logout`, `/v1/logout-all` | POST | End this session / all sessions; a session-store failure is `500 #internal` and leaves the cookie in place, so the client can retry |
 | `/v1/sessions`, `/v1/sessions/{id}` | GET, DELETE | List (a `SessionConnection`, never paged) / revoke own sessions; an id naming none of the caller's is `404 #session-not-found`, another user's included |
 | `/v1/admin/status` | GET | Dashboard snapshot: version, uptime, counts, enrichment progress, each metadata provider's configuration (`configured`, `not_configured`, `unavailable`, FR-307), recent scans, and the filesystem watcher's per-library mode (native, polling and why, unwatched) with the watch limit |
 | `/v1/admin/users` | GET | User accounts, oldest first: an `AdminUserConnection` paged by `first` (1-100, default 50) and `after`, with `total` |
@@ -277,8 +277,11 @@ that does not apply to that kind of title (a season has no backdrop, an episode 
   `https://beam.justinchung.net/reference/errors/#` — so each `type` dereferences to the section of
   `beam-docs`' [`reference/errors`](https://beam.justinchung.net/reference/errors/) describing it.
   It was previously a path prefix, and no such path has ever been served, so every identifier Beam
-  published resolved to a 404. Branch on `type`, or on status; `detail` stays human-facing,
-  non-contractual, and often an interpolated internal message.
+  published resolved to a 404. Branch on `type`, or on status; `detail` stays human-facing and
+  non-contractual. On a `500 #internal`, a `502 #enrichment-provider-error` and a
+  `503 #oidc-unavailable` it is one fixed sentence per code, never the cause (NFR-108): those
+  variants hold a `ServerFault`, whose constructor records the cause as a `tracing` `error` event at
+  the failing site and which has no `Display` to put it back on the wire.
 
   The URI is written out per variant rather than derived from the variant name. Kynos can compose
   one from `#[problem(base = ...)]` plus the variant's name, but then a rename silently changes the

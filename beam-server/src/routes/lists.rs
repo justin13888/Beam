@@ -15,7 +15,9 @@ use uuid::Uuid;
 use beam_domain::models::user_list::UserList;
 
 use crate::models::UserListConnection;
-use crate::routes::api_error::{InternalError, ListMembershipError, ListPageError, SessionAuth};
+use crate::routes::api_error::{
+    InternalError, ListMembershipError, ListPageError, ServerFault, SessionAuth,
+};
 use crate::routes::playback::{caller_access, hides, media_not_found};
 use crate::routes::tags::Playback;
 use crate::services::lists::ListError;
@@ -61,7 +63,7 @@ impl From<ListError> for ListMembershipError {
             ListError::NotATitle(detail) => Self::NotATitle(detail),
             ListError::InvalidCursor(_)
             | ListError::InvalidPagination(_)
-            | ListError::Internal(_) => Self::Internal(err.to_string()),
+            | ListError::Internal(_) => Self::Internal(ServerFault::new(err)),
         }
     }
 }
@@ -73,7 +75,7 @@ impl From<ListError> for ListPageError {
             ListError::InvalidCursor(detail) => Self::InvalidCursor(detail),
             ListError::InvalidPagination(detail) => Self::InvalidPagination(detail),
             ListError::MediaNotFound(_) | ListError::NotATitle(_) | ListError::Internal(_) => {
-                Self::Internal(err.to_string())
+                Self::Internal(ServerFault::new(err))
             }
         }
     }

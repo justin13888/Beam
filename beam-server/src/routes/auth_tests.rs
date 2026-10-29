@@ -26,7 +26,9 @@ mod tests {
     use beam_auth::utils::repository::UserRepository;
     use beam_auth::utils::repository::in_memory::InMemoryUserRepository;
     use beam_auth::utils::session_store::SessionStore;
-    use beam_auth::utils::session_store::in_memory::InMemorySessionStore;
+    use beam_auth::utils::session_store::in_memory::{
+        FailingSessionStore, InMemorySessionStore, SessionStoreOperation,
+    };
     use kynos::http::StatusCode;
     use kynos::prelude::*;
     use kynos::test::{TestClient, TestResponse};
@@ -102,7 +104,9 @@ mod tests {
         client: TestClient<AppState>,
         oidc_client: Arc<FakeOidcClient>,
         user_repo: Arc<InMemoryUserRepository>,
-        session_store: Arc<InMemorySessionStore>,
+        // A trait object, so a test can put a `FailingSessionStore` under the
+        // same router and drive a handler's storage-failure path.
+        session_store: Arc<dyn SessionStore>,
     }
 
     fn make_harness(oidc_client: FakeOidcClient) -> Harness {
@@ -149,7 +153,7 @@ mod tests {
     fn make_harness_sharing_store(
         oidc_client: FakeOidcClient,
         user_repo: Arc<InMemoryUserRepository>,
-        session_store: Arc<InMemorySessionStore>,
+        session_store: Arc<dyn SessionStore>,
         config: OidcRuntimeConfig,
     ) -> Harness {
         make_harness_behind(
@@ -167,7 +171,7 @@ mod tests {
     fn make_harness_behind(
         oidc_client: FakeOidcClient,
         user_repo: Arc<InMemoryUserRepository>,
-        session_store: Arc<InMemorySessionStore>,
+        session_store: Arc<dyn SessionStore>,
         config: OidcRuntimeConfig,
         adjust: impl FnOnce(&mut crate::config::ServerConfig),
     ) -> Harness {
@@ -988,6 +992,88 @@ mod tests {
             get_me(&harness, &session_cookie).await.status(),
             StatusCode::UNAUTHORIZED
         );
+    }
+
+    /// A harness whose session store fails `operation` and nothing else, so a
+    /// login still mints a session for the failing call to act on.
+    fn harness_failing(email: &str, operation: SessionStoreOperation) -> Harness {
+        make_harness_sharing_store(
+            FakeOidcClient::with_identity(identity(email, true)),
+            Arc::new(InMemoryUserRepository::default()),
+            Arc::new(FailingSessionStore::new(
+                InMemorySessionStore::default(),
+                operation,
+            )),
+            test_config(),
+        )
+    }
+
+    /// FR-109: logout used to discard a store failure, clear the cookie and
+    /// answer 204 -- the client believed it had signed out while the session
+    /// stayed valid on the server. It is a 500 now, and the cookie stays so the
+    /// client can retry.
+    #[tokio::test]
+    async fn a_session_store_failure_on_logout_is_500_and_keeps_the_cookie() {
+        let harness = harness_failing("stuck@example.com", SessionStoreOperation::Delete);
+        let session_cookie = login_and_get_session_cookie(&harness, "stuck@example.com").await;
+
+        let response = harness
+            .client
+            .post("/v1/logout")
+            .cookie(SESSION_COOKIE, &session_cookie)
+            .send()
+            .await;
+
+        response
+            .assert_status(StatusCode::INTERNAL_SERVER_ERROR)
+            .assert_problem_type("https://beam.justinchung.net/reference/errors/#internal");
+        assert!(
+            response.headers("set-cookie").is_empty(),
+            "a logout that revoked nothing must not touch the cookie: {:?}",
+            response.headers("set-cookie")
+        );
+        assert_eq!(
+            get_me(&harness, &session_cookie).await.status(),
+            StatusCode::OK,
+            "the session the failed logout left is still valid, as the 500 says"
+        );
+    }
+
+    /// NFR-108 over the session routes: whichever store call fails, the 500's
+    /// `detail` is the fixed sentence and never the store's own message.
+    #[tokio::test]
+    async fn a_session_store_failure_never_echoes_its_cause() {
+        for (operation, method, path) in [
+            (SessionStoreOperation::Delete, "POST", "/v1/logout"),
+            (
+                SessionStoreOperation::DeleteAllForUser,
+                "POST",
+                "/v1/logout-all",
+            ),
+            (SessionStoreOperation::ListForUser, "GET", "/v1/sessions"),
+        ] {
+            let harness = harness_failing("echo@example.com", operation);
+            let session_cookie = login_and_get_session_cookie(&harness, "echo@example.com").await;
+            let request = match method {
+                "POST" => harness.client.post(path),
+                _ => harness.client.get(path),
+            };
+            let response = request.cookie(SESSION_COOKIE, &session_cookie).send().await;
+
+            response
+                .assert_status(StatusCode::INTERNAL_SERVER_ERROR)
+                .assert_problem_type("https://beam.justinchung.net/reference/errors/#internal");
+            let body = response.json::<Value>();
+            assert_eq!(
+                body["detail"],
+                crate::routes::api_error::INTERNAL_DETAIL,
+                "{path}"
+            );
+            assert!(
+                !body.to_string().contains("injected failure"),
+                "{path}: the store's message reached the wire: {body}"
+            );
+        }
     }
 
     /// The session ids `GET /v1/sessions` reports for the holder of `cookie`.
