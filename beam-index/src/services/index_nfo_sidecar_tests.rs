@@ -521,6 +521,33 @@ async fn an_nfo_pins_the_new_movie_shows_its_title_and_queues_a_fetch_by_the_pin
     assert_eq!(row.matched_ref, None, "by its pin, not an old match");
 }
 
+/// An NFO that is there but does not parse is ignored: the movie is the
+/// one its path names, with no pin -- and once the NFO is fixed, the next
+/// scan applies it.
+#[tokio::test]
+async fn an_nfo_that_does_not_parse_is_ignored_until_it_is_fixed() {
+    let h = Harness::new().await;
+    h.video("Matrix/matrix.1080p.mkv");
+    h.write(
+        "Matrix/movie.nfo",
+        r#"<movie><title>The Matrix</title><uniqueid type="tmdb">603"#,
+    );
+
+    h.scan().await;
+
+    let movie = h.movie_of("Matrix/matrix.1080p.mkv");
+    assert_eq!(movie.pinned_ref, None, "a broken NFO pins nothing");
+    assert_ne!(movie.title, "The Matrix", "nor names the title");
+    assert_eq!(movie.identity_key.as_deref(), Some("matrix|"));
+
+    h.write("Matrix/movie.nfo", MATRIX_NFO);
+    h.scan().await;
+
+    let fixed = h.movie_of("Matrix/matrix.1080p.mkv");
+    assert_eq!(fixed.id, movie.id, "the same title, now pinned");
+    assert_eq!(fixed.pinned_ref.as_deref(), Some("tmdb:603"));
+}
+
 #[tokio::test]
 async fn a_second_file_whose_nfo_names_the_pin_joins_the_pinned_movie() {
     let h = Harness::new().await;
@@ -2356,6 +2383,44 @@ async fn a_walk_failure_where_a_kept_nfo_lives_keeps_its_record_and_the_pin() {
             .as_deref(),
         Some("tmdb:949"),
         "the kept NFO is not re-applied as new"
+    );
+}
+
+/// A subtitle under a folder the walk cannot read is not a subtitle the
+/// walk found gone: its record stays, and is still its video's.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_subtitle_under_an_unreadable_folder_is_kept() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let h = Harness::new().await;
+    h.video("Movie (2000)/Movie (2000).mkv");
+    h.write("Movie (2000)/Subs/Movie (2000).en.srt", "1");
+    h.scan().await;
+    assert_eq!(
+        h.subtitles_of("Movie (2000)/Movie (2000).mkv").await.len(),
+        1
+    );
+
+    let locked = h.root.join("Movie (2000)/Subs");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read_dir(&locked).is_ok() {
+        // Running as root: permissions do not bind, so the walk cannot fail.
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        eprintln!("skipped: running as root, which ignores file permissions");
+        return;
+    }
+    let scanned = h.service.scan_library(h.library.id.to_string()).await;
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    scanned.unwrap();
+
+    let kept = h.subtitles_of("Movie (2000)/Movie (2000).mkv").await;
+    assert_eq!(
+        kept.iter()
+            .map(|s| s.path.strip_prefix(&h.root).unwrap().to_path_buf())
+            .collect::<Vec<_>>(),
+        [PathBuf::from("Movie (2000)/Subs/Movie (2000).en.srt")],
+        "the unreadable folder's subtitle is kept"
     );
 }
 
