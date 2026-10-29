@@ -164,28 +164,6 @@ impl EnrichmentStateRepository for SqlEnrichmentStateRepository {
         Ok(())
     }
 
-    async fn backfill_missing(&self) -> Result<u64, DbErr> {
-        // Self-contained INSERT..SELECT: create a pending row for any
-        // movie/show that doesn't have one yet. A one-time catch-up for
-        // titles indexed before enrichment existed; new titles get their row
-        // from `ensure_pending` at classification time instead.
-        let stmt = Statement::from_string(
-            self.db.get_database_backend(),
-            "INSERT INTO metadata_enrichment \
-                 (id, movie_id, show_id, status, attempts, force_refresh, created_at, updated_at) \
-             SELECT gen_random_uuid(), m.id, NULL, 'pending', 0, false, now(), now() \
-               FROM movies m \
-              WHERE NOT EXISTS (SELECT 1 FROM metadata_enrichment e WHERE e.movie_id = m.id) \
-             UNION ALL \
-             SELECT gen_random_uuid(), NULL, s.id, 'pending', 0, false, now(), now() \
-               FROM shows s \
-              WHERE NOT EXISTS (SELECT 1 FROM metadata_enrichment e WHERE e.show_id = s.id)"
-                .to_string(),
-        );
-        let result = self.db.execute_raw(stmt).await?;
-        Ok(result.rows_affected())
-    }
-
     async fn fetch_due(
         &self,
         now: DateTime<Utc>,

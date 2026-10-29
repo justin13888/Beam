@@ -317,6 +317,7 @@ impl From<beam_entity::metadata_enrichment::Model> for EnrichmentState {
 #[cfg(test)]
 mod field_tests {
     use super::*;
+    use crate::test_utils::enrichment_state;
 
     #[test]
     fn every_field_reads_back_from_its_stored_form_and_nothing_else_does() {
@@ -326,6 +327,28 @@ mod field_tests {
         for stored in ["", "Title", "tmdb_id", "poster_url", "title "] {
             assert_eq!(MetadataField::parse(stored), None, "{stored:?}");
         }
+    }
+
+    /// A movie carries every piece of metadata a show does and more, so a
+    /// field enrichment writes on a show it writes on a movie; and no field
+    /// is lockable on nothing, or locking it could never mean anything.
+    #[test]
+    fn a_movie_takes_every_field_a_show_does_and_every_field_applies_somewhere() {
+        for field in MetadataField::ALL {
+            assert!(
+                field.applies_to(TitleKind::Movie),
+                "{field:?} applies to a movie"
+            );
+        }
+        let shows: Vec<MetadataField> = MetadataField::ALL
+            .into_iter()
+            .filter(|field| field.applies_to(TitleKind::Show))
+            .collect();
+        assert!(
+            shows.len() < MetadataField::ALL.len(),
+            "some movie field -- a release date, a runtime -- has no show counterpart"
+        );
+        assert!(shows.contains(&MetadataField::Title), "a show is titled");
     }
 
     #[test]
@@ -340,18 +363,8 @@ mod field_tests {
     #[test]
     fn a_filter_admits_exactly_the_rows_of_its_status_and_kind() {
         let row = |target, status| EnrichmentState {
-            id: Uuid::new_v4(),
-            target,
             status,
-            attempts: 0,
-            next_attempt_at: None,
-            enriched_at: None,
-            match_confidence: None,
-            matched_ref: None,
-            force_refresh: false,
-            last_error: None,
-            locked_fields: FieldLocks::none(),
-            updated_at: Utc::now(),
+            ..enrichment_state(target)
         };
         let movie = row(
             EnrichmentTargetId::Movie(Uuid::new_v4()),

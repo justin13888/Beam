@@ -28,13 +28,27 @@ pub trait LibraryRepository: Send + Sync + std::fmt::Debug {
 #[cfg(any(test, feature = "test-utils"))]
 pub mod in_memory {
     use super::*;
+    use crate::repositories::file::in_memory::InMemoryFileRepository;
     use std::collections::HashMap;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     #[derive(Debug, Default)]
     pub struct InMemoryLibraryRepository {
         pub libraries: Mutex<HashMap<Uuid, Library>>,
-        pub file_counts: Mutex<HashMap<Uuid, u64>>,
+        /// The file store [`LibraryRepository::count_files`] counts from, as
+        /// the SQL implementation counts the `files` table.
+        files: Arc<InMemoryFileRepository>,
+    }
+
+    impl InMemoryLibraryRepository {
+        /// A repository whose libraries hold the files `files` stores.
+        #[must_use]
+        pub fn with_files(files: Arc<InMemoryFileRepository>) -> Self {
+            Self {
+                libraries: Mutex::default(),
+                files,
+            }
+        }
     }
 
     #[async_trait]
@@ -67,12 +81,15 @@ pub mod in_memory {
         }
 
         async fn count_files(&self, library_id: Uuid) -> Result<u64, DbErr> {
-            Ok(*self
-                .file_counts
+            // Present files only, as the SQL count is.
+            Ok(self
+                .files
+                .files
                 .lock()
                 .unwrap()
-                .get(&library_id)
-                .unwrap_or(&0))
+                .values()
+                .filter(|file| file.library_id == library_id && file.missing_since.is_none())
+                .count() as u64)
         }
 
         async fn update_scan_progress(
@@ -106,4 +123,39 @@ pub mod in_memory {
             Ok(self.libraries.lock().unwrap().len() as u64)
         }
     }
+}
+
+#[cfg(test)]
+mod contract_over_in_memory {
+    use std::sync::Arc;
+
+    use super::LibraryRepository;
+    use super::in_memory::InMemoryLibraryRepository;
+    use crate::repositories::FileRepository;
+    use crate::repositories::file::in_memory::InMemoryFileRepository;
+
+    struct InMemoryFixture {
+        repo: InMemoryLibraryRepository,
+        files: Arc<InMemoryFileRepository>,
+    }
+
+    impl LibraryRepositoryFixture for InMemoryFixture {
+        fn repo(&self) -> &dyn LibraryRepository {
+            &self.repo
+        }
+
+        fn files(&self) -> &dyn FileRepository {
+            self.files.as_ref()
+        }
+    }
+
+    async fn setup() -> InMemoryFixture {
+        let files = Arc::new(InMemoryFileRepository::default());
+        InMemoryFixture {
+            repo: InMemoryLibraryRepository::with_files(files.clone()),
+            files,
+        }
+    }
+
+    crate::library_repository_contract!(setup);
 }

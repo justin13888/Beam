@@ -13,6 +13,7 @@ use beam_domain::models::{
     CreateMediaFile, FileClassification, FileRelink, LibraryFilePosition, MediaFile,
     MediaFileContent, ProbeUpdate, UpdateMediaFile, displaced_path,
 };
+use beam_domain::repositories::file::{file_named_twice, file_not_found};
 
 /// The `files` columns a file's content is stored in.
 #[derive(Debug, Default)]
@@ -458,7 +459,7 @@ impl FileRepository for SqlFileRepository {
             .chain(displaced.iter().copied())
         {
             if !named.insert(id) {
-                return Err(DbErr::Custom(format!("file {id} is named twice")));
+                return Err(file_named_twice(id));
             }
         }
         // `idx_files_path_unique` is checked per statement, so rows trading
@@ -475,7 +476,7 @@ impl FileRepository for SqlFileRepository {
                 files::Entity::find_by_id(id)
                     .one(txn)
                     .await?
-                    .ok_or_else(|| DbErr::RecordNotFound(format!("File {id} not found")))
+                    .ok_or_else(|| file_not_found(id))
             }
         };
         for id in displaced {

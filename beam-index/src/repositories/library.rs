@@ -82,24 +82,38 @@ impl LibraryRepository for SqlLibraryRepository {
         file_count: Option<i32>,
     ) -> Result<(), DbErr> {
         use beam_entity::library;
-        use sea_orm::{ActiveModelTrait, Set};
+        use sea_orm::prelude::DateTimeWithTimeZone;
+        use sea_orm::sea_query::Expr;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
-        let mut library: library::ActiveModel = library::ActiveModel {
-            id: Set(library_id),
-            ..Default::default()
-        };
-
+        // One `UPDATE .. WHERE id = $1` of only the fields given, so an
+        // unknown id -- a library deleted while its scan ran -- is a no-op,
+        // as it is for every other implementation, rather than a
+        // `RecordNotUpdated` (issue #349). With no field given there is
+        // nothing to write.
+        let mut update = library::Entity::update_many().filter(library::Column::Id.eq(library_id));
+        let mut any = false;
         if let Some(started) = started_at {
-            library.last_scan_started_at = Set(Some(started.into()));
+            update = update.col_expr(
+                library::Column::LastScanStartedAt,
+                Expr::value(Some(DateTimeWithTimeZone::from(started))),
+            );
+            any = true;
         }
         if let Some(finished) = finished_at {
-            library.last_scan_finished_at = Set(Some(finished.into()));
+            update = update.col_expr(
+                library::Column::LastScanFinishedAt,
+                Expr::value(Some(DateTimeWithTimeZone::from(finished))),
+            );
+            any = true;
         }
         if let Some(count) = file_count {
-            library.last_scan_file_count = Set(Some(count));
+            update = update.col_expr(library::Column::LastScanFileCount, Expr::value(Some(count)));
+            any = true;
         }
-
-        library.update(self.db.as_ref()).await?;
+        if any {
+            update.exec(self.db.as_ref()).await?;
+        }
         Ok(())
     }
 

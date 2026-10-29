@@ -59,10 +59,35 @@ pub mod in_memory {
 
     use super::*;
     use crate::models::catalog::{CatalogFilters, Seek, SortKey, TitleKind};
-    use crate::models::search::title_match_score;
     use crate::repositories::genre::in_memory::InMemoryGenreRepository;
     use crate::repositories::movie::in_memory::InMemoryMovieRepository;
     use crate::repositories::show::in_memory::InMemoryShowRepository;
+
+    /// A rough, offline substitute for Postgres trigram similarity: scores how
+    /// well `title` matches `query` so this double ranks results in the same
+    /// *shape* the SQL catalogue does (exact > starts-with > contains > no
+    /// match), without needing `pg_trgm`.
+    ///
+    /// Returns `0.0` for no match (the caller excludes these), `1.0` for an
+    /// empty query or a substring match, `2.0` for a prefix match and `3.0`
+    /// for an exact (case-insensitive) match -- a value in `[0.0, 3.0]`,
+    /// higher is better.
+    fn title_match_score(title: &str, query: &str) -> f64 {
+        let title_lower = title.to_lowercase();
+        let query_lower = query.to_lowercase();
+        if query_lower.is_empty() {
+            return 1.0;
+        }
+        if title_lower == query_lower {
+            3.0
+        } else if title_lower.starts_with(&query_lower) {
+            2.0
+        } else if title_lower.contains(&query_lower) {
+            1.0
+        } else {
+            0.0
+        }
+    }
 
     /// The in-memory double, reading the movie, show and genre doubles a test
     /// writes through. Liveness comes from the file double those title doubles

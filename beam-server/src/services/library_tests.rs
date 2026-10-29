@@ -19,6 +19,21 @@ mod tests {
 
     // ── helpers ───────────────────────────────────────────────────────────────────
 
+    /// `count` present files in `library_id`, written through the file store a
+    /// library double counts from.
+    async fn store_files(files: &InMemoryFileRepository, library_id: Uuid, count: usize) {
+        use beam_domain::repositories::FileRepository;
+        for _ in 0..count {
+            files
+                .create(beam_domain::test_utils::create_media_file(
+                    library_id,
+                    format!("/media/videos/{}.mkv", Uuid::new_v4()),
+                ))
+                .await
+                .unwrap();
+        }
+    }
+
     fn make_service(
         mock_library_repo: MockLibraryRepository,
         mock_file_repo: MockFileRepository,
@@ -546,7 +561,8 @@ mod tests {
     #[tokio::test]
     async fn test_get_libraries_returns_all_libraries_with_correct_file_counts() {
         let video_dir = PathBuf::from("/media/videos");
-        let lib_repo = Arc::new(InMemoryLibraryRepository::default());
+        let indexed = Arc::new(InMemoryFileRepository::default());
+        let lib_repo = Arc::new(InMemoryLibraryRepository::with_files(indexed.clone()));
         let id1 = Uuid::new_v4();
         let id2 = Uuid::new_v4();
 
@@ -560,8 +576,8 @@ mod tests {
             .lock()
             .unwrap()
             .insert(id2, make_domain_library(id2, "Shows"));
-        lib_repo.file_counts.lock().unwrap().insert(id1, 5);
-        lib_repo.file_counts.lock().unwrap().insert(id2, 12);
+        store_files(&indexed, id1, 5).await;
+        store_files(&indexed, id2, 12).await;
 
         let service = LocalLibraryService::new(
             lib_repo,
@@ -645,7 +661,8 @@ mod tests {
     #[tokio::test]
     async fn test_get_library_by_id_existing_library_returns_some() {
         let video_dir = PathBuf::from("/media/videos");
-        let lib_repo = Arc::new(InMemoryLibraryRepository::default());
+        let indexed = Arc::new(InMemoryFileRepository::default());
+        let lib_repo = Arc::new(InMemoryLibraryRepository::with_files(indexed.clone()));
         let lib_id = Uuid::new_v4();
 
         lib_repo
@@ -653,7 +670,7 @@ mod tests {
             .lock()
             .unwrap()
             .insert(lib_id, make_domain_library(lib_id, "Movies"));
-        lib_repo.file_counts.lock().unwrap().insert(lib_id, 7);
+        store_files(&indexed, lib_id, 7).await;
 
         let service = LocalLibraryService::new(
             lib_repo,

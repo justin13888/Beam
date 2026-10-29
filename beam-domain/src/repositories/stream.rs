@@ -72,3 +72,32 @@ pub mod in_memory {
         }
     }
 }
+
+#[cfg(test)]
+mod contract_over_in_memory {
+    use super::MediaStreamRepository;
+    use super::in_memory::InMemoryMediaStreamRepository;
+
+    /// No foreign key to satisfy, so every file id is fresh.
+    #[derive(Default)]
+    struct InMemoryFixture {
+        repo: InMemoryMediaStreamRepository,
+    }
+
+    #[async_trait::async_trait]
+    impl MediaStreamFixture for InMemoryFixture {
+        fn repo(&self) -> &dyn MediaStreamRepository {
+            &self.repo
+        }
+
+        async fn new_file(&self) -> Uuid {
+            Uuid::new_v4()
+        }
+    }
+
+    async fn setup() -> InMemoryFixture {
+        InMemoryFixture::default()
+    }
+
+    crate::media_stream_repository_contract!(setup);
+}

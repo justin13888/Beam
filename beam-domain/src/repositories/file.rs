@@ -145,6 +145,16 @@ pub trait FileRepository: Send + Sync + std::fmt::Debug {
     async fn count_all(&self) -> Result<u64, DbErr>;
 }
 
+/// Why [`FileRepository::relink`] refuses an id it has no row for.
+pub fn file_not_found(id: Uuid) -> DbErr {
+    DbErr::RecordNotFound(format!("File {id} not found"))
+}
+
+/// Why [`FileRepository::relink`] refuses an id it is given twice.
+pub fn file_named_twice(id: Uuid) -> DbErr {
+    DbErr::Custom(format!("file {id} is named twice"))
+}
+
 #[mutants::skip]
 #[cfg(any(test, feature = "test-utils"))]
 pub mod in_memory {
@@ -482,10 +492,10 @@ pub mod in_memory {
                 .chain(displaced.iter().copied())
             {
                 if !files.contains_key(&id) {
-                    return Err(DbErr::RecordNotFound(format!("File {id} not found")));
+                    return Err(file_not_found(id));
                 }
                 if !moving.insert(id) {
-                    return Err(DbErr::Custom(format!("file {id} is named twice")));
+                    return Err(file_named_twice(id));
                 }
             }
             let mut targets = std::collections::HashSet::new();

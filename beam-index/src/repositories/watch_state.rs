@@ -22,6 +22,7 @@ use beam_domain::models::watch_state::{
     ContinueCandidate, HistoryPosition, RecordProgress, TitleRef, WatchState, WatchTarget,
 };
 use beam_domain::repositories::WatchStateRepository;
+use beam_domain::repositories::watch_state::carry_kind_mismatch;
 use beam_domain::services::{Clock, RealClock};
 
 /// SQL-based implementation of the WatchStateRepository trait.
@@ -295,9 +296,7 @@ impl WatchStateRepository for SqlWatchStateRepository {
     async fn carry(&self, from: WatchTarget, to: WatchTarget) -> Result<(), DbErr> {
         let column = key_column(from);
         if column != key_column(to) {
-            return Err(DbErr::Custom(
-                "watch state is carried between two movies or two episodes".to_string(),
-            ));
+            return Err(carry_kind_mismatch());
         }
         if key(from) == key(to) {
             return Ok(());

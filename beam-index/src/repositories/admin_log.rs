@@ -6,15 +6,23 @@ use uuid::Uuid;
 
 use beam_domain::models::{AdminLog, AdminLogCategory, CreateAdminLog};
 use beam_domain::repositories::AdminLogRepository;
+use beam_domain::services::{Clock, RealClock};
 
 #[derive(Debug)]
 pub struct SqlAdminLogRepository {
     db: Arc<DatabaseConnection>,
+    /// Source of `created_at`. Injected so the shared contract orders entries
+    /// by advancing a `TestClock` instead of sleeping.
+    clock: Arc<dyn Clock>,
 }
 
 impl SqlAdminLogRepository {
     pub fn new(db: Arc<DatabaseConnection>) -> Self {
-        Self { db }
+        Self::with_clock(db, Arc::new(RealClock))
+    }
+
+    pub fn with_clock(db: Arc<DatabaseConnection>, clock: Arc<dyn Clock>) -> Self {
+        Self { db, clock }
     }
 }
 
@@ -30,7 +38,7 @@ impl AdminLogRepository for SqlAdminLogRepository {
             category: Set(entry.category.into()),
             message: Set(entry.message),
             details: Set(entry.details),
-            created_at: Set(chrono::Utc::now().into()),
+            created_at: Set(self.clock.now().into()),
         };
 
         let result = admin_log::Entity::insert(model)
