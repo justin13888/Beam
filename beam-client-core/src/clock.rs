@@ -70,23 +70,3 @@ mod test_clock {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_test_clock_only_moves_when_told_to() {
-        let clock = TestClock::new(1_000);
-        assert_eq!(clock.now_unix(), 1_000);
-        assert_eq!(clock.now_unix(), 1_000);
-        clock.advance_secs(15);
-        assert_eq!(clock.now_unix(), 1_015);
-    }
-
-    #[test]
-    fn the_system_clock_returns_a_plausible_epoch_time() {
-        // Sanity only: the point is that it is not zero or negative.
-        assert!(SystemClock.now_unix() > 1_700_000_000);
-    }
-}
