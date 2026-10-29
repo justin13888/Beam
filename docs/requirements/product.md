@@ -74,15 +74,17 @@ another source ([#142](https://github.com/justin13888/beam/issues/142)).
   revoked as well as granted (FR-106,
   [ADR-0003](../architecture/decisions/ADR-0003-oidc-bff-auth.md)).
 - Rich metadata enrichment (posters, backdrops, descriptions, ratings, genres, release dates,
-  season/episode titles) via the `cameo` crate (TMDB + AniList), run as an asynchronous background
-  pipeline after indexing ([ADR-0006](../architecture/decisions/ADR-0006-cameo-enrichment.md)).
+  season/episode titles) via the `cameo` crate (TMDB + AniList) and a TheTVDB adapter, run as an
+  asynchronous background pipeline after indexing
+  ([ADR-0006](../architecture/decisions/ADR-0006-cameo-enrichment.md)).
 - A web client covering: OIDC login, library browsing, movie and show/season/episode detail pages,
   direct-play playback with a source-quality picker, resume playback with a continue-watching row,
   server-side instant search (Postgres `pg_trgm`), full-file download, and an admin area (library
   management, scan progress, enrichment status and manual re-enrich, log viewing).
-- In-process per-client token-bucket rate limiting on the OIDC login/callback endpoints and on the
-  browse/search endpoint, tunable and switchable via `BEAM_RATE_LIMIT_*` (NFR-107). Streaming and
-  download are deliberately excluded, because a player legitimately bursts range requests.
+- In-process per-client token-bucket rate limiting on the OIDC login/callback and device-login
+  endpoints and on the browse and people-search endpoints, tunable and switchable via
+  `BEAM_RATE_LIMIT_*` (NFR-107). Streaming and download are deliberately excluded, because a player
+  legitimately bursts range requests.
 - Operator-tunable enrichment: batch size, interval, minimum match confidence and metadata
   language, via `BEAM_ENRICH_*` and `BEAM_METADATA_LANGUAGE`.
 - A security posture in which no bearer or session tokens ever appear in a URL or query string, CSRF

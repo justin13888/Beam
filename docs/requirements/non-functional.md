@@ -34,14 +34,14 @@ requirements (referenced below as FR-xxx).
 - **NFR-106**: The server's indexer and streaming/download paths MUST treat configured library root
   paths as read-only. The server process SHOULD run with filesystem permissions that make write
   access to library roots impossible, not merely avoided by convention (FR-202).
-- **NFR-107**: Authentication-related endpoints (login initiation, callback, device login, session
-  refresh) SHOULD be subject to rate limiting or an equivalent abuse-resistance mechanism. Enforced
-  since [#69](https://github.com/justin13888/beam/issues/69) via in-process token buckets on the
-  auth endpoints (`/v1/auth/login`, `/v1/auth/callback`, `/v1/auth/device`), on device-login polls
+- **NFR-107**: Authentication-related endpoints (login initiation, callback, device login) SHOULD
+  be subject to rate limiting or an equivalent abuse-resistance mechanism. Enforced since
+  [#69](https://github.com/justin13888/beam/issues/69) via in-process token buckets on the auth
+  endpoints (`/v1/auth/login`, `/v1/auth/callback`, `/v1/auth/device`), on device-login polls
   (`/v1/auth/device/token`, a class of its own because a waiting device polls every few seconds),
-  and on the browse/search endpoint (`GET /v1/media`), keyed per client IP. Each device login is
-  additionally paced by its own poll interval, so no client can reach the IdP through Beam faster
-  than RFC 8628 allows. Streaming and download paths are deliberately excluded (a player legitimately
+  and on the browse and search endpoints (`GET /v1/media`, `GET /v1/people`, which share one
+  budget), keyed per client IP. Each device login is additionally paced by its own poll interval,
+  so no client can reach the IdP through Beam faster than RFC 8628 allows. Streaming and download paths are deliberately excluded (a player legitimately
   bursts range requests). Tunable and switchable via the `BEAM_RATE_LIMIT_*` variables.
 - **NFR-108**: The domain API MUST NOT expose raw filesystem paths, database primary keys of internal
   infrastructure tables, or other implementation details capable of enabling path traversal or
@@ -62,8 +62,8 @@ requirements (referenced below as FR-xxx).
   external infrastructure running — no Postgres, Docker Compose, or network access is required for
   any unit or subcutaneous test to pass.
 - **NFR-202**: Every external boundary (database access via `beam-entity`, filesystem I/O, OIDC
-  provider calls, TMDB/AniList calls via `cameo`) MUST be abstracted behind a Rust trait, with an
-  in-memory or fake implementation available for tests.
+  provider calls, TMDB/AniList calls via `cameo`, TheTVDB calls) MUST be abstracted behind a Rust
+  trait, with an in-memory or fake implementation available for tests.
 - **NFR-203**: Complex stateful external dependencies (e.g., a media repository, a session store)
   SHOULD be tested against a stateful `InMemory*` fake rather than a mocking framework. `mockall`
   SHOULD be reserved for simple, strict contract verification.
@@ -79,7 +79,9 @@ requirements (referenced below as FR-xxx).
   be codified as unit tests by configuring the relevant injected trait to return the corresponding
   `Result::Err`.
 - **NFR-206**: Rust workspace coverage SHOULD be maintained at or above 70% of lines, and web
-  (`beam-web`) coverage at or above 60% of lines, measured and enforced in CI. Rust MUST additionally
+  (`beam-web`) coverage at or above 60% of lines, measured and enforced in CI; these are floors,
+  and the enforced thresholds are the ratcheted values in the `rust:coverage` task (`mise.toml`) and
+  `beam-web/vitest.config.ts`, which sit above them. Rust MUST additionally
   gate region and function coverage; regions stand in for branches, whose measurement requires a
   nightly toolchain the project does not use. Thresholds are calibrated below the measured value and
   ratcheted upward; a threshold MUST NOT be lowered to make a failing pull request pass.
@@ -108,8 +110,8 @@ requirements (referenced below as FR-xxx).
   session TTLs, rescan cadence, debounce windows and rate-limit refill assertable at all, and it
   removes the class of failure where a test passes or fails according to machine load.
 - **NFR-208**: CI MUST enforce, on every pull request: `cargo fmt --check`, `cargo clippy --workspace
-  --all-targets -- -D warnings`, the full Rust test suite, and the TypeScript `bun run check` step
-  (covering lint/typecheck for `beam-web`/`beam-docs`).
+  --all-targets -- -D warnings`, the full Rust test suite, and the TypeScript `ts:check` and
+  `ts:typecheck` tasks (covering lint/typecheck for `beam-web`/`beam-docs`).
 
 ## NFR-3xx — Performance
 
@@ -163,7 +165,9 @@ requirements (referenced below as FR-xxx).
   FR-307) when optional variables are absent. See `../operations/configuration.md`.
 - **NFR-403**: The server MUST emit structured logs (machine-parseable, e.g. JSON or key-value
   fields) for scan lifecycle events, enrichment lifecycle events, authentication events, and
-  admin-mutating actions, sufficient to back the admin log viewer (FR-604, FR-605).
+  admin-mutating actions. The admin log viewer (FR-604, FR-605) does not read these process logs: it
+  reads the `admin_logs` table, which the server writes explicitly for the events an administrator
+  reviews.
 - **NFR-404**: Real-time progress surfaces (scan, enrichment) MUST be implemented via Server-Sent
   Events rather than WebSockets or GraphQL subscriptions, consistent with the REST-only API
   ([ADR-0010](../architecture/decisions/ADR-0010-openapi-3-2-kynos.md)).
@@ -174,7 +178,8 @@ requirements (referenced below as FR-xxx).
   `compose.dependencies.yaml`, with the dev-only identity provider gated behind the `dev-idp`
   compose profile so it is absent from the default stack (FR-110). No external service dependency
   may be added there without a corresponding in-memory trait implementation for the test suite
-  (NFR-604).
+  (NFR-604). The Traefik proxy that file also runs is a reverse proxy in front of Beam, not a
+  service Beam's code calls, so it needs no such implementation.
 - **NFR-407**: Beam MUST be deployable on Kubernetes through the Helm chart in `charts/beam`, as
   exactly one server replica against an external Postgres, with every media library mounted
   read-only (FR-202) and a liveness probe that does not depend on the database. These properties are
@@ -185,15 +190,15 @@ requirements (referenced below as FR-xxx).
 
 - **NFR-501**: No third party may observe which viewer requests which title's artwork. Artwork is
   fetched from the provider by the server and served from its own cache, so a viewer's client never
-  connects to TMDB or AniList
+  connects to TMDB, AniList or TheTVDB
   ([ADR-0015](../architecture/decisions/ADR-0015-artwork-served-by-beam.md), FR-310). This replaces
   the opposite tradeoff, recorded in
   [ADR-0008](../architecture/decisions/ADR-0008-image-cdn-direct.md) and revisited in
   [#70](https://github.com/justin13888/beam/issues/70).
 - **NFR-502**: The server MUST NOT forward any first-party session cookie, auth header, or other
-  Beam-specific credential to TMDB/AniList — when resolving enrichment data, and when fetching an
-  image for the artwork cache. The outbound artwork client is built with no cookie jar, so there is
-  nowhere for a session cookie to be attached from even by accident.
+  Beam-specific credential to TMDB/AniList/TheTVDB — when resolving enrichment data, and when
+  fetching an image for the artwork cache. The outbound artwork and TheTVDB clients are built with no
+  cookie jar, so there is nowhere for a session cookie to be attached from even by accident.
 - **NFR-503**: The server MUST NOT send usage or library data anywhere unless the operator names a
   destination (`BEAM_TELEMETRY_URL`); there is no default collector. What it then sends MUST be
   aggregate only -- counts, codec and container distributions, size ranges, the server version --
