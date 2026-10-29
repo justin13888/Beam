@@ -9,6 +9,7 @@ import androidx.navigation3.runtime.serialization.NavBackStackSerializer
 import androidx.navigation3.runtime.serialization.NavKeySerializer
 import androidx.savedstate.serialization.decodeFromSavedState
 import androidx.savedstate.serialization.encodeToSavedState
+import kotlinx.serialization.ExperimentalSerializationApi
 import org.junit.Assert.assertEquals
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -57,6 +58,24 @@ class DestinationsTest {
         val restored = decodeFromSavedState(serializer, throughAParcel(encodeToSavedState(serializer, stack)))
 
         assertEquals(stack.toList(), restored.toList())
+        assertEquals(
+            "the stack holds one of every destination the sealed hierarchy declares",
+            everyDestination(),
+            stack.map { it::class.java.name }.toSet(),
+        )
+    }
+
+    /**
+     * Every subclass of [Destination], by serial name -- the class name, as
+     * none declares its own -- read from the sealed serializer rather than
+     * listed by hand, so a new destination is one this test must be given.
+     */
+    @OptIn(ExperimentalSerializationApi::class)
+    private fun everyDestination(): Set<String> {
+        // A sealed descriptor is the pair (type discriminator, value); the
+        // value's elements are the subclasses.
+        val subclasses = Destination.serializer().descriptor.getElementDescriptor(1)
+        return (0 until subclasses.elementsCount).map(subclasses::getElementName).toSet()
     }
 
     /** What leaving the process does to saved state: marshalled to bytes and back. */
