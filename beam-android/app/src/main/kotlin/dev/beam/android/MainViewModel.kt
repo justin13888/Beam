@@ -21,8 +21,19 @@ import javax.inject.Inject
 public data class MainUiState(
     /** Whether the stored session has been read yet. */
     val isReady: Boolean = false,
-    /** Whether there is a usable session. */
+    /**
+     * Whether there is a usable session.
+     *
+     * A stored session counts from the moment it is restored -- the core
+     * restores it signed in without asking the server -- and stops counting
+     * when the server refuses it.
+     */
     val isSignedIn: Boolean = false,
+    /**
+     * Whether the server has refused the active server's session, which is
+     * the shell's cue to send the viewer back to sign-in wherever they are.
+     */
+    val isSessionExpired: Boolean = false,
     /** Whether the signed-in user administers this server. */
     val isAdmin: Boolean = false,
     /** The current preferences, which the theme reads. */
@@ -66,17 +77,25 @@ public class MainViewModel
                     it.copy(
                         isReady = true,
                         isSignedIn = session is SessionState.Authenticated,
+                        isSessionExpired = session is SessionState.Expired,
                         isAdmin = (session as? SessionState.Authenticated)?.user?.isAdmin ?: false,
                     )
                 }
             }
             viewModelScope.launch {
                 // Who administers what is per server: switching servers in
-                // settings, or signing in to another, changes it.
+                // settings, or signing in to another, changes it. So does a
+                // session the server refuses mid-use.
                 servers.servers.collect { known ->
                     val session = known.firstOrNull { it.isActive }?.state
                     mutableState.update {
-                        it.copy(isAdmin = (session as? SessionState.Authenticated)?.user?.isAdmin ?: false)
+                        it.copy(
+                            // Before the restore has answered, the list is not
+                            // yet the one this device restored.
+                            isSignedIn = if (it.isReady) session is SessionState.Authenticated else it.isSignedIn,
+                            isSessionExpired = session is SessionState.Expired,
+                            isAdmin = (session as? SessionState.Authenticated)?.user?.isAdmin ?: false,
+                        )
                     }
                 }
             }

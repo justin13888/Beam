@@ -239,6 +239,11 @@ public object Fixtures {
             lastScanFinishedAtUnix = if (scanRunning) null else 1_767_225_900L,
         )
 
+    /**
+     * A known server. Signed in by default, which is also what the core
+     * restores a stored session as: `Authenticated`, carrying the identity the
+     * server confirmed when the session was stored.
+     */
     public fun server(
         id: String = "https-beam-local-8000",
         displayName: String = "Home",

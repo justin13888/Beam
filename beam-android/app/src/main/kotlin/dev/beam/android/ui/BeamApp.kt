@@ -12,6 +12,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.material3.adaptive.navigationsuite.NavigationSuiteScaffold
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -57,10 +58,22 @@ import dev.beam.android.navigation.TopLevel
 public fun BeamApp(
     isSignedIn: Boolean,
     isAdmin: Boolean,
+    isSessionExpired: Boolean,
     modifier: Modifier = Modifier,
 ) {
     val backStack = rememberNavBackStack(if (isSignedIn) TopLevel.Home else SignIn)
     var selectedTab by rememberSaveable { mutableStateOf(TopLevel.Home) }
+
+    // The start destination is chosen once, so a session the server refuses
+    // mid-use has to move the viewer explicitly. Everything on the stack was
+    // reached with the refused session, so it goes rather than sitting under
+    // sign-in for back to return to.
+    LaunchedEffect(isSessionExpired) {
+        if (isSessionExpired && backStack.lastOrNull() !is SignIn) {
+            backStack.clear()
+            backStack.add(SignIn)
+        }
+    }
 
     // The player and sign-in take the whole screen: a navigation bar over a
     // film, or beside a sign-in form, is chrome for a place the viewer cannot

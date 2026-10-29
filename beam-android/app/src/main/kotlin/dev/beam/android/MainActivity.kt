@@ -45,6 +45,7 @@ public class MainActivity : ComponentActivity() {
                 BeamApp(
                     isSignedIn = state.isSignedIn,
                     isAdmin = state.isAdmin,
+                    isSessionExpired = state.isSessionExpired,
                 )
             }
         }
