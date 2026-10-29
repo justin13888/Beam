@@ -164,6 +164,70 @@ class AdminTest {
         }
 
     @Test
+    fun `a refused block says so`() =
+        runTest {
+            // A block the server refused, with nothing said, looks to the
+            // operator exactly like a block they never pressed.
+            val admin = FakeAdminRepository()
+            val viewModel = AdminViewModel(admin, FakeCatalogRepository())
+            testScheduler.advanceUntilIdle()
+            val user =
+                viewModel.state.value.valueOrNull!!
+                    .users
+                    .first()
+
+            admin.failWith = BeamException.Forbidden("admin only", "about:blank")
+            viewModel.setUserDisabled(user.id, disabled = true)
+            testScheduler.advanceUntilIdle()
+
+            val state = viewModel.state.value.valueOrNull!!
+            assertTrue("the refusal reached no account", admin.disableCalls.isEmpty())
+            assertFalse("the row still shows the account active", state.users.first { it.id == user.id }.disabled)
+            val message = state.message
+            assertNotNull("the operator is told", message)
+            assertTrue(message!!.contains("could not be blocked"))
+        }
+
+    @Test
+    fun `deleting a library removes it after reload`() =
+        runTest {
+            val catalog =
+                FakeCatalogRepository().apply {
+                    libraryList = listOf(Fixtures.library(id = "films"), Fixtures.library(id = "shows"))
+                }
+            val viewModel = AdminViewModel(FakeAdminRepository(catalog), catalog)
+            testScheduler.advanceUntilIdle()
+
+            viewModel.deleteLibrary("films")
+            testScheduler.advanceUntilIdle()
+
+            val state = viewModel.state.value.valueOrNull!!
+            assertEquals(listOf("shows"), state.libraries.map { it.id })
+            assertNull("a deletion that worked needs no message", state.message)
+        }
+
+    @Test
+    fun `a refused library deletion says so and keeps the library`() =
+        runTest {
+            val catalog = FakeCatalogRepository()
+            val admin = FakeAdminRepository(catalog)
+            val viewModel = AdminViewModel(admin, catalog)
+            testScheduler.advanceUntilIdle()
+            val library =
+                viewModel.state.value.valueOrNull!!
+                    .libraries
+                    .first()
+
+            admin.failWith = BeamException.Forbidden("admin only", "about:blank")
+            viewModel.deleteLibrary(library.id)
+            testScheduler.advanceUntilIdle()
+
+            val state = viewModel.state.value.valueOrNull!!
+            assertTrue(state.libraries.any { it.id == library.id })
+            assertTrue(state.message!!.contains("could not be deleted"))
+        }
+
+    @Test
     fun `a user listing that fails does not take the dashboard with it`() =
         runTest {
             // The counts and the libraries are the point of the screen; the user

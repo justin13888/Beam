@@ -82,6 +82,13 @@ internal class MediaDownloadRepository
         DownloadManagerHolder {
         private var delegate: BeamDownloadManager? = null
 
+        /**
+         * Unmetered only until told otherwise: the stored preference defaults
+         * to no downloads over cellular, and a manager built before the shell
+         * has sent it must not spend the viewer's data meanwhile.
+         */
+        private var requiresUnmetered: Boolean = true
+
         @OptIn(ExperimentalCoroutinesApi::class)
         override val downloads: Flow<List<DownloadRecord>> =
             flow { emit(runCatching { beamManager() }.getOrNull()) }
@@ -114,8 +121,17 @@ internal class MediaDownloadRepository
             beamManager().removeAll()
         }
 
+        /**
+         * Held here rather than handed straight to the manager, because the
+         * shell sends the stored preference at start -- before sign-in, when
+         * building the manager would bake in an empty credential. The manager
+         * takes it when it is built, and every change after that.
+         */
         override suspend fun setRequiresUnmeteredNetwork(required: Boolean) {
-            beamManager().setRequiresUnmeteredNetwork(required)
+            synchronized(this) {
+                requiresUnmetered = required
+                delegate?.setRequiresUnmeteredNetwork(required)
+            }
         }
 
         override suspend fun isDownloaded(fileId: String): Boolean =
@@ -140,6 +156,9 @@ internal class MediaDownloadRepository
                         titles = titles,
                         artwork = artwork,
                         server = client.serverHttpConfig(),
-                    ).also { delegate = it }
+                    ).also {
+                        it.setRequiresUnmeteredNetwork(requiresUnmetered)
+                        delegate = it
+                    }
             }
     }

@@ -2,6 +2,7 @@ package dev.beam.android.feature.auth
 
 import app.cash.turbine.test
 import dev.beam.android.core.testing.FakeServerRepository
+import dev.beam.android.core.testing.Fixtures
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -320,6 +321,76 @@ class AuthViewModelTest {
             assertEquals("BCDF-GHJK", state.devicePrompt?.userCode)
             assertNull("the browser is the fallback, not the default", state.loginUrl)
             viewModel.onDeviceLoginCancelled()
+        }
+
+    @Test
+    fun `cancelling a device login stops polling`() =
+        runTest {
+            val servers =
+                FakeServerRepository().apply {
+                    deviceLogin = listOf(DeviceLoginStep.Waiting(5u, false))
+                }
+            val viewModel = AuthViewModel(servers, TV)
+            testScheduler.advanceUntilIdle()
+            viewModel.onAddressChange("beam.example.com")
+            viewModel.connect()
+            testScheduler.runCurrent()
+            testScheduler.advanceTimeBy(5_001)
+            assertEquals("the login was being polled", 1, servers.devicePolls)
+
+            viewModel.onDeviceLoginCancelled()
+            // Long enough for many more polls, had the loop survived.
+            testScheduler.advanceTimeBy(60_000)
+
+            assertEquals("no poll after the viewer gave up", 1, servers.devicePolls)
+            assertNull("and the code is gone", viewModel.state.value.devicePrompt)
+        }
+
+    @Test
+    fun `forgetting a server removes it from the shortcuts`() =
+        runTest {
+            val servers =
+                FakeServerRepository(
+                    listOf(
+                        Fixtures.server(id = "home", isActive = true),
+                        Fixtures.server(id = "cabin", isActive = false),
+                    ),
+                )
+            val viewModel = AuthViewModel(servers, PHONE)
+            testScheduler.advanceUntilIdle()
+
+            viewModel.forget("cabin")
+            testScheduler.advanceUntilIdle()
+
+            assertEquals(
+                listOf("home"),
+                viewModel.state.value.knownServers
+                    .map { it.id },
+            )
+        }
+
+    @Test
+    fun `connecting to a known server signs in to it without adding another`() =
+        runTest {
+            val servers =
+                FakeServerRepository(
+                    listOf(
+                        Fixtures.server(id = "home", isActive = true),
+                        Fixtures.server(id = "cabin", isActive = false),
+                    ),
+                )
+            val viewModel = AuthViewModel(servers, PHONE)
+            testScheduler.advanceUntilIdle()
+
+            viewModel.connect(existingServerId = "cabin")
+            testScheduler.advanceUntilIdle()
+
+            val state = viewModel.state.value
+            assertEquals("cabin", state.serverId)
+            assertNotNull(state.loginUrl)
+            val known = servers.restore()
+            assertEquals("no second entry", 2, known.size)
+            assertEquals("cabin", known.single { it.isActive }.id)
         }
 
     @Test

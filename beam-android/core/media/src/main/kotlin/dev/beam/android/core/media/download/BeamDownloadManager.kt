@@ -173,7 +173,9 @@ public class BeamDownloadManager internal constructor(
     /**
      * Only download over an unmetered connection.
      *
-     * Defaults to on elsewhere in the app. A media file is large enough that
+     * Defaults to on in [MediaDownloadRepository], which applies it to a
+     * manager as it is built, and the viewer's cellular preference turns it
+     * off from settings. A media file is large enough that
      * getting this wrong costs the viewer real money, so the safe default is
      * the one that cannot.
      */

@@ -6,6 +6,7 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import dev.beam.android.core.ffi.preferences.PreferencesRepository
 import dev.beam.android.core.ffi.repository.ServerRepository
 import dev.beam.android.core.ffi.repository.SessionRepository
+import dev.beam.android.core.ffi.toFailure
 import dev.beam.android.core.model.PaletteSource
 import dev.beam.android.core.model.QualityPreference
 import dev.beam.android.core.model.ThemeMode
@@ -15,6 +16,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import uniffi.beam_client_core.BeamException
 import uniffi.beam_client_core.DeviceSession
 import uniffi.beam_client_core.ServerSummary
 import uniffi.beam_client_core.SessionState
@@ -43,6 +45,8 @@ public data class SettingsUiState(
      * not signed in to sets [isSignedOut] instead: signing in comes first.
      */
     val hasSwitchedServer: Boolean = false,
+    /** Why the last action the viewer asked for did not happen, until dismissed. */
+    val error: String? = null,
 )
 
 /** Preferences, the account, and this device's trust decisions. */
@@ -174,12 +178,31 @@ public class SettingsViewModel
             }
         }
 
-        /** End every session everywhere, including this one. */
+        /**
+         * End every session everywhere, including this one.
+         *
+         * A failure is reported, not taken as done: the viewer asked for the
+         * other devices to be signed out, and leaving the screen as though
+         * they were would be a security-relevant lie. This device stays signed
+         * in so they can try again.
+         */
         public fun signOutEverywhere() {
+            mutableState.update { it.copy(error = null) }
             viewModelScope.launch {
-                runCatching { sessions.logoutEverywhere() }
-                mutableState.update { it.copy(isSignedOut = true) }
+                try {
+                    sessions.logoutEverywhere()
+                    mutableState.update { it.copy(isSignedOut = true) }
+                } catch (failure: BeamException) {
+                    mutableState.update {
+                        it.copy(error = "Could not sign out everywhere. ${failure.toFailure().message}")
+                    }
+                }
             }
+        }
+
+        /** Dismiss the last error. */
+        public fun clearError() {
+            mutableState.update { it.copy(error = null) }
         }
 
         private fun edit(transform: (UserPreferences) -> UserPreferences) {
