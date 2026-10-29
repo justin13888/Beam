@@ -284,6 +284,33 @@ mod tests {
         }
     }
 
+    /// A provider nobody answers at is a transport failure -- which the
+    /// artwork service retries -- not a missing image it would remember.
+    #[tokio::test]
+    async fn an_unreachable_provider_is_a_transport_failure() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a free port");
+        let address = listener.local_addr().expect("its address");
+        drop(listener);
+        let fetcher = ReqwestArtworkFetcher::new(ArtworkFetchLimits {
+            timeout: Duration::from_secs(5),
+            max_bytes: 1024,
+        })
+        .expect("the client builds");
+
+        let fetched = fetcher
+            .fetch(&format!("https://{address}/poster.jpg"))
+            .await;
+        assert!(
+            matches!(fetched, Err(ArtworkFetchError::Transport(_))),
+            "{fetched:?}"
+        );
+        // A cleartext URL is refused before anything is sent.
+        assert!(matches!(
+            fetcher.fetch(&format!("http://{address}/poster.jpg")).await,
+            Err(ArtworkFetchError::Refused { .. })
+        ));
+    }
+
     /// NFR-502: no Beam session cookie, auth header or other first-party
     /// credential may reach TMDB or AniList. Asserted on the request Beam
     /// would actually send, which needs no server to inspect.

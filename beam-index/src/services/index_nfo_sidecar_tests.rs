@@ -182,14 +182,24 @@ struct Harness {
     service: Arc<LocalIndexService>,
 }
 
+/// A clock stopped at the moment it is made: before any file a test then
+/// writes. No NFO written after it ever settles (`STAMP_SETTLE`), however
+/// long the test takes under load, so what a scan records does not depend
+/// on how quickly it followed the write.
+fn pinned_clock() -> Arc<dyn Clock> {
+    Arc::new(beam_domain::services::TestClock::starting_at(
+        chrono::Utc::now(),
+    ))
+}
+
 impl Harness {
     async fn new() -> Self {
-        Self::build(Probe::Double, Arc::new(RealClock)).await
+        Self::build(Probe::Double, pinned_clock()).await
     }
 
     async fn with_real_prober() -> Self {
         let _ = crate::probe::init();
-        Self::build(Probe::Real, Arc::new(RealClock)).await
+        Self::build(Probe::Real, pinned_clock()).await
     }
 
     async fn build(probe: Probe, clock: Arc<dyn Clock>) -> Self {
@@ -509,6 +519,33 @@ async fn an_nfo_pins_the_new_movie_shows_its_title_and_queues_a_fetch_by_the_pin
     let row = h.enrichment_of(EnrichmentTargetId::Movie(movie.id)).await;
     assert!(row.force_refresh, "the pinned movie is fetched afresh");
     assert_eq!(row.matched_ref, None, "by its pin, not an old match");
+}
+
+/// An NFO that is there but does not parse is ignored: the movie is the
+/// one its path names, with no pin -- and once the NFO is fixed, the next
+/// scan applies it.
+#[tokio::test]
+async fn an_nfo_that_does_not_parse_is_ignored_until_it_is_fixed() {
+    let h = Harness::new().await;
+    h.video("Matrix/matrix.1080p.mkv");
+    h.write(
+        "Matrix/movie.nfo",
+        r#"<movie><title>The Matrix</title><uniqueid type="tmdb">603"#,
+    );
+
+    h.scan().await;
+
+    let movie = h.movie_of("Matrix/matrix.1080p.mkv");
+    assert_eq!(movie.pinned_ref, None, "a broken NFO pins nothing");
+    assert_ne!(movie.title, "The Matrix", "nor names the title");
+    assert_eq!(movie.identity_key.as_deref(), Some("matrix|"));
+
+    h.write("Matrix/movie.nfo", MATRIX_NFO);
+    h.scan().await;
+
+    let fixed = h.movie_of("Matrix/matrix.1080p.mkv");
+    assert_eq!(fixed.id, movie.id, "the same title, now pinned");
+    assert_eq!(fixed.pinned_ref.as_deref(), Some("tmdb:603"));
 }
 
 #[tokio::test]
@@ -2349,6 +2386,44 @@ async fn a_walk_failure_where_a_kept_nfo_lives_keeps_its_record_and_the_pin() {
     );
 }
 
+/// A subtitle under a folder the walk cannot read is not a subtitle the
+/// walk found gone: its record stays, and is still its video's.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_subtitle_under_an_unreadable_folder_is_kept() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let h = Harness::new().await;
+    h.video("Movie (2000)/Movie (2000).mkv");
+    h.write("Movie (2000)/Subs/Movie (2000).en.srt", "1");
+    h.scan().await;
+    assert_eq!(
+        h.subtitles_of("Movie (2000)/Movie (2000).mkv").await.len(),
+        1
+    );
+
+    let locked = h.root.join("Movie (2000)/Subs");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read_dir(&locked).is_ok() {
+        // Running as root: permissions do not bind, so the walk cannot fail.
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        eprintln!("skipped: running as root, which ignores file permissions");
+        return;
+    }
+    let scanned = h.service.scan_library(h.library.id.to_string()).await;
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    scanned.unwrap();
+
+    let kept = h.subtitles_of("Movie (2000)/Movie (2000).mkv").await;
+    assert_eq!(
+        kept.iter()
+            .map(|s| s.path.strip_prefix(&h.root).unwrap().to_path_buf())
+            .collect::<Vec<_>>(),
+        [PathBuf::from("Movie (2000)/Subs/Movie (2000).en.srt")],
+        "the unreadable folder's subtitle is kept"
+    );
+}
+
 /// A removal the watcher reports while the library root is gone -- a volume
 /// unmounted -- is not an NFO or a subtitle deleted: their records stay.
 #[tokio::test]
@@ -2405,7 +2480,7 @@ fn move_file(h: &Harness, from: &str, to: &str) {
 /// A movie folder -- video, subtitle and NFO -- indexed, then moved to a new
 /// folder.
 async fn a_moved_movie_folder() -> (Harness, Uuid) {
-    let h = Harness::build(Probe::ContentHashed, Arc::new(RealClock)).await;
+    let h = Harness::build(Probe::ContentHashed, pinned_clock()).await;
     h.video("Heat/Heat.mkv");
     h.write("Heat/Heat.en.srt", "1");
     h.write("Heat/Heat.nfo", &tmdb_movie(949));
@@ -2499,7 +2574,7 @@ async fn the_watcher_relinks_a_moved_video_with_the_subtitles_beside_its_new_pat
 /// keeping its pin.
 #[tokio::test]
 async fn a_renamed_movie_folders_event_carries_its_subtitles_and_nfo_along() {
-    let h = Harness::build(Probe::ContentHashed, Arc::new(RealClock)).await;
+    let h = Harness::build(Probe::ContentHashed, pinned_clock()).await;
     h.video("Heat/Heat.mkv");
     h.write("Heat/Heat.en.srt", "1");
     h.write("Heat/Heat.nfo", &tmdb_movie(949));
@@ -2532,7 +2607,7 @@ async fn a_renamed_movie_folders_event_carries_its_subtitles_and_nfo_along() {
 /// `One/`'s NFO pins the movie to tmdb:949, and `Two/`'s, naming tmdb:1, is
 /// kept against it and recorded as applied (FR-219).
 async fn a_kept_conflicting_nfo_in_its_own_folder() -> Harness {
-    let h = Harness::build(Probe::ContentHashed, Arc::new(RealClock)).await;
+    let h = Harness::build(Probe::ContentHashed, pinned_clock()).await;
     h.video("One/Heat (1995).mkv");
     h.write("One/Heat (1995).nfo", &tmdb_movie(949));
     h.scan().await;
@@ -2625,7 +2700,7 @@ async fn a_kept_nfo_edited_as_its_folder_moves_repins_its_title() {
 /// by its record, and the show keeps its pin.
 #[tokio::test]
 async fn a_kept_show_nfos_folder_moved_keeps_the_shows_pin() {
-    let h = Harness::build(Probe::ContentHashed, Arc::new(RealClock)).await;
+    let h = Harness::build(Probe::ContentHashed, pinned_clock()).await;
     h.video("TV/Lost/Season 01/Lost - S01E01.mkv");
     h.write("TV/Lost/tvshow.nfo", &tmdb_show(4607));
     h.scan().await;
@@ -2687,7 +2762,7 @@ async fn a_kept_nfos_folder_seen_removed_and_put_back_repins_its_title() {
 /// and the NFO recorded as applied.
 #[tokio::test]
 async fn a_video_moved_beside_an_nfo_it_never_had_is_pinned_by_it() {
-    let h = Harness::build(Probe::ContentHashed, Arc::new(RealClock)).await;
+    let h = Harness::build(Probe::ContentHashed, pinned_clock()).await;
     h.video("Incoming/Alien (1979).mkv");
     h.scan().await;
     assert_eq!(h.movie_pins(), vec![None]);
@@ -2713,7 +2788,7 @@ async fn a_video_moved_beside_an_nfo_it_never_had_is_pinned_by_it() {
 /// taken for an edit that replaces the pin.
 #[tokio::test]
 async fn a_video_moved_beside_a_conflicting_nfo_it_never_had_keeps_the_pin() {
-    let h = Harness::build(Probe::ContentHashed, Arc::new(RealClock)).await;
+    let h = Harness::build(Probe::ContentHashed, pinned_clock()).await;
     h.video("One/Heat (1995).mkv");
     h.write("One/Heat (1995).nfo", &tmdb_movie(949));
     h.video("Incoming/Heat (1995).mkv");
@@ -2741,7 +2816,7 @@ async fn a_video_moved_beside_a_conflicting_nfo_it_never_had_keeps_the_pin() {
 /// an edit of the one it left, and the title keeps its pin.
 #[tokio::test]
 async fn a_video_moved_away_from_an_nfo_that_stays_keeps_the_pin() {
-    let h = Harness::build(Probe::ContentHashed, Arc::new(RealClock)).await;
+    let h = Harness::build(Probe::ContentHashed, pinned_clock()).await;
     h.video("One/Heat (1995).mkv");
     h.video("One/Heat (1995) - Remux.mkv");
     h.write("One/movie.nfo", &tmdb_movie(949));
@@ -2769,7 +2844,7 @@ async fn a_video_moved_away_from_an_nfo_that_stays_keeps_the_pin() {
 /// stat alike, and a scan does not re-hash a file whose size and
 /// modification time match its row.
 async fn kept_conflicting_nfos_in(folders: &[&str]) -> Harness {
-    let h = Harness::build(Probe::ContentHashed, Arc::new(RealClock)).await;
+    let h = Harness::build(Probe::ContentHashed, pinned_clock()).await;
     for (i, folder) in folders.iter().enumerate() {
         let id = if i == 0 { 949 } else { i as u32 };
         h.write(&format!("{folder}/Heat (1995).mkv"), &"v".repeat(16 + i));
@@ -2979,7 +3054,7 @@ async fn folders_swapped_with_one_nfo_edited_under_per_file_events_repin_to_the_
 /// video and applies the NFO as a new file's, pinning the title.
 #[tokio::test]
 async fn an_nfo_beside_a_video_left_to_the_scan_is_applied_by_the_scan() {
-    let h = Harness::build(Probe::ContentHashed, Arc::new(RealClock)).await;
+    let h = Harness::build(Probe::ContentHashed, pinned_clock()).await;
     h.write("One/Heat (1995).mkv", "one");
     h.write("Two/Heat (1995).mkv", "two, a longer copy");
     h.scan().await;
@@ -3126,7 +3201,7 @@ fn move_videos(h: &Harness, moves: &[(&str, &str)]) -> Vec<(PathBuf, MediaFile)>
 #[tokio::test]
 async fn a_shared_movie_nfo_edited_in_a_move_is_judged_the_same_in_either_batch_order() {
     for reversed in [false, true] {
-        let h = Harness::build(Probe::ContentHashed, Arc::new(RealClock)).await;
+        let h = Harness::build(Probe::ContentHashed, pinned_clock()).await;
         h.video("P/Heat (1995).mkv");
         h.write("P/movie.nfo", &tmdb_movie(949));
         h.video("Q/Heat (1995) - Remux.mkv");
@@ -3168,7 +3243,7 @@ async fn a_shared_movie_nfo_edited_in_a_move_is_judged_the_same_in_either_batch_
 #[tokio::test]
 async fn a_shared_tvshow_nfo_edited_in_a_move_is_judged_the_same_in_either_batch_order() {
     for reversed in [false, true] {
-        let h = Harness::build(Probe::ContentHashed, Arc::new(RealClock)).await;
+        let h = Harness::build(Probe::ContentHashed, pinned_clock()).await;
         h.video("P/Lost/Season 01/Lost - S01E01.mkv");
         h.write("P/Lost/tvshow.nfo", &tmdb_show(4607));
         h.video("Q/Lost/Season 01/Lost - S01E02.mkv");

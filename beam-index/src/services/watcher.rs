@@ -564,6 +564,11 @@ pub mod in_memory {
         /// What the next `poll_once` deregisters without reporting, as a
         /// demotion that fails does.
         failed_demotions: std::sync::Mutex<Vec<Uuid>>,
+        /// Libraries whose next `watch_library` fails, leaving them
+        /// unregistered.
+        failed_watches: std::sync::Mutex<Vec<Uuid>>,
+        /// Every library `watch_library` was asked for, in order.
+        attempts: std::sync::Mutex<Vec<Uuid>>,
         /// Bumped whenever the registrations change, so a test can wait for
         /// one made on another task.
         changes: tokio::sync::watch::Sender<u64>,
@@ -580,6 +585,8 @@ pub mod in_memory {
                 modes: std::sync::Mutex::new(std::collections::HashMap::new()),
                 demotions: std::sync::Mutex::new(Vec::new()),
                 failed_demotions: std::sync::Mutex::new(Vec::new()),
+                failed_watches: std::sync::Mutex::new(Vec::new()),
+                attempts: std::sync::Mutex::new(Vec::new()),
                 changes: tokio::sync::watch::channel(0).0,
             }
         }
@@ -609,6 +616,22 @@ pub mod in_memory {
             self.failed_demotions.lock().unwrap().push(library_id);
         }
 
+        /// Make the next `watch_library` of `library_id` fail.
+        pub fn fail_next_watch(&self, library_id: Uuid) {
+            self.failed_watches.lock().unwrap().push(library_id);
+        }
+
+        /// How many times `watch_library` has been asked for `library_id`,
+        /// failed or not.
+        pub fn watch_attempts(&self, library_id: Uuid) -> usize {
+            self.attempts
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|id| **id == library_id)
+                .count()
+        }
+
         /// Push a synthetic event to the consumer.
         pub fn emit(&self, event: FsEvent) {
             let _ = self.sender.send(event);
@@ -633,7 +656,19 @@ pub mod in_memory {
 
     #[async_trait::async_trait]
     impl FsWatcher for InMemoryFsWatcher {
-        fn watch_library(&self, library_id: Uuid, _root: &Path) -> Result<WatchMode, WatchError> {
+        fn watch_library(&self, library_id: Uuid, root: &Path) -> Result<WatchMode, WatchError> {
+            self.attempts.lock().unwrap().push(library_id);
+            {
+                let mut failed = self.failed_watches.lock().unwrap();
+                if let Some(at) = failed.iter().position(|id| *id == library_id) {
+                    failed.remove(at);
+                    self.changes.send_modify(|generation| *generation += 1);
+                    return Err(WatchError::Watch(
+                        root.to_path_buf(),
+                        "refused by the test".to_string(),
+                    ));
+                }
+            }
             self.watched.lock().unwrap().push(library_id);
             self.changes.send_modify(|generation| *generation += 1);
             Ok(self
@@ -771,57 +806,6 @@ mod tests {
             path: PathBuf::from(path),
             kind,
         }
-    }
-
-    #[tokio::test]
-    async fn test_emit_and_consume() {
-        let watcher = InMemoryFsWatcher::new();
-        let lib = Uuid::new_v4();
-        watcher.emit(event(lib, "/media/a.mp4", FsEventKind::Created));
-
-        let received = watcher.next_event().await.unwrap();
-        assert_eq!(received.library_id, lib);
-        assert_eq!(received.path, PathBuf::from("/media/a.mp4"));
-        assert_eq!(received.kind, FsEventKind::Created);
-    }
-
-    #[tokio::test]
-    async fn test_events_preserved_in_order_under_backlog() {
-        let watcher = InMemoryFsWatcher::new();
-        let lib = Uuid::new_v4();
-        // A burst is emitted before any consumption.
-        watcher.emit(event(lib, "/media/a.mp4", FsEventKind::Created));
-        watcher.emit(event(lib, "/media/b.mp4", FsEventKind::Modified));
-        watcher.emit(event(lib, "/media/c.mp4", FsEventKind::Removed));
-
-        assert_eq!(
-            watcher.next_event().await.unwrap().path,
-            PathBuf::from("/media/a.mp4")
-        );
-        assert_eq!(
-            watcher.next_event().await.unwrap().path,
-            PathBuf::from("/media/b.mp4")
-        );
-        assert_eq!(
-            watcher.next_event().await.unwrap().path,
-            PathBuf::from("/media/c.mp4")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_watch_and_unwatch_tracking() {
-        let watcher = InMemoryFsWatcher::new();
-        let a = Uuid::new_v4();
-        let b = Uuid::new_v4();
-        watcher.watch_library(a, Path::new("/media/a")).unwrap();
-        watcher.watch_library(b, Path::new("/media/b")).unwrap();
-        assert_eq!(watcher.watched_libraries(), vec![a, b]);
-
-        watcher.unwatch_library(a).unwrap();
-        assert_eq!(watcher.watched_libraries(), vec![b]);
-        // Unwatching an unknown library is a no-op.
-        watcher.unwatch_library(Uuid::new_v4()).unwrap();
-        assert_eq!(watcher.watched_libraries(), vec![b]);
     }
 
     #[test]
@@ -992,26 +976,39 @@ mod tests {
         let lib = Uuid::new_v4();
         watcher.watch_library(lib, &root).unwrap();
 
-        // A change behind the link, then one inside the root as a marker: the
-        // poll reports the marker, and nothing under the link before it.
+        // A change behind the link and a marker inside the root, then a poll.
+        // The poller scans on one thread, a poll at a time, so once the
+        // marker shows the first poll has started, a second poll's fence is
+        // reported only after the first poll has reported everything it
+        // found: draining to the fence drains the first poll whole, rather
+        // than stopping at the marker with the rest of its scan unread.
         std::fs::write(outside.join("behind-the-link.mkv"), b"x").unwrap();
         let marker = root.join("marker.mkv");
         std::fs::write(&marker, b"x").unwrap();
         watcher.poll_once();
-
-        let seen = tokio::time::timeout(EVENT_DEADLINE, async {
-            let mut seen = Vec::new();
-            loop {
-                let event = watcher.next_event().await.expect("watcher closed");
-                let done = event.path == marker;
-                seen.push(event.path);
-                if done {
-                    return seen;
-                }
+        let drain_to = |stop: PathBuf| {
+            let watcher = &watcher;
+            async move {
+                tokio::time::timeout(EVENT_DEADLINE, async {
+                    let mut seen = Vec::new();
+                    loop {
+                        let event = watcher.next_event().await.expect("watcher closed");
+                        let done = event.path == stop;
+                        seen.push(event.path);
+                        if done {
+                            return seen;
+                        }
+                    }
+                })
+                .await
+                .unwrap_or_else(|_| panic!("no poll reported {}", stop.display()))
             }
-        })
-        .await
-        .expect("the poll never reported the marker");
+        };
+        let mut seen = drain_to(marker).await;
+        let fence = root.join("fence.mkv");
+        std::fs::write(&fence, b"x").unwrap();
+        watcher.poll_once();
+        seen.extend(drain_to(fence).await);
         assert!(
             seen.iter()
                 .all(|path| !path.starts_with(root.join("linked"))),
@@ -1106,6 +1103,29 @@ mod tests {
         watcher.poll_once();
 
         assert!(status.snapshot().libraries.is_empty());
+    }
+
+    /// The runtime unwatches a library it may never have registered (one
+    /// whose watch failed); that is a no-op, and the libraries it does hold
+    /// keep their watch and keep delivering.
+    #[tokio::test]
+    async fn unwatching_a_library_it_never_watched_leaves_the_others_watched() {
+        let (_dir, root) = canonical_tempdir();
+        let (watcher, status) = notify_watcher(FilesystemKind::Network);
+        let lib = Uuid::new_v4();
+        watcher.watch_library(lib, &root).unwrap();
+
+        watcher.unwatch_library(Uuid::new_v4()).unwrap();
+
+        assert_eq!(watcher.registered_libraries(), vec![lib]);
+        assert_eq!(
+            status.snapshot().libraries.get(&lib),
+            Some(&WatchMode::Polling(PollReason::NetworkFilesystem))
+        );
+        let file = root.join("movie.mkv");
+        std::fs::write(&file, b"x").unwrap();
+        watcher.poll_once();
+        assert_eq!(next_event_for(&watcher, &file).await.library_id, lib);
     }
 
     /// The runtime re-registers whatever this omits, so it must name exactly

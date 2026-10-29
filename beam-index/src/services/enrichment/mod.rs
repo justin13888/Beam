@@ -5,6 +5,8 @@
 //! in production for this commit; the real cameo-backed adapter lands in D4.
 
 pub mod control;
+#[cfg(test)]
+mod fault_tests;
 pub mod matcher;
 
 use std::sync::Arc;
@@ -901,7 +903,8 @@ impl MetadataEnrichmentService {
         match err {
             EnrichmentError::RateLimited { retry_after } => {
                 let delay = retry_after.unwrap_or(Duration::from_secs(60));
-                let next_attempt_at = self.clock.now()
+                let now = self.clock.now();
+                let next_attempt_at = now
                     + chrono::Duration::from_std(delay).unwrap_or(chrono::Duration::seconds(60));
                 let _ = self
                     .state_repo
@@ -910,6 +913,7 @@ impl MetadataEnrichmentService {
                         "rate limited by provider",
                         row.attempts,
                         next_attempt_at,
+                        now,
                     )
                     .await;
                 ProcessOutcome::RateLimited
@@ -948,11 +952,12 @@ impl MetadataEnrichmentService {
             };
         }
         let delay = self.policy.backoff_for(attempts);
-        let next_attempt_at = self.clock.now()
-            + chrono::Duration::from_std(delay).unwrap_or(chrono::Duration::seconds(60));
+        let now = self.clock.now();
+        let next_attempt_at =
+            now + chrono::Duration::from_std(delay).unwrap_or(chrono::Duration::seconds(60));
         let _ = self
             .state_repo
-            .mark_retrying(row.id, reason, attempts, next_attempt_at)
+            .mark_retrying(row.id, reason, attempts, next_attempt_at, now)
             .await;
         ProcessOutcome::Retrying
     }
@@ -1098,10 +1103,21 @@ mod tests {
         Arc<InMemoryPersonRepository>,
     ) {
         harness_storing(
-            provider,
+            Arc::new(provider),
             credit_store,
             Arc::new(InMemoryCollectionRepository::default()),
         )
+    }
+
+    /// [`harness`] over a provider the test keeps a handle on, to read back
+    /// what the sweep asked of it.
+    fn harness_sharing(provider: Arc<InMemoryEnrichmentProvider>) -> Harness {
+        harness_storing(
+            provider,
+            |people| people,
+            Arc::new(InMemoryCollectionRepository::default()),
+        )
+        .0
     }
 
     /// [`harness`], and the store collections are written to.
@@ -1109,11 +1125,11 @@ mod tests {
         provider: InMemoryEnrichmentProvider,
         collections: Arc<dyn CollectionRepository>,
     ) -> Harness {
-        harness_storing(provider, |people| people, collections).0
+        harness_storing(Arc::new(provider), |people| people, collections).0
     }
 
     fn harness_storing(
-        provider: InMemoryEnrichmentProvider,
+        provider: Arc<InMemoryEnrichmentProvider>,
         credit_store: impl FnOnce(Arc<InMemoryPersonRepository>) -> Arc<dyn PersonRepository>,
         collections: Arc<dyn CollectionRepository>,
     ) -> (
@@ -1140,7 +1156,7 @@ mod tests {
             genre_repo.clone(),
             credit_store(people.clone()),
             collections,
-            Arc::new(provider),
+            provider,
             admin_log,
             notifications.clone(),
             clock.clone(),
@@ -1971,12 +1987,12 @@ mod tests {
                 title: "The Matrix".to_string(),
                 ..Default::default()
             });
-        let (service, movie_repo, _shows, state_repo, _genres, _clock) = harness(provider);
+        let (service, movie_repo, _shows, state_repo, _genres, clock) = harness(provider);
         let id = pinned_movie(&movie_repo, &state_repo, "matrix", ProviderPin::Tmdb(603)).await;
         let target = EnrichmentTargetId::Movie(id);
         let row = state_repo.find_by_target(target).await.unwrap().unwrap().id;
         state_repo
-            .mark_enriched(row, "tmdb:999", 1.0, chrono::Utc::now())
+            .mark_enriched(row, "tmdb:999", 1.0, clock.now())
             .await
             .unwrap();
         state_repo.request_refresh(target, false).await.unwrap();
@@ -2003,7 +2019,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let (service, _movies, show_repo, state_repo, _genres, _clock) = harness(provider);
+        let (service, _movies, show_repo, state_repo, _genres, clock) = harness(provider);
         let show = show_repo
             .find_or_create_by_identity(CreateShow::new("got".to_string(), None))
             .await
@@ -2022,7 +2038,7 @@ mod tests {
         state_repo.ensure_pending(target).await.unwrap();
         let row = state_repo.find_by_target(target).await.unwrap().unwrap().id;
         state_repo
-            .mark_enriched(row, "tmdb:999", 1.0, chrono::Utc::now())
+            .mark_enriched(row, "tmdb:999", 1.0, clock.now())
             .await
             .unwrap();
         state_repo.request_refresh(target, false).await.unwrap();
@@ -2043,12 +2059,12 @@ mod tests {
     #[tokio::test]
     async fn a_pinned_titles_lost_match_and_pin_are_retried_by_the_pin() {
         let provider = InMemoryEnrichmentProvider::new(&["tmdb"]);
-        let (service, movie_repo, _shows, state_repo, _genres, _clock) = harness(provider);
+        let (service, movie_repo, _shows, state_repo, _genres, clock) = harness(provider);
         let id = pinned_movie(&movie_repo, &state_repo, "matrix", ProviderPin::Tmdb(603)).await;
         let target = EnrichmentTargetId::Movie(id);
         let row = state_repo.find_by_target(target).await.unwrap().unwrap().id;
         state_repo
-            .mark_enriched(row, "tmdb:999", 1.0, chrono::Utc::now())
+            .mark_enriched(row, "tmdb:999", 1.0, clock.now())
             .await
             .unwrap();
         state_repo.request_refresh(target, false).await.unwrap();
@@ -2078,7 +2094,7 @@ mod tests {
 
         for kind in [TitleKind::Movie, TitleKind::Show] {
             let provider = InMemoryEnrichmentProvider::new(&["tmdb"]);
-            let (service, movie_repo, show_repo, state_repo, _genres, _clock) = harness(provider);
+            let (service, movie_repo, show_repo, state_repo, _genres, clock) = harness(provider);
             let pin = ProviderPin::Tmdb(603);
             let target = match kind {
                 TitleKind::Movie => {
@@ -2103,7 +2119,7 @@ mod tests {
             };
             let row = state_repo.find_by_target(target).await.unwrap().unwrap().id;
             state_repo
-                .mark_enriched(row, "tmdb:603", 1.0, chrono::Utc::now())
+                .mark_enriched(row, "tmdb:603", 1.0, clock.now())
                 .await
                 .unwrap();
             state_repo.request_refresh(target, false).await.unwrap();
@@ -2170,7 +2186,7 @@ mod tests {
                     ..Default::default()
                 },
             );
-        let (service, movie_repo, show_repo, state_repo, _genres, _clock) = harness(provider);
+        let (service, movie_repo, show_repo, state_repo, _genres, clock) = harness(provider);
         let found = movie_repo
             .find_or_create_by_identity(CreateMovie::new("Heat".to_string(), Some(1995), None))
             .await
@@ -2192,7 +2208,7 @@ mod tests {
             state_repo.ensure_pending(target).await.unwrap();
             let row = state_repo.find_by_target(target).await.unwrap().unwrap().id;
             state_repo
-                .mark_enriched(row, "tmdb:1", 0.8, chrono::Utc::now())
+                .mark_enriched(row, "tmdb:1", 0.8, clock.now())
                 .await
                 .unwrap();
             state_repo.request_refresh(target, false).await.unwrap();
@@ -2224,20 +2240,74 @@ mod tests {
                 retry_after: Some(Duration::from_secs(30)),
             }
         });
-        let (service, movie_repo, _show_repo, state_repo, _genre_repo, _clock) = harness(provider);
+        let (service, movie_repo, _show_repo, state_repo, _genre_repo, clock) = harness(provider);
 
+        let mut targets = Vec::new();
+        for title in ["My Movie", "My Other Movie"] {
+            let movie = movie_repo
+                .find_or_create_by_identity(CreateMovie::new(title.to_string(), Some(2020), None))
+                .await
+                .unwrap();
+            let target = EnrichmentTargetId::Movie(movie.id);
+            state_repo.ensure_pending(target).await.unwrap();
+            targets.push(target);
+        }
+
+        let report = service.sweep_once().await;
+        assert!(report.rate_limited);
+        assert_eq!(report.processed, 1, "the sweep stops at the first refusal");
+
+        let mut rows = Vec::new();
+        for target in targets {
+            rows.push(state_repo.find_by_target(target).await.unwrap().unwrap());
+        }
+        let (attempted, untouched): (Vec<_>, Vec<_>) = rows
+            .into_iter()
+            .partition(|row| row.next_attempt_at.is_some());
+        let [attempted] = attempted.as_slice() else {
+            panic!("exactly one title was attempted: {attempted:?}");
+        };
+        assert_eq!(attempted.status, EnrichmentStatus::Pending);
+        assert_eq!(attempted.attempts, 0, "a refusal spends no attempt");
+        assert_eq!(
+            attempted.next_attempt_at,
+            Some(clock.now() + chrono::Duration::seconds(30)),
+            "retried when the provider's Retry-After says"
+        );
+        assert_eq!(attempted.updated_at, clock.now());
+        assert_eq!(
+            attempted.last_error.as_deref(),
+            Some("rate limited by provider")
+        );
+        let [untouched] = untouched.as_slice() else {
+            panic!("exactly one title was left alone: {untouched:?}");
+        };
+        assert_eq!(
+            (untouched.attempts, untouched.last_error.as_deref()),
+            (0, None)
+        );
+    }
+
+    /// A refusal that names no delay waits a minute.
+    #[tokio::test]
+    async fn a_rate_limit_without_retry_after_retries_in_a_minute() {
+        let provider = InMemoryEnrichmentProvider::new(&["tmdb"])
+            .with_search_error(|| EnrichmentError::RateLimited { retry_after: None });
+        let (service, movie_repo, _show_repo, state_repo, _genre_repo, clock) = harness(provider);
         let movie = movie_repo
             .find_or_create_by_identity(CreateMovie::new("My Movie".to_string(), Some(2020), None))
             .await
             .unwrap();
-        state_repo
-            .ensure_pending(EnrichmentTargetId::Movie(movie.id))
-            .await
-            .unwrap();
+        let target = EnrichmentTargetId::Movie(movie.id);
+        state_repo.ensure_pending(target).await.unwrap();
 
-        let report = service.sweep_once().await;
-        assert!(report.rate_limited);
-        assert_eq!(report.processed, 1);
+        assert!(service.sweep_once().await.rate_limited);
+
+        let row = state_repo.find_by_target(target).await.unwrap().unwrap();
+        assert_eq!(
+            row.next_attempt_at,
+            Some(clock.now() + chrono::Duration::seconds(60))
+        );
     }
 
     #[tokio::test]
@@ -2250,21 +2320,40 @@ mod tests {
             .find_or_create_by_identity(CreateMovie::new("My Movie".to_string(), Some(2020), None))
             .await
             .unwrap();
-        state_repo
-            .ensure_pending(EnrichmentTargetId::Movie(movie.id))
-            .await
-            .unwrap();
+        let target = EnrichmentTargetId::Movie(movie.id);
+        state_repo.ensure_pending(target).await.unwrap();
 
-        // max_attempts defaults to 5; each sweep only picks the row up once
-        // it's due, so advance the clock past each backoff between sweeps.
-        let mut last_report = service.sweep_once().await;
-        assert_eq!(last_report.retrying, 1);
-        for _ in 1..5 {
-            clock.advance(Duration::from_secs(90_000));
-            last_report = service.sweep_once().await;
+        // max_attempts defaults to 5: four failures are retried, each after
+        // the backoff its count has earned, stamped at the clock's now, and
+        // the fifth gives up.
+        let policy = EnrichmentPolicy::default();
+        for attempts in 1..policy.max_attempts {
+            let report = service.sweep_once().await;
+            assert_eq!(report.retrying, 1, "attempt {attempts} is retried");
+            let row = state_repo.find_by_target(target).await.unwrap().unwrap();
+            let backoff = policy.backoff_schedule[attempts as usize - 1];
+            assert_eq!(row.status, EnrichmentStatus::Pending);
+            assert_eq!(row.attempts, attempts);
+            assert_eq!(
+                row.next_attempt_at,
+                Some(clock.now() + chrono::Duration::from_std(backoff).unwrap()),
+                "attempt {attempts} waits {backoff:?}"
+            );
+            assert_eq!(row.updated_at, clock.now());
+            assert_eq!(row.last_error.as_deref(), Some("transport error: boom"));
+
+            // Not due a moment before its backoff ends, and due at its end.
+            clock.advance(backoff - Duration::from_secs(1));
+            assert_eq!(service.sweep_once().await.processed, 0);
+            clock.advance(Duration::from_secs(1));
         }
+        let last_report = service.sweep_once().await;
         assert_eq!(last_report.failed, 1);
+        let row = state_repo.find_by_target(target).await.unwrap().unwrap();
+        assert_eq!(row.status, EnrichmentStatus::Failed);
+        assert_eq!(row.updated_at, clock.now());
 
+        clock.advance(Duration::from_secs(10 * 86_400));
         let due = state_repo.fetch_due(clock.now(), 25).await.unwrap();
         assert!(due.is_empty(), "a Failed row must never be picked up again");
     }
@@ -2278,9 +2367,14 @@ mod tests {
             year: Some(2003),
             ..Default::default()
         };
-        let provider = InMemoryEnrichmentProvider::new(&["tmdb"])
-            .with_movie_enrichment_at(ref_id.clone(), enrichment);
-        let (service, movie_repo, _show_repo, state_repo, _genre_repo, _clock) = harness(provider);
+        // No search result is configured: a refresh that searched instead of
+        // reusing its match would find nothing and leave the title unmatched.
+        let provider = Arc::new(
+            InMemoryEnrichmentProvider::new(&["tmdb"])
+                .with_movie_enrichment_at(ref_id.clone(), enrichment),
+        );
+        let (service, movie_repo, _show_repo, state_repo, _genre_repo, clock) =
+            harness_sharing(provider.clone());
 
         let movie = movie_repo
             .find_or_create_by_identity(CreateMovie::new(
@@ -2290,28 +2384,40 @@ mod tests {
             ))
             .await
             .unwrap();
-        state_repo
-            .ensure_pending(EnrichmentTargetId::Movie(movie.id))
-            .await
-            .unwrap();
+        let target = EnrichmentTargetId::Movie(movie.id);
+        state_repo.ensure_pending(target).await.unwrap();
         state_repo
             .mark_enriched(
-                state_repo.fetch_due(chrono::Utc::now(), 25).await.unwrap()[0].id,
+                state_repo.fetch_due(clock.now(), 25).await.unwrap()[0].id,
                 ref_id.as_str(),
                 0.9,
-                chrono::Utc::now(),
+                clock.now(),
             )
             .await
             .unwrap();
-        state_repo
-            .request_refresh(EnrichmentTargetId::Movie(movie.id), false)
-            .await
-            .unwrap();
+        state_repo.request_refresh(target, false).await.unwrap();
+        assert!(provider.invalidated_refs().is_empty());
 
+        clock.advance(Duration::from_secs(5));
         let report = service.sweep_once().await;
         assert_eq!(report.enriched, 1);
+        assert_eq!(
+            provider.invalidated_refs(),
+            vec![ref_id.as_str().to_string()],
+            "the match's cached response is dropped before it is re-fetched"
+        );
         let updated = movie_repo.find_by_id(movie.id).await.unwrap().unwrap();
-        assert_eq!(updated.title, "The Matrix Reloaded");
+        assert_eq!(updated.tmdb_id, Some(603));
+        let row = state_repo.find_by_target(target).await.unwrap().unwrap();
+        assert_eq!(row.status, EnrichmentStatus::Enriched);
+        assert_eq!(row.matched_ref.as_deref(), Some(ref_id.as_str()));
+        assert_eq!(
+            row.match_confidence,
+            Some(0.9),
+            "a refreshed match keeps the confidence it was made with"
+        );
+        assert!(!row.force_refresh, "the refresh is spent");
+        assert_eq!(row.enriched_at, Some(clock.now()));
     }
 
     #[tokio::test]
@@ -2676,11 +2782,11 @@ mod tests {
                 title: "Chosen".to_string(),
                 ..Default::default()
             });
-        let (service, movie_repo, _show_repo, state_repo, _genre_repo, _clock) = harness(provider);
+        let (service, movie_repo, _show_repo, state_repo, _genre_repo, clock) = harness(provider);
         let id = pinned_movie(&movie_repo, &state_repo, "matrix", ProviderPin::Tmdb(603)).await;
-        let row = state_repo.fetch_due(chrono::Utc::now(), 25).await.unwrap()[0].id;
+        let row = state_repo.fetch_due(clock.now(), 25).await.unwrap()[0].id;
         state_repo
-            .mark_enriched(row, "tmdb:604", 1.0, chrono::Utc::now())
+            .mark_enriched(row, "tmdb:604", 1.0, clock.now())
             .await
             .unwrap();
         state_repo

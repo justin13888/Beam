@@ -710,8 +710,13 @@ mod admin_log {
 
         let sql = statements(db);
         assert_contains(&sql[0], r#"ORDER BY "admin_logs"."created_at" DESC"#);
-        assert_bound(&sql[0], "20");
-        assert_bound(&sql[0], "40");
+        // The limit and the offset each bind their own number: one bound to
+        // the other's placeholder would page by the wrong amount.
+        assert_contains(&sql[0], "LIMIT $1 OFFSET $2");
+        let values = bound_values(&sql[0]);
+        assert_eq!(values.len(), 2, "{values:?}");
+        assert!(values[0].contains("20"), "the limit binds 20: {values:?}");
+        assert!(values[1].contains("40"), "the offset binds 40: {values:?}");
     }
 
     #[tokio::test]
@@ -822,6 +827,54 @@ mod enrichment {
         );
         assert_filters(&sql[0], "metadata_enrichment", "id", "=");
         assert_bound(&sql[0], &id.to_string());
+    }
+
+    /// A retry is stamped at the `now` its caller passes -- the service's
+    /// injected clock -- not at the database host's wall clock, and schedules
+    /// the attempt it was given.
+    #[tokio::test]
+    async fn a_retry_binds_the_callers_now_and_next_attempt() {
+        let created: chrono::DateTime<chrono::FixedOffset> =
+            chrono::DateTime::from_timestamp(1_600_000_000, 0)
+                .unwrap()
+                .into();
+        let stored = beam_entity::metadata_enrichment::Model {
+            id: Uuid::from_u128(52),
+            movie_id: Some(Uuid::from_u128(53)),
+            show_id: None,
+            status: beam_entity::metadata_enrichment::EnrichmentStatus::Pending,
+            attempts: 1,
+            next_attempt_at: None,
+            enriched_at: None,
+            match_confidence: None,
+            matched_ref: None,
+            force_refresh: false,
+            last_error: None,
+            locked_fields: Vec::new(),
+            created_at: created,
+            updated_at: created,
+        };
+        let db = connection(
+            MockDatabase::new(DbBackend::Postgres)
+                .append_query_results([vec![stored.clone()], vec![stored]]),
+        );
+        let repo = SqlEnrichmentStateRepository::new(db.clone());
+        let now = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let next = chrono::DateTime::from_timestamp(1_700_000_600, 0).unwrap();
+        repo.mark_retrying(Uuid::from_u128(52), "busy", 2, next, now)
+            .await
+            .unwrap();
+        drop(repo);
+
+        let sql = statements(db);
+        let update = sql
+            .iter()
+            .find(|statement| statement.sql.starts_with("UPDATE"))
+            .expect("the row is updated");
+        assert_contains(update, r#""updated_at" = "#);
+        assert_bound(update, "2023-11-14T22:13:20");
+        assert_bound(update, "2023-11-14T22:23:20");
+        assert_bound(update, "busy");
     }
 
     /// Refreshing everything is one `UPDATE` with no `WHERE` -- not a read of

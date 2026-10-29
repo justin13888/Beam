@@ -9495,7 +9495,9 @@ macro_rules! enrichment_state_repository_contract {
             repo.request_refresh(movie, true).await.unwrap();
             repo.mark_unmatched(id, "gone", at(1)).await.unwrap();
             repo.mark_failed(id, "worse", at(2)).await.unwrap();
-            repo.mark_retrying(id, "again", 1, at(3)).await.unwrap();
+            repo.mark_retrying(id, "again", 1, at(5), at(3))
+                .await
+                .unwrap();
             repo.mark_enriched(id, "tmdb:604", 1.0, at(4))
                 .await
                 .unwrap();
@@ -9561,16 +9563,16 @@ macro_rules! enrichment_state_repository_contract {
             // Queued in the reverse of the order they are due, so neither
             // insertion order nor id order can pass for the retry order.
             let later_retry = queued(&fixture, new_movie(&fixture).await).await;
-            repo.mark_retrying(later_retry, "busy", 2, now)
+            repo.mark_retrying(later_retry, "busy", 2, now, at(0))
                 .await
                 .unwrap();
             let earlier_retry = queued(&fixture, new_movie(&fixture).await).await;
-            repo.mark_retrying(earlier_retry, "busy", 1, at(10))
+            repo.mark_retrying(earlier_retry, "busy", 1, at(10), at(0))
                 .await
                 .unwrap();
 
             let not_yet = queued(&fixture, new_movie(&fixture).await).await;
-            repo.mark_retrying(not_yet, "busy", 1, at(101))
+            repo.mark_retrying(not_yet, "busy", 1, at(101), at(0))
                 .await
                 .unwrap();
             let failed = queued(&fixture, new_movie(&fixture).await).await;
@@ -9773,7 +9775,7 @@ macro_rules! enrichment_state_repository_contract {
                 repo.mark_failed(*id, "boom", at(0)).await.unwrap();
             }
             // A retry stays pending: it is not a status of its own.
-            repo.mark_retrying(rows[0], "transient", 1, at(60))
+            repo.mark_retrying(rows[0], "transient", 1, at(60), at(0))
                 .await
                 .unwrap();
 
@@ -9784,6 +9786,29 @@ macro_rules! enrichment_state_repository_contract {
                 failed,
             } = repo.count_by_status().await.unwrap();
             assert_eq!((pending, enriched, unmatched, failed), (1, 2, 3, 4));
+        }
+
+        /// A retry is a status change like any other: it is stamped at the
+        /// `now` the caller passes, never the store's own clock, and the next
+        /// attempt it schedules is the one it was given.
+        #[tokio::test]
+        async fn a_retry_is_stamped_at_the_given_now_and_schedules_the_given_attempt() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let movie = new_movie(&fixture).await;
+            let id = queued(&fixture, movie).await;
+            repo.mark_unmatched(id, "earlier", at(10)).await.unwrap();
+
+            repo.mark_retrying(id, "busy", 3, at(500), at(42))
+                .await
+                .unwrap();
+
+            let row = repo.find_by_target(movie).await.unwrap().unwrap();
+            assert_eq!(row.status, EnrichmentStatus::Pending);
+            assert_eq!(row.attempts, 3);
+            assert_eq!(row.next_attempt_at, Some(at(500)));
+            assert_eq!(row.last_error.as_deref(), Some("busy"));
+            assert_eq!(row.updated_at, at(42), "stamped at the caller's now");
         }
 
         #[tokio::test]

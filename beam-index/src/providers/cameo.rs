@@ -792,49 +792,320 @@ mod tests {
         assert_eq!(media_id.as_u64(), Some(603));
     }
 
+    /// A reference cameo cannot read as one of its ids is the provider's
+    /// error, naming the reference, rather than a lookup of nothing.
     #[test]
-    fn to_media_id_rejects_missing_separator() {
-        let external_ref = ExternalMediaRef::parse("not-a-valid-ref");
-        assert!(external_ref.is_none());
+    fn to_media_id_rejects_a_ref_with_no_native_id() {
+        let err = to_media_id(&ExternalMediaRef::new("tmdb", "")).unwrap_err();
+        assert!(
+            matches!(&err, EnrichmentError::Provider(m) if m.contains("invalid external ref tmdb:")),
+            "{err:?}"
+        );
     }
 
+    /// Every error cameo reports, and what enrichment reads it as: the
+    /// variant decides whether a title is retried, given up on or left
+    /// alone, so each one is named here.
     #[test]
-    fn map_provider_error_rate_limited_preserves_retry_after() {
-        let err = cameo::ProviderError::RateLimited {
-            retry_after: Some(std::time::Duration::from_secs(5)),
-        };
-        match map_provider_error(err) {
-            EnrichmentError::RateLimited { retry_after } => {
-                assert_eq!(retry_after, Some(std::time::Duration::from_secs(5)));
+    fn every_cameo_error_maps_to_its_enrichment_error() {
+        use cameo::{CameoClientError as Client, ProviderError as Provider};
+        let five = Some(std::time::Duration::from_secs(5));
+        let cases: Vec<(Client, EnrichmentError)> = vec![
+            (Client::NotConfigured, EnrichmentError::NotConfigured),
+            (
+                Client::Unsupported,
+                EnrichmentError::Provider(
+                    "no configured provider supports this operation".to_string(),
+                ),
+            ),
+            (
+                Client::Provider(Provider::NotFound),
+                EnrichmentError::NotFound,
+            ),
+            (
+                Client::Provider(Provider::Unsupported),
+                EnrichmentError::Provider("operation not supported by this provider".to_string()),
+            ),
+            (
+                Client::Provider(Provider::RateLimited { retry_after: five }),
+                EnrichmentError::RateLimited { retry_after: five },
+            ),
+            (
+                Client::Provider(Provider::RateLimited { retry_after: None }),
+                EnrichmentError::RateLimited { retry_after: None },
+            ),
+            (
+                Client::Provider(Provider::Auth("bad token".to_string())),
+                EnrichmentError::Provider("auth error: bad token".to_string()),
+            ),
+            (
+                Client::Provider(Provider::Api {
+                    status: 502,
+                    message: "bad gateway".to_string(),
+                }),
+                EnrichmentError::Provider("api error (HTTP 502): bad gateway".to_string()),
+            ),
+            (
+                Client::Provider(Provider::Transport("connection reset".to_string())),
+                EnrichmentError::Transport("connection reset".to_string()),
+            ),
+            (
+                Client::Provider(Provider::Deserialization("eof".to_string())),
+                EnrichmentError::Provider("deserialization error: eof".to_string()),
+            ),
+            (
+                Client::Provider(Provider::InvalidInput("empty query".to_string())),
+                EnrichmentError::Provider("invalid input: empty query".to_string()),
+            ),
+            (
+                Client::Provider(Provider::Other("odd".to_string())),
+                EnrichmentError::Provider("odd".to_string()),
+            ),
+        ];
+        for (cameo_error, expected) in cases {
+            let shown = format!("{cameo_error:?}");
+            assert_eq!(
+                format!("{:?}", map_client_error(cameo_error)),
+                format!("{expected:?}"),
+                "{shown}"
+            );
+        }
+    }
+
+    // ── Searching every provider ───────────────────────────────────────────
+    //
+    // The facade is cameo's own, with scripted search providers registered
+    // in it, so what is under test is this adapter's walk over them.
+
+    type ScriptedFailure = fn() -> cameo::ProviderError;
+
+    /// A search provider answering every search with `hits` titles, or
+    /// failing it with `fails`.
+    struct ScriptedSearch {
+        id: &'static str,
+        hits: Vec<&'static str>,
+        fails: Option<ScriptedFailure>,
+        asked: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ScriptedSearch {
+        fn answering(id: &'static str, hits: Vec<&'static str>) -> std::sync::Arc<Self> {
+            std::sync::Arc::new(Self {
+                id,
+                hits,
+                fails: None,
+                asked: Default::default(),
+            })
+        }
+
+        fn failing(id: &'static str, fails: ScriptedFailure) -> std::sync::Arc<Self> {
+            std::sync::Arc::new(Self {
+                id,
+                hits: Vec::new(),
+                fails: Some(fails),
+                asked: Default::default(),
+            })
+        }
+
+        fn asked(&self) -> usize {
+            self.asked.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn answer<T>(
+            &self,
+            make: impl Fn(MediaId, &'static str) -> T,
+        ) -> Result<cameo::Page<T>, cameo::ProviderError> {
+            self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if let Some(fails) = self.fails {
+                return Err(fails());
             }
-            other => panic!("expected RateLimited, got {other:?}"),
+            let results = self
+                .hits
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(n, title)| {
+                    make(
+                        MediaId::new(self.id, cameo::NativeId::Num(n as u64 + 1)),
+                        title,
+                    )
+                })
+                .collect();
+            Ok(cameo::Page::offset(1, results, 1, self.hits.len() as u32))
         }
     }
 
-    #[test]
-    fn map_provider_error_not_found() {
-        assert!(matches!(
-            map_provider_error(cameo::ProviderError::NotFound),
-            EnrichmentError::NotFound
-        ));
-    }
+    impl cameo::Provider for ScriptedSearch {
+        fn id(&self) -> &str {
+            self.id
+        }
 
-    #[test]
-    fn map_provider_error_transport() {
-        match map_provider_error(cameo::ProviderError::Transport(
-            "connection reset".to_string(),
-        )) {
-            EnrichmentError::Transport(msg) => assert_eq!(msg, "connection reset"),
-            other => panic!("expected Transport, got {other:?}"),
+        fn capabilities(&self) -> &[cameo::Capability] {
+            &[cameo::Capability::Search]
         }
     }
 
-    #[test]
-    fn map_client_error_not_configured() {
-        assert!(matches!(
-            map_client_error(cameo::CameoClientError::NotConfigured),
-            EnrichmentError::NotConfigured
-        ));
+    #[cameo::async_trait::async_trait]
+    impl cameo::SearchProvider for ScriptedSearch {
+        async fn search_movies(
+            &self,
+            _query: &str,
+            _page: Option<u32>,
+        ) -> Result<cameo::Page<UnifiedMovie>, cameo::ProviderError> {
+            self.answer(UnifiedMovie::new)
+        }
+
+        async fn search_tv_shows(
+            &self,
+            _query: &str,
+            _page: Option<u32>,
+        ) -> Result<cameo::Page<UnifiedTvShow>, cameo::ProviderError> {
+            self.answer(UnifiedTvShow::new)
+        }
+
+        async fn search_people(
+            &self,
+            _query: &str,
+            _page: Option<u32>,
+        ) -> Result<cameo::Page<cameo::UnifiedPerson>, cameo::ProviderError> {
+            Err(cameo::ProviderError::Unsupported)
+        }
+
+        async fn search_multi(
+            &self,
+            _query: &str,
+            _page: Option<u32>,
+        ) -> Result<cameo::Page<cameo::UnifiedSearchResult>, cameo::ProviderError> {
+            Err(cameo::ProviderError::Unsupported)
+        }
+    }
+
+    /// The adapter over a facade dispatching to `providers`, in that order.
+    fn searching(providers: &[std::sync::Arc<ScriptedSearch>]) -> CameoEnrichmentProvider {
+        let mut builder = cameo::CameoClient::builder();
+        for provider in providers {
+            builder = builder.register_search_provider(provider.clone());
+        }
+        let order: Vec<&str> = providers.iter().map(|provider| provider.id).collect();
+        CameoEnrichmentProvider {
+            client: builder.with_priority(order).build().unwrap(),
+            tmdb: None,
+        }
+    }
+
+    fn query() -> MediaQuery {
+        MediaQuery {
+            title: "Frieren".to_string(),
+            year: None,
+        }
+    }
+
+    /// A provider that fails is passed over: the others' hits are the
+    /// answer, for movies and shows alike.
+    #[tokio::test]
+    async fn a_failing_provider_is_passed_over_for_the_next_ones_hits() {
+        let broken = ScriptedSearch::failing("tmdb", || {
+            cameo::ProviderError::Transport("connection reset".to_string())
+        });
+        let working = ScriptedSearch::answering("anilist", vec!["Frieren"]);
+        let adapter = searching(&[broken.clone(), working.clone()]);
+
+        let movies = adapter.search_movies(&query()).await.unwrap();
+        assert_eq!(
+            movies
+                .iter()
+                .map(|hit| hit.external_ref.as_str())
+                .collect::<Vec<_>>(),
+            ["anilist:1"]
+        );
+        let shows = adapter.search_shows(&query()).await.unwrap();
+        assert_eq!(
+            shows
+                .iter()
+                .map(|hit| hit.external_ref.as_str())
+                .collect::<Vec<_>>(),
+            ["anilist:1"]
+        );
+        assert_eq!((broken.asked(), working.asked()), (2, 2));
+    }
+
+    /// Every provider's hits are kept, in priority order.
+    #[tokio::test]
+    async fn every_providers_hits_are_kept_in_priority_order() {
+        let first = ScriptedSearch::answering("tmdb", vec!["Frieren", "Frieren 2"]);
+        let second = ScriptedSearch::answering("anilist", vec!["Frieren"]);
+        let adapter = searching(&[first, second]);
+
+        let movies = adapter.search_movies(&query()).await.unwrap();
+        assert_eq!(
+            movies
+                .iter()
+                .map(|hit| hit.external_ref.as_str())
+                .collect::<Vec<_>>(),
+            ["tmdb:1", "tmdb:2", "anilist:1"]
+        );
+    }
+
+    /// With no hits from anyone, a failure is reported -- the last one -- so
+    /// a passing fault is retried rather than read as "no such title".
+    #[tokio::test]
+    async fn no_hits_and_a_failure_is_the_last_failure() {
+        let unauthorised =
+            ScriptedSearch::failing("tmdb", || cameo::ProviderError::Auth("bad".to_string()));
+        let unreachable = ScriptedSearch::failing("anilist", || {
+            cameo::ProviderError::Transport("timed out".to_string())
+        });
+        let adapter = searching(&[unauthorised, unreachable]);
+        let movies = adapter.search_movies(&query()).await;
+        assert!(
+            matches!(&movies, Err(EnrichmentError::Transport(m)) if m == "timed out"),
+            "{movies:?}"
+        );
+
+        let empty = ScriptedSearch::answering("tmdb", Vec::new());
+        let unreachable = ScriptedSearch::failing("anilist", || {
+            cameo::ProviderError::Transport("timed out".to_string())
+        });
+        let adapter = searching(&[empty, unreachable]);
+        let shows = adapter.search_shows(&query()).await;
+        assert!(
+            matches!(&shows, Err(EnrichmentError::Transport(_))),
+            "an empty answer beside a failure is the failure: {shows:?}"
+        );
+
+        let empty = ScriptedSearch::answering("tmdb", Vec::new());
+        let adapter = searching(&[empty]);
+        assert!(
+            adapter.search_movies(&query()).await.unwrap().is_empty(),
+            "no hits and no failure is no match"
+        );
+    }
+
+    /// A rate limit stops the search at once, carrying its delay: the next
+    /// provider is not asked, and the hits before it are not answered.
+    #[tokio::test]
+    async fn a_rate_limit_stops_the_search_at_once() {
+        let before = ScriptedSearch::answering("tmdb", vec!["Frieren"]);
+        let limited = ScriptedSearch::failing("anilist", || cameo::ProviderError::RateLimited {
+            retry_after: Some(std::time::Duration::from_secs(3)),
+        });
+        let after = ScriptedSearch::answering("other", vec!["Frieren"]);
+        let adapter = searching(&[before, limited, after.clone()]);
+
+        for searched in [
+            adapter.search_movies(&query()).await.map(|hits| hits.len()),
+            adapter.search_shows(&query()).await.map(|hits| hits.len()),
+        ] {
+            assert!(
+                matches!(
+                    searched,
+                    Err(EnrichmentError::RateLimited { retry_after: Some(after) })
+                        if after.as_secs() == 3
+                ),
+                "{searched:?}"
+            );
+        }
+        assert_eq!(after.asked(), 0);
     }
 
     #[test]

@@ -372,9 +372,12 @@ mod tests {
             &hits,
             DEFAULT_MIN_CONFIDENCE,
         );
-        assert!(result.is_some());
-        let (_, score) = result.unwrap();
-        assert!(score.total_score > 0.9);
+        let (_, score) = result.expect("an exact title and year is accepted");
+        assert_eq!(score.title_score, 1.0);
+        assert!(
+            (score.total_score - 1.0).abs() < 1e-9,
+            "the whole title weight and the whole year bonus: {score:?}"
+        );
     }
 
     #[test]
@@ -387,8 +390,12 @@ mod tests {
     #[test]
     fn wrong_year_by_one_still_accepted_with_lower_score() {
         let hits = vec![hit("Dune", Some(2021))];
-        let result = best_movie_match("Dune", Some(2020), &hits, DEFAULT_MIN_CONFIDENCE);
-        assert!(result.is_some());
+        let (_, score) = best_movie_match("Dune", Some(2020), &hits, DEFAULT_MIN_CONFIDENCE)
+            .expect("a year off by one is accepted");
+        assert!(
+            (score.total_score - 0.85).abs() < 1e-9,
+            "half the year bonus: {score:?}"
+        );
     }
 
     #[test]
@@ -433,22 +440,77 @@ mod tests {
         assert!(best_movie_match("Anything", None, &[], DEFAULT_MIN_CONFIDENCE).is_none());
     }
 
+    /// A real tie on the total: an exact title with no year (0.7 x 1.0)
+    /// against a title three edits off a seven-letter one released in the
+    /// query's year (0.7 x 4/7 + 0.3). The exact title wins it, ahead of the
+    /// exact year and a higher popularity, in either list order -- for a
+    /// movie and for a show alike.
     #[test]
-    fn prefers_exact_title_match_over_higher_year_bonus_tie() {
-        let hits = vec![
-            hit("The Office (US)", Some(2005)),
-            hit("The Office", Some(2005)),
-        ];
-        let result = best_show_match_helper("The Office", Some(2005), &hits);
-        assert_eq!(result.unwrap().0.title, "The Office");
+    fn an_exact_title_wins_a_tie_on_the_total_ahead_of_the_year_and_popularity() {
+        let query = ("abcdefg", Some(2000));
+        let mut exact = hit("abcdefg", None);
+        exact.external_ref = ExternalMediaRef::new("tmdb", "exact");
+        let mut dated = hit("abcdxyz", Some(2000));
+        dated.external_ref = ExternalMediaRef::new("tmdb", "dated");
+        dated.popularity = Some(99.0);
+        let exact_score = score(query.0, query.1, &exact.title, None, exact.year);
+        let dated_score = score(query.0, query.1, &dated.title, None, dated.year);
+        assert_eq!(
+            exact_score.total_score, dated_score.total_score,
+            "the premise: the two tie on the total"
+        );
+        assert!(exact_score.accepted(DEFAULT_MIN_CONFIDENCE));
+        assert!(dated_score.accepted(DEFAULT_MIN_CONFIDENCE));
+
+        for hits in [
+            vec![exact.clone(), dated.clone()],
+            vec![dated.clone(), exact.clone()],
+        ] {
+            let (best, _) = best_movie_match(query.0, query.1, &hits, DEFAULT_MIN_CONFIDENCE)
+                .expect("both clear the bar");
+            assert_eq!(best.external_ref.as_str(), "tmdb:exact");
+
+            let shows: Vec<ShowSearchHit> = hits.iter().map(as_show).collect();
+            let (best, _) = best_show_match(query.0, query.1, &shows, DEFAULT_MIN_CONFIDENCE)
+                .expect("both clear the bar");
+            assert_eq!(best.external_ref.as_str(), "tmdb:exact");
+        }
     }
 
-    fn best_show_match_helper<'a>(
-        title: &str,
-        year: Option<u32>,
-        hits: &'a [MovieSearchHit],
-    ) -> Option<(&'a MovieSearchHit, MatchScore)> {
-        best_movie_match(title, year, hits, DEFAULT_MIN_CONFIDENCE)
+    /// With the score, the title and the year all equal, the more popular
+    /// hit wins, in either list order.
+    #[test]
+    fn popularity_decides_a_tie_on_everything_else() {
+        let mut quiet = hit("Heat", Some(1995));
+        quiet.external_ref = ExternalMediaRef::new("tmdb", "quiet");
+        quiet.popularity = Some(1.0);
+        let mut popular = quiet.clone();
+        popular.external_ref = ExternalMediaRef::new("tmdb", "popular");
+        popular.popularity = Some(2.0);
+
+        for hits in [
+            vec![quiet.clone(), popular.clone()],
+            vec![popular.clone(), quiet.clone()],
+        ] {
+            let (best, _) = best_movie_match("Heat", Some(1995), &hits, DEFAULT_MIN_CONFIDENCE)
+                .expect("both clear the bar");
+            assert_eq!(best.external_ref.as_str(), "tmdb:popular");
+            let shows: Vec<ShowSearchHit> = hits.iter().map(as_show).collect();
+            let (best, _) = best_show_match("Heat", Some(1995), &shows, DEFAULT_MIN_CONFIDENCE)
+                .expect("both clear the bar");
+            assert_eq!(best.external_ref.as_str(), "tmdb:popular");
+        }
+    }
+
+    fn as_show(hit: &MovieSearchHit) -> ShowSearchHit {
+        ShowSearchHit {
+            external_ref: hit.external_ref.clone(),
+            title: hit.title.clone(),
+            original_title: hit.original_title.clone(),
+            year: hit.year,
+            popularity: hit.popularity,
+            vote_average: hit.vote_average,
+        }
     }
 
     #[test]
@@ -566,6 +628,142 @@ mod tests {
         }
     }
 
+    mod invariants {
+        use super::*;
+        use proptest::prelude::*;
+
+        /// Titles as providers and file names give them: any Unicode, with
+        /// punctuation and runs of spaces, and sometimes empty.
+        fn any_title() -> impl Strategy<Value = String> {
+            prop_oneof![
+                "\\PC{0,24}",
+                "[a-zA-Z0-9 .:'!&-]{0,24}",
+                Just(String::new()),
+            ]
+        }
+
+        fn any_year() -> impl Strategy<Value = Option<u32>> {
+            prop_oneof![
+                Just(None),
+                (1880u32..2100).prop_map(Some),
+                any::<u32>().prop_map(Some)
+            ]
+        }
+
+        fn any_hit() -> impl Strategy<Value = MovieSearchHit> {
+            (
+                any_title(),
+                proptest::option::of(any_title()),
+                any_year(),
+                proptest::option::of(any::<f64>()),
+                0u32..1000,
+            )
+                .prop_map(|(title, original_title, year, popularity, id)| {
+                    MovieSearchHit {
+                        external_ref: ExternalMediaRef::new("tmdb", &id.to_string()),
+                        title,
+                        original_title,
+                        year,
+                        popularity,
+                        vote_average: None,
+                    }
+                })
+        }
+
+        proptest! {
+            /// Normalizing what is already normal changes nothing.
+            #[test]
+            fn normalize_is_idempotent(title in any_title()) {
+                let once = normalize(&title);
+                prop_assert_eq!(normalize(&once), once);
+            }
+
+            /// Similarity is a fraction, the same either way round, and
+            /// whole for a title against itself.
+            #[test]
+            fn similarity_is_bounded_symmetric_and_whole_for_itself(
+                a in any_title(),
+                b in any_title(),
+            ) {
+                let ab = string_similarity(&a, &b);
+                prop_assert!((0.0..=1.0).contains(&ab), "{ab}");
+                prop_assert_eq!(ab, string_similarity(&b, &a));
+                prop_assert_eq!(string_similarity(&a, &a), 1.0);
+            }
+
+            /// Any query against any candidate scores without panicking,
+            /// within the bounds the weights allow: the title part is a
+            /// fraction of its weight, and the year moves it by at most the
+            /// bonus or the penalty.
+            #[test]
+            fn a_score_is_bounded_by_its_weights(
+                query in any_title(),
+                query_year in any_year(),
+                candidate in any_title(),
+                original in proptest::option::of(any_title()),
+                candidate_year in any_year(),
+            ) {
+                let scored = score(&query, query_year, &candidate, original.as_deref(), candidate_year);
+                prop_assert!((0.0..=1.0).contains(&scored.title_score));
+                prop_assert!(
+                    (-0.20..=TITLE_WEIGHT + 0.30 + 1e-9).contains(&scored.total_score),
+                    "{scored:?}"
+                );
+            }
+
+            /// The best match is a hit that clears the bar and that no other
+            /// hit clearing it outscores; there is none only when no hit
+            /// clears it. Never a panic, whatever a provider's popularity.
+            #[test]
+            fn the_best_match_is_an_accepted_hit_no_other_outscores(
+                query in any_title(),
+                query_year in any_year(),
+                hits in proptest::collection::vec(any_hit(), 0..8),
+                min_confidence in 0.0f64..1.0,
+            ) {
+                let scores: Vec<MatchScore> = hits
+                    .iter()
+                    .map(|hit| score(&query, query_year, &hit.title, hit.original_title.as_deref(), hit.year))
+                    .collect();
+                let accepted: Vec<f64> = scores
+                    .iter()
+                    .filter(|scored| scored.accepted(min_confidence))
+                    .map(|scored| scored.total_score)
+                    .collect();
+                match best_movie_match(&query, query_year, &hits, min_confidence) {
+                    None => prop_assert!(accepted.is_empty()),
+                    Some((best, best_score)) => {
+                        prop_assert!(hits.iter().any(|hit| std::ptr::eq(hit, best)));
+                        prop_assert!(best_score.accepted(min_confidence));
+                        prop_assert!(accepted.iter().all(|total| *total <= best_score.total_score));
+                    }
+                }
+                let shows: Vec<ShowSearchHit> = hits.iter().map(as_show).collect();
+                prop_assert_eq!(
+                    best_show_match(&query, query_year, &shows, min_confidence)
+                        .map(|(best, _)| best.external_ref.clone()),
+                    best_movie_match(&query, query_year, &hits, min_confidence)
+                        .map(|(best, _)| best.external_ref.clone()),
+                    "a show is ranked by the movie's rules"
+                );
+            }
+
+            /// The top candidates are at most `n`, best first.
+            #[test]
+            fn the_top_candidates_are_at_most_n_best_first(
+                query in any_title(),
+                hits in proptest::collection::vec(any_hit(), 0..8),
+                n in 0usize..10,
+            ) {
+                let top = top_movie_candidates(&query, None, &hits, n);
+                prop_assert_eq!(top.len(), n.min(hits.len()));
+                prop_assert!(top.windows(2).all(|pair| pair[0].1.total_score >= pair[1].1.total_score));
+                let shows: Vec<ShowSearchHit> = hits.iter().map(as_show).collect();
+                prop_assert_eq!(top_show_candidates(&query, None, &shows, n), top);
+            }
+        }
+    }
+
     mod absolute_order {
         use super::*;
         use proptest::prelude::*;
@@ -646,6 +844,56 @@ mod tests {
             assert_eq!(placed(&seasons, 4), Some((2, 1)));
             assert_eq!(placed(&seasons, 5), Some((2, 2)));
             assert_eq!(placed(&seasons, 3), None, "no regular episode is 3");
+        }
+
+        /// A provider that numbers any regular episode absolutely is read by
+        /// its numbers alone: an episode it left unnumbered is not in its
+        /// order, and a number is never read as a position instead.
+        #[test]
+        fn a_numbered_provider_is_never_read_by_position() {
+            let seasons = [
+                SeasonEnrichment {
+                    season_number: 1,
+                    episodes: vec![episode(1, None), episode(2, Some(1))],
+                    ..Default::default()
+                },
+                SeasonEnrichment {
+                    season_number: 2,
+                    episodes: vec![episode(1, None)],
+                    ..Default::default()
+                },
+            ];
+            assert_eq!(placed(&seasons, 1), Some((1, 2)));
+            assert_eq!(
+                placed(&seasons, 2),
+                None,
+                "the second position exists, but no episode is numbered 2"
+            );
+            assert_eq!(placed(&seasons, 3), None);
+            assert_eq!(placed(&seasons, 0), None);
+        }
+
+        /// A number only a special carries does not make the provider a
+        /// numbering one: the regular seasons are still read by position.
+        #[test]
+        fn a_numbered_special_alone_leaves_the_order_positional() {
+            let seasons = [
+                season(1, 2),
+                SeasonEnrichment {
+                    season_number: SPECIALS_SEASON,
+                    episodes: vec![episode(1, Some(1))],
+                    ..Default::default()
+                },
+            ];
+            assert_eq!(placed(&seasons, 1), Some((1, 1)));
+            assert_eq!(placed(&seasons, 2), Some((1, 2)));
+        }
+
+        /// Nothing is placed for a provider with no seasons, or only specials.
+        #[test]
+        fn no_regular_season_places_nothing() {
+            assert_eq!(placed(&[], 1), None);
+            assert_eq!(placed(&[season(SPECIALS_SEASON, 3)], 1), None);
         }
 
         #[test]
