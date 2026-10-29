@@ -710,8 +710,13 @@ mod admin_log {
 
         let sql = statements(db);
         assert_contains(&sql[0], r#"ORDER BY "admin_logs"."created_at" DESC"#);
-        assert_bound(&sql[0], "20");
-        assert_bound(&sql[0], "40");
+        // The limit and the offset each bind their own number: one bound to
+        // the other's placeholder would page by the wrong amount.
+        assert_contains(&sql[0], "LIMIT $1 OFFSET $2");
+        let values = bound_values(&sql[0]);
+        assert_eq!(values.len(), 2, "{values:?}");
+        assert!(values[0].contains("20"), "the limit binds 20: {values:?}");
+        assert!(values[1].contains("40"), "the offset binds 40: {values:?}");
     }
 
     #[tokio::test]
