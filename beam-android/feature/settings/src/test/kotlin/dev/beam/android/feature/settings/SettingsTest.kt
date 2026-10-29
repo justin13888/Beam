@@ -17,9 +17,11 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import uniffi.beam_client_core.BeamException
 import uniffi.beam_client_core.SessionState
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -138,6 +140,32 @@ class SettingsTest {
             testScheduler.advanceUntilIdle()
 
             assertTrue(model.state.value.isSignedOut)
+        }
+
+    @Test
+    fun `a failed sign-out everywhere is reported, not claimed`() =
+        runTest {
+            // The other devices are still signed in. Leaving the screen as
+            // though they were not would tell the viewer a stolen phone is
+            // locked out when it is not.
+            val sessions =
+                FakeSessionRepository().apply {
+                    failWith = BeamException.Network("the connection dropped", true)
+                }
+            val model = viewModel(sessions = sessions)
+            testScheduler.advanceUntilIdle()
+
+            model.signOutEverywhere()
+            testScheduler.advanceUntilIdle()
+
+            assertFalse("nothing was signed out", sessions.loggedOutEverywhere)
+            assertFalse("so the viewer is not sent away as though it were", model.state.value.isSignedOut)
+            val error = model.state.value.error
+            assertNotNull("and is told", error)
+            assertTrue(error!!.startsWith("Could not sign out everywhere."))
+
+            model.clearError()
+            assertNull(model.state.value.error)
         }
 
     @Test

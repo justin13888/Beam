@@ -12,15 +12,22 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.cache.Cache
 import androidx.media3.exoplayer.offline.DownloadManager
 import dagger.hilt.android.qualifiers.ApplicationContext
+import dev.beam.android.core.ffi.preferences.PreferencesRepository
 import dev.beam.android.core.ffi.repository.PlaybackRepository
 import dev.beam.android.core.media.http.BeamHttpClientFactory
 import dev.beam.android.core.model.DownloadRecord
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
 import uniffi.beam_client_core.BeamClient
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -66,6 +73,11 @@ public interface DownloadRepository {
  * credential, which does not exist until the viewer has signed in. Building it
  * eagerly at app start would either fail or bake in an empty credential, and
  * every download would then 401 with no obvious cause.
+ *
+ * The network requirement follows the stored cellular preference from the
+ * moment this is constructed, rather than waiting for a screen to send it:
+ * the system can start the process for the download service alone, and the
+ * viewer's choice must hold then too.
  */
 @Singleton
 internal class MediaDownloadRepository
@@ -78,9 +90,26 @@ internal class MediaDownloadRepository
         private val cache: Cache,
         private val titles: DownloadTitleStore,
         private val artwork: DownloadArtwork,
+        preferences: PreferencesRepository,
     ) : DownloadRepository,
         DownloadManagerHolder {
         private var delegate: BeamDownloadManager? = null
+
+        /**
+         * Unmetered only until told otherwise: the stored preference defaults
+         * to no downloads over cellular, and a manager built before the stored
+         * value has been read must not spend the viewer's data meanwhile.
+         */
+        private var requiresUnmetered: Boolean = true
+
+        init {
+            // Process-lived, like this singleton. The main thread, because a
+            // Media3 DownloadManager is driven from the thread it was built on,
+            // and the download service builds it there.
+            CoroutineScope(SupervisorJob() + Dispatchers.Main).launch {
+                followCellularPreference(preferences, this@MediaDownloadRepository)
+            }
+        }
 
         @OptIn(ExperimentalCoroutinesApi::class)
         override val downloads: Flow<List<DownloadRecord>> =
@@ -114,8 +143,18 @@ internal class MediaDownloadRepository
             beamManager().removeAll()
         }
 
+        /**
+         * Held here rather than handed straight to the manager, because the
+         * stored preference is read at construction -- possibly before
+         * sign-in, when building the manager would bake in an empty
+         * credential. The manager takes it when it is built, and every change
+         * after that.
+         */
         override suspend fun setRequiresUnmeteredNetwork(required: Boolean) {
-            beamManager().setRequiresUnmeteredNetwork(required)
+            synchronized(this) {
+                requiresUnmetered = required
+                delegate?.setRequiresUnmeteredNetwork(required)
+            }
         }
 
         override suspend fun isDownloaded(fileId: String): Boolean =
@@ -140,6 +179,25 @@ internal class MediaDownloadRepository
                         titles = titles,
                         artwork = artwork,
                         server = client.serverHttpConfig(),
-                    ).also { delegate = it }
+                    ).also {
+                        it.setRequiresUnmeteredNetwork(requiresUnmetered)
+                        delegate = it
+                    }
             }
     }
+
+/**
+ * Apply the stored cellular preference to [downloads]: the value stored now,
+ * then each change of it. An unrelated preference change resends nothing.
+ *
+ * Suspends for as long as [preferences] emits.
+ */
+internal suspend fun followCellularPreference(
+    preferences: PreferencesRepository,
+    downloads: DownloadRepository,
+) {
+    preferences.preferences
+        .map { it.downloadOverCellular }
+        .distinctUntilChanged()
+        .collect { overCellular -> downloads.setRequiresUnmeteredNetwork(!overCellular) }
+}

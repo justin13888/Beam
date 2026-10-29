@@ -2,6 +2,7 @@ package dev.beam.android
 
 import android.app.Application
 import androidx.test.core.app.ApplicationProvider
+import dev.beam.android.core.model.UserPreferences
 import dev.beam.android.core.testing.FakePlaybackRepository
 import dev.beam.android.core.testing.FakePreferencesRepository
 import dev.beam.android.core.testing.FakeServerRepository
@@ -13,6 +14,7 @@ import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -45,13 +47,42 @@ class MainViewModelTest {
     @After
     fun tearDown() = Dispatchers.resetMain()
 
-    private fun viewModel(servers: FakeServerRepository) =
-        MainViewModel(
-            servers = servers,
-            playback = FakePlaybackRepository(),
-            preferences = FakePreferencesRepository(),
-            context = ApplicationProvider.getApplicationContext(),
-        )
+    private fun viewModel(
+        servers: FakeServerRepository = FakeServerRepository(listOf(Fixtures.server(isActive = true))),
+        playback: FakePlaybackRepository = FakePlaybackRepository(),
+        preferences: FakePreferencesRepository = FakePreferencesRepository(),
+    ) = MainViewModel(
+        servers = servers,
+        playback = playback,
+        preferences = preferences,
+        context = ApplicationProvider.getApplicationContext(),
+    )
+
+    @Test
+    fun `toggling software decode updates the core's profile`() =
+        runTest(dispatcher) {
+            val playback = FakePlaybackRepository()
+            val preferences = FakePreferencesRepository(UserPreferences(allowSoftwareDecode = false))
+            viewModel(playback = playback, preferences = preferences)
+            testScheduler.advanceUntilIdle()
+            assertEquals(false, playback.deviceProfile?.allowSoftwareDecode)
+
+            preferences.update { it.copy(allowSoftwareDecode = true) }
+            testScheduler.advanceUntilIdle()
+            assertEquals(
+                "the next selection may use a software decoder",
+                true,
+                playback.deviceProfile?.allowSoftwareDecode,
+            )
+
+            preferences.update { it.copy(allowSoftwareDecode = false) }
+            testScheduler.advanceUntilIdle()
+            assertEquals(
+                "and turning it off again forbids it again",
+                false,
+                playback.deviceProfile?.allowSoftwareDecode,
+            )
+        }
 
     @Test
     fun `admin access follows a switch of server and a sign-in to another`() =

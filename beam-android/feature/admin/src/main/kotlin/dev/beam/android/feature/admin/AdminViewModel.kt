@@ -186,8 +186,17 @@ public class AdminViewModel
             disabled: Boolean,
         ) {
             viewModelScope.launch {
-                runCatching { admin.setUserDisabled(userId, disabled) }
+                val outcome = runCatching { admin.setUserDisabled(userId, disabled) }
                 reload()
+                // Only a failure is announced: a block that worked shows in the
+                // row itself, and one that was refused would otherwise look
+                // exactly like the operator never pressed it. Applied after the
+                // reload, which replaces the whole state.
+                outcome.onFailure { error ->
+                    val notDone =
+                        if (disabled) "The account could not be blocked." else "The account could not be unblocked."
+                    showMessage(mutationFailureMessage(error, notDone))
+                }
             }
         }
 
@@ -219,9 +228,17 @@ public class AdminViewModel
         /** Delete a library and everything indexed into it. */
         public fun deleteLibrary(libraryId: String) {
             viewModelScope.launch {
-                runCatching { admin.deleteLibrary(libraryId) }
+                val outcome = runCatching { admin.deleteLibrary(libraryId) }
                 reload()
+                outcome.onFailure { error ->
+                    showMessage(mutationFailureMessage(error, "The library could not be deleted."))
+                }
             }
+        }
+
+        /** Put [message] in the snackbar, over whatever is on screen. */
+        private fun showMessage(message: String) {
+            mutableState.update { it.mapValue { state -> state.copy(message = message) } }
         }
 
         /** Show playback telemetry for a different range of days. */
@@ -368,6 +385,15 @@ public class AdminViewModel
 
 /** Whether a scan is waiting or running, as opposed to finished either way. */
 internal fun ScanJobState.isUnderWay(): Boolean = this == ScanJobState.QUEUED || this == ScanJobState.RUNNING
+
+/**
+ * That an action was not carried out, and why where the core mapped a reason:
+ * [notDone] names the action, so the operator knows which press failed.
+ */
+private fun mutationFailureMessage(
+    error: Throwable,
+    notDone: String,
+): String = listOfNotNull(notDone, (error as? BeamException)?.toFailure()?.message).joinToString(" ")
 
 /** The problem type the server answers a scan of a library already being scanned with. */
 private const val SCAN_IN_PROGRESS = "#library-scan-in-progress"

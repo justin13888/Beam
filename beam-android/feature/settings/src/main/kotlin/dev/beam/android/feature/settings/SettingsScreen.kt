@@ -80,6 +80,7 @@ public fun SettingsRoute(
         onForgetCertificates = viewModel::forgetCertificates,
         onSignOut = viewModel::signOut,
         onSignOutEverywhere = viewModel::signOutEverywhere,
+        onDismissError = viewModel::clearError,
         modifier = modifier,
     )
 }
@@ -104,6 +105,7 @@ internal fun SettingsScreen(
     onSwitchServer: (String) -> Unit = {},
     onRemoveServer: (String) -> Unit = {},
     onAddServer: () -> Unit = {},
+    onDismissError: () -> Unit = {},
 ) {
     var confirmingSignOutEverywhere by remember { mutableStateOf(false) }
     var removing by remember { mutableStateOf<ServerSummary?>(null) }
@@ -152,6 +154,15 @@ internal fun SettingsScreen(
             dismissButton = {
                 TextButton(onClick = { confirmingSignOutEverywhere = false }) { Text("Cancel") }
             },
+        )
+    }
+
+    state.error?.let { error ->
+        AlertDialog(
+            onDismissRequest = onDismissError,
+            title = { Text("That did not work") },
+            text = { Text(error) },
+            confirmButton = { TextButton(onClick = onDismissError) { Text("OK") } },
         )
     }
 

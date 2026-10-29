@@ -545,8 +545,16 @@ public class FakeSessionRepository : SessionRepository {
     }
 }
 
-/** An administrative surface that answers from memory. */
-public class FakeAdminRepository : AdminRepository {
+/**
+ * An administrative surface that answers from memory.
+ *
+ * Libraries are listed through the catalog, not here, so a [catalog] passed
+ * in is the server both share: deleting a library through this one takes it
+ * out of that one's list, as the server would.
+ */
+public class FakeAdminRepository(
+    private val catalog: FakeCatalogRepository? = null,
+) : AdminRepository {
     /** Set to make every call throw, typically `Forbidden`. */
     public var failWith: BeamException? = null
 
@@ -641,6 +649,7 @@ public class FakeAdminRepository : AdminRepository {
 
     override suspend fun deleteLibrary(libraryId: String) {
         failWith?.let { throw it }
+        catalog?.let { shared -> shared.libraryList = shared.libraryList.filterNot { it.id == libraryId } }
     }
 
     override suspend fun scanLibrary(libraryId: String) {
