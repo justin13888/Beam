@@ -374,6 +374,77 @@ async fn set_watched(
     request.cookie("beam_session", token).send().await.status()
 }
 
+// ── Store failures (NFR-205) ─────────────────────────────────────────────────
+
+/// A watch-state store that cannot read is a 500 on the shelf and the
+/// history, never an empty page -- which a client would show as "nothing
+/// watched", and might act on by offering to start everything again.
+#[tokio::test]
+async fn a_watch_state_store_failure_is_a_500_never_an_empty_shelf_or_history() {
+    use beam_domain::repositories::watch_state::MockWatchStateRepository;
+
+    use crate::routes::test_support::{outage, signed_in, state_with};
+
+    let files = Arc::new(InMemoryFileRepository::default());
+    let movies = Arc::new(InMemoryMovieRepository::with_files(files.clone()));
+    let shows = Arc::new(InMemoryShowRepository::with_files(files.clone()));
+    let mut watch_state = MockWatchStateRepository::new();
+    watch_state
+        .expect_find_continue_candidates()
+        .returning(|_, _, _| Err(outage()));
+    watch_state
+        .expect_find_history_page()
+        .returning(|_, _, _| Err(outage()));
+    watch_state
+        .expect_count_by_user()
+        .returning(|_| Err(outage()));
+    let sources = Arc::new(SourceCatalog::new(
+        crate::services::sources::SourceRepositories {
+            movies: movies.clone(),
+            files: files.clone(),
+            streams: Arc::new(InMemoryMediaStreamRepository::default()),
+            sidecars: Arc::new(
+                beam_domain::repositories::sidecar_subtitle::in_memory::InMemorySidecarSubtitleRepository::default(),
+            ),
+            chapters: Arc::new(
+                beam_domain::repositories::chapter::in_memory::InMemoryChapterRepository::default(),
+            ),
+            trickplay: Arc::new(
+                beam_domain::repositories::trickplay::in_memory::InMemoryTrickplayRepository::default(),
+            ),
+        },
+    ));
+    let playback = Arc::new(DbPlaybackService::new(PlaybackRepositories {
+        watch_state: Arc::new(watch_state),
+        files,
+        movies,
+        shows,
+        sources,
+    }));
+    let state = state_with(|services| services.playback = playback);
+    let token = signed_in(&state).await;
+    let client = TestClient::new(
+        Router::new()
+            .nest(
+                "/v1",
+                Router::new().mount(kynos::routes![get_continue_watching, get_history]),
+            )
+            .build(state)
+            .expect("the playback router describes itself"),
+    );
+
+    for path in ["/v1/continue-watching", "/v1/history"] {
+        let response = client.get(path).cookie("beam_session", &token).send().await;
+        response
+            .assert_status(StatusCode::INTERNAL_SERVER_ERROR)
+            .assert_problem_type("https://beam.justinchung.net/reference/errors/#internal");
+        assert!(
+            !response.text().contains("items"),
+            "{path}: no page is answered"
+        );
+    }
+}
+
 // ── Reporting ────────────────────────────────────────────────────────────────
 
 /// A multi-part movie is played through its last part: the end of an

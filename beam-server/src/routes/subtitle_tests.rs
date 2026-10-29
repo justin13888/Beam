@@ -757,3 +757,143 @@ fn the_converter_version_changes_with_its_output() {
         assert_ne!(pair[0].1, pair[1].1, "a new version renders differently");
     }
 }
+
+/// Every entry beneath `root` -- its path, and for a file its bytes and
+/// modification time -- so a test can show a request left a library exactly
+/// as it found it.
+fn library_tree(
+    root: &std::path::Path,
+) -> std::collections::BTreeMap<PathBuf, Option<(Vec<u8>, std::time::SystemTime)>> {
+    let mut tree = std::collections::BTreeMap::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).expect("a readable folder") {
+            let path = entry.expect("a readable entry").path();
+            let metadata = std::fs::symlink_metadata(&path).expect("readable metadata");
+            if metadata.is_dir() {
+                pending.push(path.clone());
+                tree.insert(path, None);
+            } else {
+                let bytes = std::fs::read(&path).expect("a readable file");
+                tree.insert(path, Some((bytes, metadata.modified().expect("an mtime"))));
+            }
+        }
+    }
+    tree
+}
+
+/// FR-202: rendering a WebVTT rendition -- and serving the subtitle as
+/// stored -- reads the library and writes nothing in it: no cache file
+/// beside the source, no rewritten line ends, not even a touched mtime.
+#[tokio::test]
+async fn a_webvtt_rendition_leaves_the_library_tree_unchanged() {
+    let f = fixture().await;
+    let video = f.video();
+    let srt = f.sidecar(video, "Movie.en.srt", SRT).await;
+    let vtt = f
+        .sidecar(
+            video,
+            "Movie.fr.vtt",
+            b"WEBVTT\r\n\r\n00:01.000 --> 00:02.000\r\nSalut\r\n",
+        )
+        .await;
+    let token = f.session().await;
+    let client = f.client();
+    let before = library_tree(f.dir.path());
+
+    for path in [
+        format!("{}/webvtt", url(video, srt)),
+        format!("{}/webvtt", url(video, vtt)),
+        url(video, srt),
+    ] {
+        client
+            .get(&path)
+            .cookie("beam_session", &token)
+            .send()
+            .await
+            .assert_status(StatusCode::OK);
+        client
+            .head(&path)
+            .cookie("beam_session", &token)
+            .send()
+            .await
+            .assert_status(StatusCode::OK);
+    }
+
+    assert_eq!(library_tree(f.dir.path()), before);
+}
+
+/// NFR-205: a subtitle index that cannot be read is a 500, never the
+/// subtitle-not-found that tells a player the track does not exist.
+#[tokio::test]
+async fn a_subtitle_store_failure_is_a_500_never_subtitle_not_found() {
+    use beam_domain::models::file::CreateMediaFile;
+    use beam_domain::repositories::sidecar_subtitle::MockSidecarSubtitleRepository;
+
+    use crate::routes::test_support::{outage, signed_in, state_with};
+
+    let dir = TempDir::new().expect("a temp dir");
+    let libraries = Arc::new(InMemoryLibraryRepository::default());
+    let library = libraries
+        .create(CreateLibrary {
+            name: "Films".to_owned(),
+            root_path: dir.path().to_owned(),
+            description: None,
+        })
+        .await
+        .expect("create the library");
+    let files = Arc::new(InMemoryFileRepository::default());
+    let video = files
+        .create(CreateMediaFile {
+            content: Some(MediaFileContent::movie(Uuid::new_v4())),
+            status: FileStatus::Known,
+            ..beam_domain::test_utils::create_media_file(library.id, dir.path().join("Movie.mkv"))
+        })
+        .await
+        .expect("a file row");
+    let mut sidecars = MockSidecarSubtitleRepository::new();
+    sidecars
+        .expect_find_by_file_id()
+        .returning(|_| Err(outage()));
+    let subtitles = Arc::new(DbSubtitleService::new(
+        libraries,
+        files.clone(),
+        Arc::new(sidecars),
+    ));
+    let state = state_with(|services| {
+        services.file_repo = files;
+        services.subtitles = subtitles;
+    });
+    let token = signed_in(&state).await;
+    let client = TestClient::new(
+        Router::new()
+            .nest(
+                "/v1",
+                Router::new().mount(kynos::routes![get_subtitle, get_subtitle_webvtt]),
+            )
+            .build(state)
+            .expect("the subtitle router describes itself"),
+    );
+
+    let subtitle = Uuid::new_v4();
+    for path in [
+        url(video.id, subtitle),
+        format!("{}/webvtt", url(video.id, subtitle)),
+    ] {
+        let response = client
+            .get(&path)
+            .cookie("beam_session", &token)
+            .send()
+            .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "{path}"
+        );
+        assert_eq!(
+            problem_type(response.bytes().as_ref()),
+            "https://beam.justinchung.net/reference/errors/#internal",
+            "{path}"
+        );
+    }
+}

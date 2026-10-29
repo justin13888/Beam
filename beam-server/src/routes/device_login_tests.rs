@@ -211,6 +211,75 @@ fn problem(name: &str) -> String {
     format!("{ERRORS}#{name}")
 }
 
+/// A device-flow store that fails every call: what a database outage looks
+/// like from the handlers.
+#[derive(Debug)]
+struct FailingDeviceFlows;
+
+#[async_trait::async_trait]
+impl beam_auth::utils::device_auth_store::DeviceAuthStore for FailingDeviceFlows {
+    async fn create(
+        &self,
+        _: &beam_auth::utils::device_auth_store::NewDeviceAuth,
+    ) -> Result<(), beam_auth::utils::device_auth_store::DeviceAuthError> {
+        Err(crate::routes::test_support::outage().into())
+    }
+    async fn claim_poll(
+        &self,
+        _: &str,
+    ) -> Result<
+        beam_auth::utils::device_auth_store::Claim,
+        beam_auth::utils::device_auth_store::DeviceAuthError,
+    > {
+        Err(crate::routes::test_support::outage().into())
+    }
+    async fn bump_interval(
+        &self,
+        _: &str,
+    ) -> Result<Option<u32>, beam_auth::utils::device_auth_store::DeviceAuthError> {
+        Err(crate::routes::test_support::outage().into())
+    }
+    async fn consume(
+        &self,
+        _: &str,
+    ) -> Result<
+        Option<beam_auth::utils::device_auth_store::DeviceAuth>,
+        beam_auth::utils::device_auth_store::DeviceAuthError,
+    > {
+        Err(crate::routes::test_support::outage().into())
+    }
+}
+
+/// NFR-205: a device-flow store that cannot write is a 500 when a device
+/// login starts -- never a handle the device would then poll in vain -- and
+/// one that cannot read is a 500 on a poll, never `pending` or `expired`,
+/// either of which would tell the device something untrue about its flow.
+#[tokio::test]
+async fn a_device_flow_store_failure_is_a_500_never_a_handle_or_a_verdict() {
+    use crate::routes::test_support::{served_client, state_with};
+
+    let state = state_with(|services| {
+        services.oidc_client = Arc::new(FakeOidcClient::default());
+        services.device_auth_store = Arc::new(FailingDeviceFlows);
+    });
+    let client = served_client(state);
+
+    let start = client.post("/v1/auth/device").send().await;
+    start
+        .assert_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .assert_problem_type(&problem("internal"));
+    assert!(!start.text().contains("device_handle"));
+    assert!(!start.text().contains(FAKE_USER_CODE));
+
+    client
+        .post("/v1/auth/device/token")
+        .json(&json!({ "device_handle": "a-handle-the-store-cannot-read" }))
+        .send()
+        .await
+        .assert_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .assert_problem_type(&problem("internal"));
+}
+
 // ─── POST /v1/auth/device ─────────────────────────────────────────────────────
 
 #[tokio::test]

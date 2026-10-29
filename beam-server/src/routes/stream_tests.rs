@@ -123,11 +123,16 @@ impl MetadataService for StubMetadataService {
 #[derive(Debug, Clone)]
 struct StubLibraryService {
     files: Vec<LocatedFile>,
+    /// Every lookup fails as an unreachable database would (NFR-205).
+    outage: bool,
 }
 
 impl StubLibraryService {
     fn new(files: Vec<LocatedFile>) -> Self {
-        Self { files }
+        Self {
+            files,
+            outage: false,
+        }
     }
 }
 
@@ -179,6 +184,9 @@ impl LibraryService for StubLibraryService {
         &self,
         file_id: uuid::Uuid,
     ) -> Result<Option<LocatedFile>, LibraryError> {
+        if self.outage {
+            return Err(LibraryError::Db(crate::routes::test_support::outage()));
+        }
         Ok(self.files.iter().find(|f| f.id == file_id).cloned())
     }
 }
@@ -192,6 +200,10 @@ struct TestFixture {
 }
 
 fn make_test_state(files: Vec<LocatedFile>) -> TestFixture {
+    make_test_state_over(StubLibraryService::new(files))
+}
+
+fn make_test_state_over(library: StubLibraryService) -> TestFixture {
     let session_store = Arc::new(InMemorySessionStore::default());
     let user_repo = Arc::new(InMemoryUserRepository::default());
 
@@ -203,7 +215,7 @@ fn make_test_state(files: Vec<LocatedFile>) -> TestFixture {
     let services = AppServices {
         hash: Arc::new(StubHashService),
         access: crate::routes::test_support::open_access(),
-        library: Arc::new(StubLibraryService::new(files)),
+        library: Arc::new(library),
         metadata: Arc::new(StubMetadataService),
         subtitles: crate::routes::test_support::idle_subtitles(),
         notification,
@@ -960,4 +972,99 @@ async fn download_file_without_a_session_cookie_is_401() {
         client.get(DOWNLOAD).send().await.status(),
         StatusCode::UNAUTHORIZED
     );
+}
+
+// ─── Store failures (NFR-205) ──────────────────────────────────────────────
+
+/// A file index that cannot be read is a 500 on every delivery route, never
+/// the file-not-found that tells a player the file was removed.
+#[tokio::test]
+async fn a_file_index_failure_is_a_500_never_file_not_found() {
+    let fixture = make_test_state_over(StubLibraryService {
+        files: vec![],
+        outage: true,
+    });
+    let client = build_client(&fixture);
+    let token = seed_session_token(&fixture).await;
+
+    for (method, path) in [
+        ("GET", STREAM),
+        ("HEAD", STREAM),
+        ("GET", DOWNLOAD),
+        ("HEAD", DOWNLOAD),
+    ] {
+        let request = match method {
+            "GET" => client.get(path),
+            _ => client.head(path),
+        };
+        let response = request.cookie("beam_session", &token).send().await;
+        assert_eq!(
+            response.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "{method} {path}"
+        );
+    }
+}
+
+// ─── Ranged requests, generated ────────────────────────────────────────────
+
+/// A current-thread runtime for one generated case: proptest's runner is
+/// synchronous, and each case drives the router to completion.
+fn runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a current-thread runtime")
+}
+
+/// `bytes={first}-{last}` against a file of `file_size` octets, each octet
+/// its own offset modulo 251 so a misplaced byte is visible.
+fn ranged_case() -> impl proptest::strategy::Strategy<Value = (usize, u64, u64)> {
+    use proptest::prelude::*;
+
+    (1usize..=600).prop_flat_map(|file_size| {
+        let bound = 2 * file_size as u64 + 2;
+        (Just(file_size), 0..bound)
+            .prop_flat_map(move |(file_size, first)| (Just(file_size), Just(first), first..bound))
+    })
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+
+    /// Whatever range is asked for, the answer never reaches outside the
+    /// file: a range starting inside it is a 206 whose `Content-Range` and
+    /// body are the clamped span's octets, and one starting at or past the
+    /// end is a 416 naming the file's length.
+    #[test]
+    fn a_ranged_stream_never_answers_outside_the_file(
+        (file_size, first, last) in ranged_case()
+    ) {
+        let contents: Vec<u8> = (0..file_size).map(|i| (i % 251) as u8).collect();
+        runtime().block_on(async {
+            let served = serve("video.mkv", &contents).await;
+            let response = served
+                .client
+                .get(STREAM)
+                .cookie("beam_session", &served.token)
+                .header("Range", &format!("bytes={first}-{last}"))
+                .send()
+                .await;
+
+            let size = file_size as u64;
+            if first < size {
+                let end = last.min(size - 1);
+                response.assert_part(first, end, size);
+                assert_eq!(
+                    response.bytes().as_ref(),
+                    &contents[first as usize..=end as usize],
+                    "the octets of bytes={first}-{last} of {size}"
+                );
+            } else {
+                response
+                    .assert_status(StatusCode::RANGE_NOT_SATISFIABLE)
+                    .assert_header("content-range", &format!("bytes */{size}"));
+            }
+        });
+    }
 }

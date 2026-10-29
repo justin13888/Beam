@@ -387,6 +387,67 @@ async fn the_sweep_removes_what_no_record_names() {
     assert!(other.exists());
 }
 
+/// Every entry beneath `root` -- its path, and for a file its bytes and
+/// modification time.
+fn library_tree(
+    root: &std::path::Path,
+) -> std::collections::BTreeMap<PathBuf, Option<(Vec<u8>, std::time::SystemTime)>> {
+    let mut tree = std::collections::BTreeMap::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            let metadata = std::fs::symlink_metadata(&path).unwrap();
+            if metadata.is_dir() {
+                pending.push(path.clone());
+                tree.insert(path, None);
+            } else {
+                let bytes = std::fs::read(&path).unwrap();
+                tree.insert(path, Some((bytes, metadata.modified().unwrap())));
+            }
+        }
+    }
+    tree
+}
+
+/// FR-202: making sheets, remaking them for changed content, recording a
+/// file that gives none, and sweeping, all write beneath the data
+/// directory only -- the library is byte-for-byte, mtime-for-mtime, as it was.
+#[tokio::test]
+async fn a_trickplay_pass_leaves_the_library_tree_unchanged() {
+    let h = Harness::new(Outcome::Sheets(2)).await;
+    std::fs::create_dir(h.library_root.join("Season 1")).unwrap();
+    let film = h.file("Film (2001).mkv", 1).await;
+    h.file("Season 1/Show S01E01.mkv", 2).await;
+    let before = library_tree(&h.library_root);
+
+    h.service.run_pass().await.unwrap();
+    h.rehash(&film, 3).await;
+    h.service.run_pass().await.unwrap();
+    h.generator.set(Outcome::NoVideo);
+    h.file("Clip.mkv", 4).await;
+    let with_clip = library_tree(&h.library_root);
+    h.service.run_pass().await.unwrap();
+
+    assert_eq!(h.generator.calls(), 4, "every pass made something");
+    assert_eq!(
+        library_tree(&h.library_root),
+        with_clip,
+        "the last pass wrote nothing in the library"
+    );
+    let mut expected = before;
+    expected.extend(
+        with_clip
+            .into_iter()
+            .filter(|(path, _)| path.ends_with("Clip.mkv")),
+    );
+    assert_eq!(
+        library_tree(&h.library_root),
+        expected,
+        "the library holds what the test wrote and nothing the passes did"
+    );
+}
+
 #[tokio::test]
 async fn a_sheet_is_located_for_the_files_current_content_only() {
     let h = Harness::new(Outcome::Sheets(2)).await;

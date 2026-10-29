@@ -285,6 +285,69 @@ async fn the_sheets_of_an_unknown_file_are_file_not_found() {
     );
 }
 
+/// NFR-205: a trickplay record store that cannot read is a 500, never the
+/// sheet-not-found that tells a player the file simply has no previews.
+#[tokio::test]
+async fn a_trickplay_record_store_failure_is_a_500_never_sheet_not_found() {
+    use beam_domain::models::file::CreateMediaFile;
+    use beam_domain::repositories::FileRepository;
+    use beam_domain::repositories::trickplay::MockTrickplayRepository;
+
+    use crate::routes::test_support::{outage, signed_in, state_with};
+
+    let files = Arc::new(InMemoryFileRepository::default());
+    let file = files
+        .create(CreateMediaFile {
+            duration: Some(std::time::Duration::from_secs(7_200)),
+            content: Some(MediaFileContent::movie(Uuid::new_v4())),
+            status: FileStatus::Known,
+            ..beam_domain::test_utils::create_media_file(Uuid::new_v4(), "/videos/Movie.mkv")
+        })
+        .await
+        .expect("a file row");
+    let mut records = MockTrickplayRepository::new();
+    records.expect_find().returning(|_| Err(outage()));
+    let trickplay = Arc::new(TrickplayService::new(
+        PathBuf::from("/nonexistent/beam-test/trickplay"),
+        TrickplayDependencies {
+            libraries: Arc::new(InMemoryLibraryRepository::default()),
+            files: files.clone(),
+            records: Arc::new(records),
+            generator: Arc::new(beam_index::services::trickplay::MockTrickplayGenerator::new()),
+            clock: Arc::new(beam_domain::services::RealClock),
+        },
+    ));
+    let state = state_with(|services| {
+        services.file_repo = files;
+        services.trickplay = trickplay;
+    });
+    let token = signed_in(&state).await;
+    let client = TestClient::new(
+        Router::new()
+            .nest(
+                "/v1",
+                Router::new().mount(kynos::routes![get_trickplay_sheet, head_trickplay_sheet]),
+            )
+            .build(state)
+            .expect("the trickplay router describes itself"),
+    );
+
+    for response in [
+        client
+            .get(&url(file.id, 0))
+            .cookie("beam_session", &token)
+            .send()
+            .await,
+        client
+            .head(&url(file.id, 0))
+            .cookie("beam_session", &token)
+            .send()
+            .await,
+    ] {
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+}
+
 #[tokio::test]
 async fn a_sheet_needs_a_session() {
     let f = fixture().await;

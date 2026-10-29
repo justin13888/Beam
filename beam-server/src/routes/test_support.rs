@@ -533,8 +533,14 @@ pub(crate) fn idle_language_preferences()
 pub(crate) fn state_with_language_preferences(
     preferences: Arc<dyn beam_domain::repositories::LanguagePreferenceRepository>,
 ) -> AppState {
+    state_with(|services| services.language_preferences = preferences)
+}
+
+/// [`make_app_state`] with whichever seams `adjust` replaces -- a store that
+/// fails, say, to drive a route's NFR-205 path -- every other one shared.
+pub(crate) fn state_with(adjust: impl FnOnce(&mut AppServices)) -> AppState {
     let base = make_app_state();
-    let services = AppServices {
+    let mut services = AppServices {
         hash: base.services.hash.clone(),
         access: base.services.access.clone(),
         library: base.services.library.clone(),
@@ -543,7 +549,7 @@ pub(crate) fn state_with_language_preferences(
         notification: base.services.notification.clone(),
         admin_log: base.services.admin_log.clone(),
         user_repo: base.services.user_repo.clone(),
-        language_preferences: preferences,
+        language_preferences: base.services.language_preferences.clone(),
         playback: base.services.playback.clone(),
         genre_repo: base.services.genre_repo.clone(),
         library_repo: base.services.library_repo.clone(),
@@ -566,7 +572,44 @@ pub(crate) fn state_with_language_preferences(
         playback_telemetry: base.services.playback_telemetry.clone(),
         trickplay: base.services.trickplay.clone(),
     };
+    adjust(&mut services);
     AppState::new(base.config.clone(), services, base.probe.clone(), None)
+}
+
+/// A session for a user nobody stored, issued straight into `state`'s session
+/// store. Enough for any route that needs only a signed-in caller: such a
+/// route reads no user row.
+pub(crate) async fn signed_in(state: &AppState) -> String {
+    state
+        .services
+        .session_store
+        .create(
+            &beam_auth::utils::session_store::SessionData {
+                user_id: uuid::Uuid::new_v4().to_string(),
+                device_hash: "test-device".to_owned(),
+                ip: "127.0.0.1".to_owned(),
+                created_at: chrono::Utc::now().timestamp(),
+                last_active: chrono::Utc::now().timestamp(),
+            },
+            86_400,
+            86_400,
+        )
+        .await
+        .expect("the in-memory session store issues a session")
+}
+
+/// What a store reports when the database is unreachable.
+pub(crate) fn outage() -> sea_orm::DbErr {
+    sea_orm::DbErr::Custom("store unavailable".to_owned())
+}
+
+/// The served router over `state`.
+pub(crate) fn served_client(state: AppState) -> kynos::test::TestClient<AppState> {
+    kynos::test::TestClient::new(
+        crate::routes::create_router(&crate::bootstrap::AllowedOrigins::none())
+            .build(state)
+            .expect("the served router describes itself"),
+    )
 }
 
 /// Subtitle delivery over an empty index: every lookup is a miss.
