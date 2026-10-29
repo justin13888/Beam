@@ -320,6 +320,23 @@ async fn a_plan_whose_source_cannot_be_listed_is_the_file_alone() {
     assert_eq!(plan.start_part_index, 0);
 }
 
+/// Without a title there is no source to look up: the plan is the file
+/// alone, and nothing is asked of the server.
+#[tokio::test]
+async fn a_plan_without_a_title_is_the_file_alone_and_asks_nothing() {
+    let (client, backend) = one_answer(500, r#"{"type":"about:blank","status":500}"#).await;
+
+    let plan = client
+        .playback_plan(None, "f-1".to_owned())
+        .await
+        .expect("a plan of one file");
+
+    assert_eq!(plan.parts.len(), 1);
+    assert_eq!(plan.parts[0].url, "https://beam.test/v1/files/f-1/stream");
+    assert_eq!(plan.start_part_index, 0);
+    assert!(backend.recorded().is_empty(), "no title, so no lookup");
+}
+
 /// A server that never answers holds a start for the bounded lookup
 /// only, then the file plays alone -- a download is not held for as long
 /// as the OS takes to give up on a connection that drops every packet.

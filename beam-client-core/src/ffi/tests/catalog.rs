@@ -245,6 +245,42 @@ async fn genres_are_the_servers_list() {
     assert_eq!(request.url.path(), "/v1/genres");
 }
 
+/// A browse sends the query it was given, and hands back the page with its
+/// cursor and its titles' artwork resolved against the server.
+#[tokio::test]
+async fn a_browse_sends_its_query_and_resolves_the_page() {
+    let body = r#"{"items":[{"Movie":{"id":"00000000-0000-0000-0000-000000000007",
+        "title":{"original":"Le Samourai"},"genres":[],"ratings":{},"identifiers":{},
+        "poster_url":"/v1/artwork/movie/7/poster",
+        "user_state":{"played":false,"position_secs":0.0,"play_count":0}}}],
+        "page_info":{"has_next_page":true,"has_previous_page":false,"end_cursor":"m2"}}"#;
+    let (client, backend) = one_answer(200, body).await;
+
+    let page = client
+        .browse_media(BrowseQuery {
+            first: Some(20),
+            after: Some("m1".to_owned()),
+            ..BrowseQuery::default()
+        })
+        .await
+        .expect("answered");
+
+    assert_eq!(page.end_cursor.as_deref(), Some("m2"));
+    assert!(page.has_next_page);
+    let title = page.items.first().expect("the page's one title");
+    assert_eq!(title.title, "Le Samourai");
+    assert_eq!(
+        title.poster_url.as_deref(),
+        Some("https://beam.test/v1/artwork/movie/7/poster")
+    );
+    let request = the_request(&backend);
+    assert_eq!(request.method, reqwest::Method::GET);
+    assert_eq!(request.url.path(), "/v1/media");
+    let query = query_of(&request);
+    assert_eq!(query.get("first").map(String::as_str), Some("20"));
+    assert_eq!(query.get("after").map(String::as_str), Some("m1"));
+}
+
 #[tokio::test]
 async fn libraries_are_every_library_on_the_server() {
     let body: &'static str =
