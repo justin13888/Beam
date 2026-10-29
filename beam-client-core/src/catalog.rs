@@ -1968,6 +1968,199 @@ mod tests {
         );
     }
 
+    fn admin_status(counts: &str, uptime: &str) -> wire::AdminStatus {
+        let json = format!(
+            r#"{{"uptime_secs":{uptime},"version":"1.2.3","counts":{counts},
+                "enrichment":{{"pending":4,"enriched":100,"unmatched":5,"failed":1}},
+                "enrichment_providers":[],"metadata_providers":[],
+                "recent_scans":[
+                    {{"level":"warning","message":"skipped 2","created_at":"2026-01-01T00:00:00Z"}},
+                    {{"level":"info","message":"done","created_at":"2026-01-01T00:00:10Z"}}],
+                "watcher":{{"enabled":false,"watch_limit_reached":false,"libraries":[]}}}}"#
+        );
+        serde_json::from_str(&json).expect("a valid admin status")
+    }
+
+    #[test]
+    fn an_admin_status_carries_its_counts_and_recent_scans_in_order() {
+        let status = AdminStatus::from_generated(admin_status(
+            r#"{"users":3,"libraries":2,"files":120}"#,
+            "3600",
+        ));
+
+        assert_eq!(
+            status,
+            AdminStatus {
+                version: "1.2.3".to_owned(),
+                uptime_secs: 3600,
+                counts: AdminCounts {
+                    libraries: 2,
+                    files: 120,
+                    users: 3,
+                },
+                enrichment: EnrichmentCounts {
+                    pending: 4,
+                    enriched: 100,
+                    failed: 1,
+                    unmatched: 5,
+                },
+                recent_scans: vec![
+                    RecentScan {
+                        level: LogLevel::Warning,
+                        message: "skipped 2".to_owned(),
+                        timestamp_unix: 1_767_225_600,
+                    },
+                    RecentScan {
+                        level: LogLevel::Info,
+                        message: "done".to_owned(),
+                        timestamp_unix: 1_767_225_610,
+                    },
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn a_negative_admin_count_reads_as_zero_rather_than_wrapping() {
+        // The schema's minimum is not enforced by the generated client, so a
+        // negative value decodes; it must not become 18 quintillion users.
+        let status = AdminStatus::from_generated(admin_status(
+            r#"{"users":-1,"libraries":2,"files":-5}"#,
+            "-7",
+        ));
+
+        assert_eq!(status.uptime_secs, 0);
+        assert_eq!(
+            (
+                status.counts.users,
+                status.counts.libraries,
+                status.counts.files
+            ),
+            (0, 2, 0)
+        );
+    }
+
+    fn admin_user(avatar: &str) -> wire::AdminUser {
+        let json = format!(
+            r#"{{"id":"00000000-0000-0000-0000-0000000000b1","display_name":"Bea",
+                "email":null,"avatar_url":{avatar},"is_admin":true,"disabled":false,
+                "created_at":"2026-01-01T00:00:00Z"}}"#
+        );
+        serde_json::from_str(&json).expect("a valid admin user")
+    }
+
+    #[test]
+    fn an_admin_user_s_avatar_is_resolved_against_the_serving_server() {
+        let user = AdminUser::from_generated(admin_user(r#""/avatars/b1.png""#), &record());
+
+        assert_eq!(
+            user,
+            AdminUser {
+                id: "00000000-0000-0000-0000-0000000000b1".to_owned(),
+                display_name: "Bea".to_owned(),
+                email: None,
+                avatar_url: Some("https://beam.local:8000/avatars/b1.png".to_owned()),
+                is_admin: true,
+                disabled: false,
+                created_at_unix: 1_767_225_600,
+            }
+        );
+    }
+
+    #[test]
+    fn an_admin_user_without_an_avatar_has_none() {
+        let user = AdminUser::from_generated(admin_user("null"), &record());
+        assert_eq!(user.avatar_url, None);
+    }
+
+    fn admin_event(category: &str) -> wire::AdminEvent {
+        let json = format!(
+            r#"{{"id":"00000000-0000-0000-0000-0000000000e1","occurred_at":"2026-01-01T00:00:00Z",
+                "level":"error","category":"{category}","message":"m",
+                "library_id":"00000000-0000-0000-0000-00000000000a","library_name":"Films"}}"#
+        );
+        serde_json::from_str(&json).expect("a valid admin event")
+    }
+
+    /// The feed has two categories and the server four: a scan's progress
+    /// reads as the scan it belongs to, and an enrichment outcome as a server
+    /// event. Every category the contract declares is folded into one of the
+    /// two; the declared list is read from the document, so a category the
+    /// server adds fails here rather than being silently unhandled.
+    #[test]
+    fn every_admin_event_category_folds_into_the_feeds_two() {
+        let document: serde_json::Value =
+            serde_json::from_str(include_str!("../api/openapi.json")).expect("the document");
+        let declared: Vec<&str> = document
+            .pointer("/components/schemas/AdminEventCategory/enum")
+            .and_then(serde_json::Value::as_array)
+            .expect("the contract declares the categories")
+            .iter()
+            .map(|value| value.as_str().expect("a category name"))
+            .collect();
+        let folded: Vec<(&str, EventCategory)> = declared
+            .iter()
+            .map(|name| {
+                (
+                    *name,
+                    AdminEvent::from_generated(admin_event(name)).category,
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            folded,
+            vec![
+                ("library_scan", EventCategory::LibraryScan),
+                ("scan_progress", EventCategory::LibraryScan),
+                ("enrichment", EventCategory::System),
+                ("system", EventCategory::System),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_admin_event_carries_its_library_and_instant() {
+        let event = AdminEvent::from_generated(admin_event("system"));
+
+        assert_eq!(
+            event,
+            AdminEvent {
+                id: "00000000-0000-0000-0000-0000000000e1".to_owned(),
+                level: LogLevel::Error,
+                category: EventCategory::System,
+                message: "m".to_owned(),
+                library_id: Some("00000000-0000-0000-0000-00000000000a".to_owned()),
+                library_name: Some("Films".to_owned()),
+                timestamp_unix: 1_767_225_600,
+            }
+        );
+    }
+
+    proptest::proptest! {
+        /// A progress bar never runs past either end of its track, whatever
+        /// position the server holds -- negative after a seek glitch, or past
+        /// a probed duration that came out short. Finite only: both numbers
+        /// arrive as JSON, which has no infinity and no NaN to send.
+        #[test]
+        fn a_progress_fraction_stays_within_the_bar(
+            position in proptest::num::f64::NORMAL
+                | proptest::num::f64::SUBNORMAL
+                | proptest::num::f64::ZERO,
+            duration in proptest::option::of(
+                proptest::num::f64::NORMAL
+                    | proptest::num::f64::SUBNORMAL
+                    | proptest::num::f64::ZERO
+            ),
+        ) {
+            if let Some(fraction) = progress_fraction(position, duration) {
+                proptest::prop_assert!((0.0..=1.0).contains(&fraction), "{fraction}");
+            } else {
+                proptest::prop_assert!(!duration.is_some_and(|known| known > 0.0));
+            }
+        }
+    }
+
     #[test]
     fn a_health_report_narrows_its_uptime() {
         let json = r#"{"status":"healthy","version":"0.1.0","uptime_secs":1234,

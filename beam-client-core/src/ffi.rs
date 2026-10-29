@@ -505,15 +505,7 @@ impl BeamClient {
     #[uniffi::constructor]
     #[must_use]
     pub fn new(storage: Arc<dyn KeyValueStore>) -> Arc<Self> {
-        Arc::new(Self {
-            storage,
-            clock: Arc::new(SystemClock),
-            servers: RwLock::new(HashMap::new()),
-            active: RwLock::new(None),
-            device_profile: RwLock::new(None),
-            client_kind: RwLock::new(TelemetryClientKind::default()),
-            abandoned_sessions: RwLock::new(HashSet::new()),
-        })
+        Self::over(storage, Arc::new(SystemClock))
     }
 
     /// Load the server registry and any stored sessions.
@@ -2124,6 +2116,23 @@ fn parse_day(field: &str, value: &str) -> Result<crate::api::Date, BeamError> {
 }
 
 impl BeamClient {
+    /// A core over the platform's storage, reading time from `clock`.
+    ///
+    /// [`Self::new`] is this over the system clock; a test passes a
+    /// `TestClock`, so the throttle interval and the queue's back-off are
+    /// asserted to the second rather than raced against the wall clock.
+    fn over(storage: Arc<dyn KeyValueStore>, clock: Arc<dyn Clock>) -> Arc<Self> {
+        Arc::new(Self {
+            storage,
+            clock,
+            servers: RwLock::new(HashMap::new()),
+            active: RwLock::new(None),
+            device_profile: RwLock::new(None),
+            client_kind: RwLock::new(TelemetryClientKind::default()),
+            abandoned_sessions: RwLock::new(HashSet::new()),
+        })
+    }
+
     /// Build a server's context from scratch and put it in the registry.
     ///
     /// `state` is the session state the server starts in: what a cold start
@@ -2235,6 +2244,14 @@ impl BeamClient {
             )?;
             Ok(())
         })?
+    }
+
+    /// The trust decision one server's TLS verifier reads and records into.
+    /// Tests only: a canned handshake runs the real verifier over it, so a
+    /// rejection reaches the façade the way a device's would.
+    #[cfg(test)]
+    fn trust_for(&self, server_id: &str) -> Result<Arc<crate::tls::TrustDecision>, BeamError> {
+        self.with_context(server_id, |context| Arc::clone(&context.trust))
     }
 
     /// Used only by [`Self::use_transport`]: nothing in production mutates a
@@ -3147,15 +3164,51 @@ mod tests {
 
     #[tokio::test]
     async fn removing_a_server_forgets_it_and_its_secret() {
-        let (client, id) = client_with_server().await;
+        // Signed in and with a queued resume point, so every key the server
+        // owns exists before the removal -- the removal is what clears them.
+        let storage = Arc::new(InMemoryKeyValueStore::new());
+        let (client, id, _) = signed_in_client_over(Arc::clone(&storage)).await;
+        client
+            .use_transport(&id, Arc::new(CannedBackend::unreachable()))
+            .expect("the server is registered");
+        client
+            .report_progress(FILE_A.to_owned(), 30.0, None, true)
+            .await
+            .expect("queued");
+        for key in [
+            format!("servers/{id}"),
+            format!("progress_queue/{id}"),
+            ACTIVE_SERVER_KEY.to_owned(),
+        ] {
+            assert!(storage.has_plain(&key), "{key} exists before the removal");
+        }
+        assert!(storage.has_secret(&session_key(&id)));
+        assert!(storage.has_secret(&identity_key(&id)));
 
         client.remove_server(id.clone()).await.expect("removed");
 
         assert!(client.list_servers().expect("listable").is_empty());
         assert!(matches!(
-            client.session_state(id),
+            client.session_state(id.clone()),
             Err(BeamError::UnknownServer { .. })
         ));
+        for key in [
+            format!("servers/{id}"),
+            format!("progress_queue/{id}"),
+            ACTIVE_SERVER_KEY.to_owned(),
+        ] {
+            assert!(!storage.has_plain(&key), "{key} outlived its server");
+        }
+        assert!(!storage.has_secret(&session_key(&id)), "the cookie leaked");
+        assert!(!storage.has_secret(&identity_key(&id)));
+        assert_eq!(
+            storage
+                .get(SERVER_INDEX_KEY.to_owned())
+                .await
+                .expect("readable"),
+            Some("[]".to_owned()),
+            "the index no longer names it"
+        );
     }
 
     #[tokio::test]
@@ -3291,15 +3344,57 @@ mod tests {
     async fn logging_out_clears_the_session_but_keeps_the_server() {
         // Signing out is not forgetting the address; the viewer will sign back
         // in to the same place.
-        let (client, id) = client_with_server().await;
+        let storage = Arc::new(InMemoryKeyValueStore::new());
+        let (client, id, _) = signed_in_client_over(Arc::clone(&storage)).await;
+        assert!(matches!(
+            client.session_state(id.clone()).expect("known"),
+            SessionState::Authenticated { .. }
+        ));
 
         client.logout(id.clone()).await.expect("logged out");
 
         assert!(matches!(
-            client.session_state(id).expect("still known"),
+            client.session_state(id.clone()).expect("still known"),
             SessionState::LoggedOut
         ));
+        assert!(!storage.has_secret(&session_key(&id)));
         assert_eq!(client.list_servers().expect("listable").len(), 1);
+        assert!(storage.has_plain(&format!("servers/{id}")));
+    }
+
+    /// Signing out with no signal still signs out on this device: the revoke
+    /// is best-effort, and a sign-out button that failed offline would leave
+    /// a lost phone signed in.
+    #[tokio::test]
+    async fn logout_with_an_unreachable_server_still_signs_out_locally() {
+        let storage = Arc::new(InMemoryKeyValueStore::new());
+        let (client, id, _) = signed_in_client_over(Arc::clone(&storage)).await;
+        let backend = Arc::new(CannedBackend::unreachable());
+        client
+            .use_transport(
+                &id,
+                Arc::clone(&backend) as Arc<dyn crate::api::HttpBackend>,
+            )
+            .expect("the server is registered");
+
+        client
+            .logout(id.clone())
+            .await
+            .expect("an unreachable revoke is not an error");
+
+        assert_eq!(backend.recorded().len(), 1, "the revoke was attempted");
+        assert_eq!(backend.recorded()[0].url.path(), "/v1/logout");
+        assert!(matches!(
+            client.session_state(id.clone()).expect("known"),
+            SessionState::LoggedOut
+        ));
+        assert!(!storage.has_secret(&session_key(&id)));
+        assert!(!storage.has_secret(&identity_key(&id)));
+        assert_eq!(
+            client.server_http_config(),
+            Err(BeamError::Unauthenticated),
+            "the player no longer gets the cookie either"
+        );
     }
 
     /// The title the transport tests ask about; what it names never matters.
@@ -5746,5 +5841,1113 @@ mod tests {
             Err(BeamError::BadRequest { .. })
         ));
         assert_eq!(backend.recorded().len(), sent_before);
+    }
+
+    // -- characterization: several servers -------------------------------
+
+    const JSON: &str = "application/json";
+    const PROBLEM: &str = "application/problem+json";
+
+    /// Two files the progress tests report on; what they name never matters.
+    const FILE_A: &str = "a0000000-0000-4000-8000-00000000000a";
+    const FILE_B: &str = "b0000000-0000-4000-8000-00000000000b";
+
+    /// What `PUT /v1/files/{id}/progress` answers: the state the server now
+    /// holds, which is what `ProgressOutcome::Sent` reports back.
+    const PROGRESS_ACK: &str = r#"{"played":false,"position_secs":45.0,"play_count":0}"#;
+
+    const NO_PAGES: &str = r#""page_info":{"has_next_page":false,"has_previous_page":false}"#;
+
+    /// Register `base_url` on `client` and sign in to it with `cookie`,
+    /// through the production path, against a canned `/v1/me`.
+    async fn sign_in_to(client: &BeamClient, base_url: &str, cookie: &str) -> String {
+        let id = client
+            .add_server(base_url.to_owned(), None)
+            .await
+            .expect("adding a server is offline")
+            .id;
+        client
+            .use_transport(&id, Arc::new(CannedBackend::answering(200, JSON, ME)))
+            .expect("the server is registered");
+        client
+            .complete_login(id.clone(), cookie.to_owned())
+            .await
+            .expect("the canned /v1/me confirms the cookie");
+        id
+    }
+
+    /// Point `server_id` at a backend giving these answers in turn, and hand
+    /// it back so the test can read what reached it.
+    fn answer_with(
+        client: &BeamClient,
+        server_id: &str,
+        answers: Vec<crate::transport::CannedAnswer>,
+    ) -> Arc<CannedBackend> {
+        let backend = Arc::new(CannedBackend::saying(answers));
+        client
+            .use_transport(
+                server_id,
+                Arc::clone(&backend) as Arc<dyn crate::api::HttpBackend>,
+            )
+            .expect("the server is registered");
+        backend
+    }
+
+    fn genres_answering(name: &'static str) -> crate::transport::CannedAnswer {
+        let body: &'static str =
+            Box::leak(format!(r#"{{"items":["{name}"],{NO_PAGES}}}"#).into_boxed_str());
+        crate::transport::CannedAnswer::respond(200, JSON, body)
+    }
+
+    /// Each server has its own transport and its own cookie, and selecting
+    /// one is what decides which a call uses. Every earlier test registered
+    /// one server, so a call reaching the wrong server -- or carrying the
+    /// other server's cookie, which is a credential leak across origins --
+    /// could not have failed any of them.
+    #[tokio::test]
+    async fn switching_servers_routes_calls_and_cookies_to_the_selected_one() {
+        let client = client();
+        let home = sign_in_to(&client, "https://home.beam.test", "home-cookie").await;
+        let cabin = sign_in_to(&client, "https://cabin.beam.test", "cabin-cookie").await;
+        let home_backend = answer_with(&client, &home, vec![genres_answering("Home")]);
+        let cabin_backend = answer_with(&client, &cabin, vec![genres_answering("Cabin")]);
+
+        // The server added last is the active one.
+        assert_eq!(
+            client.genres().await.expect("answered"),
+            vec!["Cabin".to_owned()]
+        );
+        client.select_server(home.clone()).await.expect("known");
+        assert_eq!(
+            client.genres().await.expect("answered"),
+            vec!["Home".to_owned()]
+        );
+
+        let to_home = home_backend.recorded();
+        let to_cabin = cabin_backend.recorded();
+        assert_eq!((to_home.len(), to_cabin.len()), (1, 1));
+        assert_eq!(to_home[0].url.host_str(), Some("home.beam.test"));
+        assert_eq!(cookies_of(&to_home[0]), vec!["beam_session=home-cookie"]);
+        assert_eq!(to_cabin[0].url.host_str(), Some("cabin.beam.test"));
+        assert_eq!(cookies_of(&to_cabin[0]), vec!["beam_session=cabin-cookie"]);
+
+        let player = client.server_http_config().expect("signed in");
+        assert_eq!(player.base_url, "https://home.beam.test");
+        assert_eq!(
+            player.headers.get("Cookie").map(String::as_str),
+            Some("beam_session=home-cookie"),
+            "the player is handed the selected server's cookie"
+        );
+        let active: Vec<String> = client
+            .list_servers()
+            .expect("listable")
+            .into_iter()
+            .filter(|server| server.is_active)
+            .map(|server| server.id)
+            .collect();
+        assert_eq!(active, vec![home]);
+    }
+
+    #[tokio::test]
+    async fn removing_an_inactive_server_keeps_the_active_one() {
+        let storage = Arc::new(InMemoryKeyValueStore::new());
+        let client = BeamClient::new(Arc::clone(&storage) as Arc<dyn KeyValueStore>);
+        let home = sign_in_to(&client, "https://home.beam.test", "home-cookie").await;
+        let cabin = sign_in_to(&client, "https://cabin.beam.test", "cabin-cookie").await;
+
+        client.remove_server(home.clone()).await.expect("removed");
+
+        let servers = client.list_servers().expect("listable");
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].id, cabin);
+        assert!(servers[0].is_active, "the active server stays active");
+        assert!(matches!(
+            servers[0].state,
+            SessionState::Authenticated { .. }
+        ));
+        assert!(storage.has_secret(&session_key(&cabin)));
+        assert!(!storage.has_secret(&session_key(&home)));
+
+        // And it is still the active, signed-in server after a cold start.
+        let restarted = BeamClient::new(storage as Arc<dyn KeyValueStore>);
+        let restored = restarted.restore().await.expect("restored");
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].id, cabin);
+        assert!(restored[0].is_active);
+        assert!(matches!(
+            restored[0].state,
+            SessionState::Authenticated { .. }
+        ));
+    }
+
+    // -- characterization: restore over a damaged store ------------------
+
+    #[tokio::test]
+    async fn a_store_that_cannot_be_read_fails_the_restore() {
+        let storage = Arc::new(InMemoryKeyValueStore::new());
+        BeamClient::new(Arc::clone(&storage) as Arc<dyn KeyValueStore>)
+            .add_server("https://beam.test".to_owned(), None)
+            .await
+            .expect("added");
+        storage.set_failure(FailureMode::FailReads);
+
+        let restarted = BeamClient::new(storage as Arc<dyn KeyValueStore>);
+
+        assert!(matches!(
+            restarted.restore().await,
+            Err(BeamError::Storage { .. })
+        ));
+        assert!(restarted.list_servers().expect("listable").is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_corrupt_index_restores_no_servers_rather_than_failing() {
+        let storage = Arc::new(InMemoryKeyValueStore::new());
+        BeamClient::new(Arc::clone(&storage) as Arc<dyn KeyValueStore>)
+            .add_server("https://beam.test".to_owned(), None)
+            .await
+            .expect("added");
+        storage
+            .put(SERVER_INDEX_KEY.to_owned(), "{not json".to_owned())
+            .await
+            .expect("writable");
+
+        let restarted = BeamClient::new(storage as Arc<dyn KeyValueStore>);
+
+        assert_eq!(restarted.restore().await.expect("not an error"), Vec::new());
+    }
+
+    #[tokio::test]
+    async fn a_corrupt_record_is_skipped_and_the_other_servers_restore() {
+        let storage = Arc::new(InMemoryKeyValueStore::new());
+        let first = BeamClient::new(Arc::clone(&storage) as Arc<dyn KeyValueStore>);
+        let home = first
+            .add_server("https://home.beam.test".to_owned(), None)
+            .await
+            .expect("added")
+            .id;
+        let cabin = first
+            .add_server("https://cabin.beam.test".to_owned(), None)
+            .await
+            .expect("added")
+            .id;
+        storage
+            .put(format!("servers/{home}"), "{not json".to_owned())
+            .await
+            .expect("writable");
+
+        let restarted = BeamClient::new(storage as Arc<dyn KeyValueStore>);
+        let restored = restarted.restore().await.expect("not an error");
+
+        let ids: Vec<&str> = restored.iter().map(|server| server.id.as_str()).collect();
+        assert_eq!(ids, vec![cabin.as_str()]);
+        assert!(restored[0].is_active);
+    }
+
+    // -- characterization: progress through the façade -------------------
+
+    /// A signed-in client over a clock the test moves and a storage it reads.
+    async fn clocked_client() -> (
+        Arc<BeamClient>,
+        String,
+        Arc<InMemoryKeyValueStore>,
+        Arc<crate::clock::TestClock>,
+    ) {
+        let storage = Arc::new(InMemoryKeyValueStore::new());
+        let clock = Arc::new(crate::clock::TestClock::new(1_000_000));
+        let client = BeamClient::over(
+            Arc::clone(&storage) as Arc<dyn KeyValueStore>,
+            Arc::clone(&clock) as Arc<dyn Clock>,
+        );
+        let id = sign_in_to(&client, "https://beam.test", "opaque-value").await;
+        (client, id, storage, clock)
+    }
+
+    /// The progress queue as persisted, oldest first.
+    async fn queued(storage: &InMemoryKeyValueStore, server_id: &str) -> Vec<QueuedProgress> {
+        storage
+            .get(format!("progress_queue/{server_id}"))
+            .await
+            .expect("readable")
+            .map(|raw| serde_json::from_str(&raw).expect("the queue decodes"))
+            .unwrap_or_default()
+    }
+
+    /// Queue one sample for each of [`FILE_A`] then [`FILE_B`], a second
+    /// apart, against a server that cannot be reached.
+    async fn queue_two_samples(
+        client: &BeamClient,
+        server_id: &str,
+        clock: &crate::clock::TestClock,
+    ) {
+        answer_with(
+            client,
+            server_id,
+            vec![crate::transport::CannedAnswer::Unreachable],
+        );
+        assert_eq!(
+            client
+                .report_progress(FILE_A.to_owned(), 30.0, Some(7200.0), true)
+                .await
+                .expect("an outcome"),
+            ProgressOutcome::Queued { pending: 1 }
+        );
+        clock.advance_secs(1);
+        assert_eq!(
+            client
+                .report_progress(FILE_B.to_owned(), 60.0, None, true)
+                .await
+                .expect("an outcome"),
+            ProgressOutcome::Queued { pending: 2 }
+        );
+    }
+
+    fn json_body(request: &crate::transport::RecordedRequest) -> serde_json::Value {
+        serde_json::from_slice(&request.body).expect("a JSON body")
+    }
+
+    #[tokio::test]
+    async fn a_flush_sends_every_due_sample_and_empties_the_queue() {
+        let (client, id, storage, clock) = clocked_client().await;
+        queue_two_samples(&client, &id, &clock).await;
+        let backend = answer_with(
+            &client,
+            &id,
+            vec![crate::transport::CannedAnswer::respond(
+                200,
+                JSON,
+                PROGRESS_ACK,
+            )],
+        );
+
+        assert_eq!(client.flush_progress().await.expect("flushed"), 2);
+
+        assert_eq!(client.pending_progress_count().await.expect("countable"), 0);
+        assert!(!storage.has_plain(&format!("progress_queue/{id}")));
+        let sent = backend.recorded();
+        let paths: Vec<&str> = sent.iter().map(|request| request.url.path()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                format!("/v1/files/{FILE_A}/progress"),
+                format!("/v1/files/{FILE_B}/progress"),
+            ],
+            "oldest first"
+        );
+        assert!(
+            sent.iter()
+                .all(|request| request.method == reqwest::Method::PUT)
+        );
+        assert_eq!(json_body(&sent[0])["position_secs"], 30.0);
+        assert_eq!(json_body(&sent[0])["duration_secs"], 7200.0);
+        assert_eq!(json_body(&sent[1])["position_secs"], 60.0);
+    }
+
+    #[tokio::test]
+    async fn a_flush_stops_at_the_first_failure_and_backs_that_sample_off() {
+        let (client, id, storage, clock) = clocked_client().await;
+        queue_two_samples(&client, &id, &clock).await;
+        let backend = answer_with(
+            &client,
+            &id,
+            vec![
+                crate::transport::CannedAnswer::respond(503, PROBLEM, r#"{"type":"about:blank"}"#),
+                crate::transport::CannedAnswer::respond(200, JSON, PROGRESS_ACK),
+            ],
+        );
+        let now = clock.now_unix();
+
+        assert_eq!(client.flush_progress().await.expect("not an error"), 0);
+
+        assert_eq!(
+            backend.recorded().len(),
+            1,
+            "the backlog is not sent at a server that just failed"
+        );
+        let queue = queued(&storage, &id).await;
+        assert_eq!(queue.len(), 2, "nothing is lost");
+        assert_eq!(queue[0].file_id, FILE_A);
+        assert_eq!(queue[0].attempts, 1);
+        assert_eq!(
+            queue[0].not_before_unix,
+            now + 2,
+            "no Retry-After: the first exponential step"
+        );
+        assert_eq!(queue[1].file_id, FILE_B);
+        assert_eq!(queue[1].attempts, 0, "never attempted");
+    }
+
+    #[tokio::test]
+    async fn a_429_retry_after_reaches_the_queue() {
+        let (client, id, storage, clock) = clocked_client().await;
+        queue_two_samples(&client, &id, &clock).await;
+        let backend = answer_with(
+            &client,
+            &id,
+            vec![
+                crate::transport::CannedAnswer::respond(429, PROBLEM, r#"{"type":"about:blank"}"#)
+                    .with_header("retry-after", "90"),
+                crate::transport::CannedAnswer::respond(200, JSON, PROGRESS_ACK),
+            ],
+        );
+        let now = clock.now_unix();
+
+        assert_eq!(client.flush_progress().await.expect("not an error"), 0);
+        let queue = queued(&storage, &id).await;
+        assert_eq!(
+            queue[0].not_before_unix,
+            now + 90,
+            "the server's interval, not the blind back-off"
+        );
+
+        // The other sample was never attempted, so it is still due; the
+        // rate-limited one is not, until the server's interval has passed.
+        assert_eq!(client.flush_progress().await.expect("flushed"), 1);
+        assert_eq!(
+            backend.recorded()[1].url.path(),
+            format!("/v1/files/{FILE_B}/progress")
+        );
+        clock.advance_secs(89);
+        assert_eq!(client.flush_progress().await.expect("flushed"), 0);
+        assert_eq!(backend.recorded().len(), 2, "not before its interval");
+        clock.advance_secs(1);
+        assert_eq!(client.flush_progress().await.expect("flushed"), 1);
+        assert_eq!(client.pending_progress_count().await.expect("countable"), 0);
+    }
+
+    /// A queued id that is not a UUID was written by an older build and can
+    /// never be accepted: it is failed without a request, and stops the flush
+    /// like any other failure. Backed off, it no longer blocks the next one.
+    #[tokio::test]
+    async fn a_queued_sample_with_a_malformed_id_fails_without_a_request() {
+        let (client, id, storage, clock) = clocked_client().await;
+        let now = clock.now_unix();
+        let entries = vec![
+            QueuedProgress {
+                file_id: "not-a-uuid".to_owned(),
+                position_secs: 10.0,
+                duration_secs: None,
+                captured_at_unix: now - 2,
+                attempts: 0,
+                not_before_unix: now - 2,
+            },
+            QueuedProgress {
+                file_id: FILE_A.to_owned(),
+                position_secs: 20.0,
+                duration_secs: None,
+                captured_at_unix: now - 1,
+                attempts: 0,
+                not_before_unix: now - 1,
+            },
+        ];
+        storage
+            .put(
+                format!("progress_queue/{id}"),
+                serde_json::to_string(&entries).expect("encodes"),
+            )
+            .await
+            .expect("writable");
+        let backend = answer_with(
+            &client,
+            &id,
+            vec![crate::transport::CannedAnswer::respond(
+                200,
+                JSON,
+                PROGRESS_ACK,
+            )],
+        );
+
+        assert_eq!(client.flush_progress().await.expect("not an error"), 0);
+        assert!(backend.recorded().is_empty(), "nothing reached the wire");
+        let queue = queued(&storage, &id).await;
+        assert_eq!(queue[0].file_id, "not-a-uuid");
+        assert_eq!(queue[0].attempts, 1);
+        assert_eq!(queue[1].attempts, 0);
+
+        assert_eq!(client.flush_progress().await.expect("flushed"), 1);
+        assert_eq!(
+            backend.recorded()[0].url.path(),
+            format!("/v1/files/{FILE_A}/progress")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sent_sample_retires_its_queued_entry() {
+        let (client, id, storage, _clock) = clocked_client().await;
+        answer_with(
+            &client,
+            &id,
+            vec![crate::transport::CannedAnswer::Unreachable],
+        );
+        client
+            .report_progress(FILE_A.to_owned(), 30.0, None, true)
+            .await
+            .expect("queued");
+        assert_eq!(queued(&storage, &id).await.len(), 1);
+        answer_with(
+            &client,
+            &id,
+            vec![crate::transport::CannedAnswer::respond(
+                200,
+                JSON,
+                PROGRESS_ACK,
+            )],
+        );
+
+        let outcome = client
+            .report_progress(FILE_A.to_owned(), 45.0, None, true)
+            .await
+            .expect("sent");
+
+        assert_eq!(
+            outcome,
+            ProgressOutcome::Sent {
+                position_secs: 45.0
+            }
+        );
+        assert!(
+            queued(&storage, &id).await.is_empty(),
+            "the newer position supersedes the queued one"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_held_sample_is_throttled_at_the_facade() {
+        let (client, id, _storage, clock) = clocked_client().await;
+        let backend = answer_with(
+            &client,
+            &id,
+            vec![crate::transport::CannedAnswer::respond(
+                200,
+                JSON,
+                PROGRESS_ACK,
+            )],
+        );
+        client
+            .report_progress(FILE_A.to_owned(), 10.0, None, false)
+            .await
+            .expect("sent");
+        clock.advance_secs(4);
+
+        let held = client
+            .report_progress(FILE_A.to_owned(), 14.0, Some(7200.0), false)
+            .await
+            .expect("an outcome");
+
+        assert_eq!(
+            held,
+            ProgressOutcome::Throttled {
+                next_eligible_in_secs: 11
+            }
+        );
+        assert_eq!(backend.recorded().len(), 1, "a held sample sends nothing");
+
+        // A forced report goes out at once, at its own position, with the
+        // duration only the held sample knew.
+        client
+            .report_progress(FILE_A.to_owned(), 15.0, None, true)
+            .await
+            .expect("sent");
+        let sent = backend.recorded();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(json_body(&sent[1])["position_secs"], 15.0);
+        assert_eq!(json_body(&sent[1])["duration_secs"], 7200.0);
+    }
+
+    // -- characterization: transport failures through the façade ---------
+
+    #[tokio::test]
+    async fn an_unreachable_server_queues_progress_and_reports_network() {
+        let (client, id, storage, _clock) = clocked_client().await;
+        answer_with(
+            &client,
+            &id,
+            vec![crate::transport::CannedAnswer::Unreachable],
+        );
+
+        assert!(matches!(
+            client.genres().await,
+            Err(BeamError::Network {
+                retryable: true,
+                ..
+            })
+        ));
+        assert_eq!(
+            client
+                .report_progress(FILE_A.to_owned(), 30.0, None, true)
+                .await
+                .expect("an outcome, not an error"),
+            ProgressOutcome::Queued { pending: 1 }
+        );
+        assert_eq!(queued(&storage, &id).await[0].position_secs, 30.0);
+        assert!(
+            matches!(
+                client.session_state(id).expect("known"),
+                SessionState::Authenticated { .. }
+            ),
+            "an outage is not a sign-out"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_malformed_success_body_is_protocol() {
+        let (client, id, _storage, _clock) = clocked_client().await;
+        answer_with(
+            &client,
+            &id,
+            vec![crate::transport::CannedAnswer::respond(
+                200,
+                JSON,
+                r#"{"items":"not a list"}"#,
+            )],
+        );
+
+        let error = client.genres().await.expect_err("does not decode");
+
+        assert!(matches!(error, BeamError::Protocol { .. }), "{error:?}");
+        assert!(error.is_permanent(), "the same body fails the same way");
+        assert!(matches!(
+            client.session_state(id).expect("known"),
+            SessionState::Authenticated { .. }
+        ));
+    }
+
+    /// A backend that performs a real TLS handshake, in memory, against a
+    /// server presenting a self-signed certificate -- through the verifier the
+    /// façade built for this server -- and reports the failed connection.
+    #[derive(Debug)]
+    struct SelfSignedServer {
+        trust: Arc<crate::tls::TrustDecision>,
+        host: &'static str,
+        /// What the transport reports once the handshake has failed.
+        refused: CannedBackend,
+    }
+
+    impl SelfSignedServer {
+        fn handshake(&self) {
+            use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
+
+            let certified =
+                rcgen::generate_simple_self_signed(vec![self.host.to_owned()]).expect("generate");
+            let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+                certified.signing_key.serialize_der(),
+            ));
+            let server_config = rustls::ServerConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            .expect("versions")
+            .with_no_client_auth()
+            .with_single_cert(vec![certified.cert.der().clone()], key)
+            .expect("a server config");
+            let client_config =
+                crate::tls::client_config(Arc::clone(&self.trust)).expect("a client config");
+
+            let mut server =
+                rustls::ServerConnection::new(Arc::new(server_config)).expect("a server");
+            let mut client = rustls::ClientConnection::new(
+                Arc::new(client_config),
+                ServerName::try_from(self.host).expect("a name"),
+            )
+            .expect("a client");
+            for _ in 0..8 {
+                let mut bytes = Vec::new();
+                client.write_tls(&mut bytes).expect("writable");
+                server.read_tls(&mut bytes.as_slice()).expect("readable");
+                server
+                    .process_new_packets()
+                    .expect("the server accepts the hello");
+                let mut bytes = Vec::new();
+                server.write_tls(&mut bytes).expect("writable");
+                client.read_tls(&mut bytes.as_slice()).expect("readable");
+                if client.process_new_packets().is_err() {
+                    return;
+                }
+            }
+            panic!("the handshake was expected to be refused");
+        }
+    }
+
+    impl crate::api::HttpBackend for SelfSignedServer {
+        fn execute(&self, request: reqwest::Request) -> crate::api::ExecuteFuture<'_> {
+            self.handshake();
+            self.refused.execute(request)
+        }
+    }
+
+    /// A certificate nobody vouches for surfaces as `UntrustedCertificate`,
+    /// carrying what the prompt shows -- not as the generic network failure
+    /// the handshake looks like from the transport. The verifier is the real
+    /// one the façade built for the server.
+    #[tokio::test]
+    async fn a_rejected_handshake_surfaces_untrusted_certificate_with_details() {
+        crate::tls::install_crypto_provider();
+        let (client, id, _storage, _clock) = clocked_client().await;
+        let trust = client.trust_for(&id).expect("registered");
+        client
+            .use_transport(
+                &id,
+                Arc::new(SelfSignedServer {
+                    trust,
+                    host: "beam.test",
+                    refused: CannedBackend::unreachable(),
+                }),
+            )
+            .expect("the server is registered");
+
+        let error = client.genres().await.expect_err("refused");
+
+        let BeamError::UntrustedCertificate { host, details } = error else {
+            panic!("expected an untrusted certificate, got {error:?}");
+        };
+        assert_eq!(host, "beam.test");
+        assert!(details.is_self_signed);
+        assert!(details.subject_alt_names.contains(&"beam.test".to_owned()));
+        assert_eq!(
+            details.sha256_fingerprint.split(':').count(),
+            32,
+            "a whole SHA-256 digest, for the user to compare"
+        );
+        assert!(
+            client
+                .trust_for(&id)
+                .expect("registered")
+                .take_rejection()
+                .is_none(),
+            "the rejection is consumed by the error that reported it"
+        );
+    }
+
+    // -- characterization: choosing a source ------------------------------
+
+    /// Two files nothing on a phone decodes.
+    const UNPLAYABLE_SOURCES: &str = r#"{"items":[
+        {"file_id":"a1a1a1a1-0000-4000-8000-000000000001","is_primary":true,
+         "edition":null,"episode_span":null,"parts":[],
+         "size_bytes":4000,"mime_type":"video/mp4","container_format":"mp4",
+         "duration_secs":60.0,
+         "video_tracks":[{"index":0,"codec":"vp6","width":640,"height":480,
+                          "frame_rate":null,"bit_rate":null,"hdr_format":null}],
+         "audio_tracks":[],"subtitle_tracks":[],
+         "stream_url":"/v1/files/a1a1a1a1-0000-4000-8000-000000000001/stream",
+         "download_url":"/v1/files/a1a1a1a1-0000-4000-8000-000000000001/download"},
+        {"file_id":"b2b2b2b2-0000-4000-8000-000000000002","is_primary":false,
+         "edition":null,"episode_span":null,"parts":[],
+         "size_bytes":2000,"mime_type":"video/mp4","container_format":"mp4",
+         "duration_secs":60.0,
+         "video_tracks":[{"index":0,"codec":"theora","width":640,"height":480,
+                          "frame_rate":null,"bit_rate":null,"hdr_format":null}],
+         "audio_tracks":[],"subtitle_tracks":[],
+         "stream_url":"/v1/files/b2b2b2b2-0000-4000-8000-000000000002/stream",
+         "download_url":"/v1/files/b2b2b2b2-0000-4000-8000-000000000002/download"}
+    ],
+    "page_info":{"has_next_page":false,"has_previous_page":false,
+                 "start_cursor":null,"end_cursor":null}}"#;
+
+    #[tokio::test]
+    async fn a_title_nothing_here_can_play_is_not_found_with_the_first_reason() {
+        let client = client_answering_sources(UNPLAYABLE_SOURCES).await;
+        client.set_device_profile(
+            crate::capability::builders::DeviceProfileBuilder::phone_h264_hevc().build(),
+        );
+
+        let refused = client
+            .select_playback_source(MEDIA_ID.to_owned(), QualityPolicy::Highest)
+            .await;
+
+        assert_eq!(
+            refused,
+            Err(BeamError::NotFound {
+                detail: "No VP6 decoder on this device".to_owned(),
+                code: ABOUT_BLANK.to_owned(),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn the_highest_playable_source_is_selected() {
+        let client = client_answering_sources(TWO_H264_SOURCES).await;
+        client.set_device_profile(
+            crate::capability::builders::DeviceProfileBuilder::phone_h264_hevc().build(),
+        );
+
+        let selection = client
+            .select_playback_source(MEDIA_ID.to_owned(), QualityPolicy::Highest)
+            .await
+            .expect("both files play");
+
+        assert_eq!(
+            selection.source.file_id,
+            "a1a1a1a1-0000-4000-8000-000000000001"
+        );
+    }
+
+    #[tokio::test]
+    async fn selection_is_refused_before_the_profile_is_set() {
+        let client = client_answering_sources(TWO_H264_SOURCES).await;
+
+        assert!(matches!(
+            client
+                .select_playback_source(MEDIA_ID.to_owned(), QualityPolicy::Highest)
+                .await,
+            Err(BeamError::BadRequest { .. })
+        ));
+    }
+
+    // -- characterization: the remaining operations -----------------------
+
+    /// A signed-in client whose server gives `body` with `status` to the next
+    /// call, and the backend that records it.
+    async fn one_answer(status: u16, body: &'static str) -> (Arc<BeamClient>, Arc<CannedBackend>) {
+        let (client, id, _storage, _clock) = clocked_client().await;
+        let backend = answer_with(
+            &client,
+            &id,
+            vec![crate::transport::CannedAnswer::respond(status, JSON, body)],
+        );
+        (client, backend)
+    }
+
+    /// The one request a [`one_answer`] backend received.
+    fn the_request(backend: &CannedBackend) -> crate::transport::RecordedRequest {
+        let recorded = backend.recorded();
+        assert_eq!(recorded.len(), 1, "exactly one request: {recorded:?}");
+        recorded[0].clone()
+    }
+
+    fn query_of(request: &crate::transport::RecordedRequest) -> HashMap<String, String> {
+        request.url.query_pairs().into_owned().collect()
+    }
+
+    const LIBRARY: &str = r#"{"id":"00000000-0000-0000-0000-00000000000a","name":"Films",
+        "description":"Feature films","file_count":42,"last_scan_file_count":40,
+        "last_scan_started_at":"2026-01-01T00:00:00Z",
+        "last_scan_finished_at":"2026-01-01T00:10:00Z"}"#;
+
+    #[tokio::test]
+    async fn genres_are_the_servers_list() {
+        let body: &'static str =
+            Box::leak(format!(r#"{{"items":["Crime","Drama"],{NO_PAGES}}}"#).into_boxed_str());
+        let (client, backend) = one_answer(200, body).await;
+
+        let genres = client.genres().await.expect("answered");
+
+        assert_eq!(genres, vec!["Crime".to_owned(), "Drama".to_owned()]);
+        let request = the_request(&backend);
+        assert_eq!(request.method, reqwest::Method::GET);
+        assert_eq!(request.url.path(), "/v1/genres");
+    }
+
+    #[tokio::test]
+    async fn libraries_are_every_library_on_the_server() {
+        let body: &'static str =
+            Box::leak(format!(r#"{{"items":[{LIBRARY}],{NO_PAGES}}}"#).into_boxed_str());
+        let (client, backend) = one_answer(200, body).await;
+
+        let libraries = client.libraries().await.expect("answered");
+
+        assert_eq!(libraries.len(), 1);
+        assert_eq!(libraries[0].name, "Films");
+        assert_eq!(libraries[0].size, 42);
+        assert_eq!(libraries[0].last_scan_file_count, Some(40));
+        assert_eq!(libraries[0].last_scan_finished_at_unix, Some(1_767_226_200));
+        let request = the_request(&backend);
+        assert_eq!(request.method, reqwest::Method::GET);
+        assert_eq!(request.url.path(), "/v1/libraries");
+    }
+
+    #[tokio::test]
+    async fn one_library_is_asked_for_by_its_id() {
+        let (client, backend) = one_answer(200, LIBRARY).await;
+
+        let library = client
+            .library(LIBRARY_ID.to_owned())
+            .await
+            .expect("answered");
+
+        assert_eq!(library.id, LIBRARY_ID);
+        assert_eq!(library.description.as_deref(), Some("Feature films"));
+        assert_eq!(
+            the_request(&backend).url.path(),
+            format!("/v1/libraries/{LIBRARY_ID}")
+        );
+        assert!(matches!(
+            client.library("films".to_owned()).await,
+            Err(BeamError::BadRequest { .. })
+        ));
+        assert_eq!(backend.recorded().len(), 1, "a malformed id is never sent");
+    }
+
+    #[tokio::test]
+    async fn health_is_the_servers_own_report() {
+        let (client, backend) = one_answer(
+            200,
+            r#"{"status":"degraded","version":"1.2.3","uptime_secs":77,
+                "checked_at":"2026-01-01T00:00:00Z",
+                "checks":{"database":{"status":"error","detail":"timed out"}}}"#,
+        )
+        .await;
+
+        let health = client.health().await.expect("answered");
+
+        assert_eq!(
+            health,
+            crate::catalog::ServerHealth {
+                status: "degraded".to_owned(),
+                version: "1.2.3".to_owned(),
+                uptime_secs: 77,
+                database: "error: timed out".to_owned(),
+            }
+        );
+        assert_eq!(the_request(&backend).url.path(), "/v1/health");
+    }
+
+    #[tokio::test]
+    async fn continue_watching_asks_for_the_limit_and_resolves_its_rows() {
+        let (client, backend) = one_answer(
+            200,
+            r#"{"items":[{"reason":"resume","media_id":"00000000-0000-0000-0000-000000000007",
+                "media_type":"movie","file_id":"f1f1f1f1-0000-4000-8000-000000000001",
+                "position_secs":600.0,"duration_secs":6000.0,
+                "last_played_at":"2026-01-01T00:00:00Z","title":"Le Samourai",
+                "poster_url":"/artwork/m/poster.jpg"}],
+                "page_info":{"has_next_page":false,"has_previous_page":false}}"#,
+        )
+        .await;
+
+        let rows = client.continue_watching(Some(5)).await.expect("answered");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].file_id, "f1f1f1f1-0000-4000-8000-000000000001");
+        assert_eq!(rows[0].progress_fraction, Some(0.1));
+        assert_eq!(rows[0].updated_at_unix, 1_767_225_600);
+        let poster = rows[0]
+            .media
+            .as_ref()
+            .and_then(|media| media.poster_url.clone());
+        assert_eq!(
+            poster.as_deref(),
+            Some("https://beam.test/artwork/m/poster.jpg")
+        );
+        let request = the_request(&backend);
+        assert_eq!(request.url.path(), "/v1/continue-watching");
+        assert_eq!(
+            query_of(&request).get("first").map(String::as_str),
+            Some("5")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_history_page_carries_its_cursor_total_and_rows() {
+        let (client, backend) = one_answer(
+            200,
+            r#"{"items":[{"media_id":"00000000-0000-0000-0000-000000000007",
+                "media_type":"movie","file_id":"f1f1f1f1-0000-4000-8000-000000000001",
+                "position_secs":0.0,"played":true,"play_count":2,
+                "last_played_at":"2026-01-01T00:00:00Z","title":"Le Samourai"}],
+                "page_info":{"has_next_page":true,"has_previous_page":true,
+                             "start_cursor":"c2","end_cursor":"c3"},
+                "total":12}"#,
+        )
+        .await;
+
+        let page = client
+            .history(Some(10), Some("c1".to_owned()))
+            .await
+            .expect("answered");
+
+        assert_eq!(page.total, 12);
+        assert_eq!(page.end_cursor.as_deref(), Some("c3"));
+        assert!(page.has_next_page);
+        assert_eq!(page.items.len(), 1);
+        assert!(page.items[0].completed);
+        let request = the_request(&backend);
+        assert_eq!(request.url.path(), "/v1/history");
+        let query = query_of(&request);
+        assert_eq!(query.get("first").map(String::as_str), Some("10"));
+        assert_eq!(query.get("after").map(String::as_str), Some("c1"));
+    }
+
+    #[tokio::test]
+    async fn revoking_a_session_deletes_it_by_id() {
+        const SESSION_ID: &str = "5e5e5e5e-0000-4000-8000-000000000001";
+        let (client, backend) = one_answer(204, "").await;
+
+        client
+            .revoke_session(SESSION_ID.to_owned())
+            .await
+            .expect("revoked");
+
+        let request = the_request(&backend);
+        assert_eq!(request.method, reqwest::Method::DELETE);
+        assert_eq!(request.url.path(), format!("/v1/sessions/{SESSION_ID}"));
+        assert!(matches!(
+            client.revoke_session("this one".to_owned()).await,
+            Err(BeamError::BadRequest { .. })
+        ));
+        assert_eq!(backend.recorded().len(), 1, "a malformed id is never sent");
+    }
+
+    const ADMIN_STATUS: &str = r#"{"uptime_secs":3600,"version":"1.2.3",
+        "counts":{"users":3,"libraries":2,"files":120},
+        "enrichment":{"pending":4,"enriched":100,"unmatched":5,"failed":1},
+        "enrichment_providers":[{"provider":"tmdb","state":"configured"}],
+        "metadata_providers":[{"provider":"tvdb","state":"not_configured","detail":"set a key"}],
+        "recent_scans":[{"level":"warning","message":"skipped 2 files",
+                         "created_at":"2026-01-01T00:00:00Z"}],
+        "watcher":{"enabled":true,"watch_limit_reached":false,"libraries":[]}}"#;
+
+    #[tokio::test]
+    async fn the_admin_status_is_read_and_narrowed() {
+        let (client, backend) = one_answer(200, ADMIN_STATUS).await;
+
+        let status = client.admin_status().await.expect("answered");
+
+        assert_eq!(status.version, "1.2.3");
+        assert_eq!(status.uptime_secs, 3600);
+        assert_eq!(
+            (
+                status.counts.users,
+                status.counts.libraries,
+                status.counts.files
+            ),
+            (3, 2, 120)
+        );
+        assert_eq!(status.recent_scans.len(), 1);
+        assert_eq!(the_request(&backend).url.path(), "/v1/admin/status");
+    }
+
+    #[tokio::test]
+    async fn a_page_of_admin_users_resolves_avatars_against_the_server() {
+        let (client, backend) = one_answer(
+            200,
+            r#"{"items":[{"id":"00000000-0000-0000-0000-0000000000b1","display_name":"Bea",
+                "email":"bea@example.test","avatar_url":"/avatars/b1.png","is_admin":false,
+                "disabled":true,"created_at":"2026-01-01T00:00:00Z"}],
+                "page_info":{"has_next_page":true,"has_previous_page":false,
+                             "start_cursor":"u1","end_cursor":"u1"},
+                "total":7}"#,
+        )
+        .await;
+
+        let page = client.admin_users(Some(1), None).await.expect("answered");
+
+        assert_eq!((page.total, page.has_next_page), (7, true));
+        assert_eq!(page.end_cursor.as_deref(), Some("u1"));
+        assert_eq!(
+            page.items[0].avatar_url.as_deref(),
+            Some("https://beam.test/avatars/b1.png")
+        );
+        assert!(page.items[0].disabled);
+        let request = the_request(&backend);
+        assert_eq!(request.url.path(), "/v1/admin/users");
+        let query = query_of(&request);
+        assert_eq!(query.get("first").map(String::as_str), Some("1"));
+        assert!(!query.contains_key("after"));
+    }
+
+    #[tokio::test]
+    async fn disabling_a_user_patches_only_that_flag() {
+        const USER_ID: &str = "00000000-0000-0000-0000-0000000000b1";
+        let (client, backend) = one_answer(204, "").await;
+
+        client
+            .set_user_disabled(USER_ID.to_owned(), true)
+            .await
+            .expect("disabled");
+
+        let request = the_request(&backend);
+        assert_eq!(request.method, reqwest::Method::PATCH);
+        assert_eq!(request.url.path(), format!("/v1/admin/users/{USER_ID}"));
+        assert_eq!(json_body(&request), serde_json::json!({"disabled": true}));
+    }
+
+    #[tokio::test]
+    async fn admin_events_ask_for_the_limit_and_fold_their_categories() {
+        let (client, backend) = one_answer(
+            200,
+            r#"{"items":[
+                {"id":"00000000-0000-0000-0000-0000000000e1","occurred_at":"2026-01-01T00:00:00Z",
+                 "level":"info","category":"scan_progress","message":"40 of 42",
+                 "library_id":"00000000-0000-0000-0000-00000000000a","library_name":"Films"},
+                {"id":"00000000-0000-0000-0000-0000000000e2","occurred_at":"2026-01-01T00:00:01Z",
+                 "level":"error","category":"enrichment","message":"no match"}],
+                "page_info":{"has_next_page":false,"has_previous_page":false}}"#,
+        )
+        .await;
+
+        let events = client.admin_events(Some(3)).await.expect("answered");
+
+        use crate::catalog::EventCategory;
+        let categories: Vec<EventCategory> = events.iter().map(|event| event.category).collect();
+        assert_eq!(
+            categories,
+            vec![EventCategory::LibraryScan, EventCategory::System]
+        );
+        assert_eq!(events[0].library_name.as_deref(), Some("Films"));
+        let request = the_request(&backend);
+        assert_eq!(request.url.path(), "/v1/admin/events");
+        assert_eq!(
+            query_of(&request).get("first").map(String::as_str),
+            Some("3")
+        );
+    }
+
+    #[tokio::test]
+    async fn creating_a_library_posts_its_name_and_root() {
+        let (client, backend) = one_answer(200, LIBRARY).await;
+
+        let library = client
+            .create_library("Films".to_owned(), "/media/films".to_owned())
+            .await
+            .expect("created");
+
+        assert_eq!(library.name, "Films");
+        let request = the_request(&backend);
+        assert_eq!(request.method, reqwest::Method::POST);
+        assert_eq!(request.url.path(), "/v1/admin/libraries");
+        assert_eq!(
+            json_body(&request),
+            serde_json::json!({"name": "Films", "root_path": "/media/films"})
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_a_library_deletes_it_by_id() {
+        let (client, backend) = one_answer(204, "").await;
+
+        client
+            .delete_library(LIBRARY_ID.to_owned())
+            .await
+            .expect("deleted");
+
+        let request = the_request(&backend);
+        assert_eq!(request.method, reqwest::Method::DELETE);
+        assert_eq!(
+            request.url.path(),
+            format!("/v1/admin/libraries/{LIBRARY_ID}")
+        );
+    }
+
+    #[tokio::test]
+    async fn refreshing_metadata_posts_to_the_titles_refresh() {
+        let (client, backend) = one_answer(204, "").await;
+
+        client
+            .refresh_media_metadata(MEDIA_ID.to_owned())
+            .await
+            .expect("accepted");
+
+        let request = the_request(&backend);
+        assert_eq!(request.method, reqwest::Method::POST);
+        assert_eq!(
+            request.url.path(),
+            format!("/v1/admin/media/{MEDIA_ID}/refresh")
+        );
+        assert!(matches!(
+            client.refresh_media_metadata("x".to_owned()).await,
+            Err(BeamError::BadRequest { .. })
+        ));
+        assert_eq!(backend.recorded().len(), 1, "a malformed id is never sent");
     }
 }

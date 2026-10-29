@@ -198,11 +198,7 @@ impl MatroskaExtractor {
 
         let mut frame = Frame::default();
         loop {
-            if !inner
-                .file
-                .next_frame(&mut frame)
-                .map_err(|error| map_demux_error(error, &self.fault))?
-            {
+            if !read_frame(&mut inner, &mut frame, &self.fault)? {
                 return Ok(None);
             }
             if inner.selected.contains(&frame.track) {
@@ -256,11 +252,7 @@ impl MatroskaExtractor {
             let mut best: Option<u64> = None;
             let mut frame = Frame::default();
             for _ in 0..SEEK_SCAN_FRAME_LIMIT {
-                if !inner
-                    .file
-                    .next_frame(&mut frame)
-                    .map_err(|error| map_demux_error(error, &self.fault))?
-                {
+                if !read_frame(&mut inner, &mut frame, &self.fault)? {
                     break;
                 }
                 if frame.timestamp > target_ticks {
@@ -345,14 +337,40 @@ fn sample_from_frame(frame: &Frame, timestamp_scale: u64) -> EncodedSample {
     }
 }
 
+/// Run a parser call that reads block data, turning a panic into a
+/// malformed-file error.
+///
+/// matroska-demuxer 0.8.1 reads a block's relative timestamp with `i16::abs`,
+/// which overflows on `i16::MIN`, both when reading frames and when a seek
+/// probes a block's timestamp. Its parser is generic over the reader, so it is
+/// compiled into this crate under this crate's overflow checks: a release
+/// build wraps and then fails the `u64` conversion as an error, while a build
+/// with overflow checks -- every dev build -- panics. A corrupt file is the
+/// file's fault, so it is reported as one rather than as a crash.
+fn guard_parse<T>(parse: impl FnOnce() -> T) -> Result<T, ExtractorError> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(parse)).map_err(|_| {
+        ExtractorError::Malformed {
+            detail: "the parser rejected a corrupt block".to_owned(),
+        }
+    })
+}
+
+/// Read the next frame; `false` at end of file.
+fn read_frame(
+    inner: &mut Inner,
+    frame: &mut Frame,
+    fault: &FaultLog,
+) -> Result<bool, ExtractorError> {
+    let file = &mut inner.file;
+    guard_parse(|| file.next_frame(frame))?.map_err(|error| map_demux_error(error, fault))
+}
+
 fn seek_ticks(inner: &mut Inner, ticks: u64, requested: f64) -> Result<(), ExtractorError> {
-    inner
-        .file
-        .seek(ticks)
-        .map_err(|error| ExtractorError::Seek {
-            seconds: requested,
-            detail: error.to_string(),
-        })
+    let file = &mut inner.file;
+    guard_parse(|| file.seek(ticks))?.map_err(|error| ExtractorError::Seek {
+        seconds: requested,
+        detail: error.to_string(),
+    })
 }
 
 fn describe_track(track: &matroska_demuxer::TrackEntry) -> ExtractorTrack {
@@ -818,5 +836,70 @@ mod tests {
 
         frame.is_keyframe = Some(false);
         assert!(!is_keyframe(&frame));
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use crate::ports::byte_source::InMemoryByteSource;
+    use proptest::prelude::*;
+
+    const FIXTURES: [&[u8]; 4] = [
+        include_bytes!("../../fixtures/h264.mkv"),
+        include_bytes!("../../fixtures/hevc.mkv"),
+        include_bytes!("../../fixtures/h264_aac.mkv"),
+        include_bytes!("../../fixtures/vp9_opus.webm"),
+    ];
+
+    /// Open `bytes` and read every sample there is, seeking once on the way.
+    ///
+    /// A file is untrusted input from a library the server never vetted, so
+    /// any outcome is acceptable except a panic -- which, across the FFI
+    /// boundary, takes the app down with it. Bounded, so a parser that loops
+    /// on a corrupt cluster fails the property instead of hanging it.
+    fn exercise(bytes: Vec<u8>) -> Result<(), TestCaseError> {
+        let Ok(extractor) = MatroskaExtractor::open(Arc::new(InMemoryByteSource::new(bytes)))
+        else {
+            return Ok(());
+        };
+        let _ = extractor.tracks();
+        let _ = extractor.duration_seconds();
+        for _ in 0..10_000 {
+            match extractor.next_sample() {
+                Ok(Some(_)) => {}
+                Ok(None) | Err(_) => {
+                    let _ = extractor.seek(0.5);
+                    return Ok(());
+                }
+            }
+        }
+        Err(TestCaseError::fail("the extractor never reached an end"))
+    }
+
+    proptest! {
+        #[test]
+        fn arbitrary_bytes_never_panic(bytes in proptest::collection::vec(any::<u8>(), 0..2048)) {
+            exercise(bytes)?;
+        }
+
+        #[test]
+        fn a_truncated_file_never_panics(fixture in 0_usize..4, cut in any::<proptest::sample::Index>()) {
+            let bytes = FIXTURES[fixture];
+            exercise(bytes[..cut.index(bytes.len())].to_vec())?;
+        }
+
+        #[test]
+        fn a_corrupted_file_never_panics(
+            fixture in 0_usize..4,
+            flips in proptest::collection::vec((any::<proptest::sample::Index>(), any::<u8>()), 1..16),
+        ) {
+            let mut bytes = FIXTURES[fixture].to_vec();
+            for (at, value) in flips {
+                let index = at.index(bytes.len());
+                bytes[index] = value;
+            }
+            exercise(bytes)?;
+        }
     }
 }

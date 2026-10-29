@@ -187,81 +187,9 @@ mod in_memory {
     }
 }
 
+/// The hermetic instantiation of the shared `KeyValueStore` contract in
+/// [`crate::ports::contract`].
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn a_written_value_reads_back() {
-        let store = InMemoryKeyValueStore::new();
-        store
-            .put("servers/index".to_owned(), "[]".to_owned())
-            .await
-            .expect("put");
-        assert_eq!(
-            store.get("servers/index".to_owned()).await.expect("get"),
-            Some("[]".to_owned())
-        );
-    }
-
-    #[tokio::test]
-    async fn an_absent_key_reads_as_none_and_removes_cleanly() {
-        let store = InMemoryKeyValueStore::new();
-        assert_eq!(store.get("nothing".to_owned()).await.expect("get"), None);
-        store.remove("nothing".to_owned()).await.expect("remove");
-    }
-
-    #[tokio::test]
-    async fn secrets_are_held_apart_from_plaintext() {
-        let store = InMemoryKeyValueStore::new();
-        store
-            .put_secret("session/a".to_owned(), "cookie".to_owned())
-            .await
-            .expect("put_secret");
-
-        // The whole point of the split boundary: a secret must not be
-        // reachable through, or land in, the plaintext store.
-        assert!(store.has_secret("session/a"));
-        assert!(!store.has_plain("session/a"));
-        assert_eq!(store.get("session/a".to_owned()).await.expect("get"), None);
-    }
-
-    #[tokio::test]
-    async fn list_keys_filters_by_prefix_and_ignores_secrets() {
-        let store = InMemoryKeyValueStore::new();
-        store.put("servers/a".to_owned(), "1".to_owned()).await.ok();
-        store.put("servers/b".to_owned(), "2".to_owned()).await.ok();
-        store.put("pins/a".to_owned(), "3".to_owned()).await.ok();
-        store
-            .put_secret("servers/secret".to_owned(), "s".to_owned())
-            .await
-            .ok();
-
-        let mut keys = store
-            .list_keys("servers/".to_owned())
-            .await
-            .expect("list_keys");
-        keys.sort();
-        assert_eq!(keys, vec!["servers/a".to_owned(), "servers/b".to_owned()]);
-    }
-
-    #[tokio::test]
-    async fn failure_injection_reaches_reads_and_writes_independently() {
-        let store = InMemoryKeyValueStore::new();
-        store
-            .put("k".to_owned(), "v".to_owned())
-            .await
-            .expect("put");
-
-        store.set_failure(FailureMode::FailReads);
-        assert!(store.get("k".to_owned()).await.is_err());
-        assert!(store.put("k".to_owned(), "v2".to_owned()).await.is_ok());
-
-        store.set_failure(FailureMode::FailWrites);
-        assert!(store.get("k".to_owned()).await.is_ok());
-        assert!(store.put("k".to_owned(), "v3".to_owned()).await.is_err());
-
-        store.set_failure(FailureMode::None);
-        assert!(store.get("k".to_owned()).await.is_ok());
-    }
+mod contract_over_in_memory {
+    crate::key_value_store_contract!(super::InMemoryKeyValueStore::new());
 }

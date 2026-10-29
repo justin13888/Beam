@@ -1248,3 +1248,89 @@ mod tests {
         assert_eq!(a.source.file_id, b.source.file_id);
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use crate::capability::builders::{DeviceProfileBuilder, MediaSourceBuilder};
+    use proptest::prelude::*;
+
+    /// A file as a library might hold it: a codec the phone may or may not
+    /// decode, at some size, resolution and bit rate.
+    fn source() -> impl Strategy<Value = (&'static str, u64, u32, u64)> {
+        (
+            prop_oneof![Just("h264"), Just("hevc"), Just("av1"), Just("vp6")],
+            1_u64..50_000_000_000,
+            prop_oneof![Just(480_u32), Just(720), Just(1080), Just(2160)],
+            1_000_000_u64..80_000_000,
+        )
+    }
+
+    fn policy() -> impl Strategy<Value = QualityPolicy> {
+        prop_oneof![
+            Just(QualityPolicy::Highest),
+            Just(QualityPolicy::Smallest),
+            Just(QualityPolicy::MatchScreen),
+        ]
+    }
+
+    /// The part of a source a policy ranks on: two sources equal here are a
+    /// tie the policy has no reason to break either way.
+    fn rank(source: &MediaSourceView, policy: &QualityPolicy) -> (u64, u64, u64) {
+        match policy {
+            QualityPolicy::Smallest => (source.size_bytes, 0, 0),
+            _ => quality_key(source),
+        }
+    }
+
+    proptest! {
+        /// The selection is one of the sources offered, every other source is
+        /// accounted for as rejected, and the order the server listed them in
+        /// changes what is chosen only between sources the policy ranks equal.
+        #[test]
+        fn a_selection_is_one_of_its_inputs_whatever_their_order(
+            files in proptest::collection::vec(source(), 0..8),
+            policy in policy(),
+        ) {
+            let sources: Vec<MediaSourceView> = files
+                .iter()
+                .enumerate()
+                .map(|(index, (codec, size, height, bit_rate))| {
+                    MediaSourceBuilder::new(&format!("s{index}"))
+                        .video(codec, height * 16 / 9, *height)
+                        .size(*size)
+                        .bitrate(*bit_rate)
+                        .build()
+                })
+                .collect();
+            let mut reversed = sources.clone();
+            reversed.reverse();
+            let profile = DeviceProfileBuilder::phone_h264_hevc().build();
+
+            let forward = select_source(&sources, &profile, &policy);
+            let backward = select_source(&reversed, &profile, &policy);
+
+            match (forward, backward) {
+                (Ok(a), Ok(b)) => {
+                    prop_assert!(sources.contains(&a.source));
+                    prop_assert!(sources.contains(&b.source));
+                    prop_assert_eq!(rank(&a.source, &policy), rank(&b.source, &policy));
+
+                    let mut accounted: Vec<&str> =
+                        a.rejected.iter().map(|r| r.file_id.as_str()).collect();
+                    accounted.push(a.source.file_id.as_str());
+                    accounted.sort_unstable();
+                    let mut offered: Vec<&str> =
+                        sources.iter().map(|s| s.file_id.as_str()).collect();
+                    offered.sort_unstable();
+                    prop_assert_eq!(accounted, offered);
+                }
+                (Err(a), Err(b)) => {
+                    prop_assert_eq!(a.len(), sources.len(), "every source has a reason");
+                    prop_assert_eq!(b.len(), sources.len());
+                }
+                (a, b) => prop_assert!(false, "order changed the verdict: {:?} / {:?}", a, b),
+            }
+        }
+    }
+}
