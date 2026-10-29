@@ -251,3 +251,27 @@ impl<M: MigratorTrait> MigratorTrait for AllOrNothing<M> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// sea-orm applies migrations in registration order and records each by
+    /// name; a name sorting before an earlier one's is a migration a
+    /// database already past it would never apply, and a repeated name is
+    /// one it would skip. Registration order and name order must agree.
+    #[test]
+    fn migrations_are_registered_in_strictly_ascending_name_order() {
+        let migrations = Migrator::migrations();
+        let names: Vec<&str> = migrations
+            .iter()
+            .map(|migration| migration.name())
+            .collect();
+        let out_of_order: Vec<String> = names
+            .windows(2)
+            .filter(|pair| pair[0] >= pair[1])
+            .map(|pair| format!("{} is registered before {}", pair[0], pair[1]))
+            .collect();
+        assert!(out_of_order.is_empty(), "{}", out_of_order.join("\n"));
+    }
+}

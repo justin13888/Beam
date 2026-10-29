@@ -1792,3 +1792,182 @@ async fn the_movie_parts_migration_constrains_and_reverses() {
 
     scoped.drop_schema().await.expect("drop schema");
 }
+
+/// Applies every registered migration before `name`, so the next `up` of one
+/// step applies `name` itself.
+async fn up_to_just_before(db: &sea_orm_migration::sea_orm::DatabaseConnection, name: &str) {
+    let before_this_one = beam_migration::Migrator::migrations()
+        .iter()
+        .position(|m| m.name() == name)
+        .expect("the migration is registered");
+    up_all_or_nothing::<beam_migration::Migrator, _>(
+        db,
+        Some(<u32 as TryFrom<usize>>::try_from(before_this_one).expect("few migrations")),
+    )
+    .await
+    .expect("every migration before this one applies");
+}
+
+/// The values of the text column `v` that `sql` returns.
+async fn text_rows(db: &sea_orm_migration::sea_orm::DatabaseConnection, sql: &str) -> Vec<String> {
+    use sea_orm_migration::sea_orm::{ConnectionTrait, Statement};
+    db.query_all_raw(Statement::from_string(db.get_database_backend(), sql))
+        .await
+        .expect("query")
+        .into_iter()
+        .map(|row| row.try_get::<String>("", "v").expect("a text column v"))
+        .collect()
+}
+
+/// The ADR-0003 cutover: an account never linked to an OIDC identity is
+/// deleted, a survivor without a display name takes its username, the OIDC
+/// columns become required and the password columns go. `down()` brings the
+/// password columns back (empty) and relaxes the constraints, and `up()`
+/// applies again over that.
+#[tokio::test]
+async fn the_oidc_only_migration_deletes_unlinked_accounts_and_backfills_names() {
+    use sea_orm_migration::sea_orm::ConnectionTrait;
+
+    const MIGRATION: &str = "m20260706_000001_users_oidc_only";
+    let scoped = ScopedSchema::create("users_oidc_only")
+        .await
+        .expect("create schema");
+    let db = scoped.db();
+    let db = db.as_ref();
+    up_to_just_before(db, MIGRATION).await;
+
+    // (id suffix, username, issuer, subject, display name): two linked
+    // accounts, one with a display name and one without, and two that were
+    // only ever half linked.
+    for (id, username, issuer, subject, display_name) in [
+        ("01", "named", "'https://idp'", "'sub-1'", "'Named Person'"),
+        ("02", "unnamed", "'https://idp'", "'sub-2'", "NULL"),
+        ("03", "no_issuer", "NULL", "'sub-3'", "'No Issuer'"),
+        ("04", "no_subject", "'https://idp'", "NULL", "NULL"),
+    ] {
+        db.execute_unprepared(&format!(
+            "INSERT INTO users (id, username, email, password_hash, is_admin, created_at, \
+                                updated_at, oidc_issuer, oidc_subject, display_name) VALUES \
+             ('00000000-0000-0000-0000-0000000000{id}', '{username}', '{username}@example.com', \
+              'hash', false, now(), now(), {issuer}, {subject}, {display_name})"
+        ))
+        .await
+        .expect("seed a pre-cutover account");
+    }
+
+    up_all_or_nothing::<beam_migration::Migrator, _>(db, Some(1))
+        .await
+        .expect("the migration applies");
+
+    assert_eq!(
+        text_rows(
+            db,
+            "SELECT id::text || ' ' || display_name AS v FROM users ORDER BY id"
+        )
+        .await,
+        vec![
+            "00000000-0000-0000-0000-000000000001 Named Person",
+            "00000000-0000-0000-0000-000000000002 unnamed",
+        ],
+        "only linked accounts survive; a missing display name is the username"
+    );
+    let password_columns = "SELECT column_name::text AS v FROM information_schema.columns \
+         WHERE table_schema = current_schema() AND table_name = 'users' \
+           AND column_name IN ('username', 'password_hash') ORDER BY column_name";
+    assert!(
+        text_rows(db, password_columns).await.is_empty(),
+        "the password columns are gone"
+    );
+    let required = "SELECT column_name::text || ' ' || is_nullable::text AS v \
+         FROM information_schema.columns \
+         WHERE table_schema = current_schema() AND table_name = 'users' \
+           AND column_name IN ('oidc_issuer', 'oidc_subject', 'display_name') \
+         ORDER BY column_name";
+    assert_eq!(
+        text_rows(db, required).await,
+        vec!["display_name NO", "oidc_issuer NO", "oidc_subject NO"],
+        "the OIDC identity and display name are required"
+    );
+
+    beam_migration::Migrator::down(db, Some(1))
+        .await
+        .expect("the migration rolls back");
+    assert_eq!(
+        text_rows(db, password_columns).await,
+        vec!["password_hash", "username"],
+        "down() restores the password columns"
+    );
+    assert_eq!(
+        text_rows(db, required).await,
+        vec!["display_name YES", "oidc_issuer YES", "oidc_subject YES"],
+        "down() relaxes the OIDC columns"
+    );
+    assert_eq!(
+        text_rows(
+            db,
+            "SELECT username || '|' || password_hash AS v FROM users ORDER BY id"
+        )
+        .await,
+        vec!["|", "|"],
+        "the restored columns are empty: a deleted password cannot come back"
+    );
+    up_all_or_nothing::<beam_migration::Migrator, _>(db, None)
+        .await
+        .expect("the migration reapplies over the rolled-back schema");
+
+    scoped.drop_schema().await.expect("drop schema");
+}
+
+/// Postgres cannot drop an enum value, so this migration's `down()` is a
+/// no-op on the schema: `enrichment` stays a category. What it must still do
+/// is leave the ledger able to apply the migration again -- which the
+/// `IF NOT EXISTS` in `up()` makes safe over the value that stayed.
+#[tokio::test]
+async fn the_enrichment_category_migration_has_a_no_op_down_that_reapplies() {
+    const MIGRATION: &str = "m20260704_000004_add_enrichment_admin_log_category";
+    let scoped = ScopedSchema::create("enrichment_category")
+        .await
+        .expect("create schema");
+    let db = scoped.db();
+    let db = db.as_ref();
+    up_to_just_before(db, MIGRATION).await;
+
+    let categories = "SELECT e.enumlabel::text AS v FROM pg_enum e \
+         JOIN pg_type t ON t.oid = e.enumtypid \
+         JOIN pg_namespace n ON n.oid = t.typnamespace \
+         WHERE t.typname = 'admin_log_category' AND n.nspname = current_schema() \
+         ORDER BY e.enumsortorder";
+    let recorded =
+        format!("SELECT version AS v FROM seaql_migrations WHERE version = '{MIGRATION}'");
+    assert_eq!(
+        text_rows(db, categories).await,
+        vec!["library_scan", "system", "auth"]
+    );
+
+    up_all_or_nothing::<beam_migration::Migrator, _>(db, Some(1))
+        .await
+        .expect("the migration applies");
+    let with_enrichment = vec!["library_scan", "system", "auth", "enrichment"];
+    assert_eq!(text_rows(db, categories).await, with_enrichment);
+
+    beam_migration::Migrator::down(db, Some(1))
+        .await
+        .expect("the no-op down succeeds");
+    assert_eq!(
+        text_rows(db, categories).await,
+        with_enrichment,
+        "down() leaves the value: Postgres has no DROP VALUE"
+    );
+    assert!(
+        text_rows(db, &recorded).await.is_empty(),
+        "down() still takes the migration off the ledger"
+    );
+
+    up_all_or_nothing::<beam_migration::Migrator, _>(db, Some(1))
+        .await
+        .expect("up() reapplies over the value that stayed");
+    assert_eq!(text_rows(db, categories).await, with_enrichment);
+    assert_eq!(text_rows(db, &recorded).await, vec![MIGRATION]);
+
+    scoped.drop_schema().await.expect("drop schema");
+}

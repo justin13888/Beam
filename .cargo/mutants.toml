@@ -105,6 +105,9 @@ exclude_globs = [
     # Excluded by path rather than by name: a path names exactly one file and
     # cannot silently capture production code the way a name pattern can.
     "beam-client-core/src/capability/builders.rs",
+    # The domain's test-data builders, declared the same way for the same
+    # reason (issue #349).
+    "beam-domain/src/test_utils.rs",
 
     # Pure DDL: sea-orm-migration up/down bodies, with no unit tests by design
     # (docs/testing.md). The only thing that can validate a migration is running

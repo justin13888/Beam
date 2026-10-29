@@ -207,4 +207,175 @@ mod tests {
             assert!(seen.insert(codec), "{codec} named twice");
         }
     }
+
+    fn upsert() -> UpsertSidecarSubtitle {
+        UpsertSidecarSubtitle {
+            file_id: Uuid::from_u128(1),
+            library_id: Uuid::from_u128(2),
+            path: PathBuf::from("/media/Heat.en.forced.srt"),
+            info: SidecarInfo {
+                format: SubtitleFormat::Srt,
+                language: Some("eng".to_string()),
+                title: None,
+                is_forced: true,
+                is_sdh: false,
+                is_default: false,
+            },
+            size_bytes: 4_096,
+            mtime: DateTime::from_timestamp(1_700_000_000, 0),
+        }
+    }
+
+    /// The row `upsert()` was stored as.
+    fn stored() -> SidecarSubtitle {
+        let UpsertSidecarSubtitle {
+            file_id,
+            library_id,
+            path,
+            info,
+            size_bytes,
+            mtime,
+        } = upsert();
+        SidecarSubtitle {
+            id: Uuid::from_u128(3),
+            file_id,
+            library_id,
+            path,
+            info,
+            size_bytes,
+            mtime,
+            created_at: DateTime::UNIX_EPOCH,
+            updated_at: DateTime::UNIX_EPOCH,
+        }
+    }
+
+    /// A scan writes a sidecar again exactly when one thing it found differs
+    /// from the row -- any of them, each on its own -- and never for what the
+    /// store alone assigns.
+    #[test]
+    fn an_upsert_matches_its_row_exactly_when_every_field_it_carries_agrees() {
+        type Change = fn(&mut SidecarSubtitle);
+        let cases: [(&str, Change, bool); 13] = [
+            ("nothing", |_| {}, true),
+            ("id", |s| s.id = Uuid::from_u128(9), true),
+            (
+                "created_at",
+                |s| s.created_at = DateTime::UNIX_EPOCH + chrono::Duration::days(1),
+                true,
+            ),
+            (
+                "updated_at",
+                |s| s.updated_at = DateTime::UNIX_EPOCH + chrono::Duration::days(1),
+                true,
+            ),
+            ("file_id", |s| s.file_id = Uuid::from_u128(9), false),
+            ("library_id", |s| s.library_id = Uuid::from_u128(9), false),
+            (
+                "path",
+                |s| s.path = PathBuf::from("/media/Heat.en.srt"),
+                false,
+            ),
+            ("format", |s| s.info.format = SubtitleFormat::Vtt, false),
+            ("language", |s| s.info.language = None, false),
+            (
+                "title",
+                |s| s.info.title = Some("Commentary".to_string()),
+                false,
+            ),
+            ("is_forced", |s| s.info.is_forced = false, false),
+            ("size_bytes", |s| s.size_bytes += 1, false),
+            ("mtime", |s| s.mtime = None, false),
+        ];
+        for (field, change, matches) in cases {
+            let mut row = stored();
+            change(&mut row);
+            assert_eq!(upsert().matches(&row), matches, "{field} changed");
+        }
+        for (field, change) in [
+            (
+                "is_sdh",
+                (|i: &mut SidecarInfo| i.is_sdh = true) as fn(&mut SidecarInfo),
+            ),
+            ("is_default", |i| i.is_default = true),
+        ] {
+            let mut row = stored();
+            change(&mut row.info);
+            assert!(!upsert().matches(&row), "{field} changed");
+        }
+    }
+}
+
+#[cfg(all(test, feature = "entity"))]
+mod entity_conversion_tests {
+    use super::*;
+
+    fn model(format: &str, size_bytes: i64) -> beam_entity::sidecar_subtitle::Model {
+        let at: chrono::DateTime<chrono::FixedOffset> = DateTime::UNIX_EPOCH.into();
+        beam_entity::sidecar_subtitle::Model {
+            id: Uuid::from_u128(1),
+            file_id: Uuid::from_u128(2),
+            library_id: Uuid::from_u128(3),
+            path: "/media/Heat.en.srt".to_string(),
+            format: format.to_string(),
+            language: Some("eng".to_string()),
+            title: Some("SDH".to_string()),
+            is_forced: false,
+            is_sdh: true,
+            is_default: true,
+            size_bytes,
+            mtime: Some(at),
+            created_at: at,
+            updated_at: at,
+        }
+    }
+
+    #[test]
+    fn a_row_reads_back_with_every_field_and_its_format_in_any_case() {
+        for stored in ["srt", "SRT"] {
+            let read = SidecarSubtitle::try_from(model(stored, 4_096)).unwrap();
+            assert_eq!(
+                read,
+                SidecarSubtitle {
+                    id: Uuid::from_u128(1),
+                    file_id: Uuid::from_u128(2),
+                    library_id: Uuid::from_u128(3),
+                    path: PathBuf::from("/media/Heat.en.srt"),
+                    info: SidecarInfo {
+                        format: SubtitleFormat::Srt,
+                        language: Some("eng".to_string()),
+                        title: Some("SDH".to_string()),
+                        is_forced: false,
+                        is_sdh: true,
+                        is_default: true,
+                    },
+                    size_bytes: 4_096,
+                    mtime: Some(DateTime::UNIX_EPOCH),
+                    created_at: DateTime::UNIX_EPOCH,
+                    updated_at: DateTime::UNIX_EPOCH,
+                },
+                "{stored:?}"
+            );
+        }
+    }
+
+    /// A format the domain does not index -- one the `CHECK` would never let
+    /// in -- is refused by name rather than read as some other format.
+    #[test]
+    fn a_row_of_a_format_beam_does_not_index_is_refused() {
+        for stored in ["sub", "", "srt "] {
+            let refused = SidecarSubtitle::try_from(model(stored, 1)).unwrap_err();
+            assert!(
+                matches!(&refused, sea_orm::DbErr::Custom(message) if message.contains(&format!("{stored:?}"))),
+                "{stored:?}: {refused}"
+            );
+        }
+    }
+
+    /// A negative size, which no write produces, reads as empty rather than
+    /// wrapping to an enormous one.
+    #[test]
+    fn a_negative_size_reads_as_zero() {
+        let read = SidecarSubtitle::try_from(model("vtt", -5)).unwrap();
+        assert_eq!(read.size_bytes, 0);
+    }
 }

@@ -116,3 +116,68 @@ mod tests {
         assert_eq!(UserList::parse("history"), None);
     }
 }
+
+#[cfg(all(test, feature = "entity"))]
+mod entity_conversion_tests {
+    use super::*;
+
+    fn model(
+        list: &str,
+        movie_id: Option<Uuid>,
+        show_id: Option<Uuid>,
+    ) -> beam_entity::user_list_entry::Model {
+        beam_entity::user_list_entry::Model {
+            id: Uuid::from_u128(1),
+            user_id: Uuid::from_u128(2),
+            list: list.to_string(),
+            movie_id,
+            show_id,
+            added_at: DateTime::UNIX_EPOCH.into(),
+        }
+    }
+
+    /// An entry is on a list Beam knows and names exactly one movie or one
+    /// show; a row breaking either is refused, never read as a guess.
+    #[test]
+    fn a_row_converts_only_on_a_known_list_naming_one_title() {
+        let (movie, show) = (Some(Uuid::from_u128(10)), Some(Uuid::from_u128(11)));
+        let cases = [
+            (
+                "a movie on the watchlist",
+                model("watchlist", movie, None),
+                Some((UserList::Watchlist, TitleRef::Movie(Uuid::from_u128(10)))),
+            ),
+            (
+                "a show in favourites",
+                model("favourites", None, show),
+                Some((UserList::Favourites, TitleRef::Show(Uuid::from_u128(11)))),
+            ),
+            ("an unknown list", model("history", movie, None), None),
+            (
+                "a list in the wrong case",
+                model("Watchlist", movie, None),
+                None,
+            ),
+            ("no title", model("watchlist", None, None), None),
+            (
+                "both a movie and a show",
+                model("watchlist", movie, show),
+                None,
+            ),
+        ];
+        for (name, row, expected) in cases {
+            let converted = UserListEntry::try_from(row);
+            match expected {
+                Some((list, title)) => {
+                    let entry = converted.unwrap_or_else(|err| panic!("{name}: {err}"));
+                    assert_eq!((entry.list, entry.title), (list, title), "{name}");
+                }
+                None => assert!(
+                    matches!(&converted, Err(sea_orm::DbErr::Custom(message))
+                        if message.contains(&Uuid::from_u128(1).to_string())),
+                    "{name}: {converted:?}"
+                ),
+            }
+        }
+    }
+}

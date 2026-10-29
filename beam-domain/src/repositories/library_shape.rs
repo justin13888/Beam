@@ -54,7 +54,7 @@ pub mod in_memory {
         fn default() -> Self {
             let files = Arc::new(InMemoryFileRepository::default());
             Self {
-                libraries: Arc::new(InMemoryLibraryRepository::default()),
+                libraries: Arc::new(InMemoryLibraryRepository::with_files(files.clone())),
                 movies: Arc::new(InMemoryMovieRepository::with_files(files.clone())),
                 shows: Arc::new(InMemoryShowRepository::with_files(files.clone())),
                 files,

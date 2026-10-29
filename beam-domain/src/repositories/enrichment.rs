@@ -15,12 +15,6 @@ pub trait EnrichmentStateRepository: Send + Sync + std::fmt::Debug {
     /// exists, regardless of its current status).
     async fn ensure_pending(&self, target: EnrichmentTargetId) -> Result<(), DbErr>;
 
-    /// Create `Pending` rows for any movies/shows that don't have one yet.
-    /// Returns the number of rows created. Intended as a one-time catch-up
-    /// for titles indexed before enrichment existed; new titles get their
-    /// row from `ensure_pending` at classification time instead.
-    async fn backfill_missing(&self) -> Result<u64, DbErr>;
-
     /// Fetch up to `limit` rows that are due for (re-)enrichment as of `now`.
     async fn fetch_due(
         &self,
@@ -115,6 +109,7 @@ pub mod in_memory {
     use crate::models::enrichment::EnrichmentStatus;
     use crate::repositories::movie::in_memory::InMemoryMovieRepository;
     use crate::repositories::show::in_memory::InMemoryShowRepository;
+    use crate::test_utils::enrichment_state;
     use parking_lot::RwLock;
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -151,18 +146,8 @@ pub mod in_memory {
 
     fn pending(target: EnrichmentTargetId) -> EnrichmentState {
         EnrichmentState {
-            id: Uuid::new_v4(),
-            target,
-            status: EnrichmentStatus::Pending,
-            attempts: 0,
-            next_attempt_at: None,
-            enriched_at: None,
-            match_confidence: None,
-            matched_ref: None,
-            force_refresh: false,
-            last_error: None,
-            locked_fields: FieldLocks::none(),
             updated_at: Utc::now(),
+            ..enrichment_state(target)
         }
     }
 
@@ -187,12 +172,6 @@ pub mod in_memory {
             let row = pending(target);
             rows.insert(row.id, row);
             Ok(())
-        }
-
-        async fn backfill_missing(&self) -> Result<u64, DbErr> {
-            // The in-memory fake has no separate movie/show table to backfill
-            // from; tests seed rows directly via `ensure_pending`.
-            Ok(0)
         }
 
         async fn fetch_due(

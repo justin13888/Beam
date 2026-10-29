@@ -197,4 +197,15 @@ mod entity_conversion_tests {
     fn an_unknown_episode_runtime_stays_unknown() {
         assert_eq!(Episode::from(episode_model(None)).runtime, None);
     }
+
+    /// Characterises, not endorses: as for a movie, a negative stored
+    /// runtime wraps through the unchecked cast to `u64` rather than being
+    /// refused.
+    #[test]
+    fn a_negative_episode_runtime_wraps_into_an_enormous_duration() {
+        assert_eq!(
+            Episode::from(episode_model(Some(-1))).runtime,
+            Some(Duration::from_secs(u64::MAX - 59))
+        );
+    }
 }

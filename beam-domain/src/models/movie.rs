@@ -192,4 +192,17 @@ mod entity_conversion_tests {
     fn an_unknown_runtime_stays_unknown() {
         assert_eq!(Movie::from(model(None)).runtime, None);
     }
+
+    /// Characterises, not endorses: the conversion casts `mins * 60` to
+    /// `u64` unchecked, so a negative stored runtime -- which the column's
+    /// `INTEGER` type admits -- wraps to a duration of some 584 billion
+    /// years instead of being refused. Pinned so a fix is a deliberate
+    /// change to this test.
+    #[test]
+    fn a_negative_runtime_wraps_into_an_enormous_duration() {
+        assert_eq!(
+            Movie::from(model(Some(-1))).runtime,
+            Some(Duration::from_secs(u64::MAX - 59))
+        );
+    }
 }

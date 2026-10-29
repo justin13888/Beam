@@ -306,6 +306,56 @@ mod tests {
         );
     }
 
+    /// A small domain, so generated positions collide on key, id and kind
+    /// often enough for the equal and transitive cases to be exercised.
+    fn any_position() -> impl proptest::strategy::Strategy<Value = CatalogPosition> {
+        use proptest::prelude::*;
+        let float = proptest::sample::select(vec![0.0_f32, 0.25, 0.5, 1.0, 7.5]);
+        let small = proptest::option::of(0_i32..3);
+        let key = prop_oneof![
+            proptest::sample::select(vec!["a", "b", "c"]).prop_map(|t| SortKey::Title(t.into())),
+            small.clone().prop_map(SortKey::Year),
+            proptest::option::of(float.clone()).prop_map(SortKey::Rating),
+            (0_i64..3).prop_map(|s| SortKey::DateAdded(
+                DateTime::from_timestamp(s, 0).expect("in range")
+            )),
+            small.prop_map(SortKey::Runtime),
+            float.prop_map(SortKey::Relevance),
+        ];
+        let kind = proptest::sample::select(vec![TitleKind::Movie, TitleKind::Show]);
+        (kind, 0_u128..3, key).prop_map(|(kind, id, key)| at(kind, id, key))
+    }
+
+    fn any_direction() -> impl proptest::strategy::Strategy<Value = SortDirection> {
+        proptest::sample::select(vec![SortDirection::Asc, SortDirection::Desc])
+    }
+
+    proptest::proptest! {
+        /// `display_cmp` is a total order in either direction -- the property
+        /// every sort and every page boundary relies on: swapping the operands
+        /// reverses the answer, it is transitive, and it calls two positions
+        /// equal exactly when they are the same position.
+        #[test]
+        fn display_order_is_a_total_order(
+            a in any_position(),
+            b in any_position(),
+            c in any_position(),
+            direction in any_direction(),
+        ) {
+            use proptest::prelude::*;
+            let ab = a.display_cmp(&b, direction);
+            prop_assert_eq!(ab, b.display_cmp(&a, direction).reverse(), "antisymmetric");
+            prop_assert_eq!(ab == Ordering::Equal, a == b, "consistent with Eq");
+            let bc = b.display_cmp(&c, direction);
+            if ab != Ordering::Greater && bc != Ordering::Greater {
+                prop_assert_ne!(a.display_cmp(&c, direction), Ordering::Greater, "transitive");
+            }
+            if ab == bc {
+                prop_assert_eq!(a.display_cmp(&c, direction), ab, "transitive, strictly");
+            }
+        }
+    }
+
     #[test]
     fn kinds_round_trip_through_their_spelling() {
         for kind in [TitleKind::Movie, TitleKind::Show] {

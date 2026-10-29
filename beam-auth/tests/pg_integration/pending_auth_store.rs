@@ -51,12 +51,7 @@ async fn concurrent_consumers_of_one_state_produce_exactly_one_winner() {
     fixture
         .store
         .create(
-            &beam_auth::utils::pending_auth_store::PendingAuth {
-                state: state.clone(),
-                nonce: "nonce".to_string(),
-                pkce_verifier: "verifier".to_string(),
-                redirect_path: None,
-            },
+            &beam_auth::utils::pending_auth_store::test_utils::pending_auth(&state),
             600,
         )
         .await

@@ -111,6 +111,12 @@ pub trait WatchStateRepository: Send + Sync + std::fmt::Debug {
     ) -> Result<HashMap<Uuid, DateTime<Utc>>, DbErr>;
 }
 
+/// Why [`WatchStateRepository::carry`] refuses a pair: a movie's watch state
+/// cannot become an episode's.
+pub fn carry_kind_mismatch() -> DbErr {
+    DbErr::Custom("watch state is carried between two movies or two episodes".to_string())
+}
+
 /// Test doubles. Gated behind `test-utils` so downstream crates can depend on
 /// them without them reaching a release build. See
 /// [`crate::services::clock::in_memory`] for why the `#[mutants::skip]` is
@@ -282,9 +288,7 @@ pub mod in_memory {
 
         async fn carry(&self, from: WatchTarget, to: WatchTarget) -> Result<(), DbErr> {
             if std::mem::discriminant(&from) != std::mem::discriminant(&to) {
-                return Err(DbErr::Custom(
-                    "watch state is carried between two movies or two episodes".to_string(),
-                ));
+                return Err(carry_kind_mismatch());
             }
             if key(from) == key(to) {
                 return Ok(());

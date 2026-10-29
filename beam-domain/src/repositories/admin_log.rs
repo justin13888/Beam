@@ -23,13 +23,33 @@ pub trait AdminLogRepository: Send + Sync + std::fmt::Debug {
 #[cfg(any(test, feature = "test-utils"))]
 pub mod in_memory {
     use super::*;
+    use crate::services::{Clock, RealClock};
     use parking_lot::RwLock;
     use std::sync::Arc;
     use uuid::Uuid;
 
-    #[derive(Debug, Default)]
+    #[derive(Debug)]
     pub struct InMemoryAdminLogRepository {
         logs: Arc<RwLock<Vec<AdminLog>>>,
+        /// Source of `created_at`, as the SQL implementation's is.
+        clock: Arc<dyn Clock>,
+    }
+
+    impl Default for InMemoryAdminLogRepository {
+        fn default() -> Self {
+            Self::with_clock(Arc::new(RealClock))
+        }
+    }
+
+    impl InMemoryAdminLogRepository {
+        /// A repository stamping `created_at` from `clock`.
+        #[must_use]
+        pub fn with_clock(clock: Arc<dyn Clock>) -> Self {
+            Self {
+                logs: Arc::default(),
+                clock,
+            }
+        }
     }
 
     #[async_trait]
@@ -41,7 +61,7 @@ pub mod in_memory {
                 category: entry.category,
                 message: entry.message,
                 details: entry.details,
-                created_at: chrono::Utc::now(),
+                created_at: self.clock.now(),
             };
             self.logs.write().push(log.clone());
             Ok(log)
@@ -80,4 +100,40 @@ pub mod in_memory {
             Ok(self.logs.read().len() as u64)
         }
     }
+}
+
+#[cfg(test)]
+mod contract_over_in_memory {
+    use std::sync::Arc;
+
+    use super::AdminLogRepository;
+    use super::in_memory::InMemoryAdminLogRepository;
+    use crate::services::TestClock;
+
+    struct InMemoryFixture {
+        repo: InMemoryAdminLogRepository,
+        clock: Arc<TestClock>,
+    }
+
+    impl AdminLogFixture for InMemoryFixture {
+        fn repo(&self) -> &dyn AdminLogRepository {
+            &self.repo
+        }
+
+        fn clock(&self) -> &TestClock {
+            &self.clock
+        }
+    }
+
+    async fn setup() -> InMemoryFixture {
+        let clock = Arc::new(TestClock::starting_at(
+            chrono::DateTime::from_timestamp(1_900_000_000, 0).unwrap(),
+        ));
+        InMemoryFixture {
+            repo: InMemoryAdminLogRepository::with_clock(clock.clone()),
+            clock,
+        }
+    }
+
+    crate::admin_log_repository_contract!(setup);
 }

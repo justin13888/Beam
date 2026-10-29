@@ -107,12 +107,8 @@ mod user_repository {
 
     fn create_user() -> CreateUser {
         CreateUser {
-            oidc_issuer: "https://idp.test".to_string(),
-            oidc_subject: "subj-1".to_string(),
             email: Some("ada@example.com".to_string()),
-            display_name: "Ada".to_string(),
-            avatar_url: None,
-            is_admin: false,
+            ..crate::utils::models::test_utils::create_user("https://idp.test", "subj-1")
         }
     }
 
@@ -196,24 +192,42 @@ mod user_repository {
 
     #[tokio::test]
     async fn moderation_and_admin_updates_touch_one_row_and_nothing_else() {
-        for (label, id) in [
-            ("set_disabled", Uuid::from_u128(11)),
-            ("set_admin", Uuid::from_u128(12)),
+        // (method, the column it writes, the column it must leave alone)
+        for (label, written, untouched) in [
+            ("set_disabled", "disabled", "is_admin"),
+            ("set_admin", "is_admin", "disabled"),
         ] {
-            let db = connection(empty_mock());
+            // A stored row for the lookup to find, and the row the UPDATE
+            // returns: without the first the method stops at the lookup and
+            // the UPDATE this test is about is never issued.
+            let db = connection(
+                MockDatabase::new(DbBackend::Postgres)
+                    .append_query_results([vec![user_row()], vec![user_row()]]),
+            );
             let repo = SqlUserRepository::new(db.clone());
+            let id = user_row().id;
             if label == "set_disabled" {
-                let _ = repo.set_disabled(id, true).await;
+                repo.set_disabled(id, true).await.unwrap();
             } else {
-                let _ = repo.set_admin(id, true).await;
+                repo.set_admin(id, true).await.unwrap();
             }
             drop(repo);
 
             let sql = statements(db);
-            // The row is located before it is written: an UPDATE with no
-            // WHERE would promote or disable every account at once.
-            assert_filters(&sql[0], "users", "id", "=");
-            assert_bound(&sql[0], &id.to_string());
+            let update = sql
+                .iter()
+                .find(|s| s.sql.starts_with("UPDATE"))
+                .unwrap_or_else(|| panic!("{label}: a found user is updated, got {sql:?}"));
+            // An UPDATE with no WHERE would promote or disable every account
+            // at once.
+            assert_filters(update, "users", "id", "=");
+            assert_bound(update, &id.to_string());
+            assert_contains(update, &format!(r#""{written}" ="#));
+            assert!(
+                !update.sql.contains(&format!(r#""{untouched}" ="#)),
+                "{label} must not rewrite `{untouched}`:\n{}",
+                update.sql
+            );
         }
     }
 
@@ -300,17 +314,8 @@ mod user_repository {
 
 mod session_store {
     use super::*;
-    use crate::utils::session_store::{PgSessionStore, SessionData, SessionStore};
-
-    fn session(user_id: Uuid) -> SessionData {
-        SessionData {
-            user_id: user_id.to_string(),
-            device_hash: "device-hash".to_string(),
-            ip: "203.0.113.7".to_string(),
-            created_at: 0,
-            last_active: 0,
-        }
-    }
+    use crate::utils::session_store::test_utils::session_for as session;
+    use crate::utils::session_store::{PgSessionStore, SessionStore};
 
     #[tokio::test]
     async fn only_the_hash_of_a_session_token_is_ever_stored() {
@@ -428,27 +433,25 @@ mod session_store {
 
 mod pending_auth_store {
     use super::*;
-    use crate::utils::pending_auth_store::{PendingAuth, PendingAuthStore, SqlPendingAuthStore};
-
-    fn pending() -> PendingAuth {
-        PendingAuth {
-            state: "state-token".to_string(),
-            nonce: "nonce-token".to_string(),
-            pkce_verifier: "verifier-token".to_string(),
-            redirect_path: Some("/libraries".to_string()),
-        }
-    }
+    use crate::utils::pending_auth_store::test_utils::pending_auth;
+    use crate::utils::pending_auth_store::{PendingAuthStore, SqlPendingAuthStore};
 
     #[tokio::test]
     async fn starting_a_login_persists_the_state_nonce_and_verifier() {
         let db = connection(empty_mock());
         let store = SqlPendingAuthStore::with_clock(db.clone(), clock());
-        let _ = store.create(&pending(), 600).await;
+        let pending = pending_auth("state-token");
+        let _ = store.create(&pending, 600).await;
         drop(store);
 
         let sql = statements(db);
         assert_contains(&sql[0], r#"INSERT INTO "pending_auths""#);
-        for value in ["state-token", "nonce-token", "verifier-token", "/libraries"] {
+        for value in [
+            pending.state.as_str(),
+            pending.nonce.as_str(),
+            pending.pkce_verifier.as_str(),
+            "/libraries",
+        ] {
             assert_bound(&sql[0], value);
         }
     }
@@ -635,7 +638,7 @@ mod expiry_rules {
     use chrono::{DateTime, FixedOffset, Utc};
 
     use crate::utils::pending_auth_store::{PendingAuth, PendingAuthStore, SqlPendingAuthStore};
-    use crate::utils::session_store::{PgSessionStore, SessionData, SessionStore};
+    use crate::utils::session_store::{PgSessionStore, SessionStore};
 
     /// The instant `clock()` is fixed at.
     fn now() -> DateTime<Utc> {
@@ -729,13 +732,7 @@ mod expiry_rules {
         let store = PgSessionStore::with_clock(db.clone(), clock());
         let _ = store
             .create(
-                &SessionData {
-                    user_id: Uuid::from_u128(2).to_string(),
-                    device_hash: "device".to_string(),
-                    ip: "203.0.113.7".to_string(),
-                    created_at: 0,
-                    last_active: 0,
-                },
+                &crate::utils::session_store::test_utils::session_for(Uuid::from_u128(2)),
                 3_600,
                 86_400,
             )
@@ -850,12 +847,7 @@ mod expiry_rules {
         let store = SqlPendingAuthStore::with_clock(db.clone(), clock());
         let _ = store
             .create(
-                &PendingAuth {
-                    state: "state-token".to_string(),
-                    nonce: "nonce".to_string(),
-                    pkce_verifier: "verifier".to_string(),
-                    redirect_path: None,
-                },
+                &crate::utils::pending_auth_store::test_utils::pending_auth("state-token"),
                 600,
             )
             .await;

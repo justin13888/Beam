@@ -79,15 +79,4 @@ mod tests {
             "identifiers must be random v4, not derived from anything guessable"
         );
     }
-
-    #[test]
-    fn the_test_generator_hands_out_the_identifiers_it_promises() {
-        // `nth` is what lets a test name an identifier before the flow runs;
-        // if it disagreed with `new_id` the promise would be silently broken.
-        let generator = SequentialIdGenerator::new();
-        for n in 0..5 {
-            assert_eq!(generator.new_id(), SequentialIdGenerator::nth(n));
-        }
-        assert_ne!(SequentialIdGenerator::nth(0), Uuid::nil());
-    }
 }

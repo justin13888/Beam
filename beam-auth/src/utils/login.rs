@@ -192,8 +192,13 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
-    use crate::utils::repository::in_memory::InMemoryUserRepository;
-    use crate::utils::session_store::in_memory::InMemorySessionStore;
+    use crate::utils::models::test_utils::create_user;
+    use crate::utils::repository::in_memory::{
+        FailingUserRepository, InMemoryUserRepository, UserRepositoryOperation,
+    };
+    use crate::utils::session_store::in_memory::{
+        FailingSessionStore, InMemorySessionStore, SessionStoreOperation,
+    };
 
     fn config(admin_claim: Option<&str>) -> OidcRuntimeConfig {
         OidcRuntimeConfig {
@@ -347,6 +352,174 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_later_login_refreshes_the_profile_the_idp_now_asserts() {
+        // Each IdP-side change on its own: a refresh gated on both changing
+        // would miss the far more common case of only one.
+        let world = world();
+        let first = login(&world, json!({}), None).await;
+        let avatar = "https://idp.test/ada.png";
+
+        let steps = [
+            (Some("Ada"), Some(avatar)),
+            (Some("Ada Lovelace"), Some(avatar)),
+            (Some("Ada Lovelace"), None),
+        ];
+        for (name, picture) in steps {
+            let minted = complete_login(
+                &OidcIdentity {
+                    name: name.map(str::to_owned),
+                    picture: picture.map(str::to_owned),
+                    ..identity(json!({}))
+                },
+                &client(),
+                &world.users,
+                &world.sessions,
+                &config(None),
+            )
+            .await
+            .expect("an enabled identity signs in");
+
+            assert_eq!(minted.user.id, first.user.id, "the same account");
+            let stored = world
+                .users
+                .find_by_id(first.user.id)
+                .await
+                .unwrap()
+                .unwrap();
+            for (label, user) in [("returned", &minted.user), ("stored", &stored)] {
+                assert_eq!(user.display_name, name.unwrap(), "{label}: {name:?}");
+                assert_eq!(user.avatar_url.as_deref(), picture, "{label}: {picture:?}");
+            }
+        }
+        assert_eq!(
+            world.users.count().await.unwrap(),
+            1,
+            "a returning identity is never provisioned twice"
+        );
+    }
+
+    /// The pieces of a world whose user repository fails `failing`, with
+    /// `subj-1` already provisioned as a non-admin named `Ada`.
+    async fn world_failing(
+        failing: UserRepositoryOperation,
+    ) -> (FailingUserRepository, InMemorySessionStore, uuid::Uuid) {
+        let users = FailingUserRepository::new(InMemoryUserRepository::default(), failing);
+        let existing = users
+            .inner()
+            .create(create_user("https://idp.test", "subj-1"))
+            .await
+            .unwrap();
+        (users, InMemorySessionStore::default(), existing.id)
+    }
+
+    #[tokio::test]
+    async fn a_user_repository_failure_at_any_step_is_internal_and_mints_no_session() {
+        // Each step is reached by an identity that differs from the stored
+        // user in exactly what that step writes.
+        let cases = [
+            (
+                UserRepositoryOperation::FindByOidcIdentity,
+                json!({}),
+                "Ada",
+            ),
+            (
+                UserRepositoryOperation::SetAdmin,
+                json!({"groups": ["beam-admin"]}),
+                "Ada",
+            ),
+            (
+                UserRepositoryOperation::UpdateOidcProfile,
+                json!({}),
+                "Ada Lovelace",
+            ),
+        ];
+        for (failing, claims, name) in cases {
+            let (users, sessions, existing) = world_failing(failing).await;
+
+            let result = complete_login(
+                &OidcIdentity {
+                    name: Some(name.to_owned()),
+                    ..identity(claims)
+                },
+                &client(),
+                &users,
+                &sessions,
+                &config(Some("groups")),
+            )
+            .await;
+
+            match result {
+                Err(LoginError::Internal(message)) => assert!(
+                    message.contains(&format!("{failing:?}")),
+                    "{failing:?}: the cause is carried, got {message:?}"
+                ),
+                other => panic!("{failing:?}: expected Internal, got {other:?}"),
+            }
+            assert!(
+                sessions
+                    .list_for_user(&existing.to_string())
+                    .await
+                    .unwrap()
+                    .is_empty(),
+                "{failing:?}: no session for a login that failed"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failure_provisioning_a_new_user_is_internal_and_mints_no_session() {
+        let users = FailingUserRepository::new(
+            InMemoryUserRepository::default(),
+            UserRepositoryOperation::Create,
+        );
+        let sessions = InMemorySessionStore::default();
+
+        let result = complete_login(
+            &identity(json!({})),
+            &client(),
+            &users,
+            &sessions,
+            &config(None),
+        )
+        .await;
+
+        match result {
+            Err(LoginError::Internal(message)) => assert!(
+                message.contains("Create"),
+                "the cause is carried, got {message:?}"
+            ),
+            other => panic!("expected Internal, got {other:?}"),
+        }
+        assert_eq!(users.inner().count().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_session_store_failure_is_internal() {
+        let users = InMemoryUserRepository::default();
+        let sessions = FailingSessionStore::new(
+            InMemorySessionStore::default(),
+            SessionStoreOperation::Create,
+        );
+
+        let result = complete_login(
+            &identity(json!({})),
+            &client(),
+            &users,
+            &sessions,
+            &config(None),
+        )
+        .await;
+
+        match result {
+            Err(LoginError::Internal(message)) => assert!(
+                message.contains("Create"),
+                "the cause is carried, got {message:?}"
+            ),
+            other => panic!("expected Internal, got {other:?}"),
+        }
+    }
+
     #[test]
     fn a_name_claim_wins_over_the_email_local_part() {
         assert_eq!(
@@ -363,5 +536,19 @@ mod tests {
         );
         assert_eq!(derive_display_name(Some(""), None, "sub"), "user-sub");
         assert_eq!(derive_display_name(None, None, "sub"), "user-sub");
+    }
+
+    #[test]
+    fn an_email_with_an_empty_local_part_falls_through_to_the_subject() {
+        // `@example.com` splits to an empty local part; naming somebody ""
+        // would leave an account nobody can pick out of the admin list.
+        assert_eq!(
+            derive_display_name(None, Some("@example.com"), "sub"),
+            "user-sub"
+        );
+        assert_eq!(
+            derive_display_name(Some(""), Some("@example.com"), "sub"),
+            "user-sub"
+        );
     }
 }

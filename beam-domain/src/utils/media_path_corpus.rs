@@ -874,6 +874,56 @@ fn the_corpus_infers_what_each_path_is() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// The classifier version the corpus's classifications were last pinned at,
+/// and an XXH3 digest of those classifications -- each path's inference and
+/// the identity key of the title it names.
+///
+/// [`CLASSIFIER_VERSION`] promises that a build which classifies or keys a
+/// path differently carries a new number, so stored rows are reclassified
+/// and rekeyed. Nothing else ties the number to the behaviour: this pin
+/// does. Change the classifications and the digest moves; the test then
+/// fails until the version is bumped and the pin updated together.
+const PINNED_CLASSIFICATIONS: (u16, u64) = (3, 0x3b89_cff0_29dd_d02d);
+
+/// The digest [`PINNED_CLASSIFICATIONS`] pins, over every corpus path in
+/// order. Derived from what the classifier does, not from the table's
+/// expected column, so it moves with the behaviour itself.
+fn corpus_classification_digest() -> u64 {
+    let mut digest = xxhash_rust::xxh3::Xxh3::new();
+    for (path, _) in CORPUS {
+        let inference = infer_media(Path::new(path));
+        let key = match &inference {
+            MediaInference::Episode(episode) => episode.series.identity_key(),
+            MediaInference::Movie(movie) => movie.title.identity_key(),
+            MediaInference::Unclassifiable(_) => String::new(),
+        };
+        for field in [*path, describe(&inference).as_str(), key.as_str()] {
+            digest.update(field.as_bytes());
+            digest.update(b"\0");
+        }
+    }
+    digest.digest()
+}
+
+#[test]
+fn classifier_version_is_bumped_when_the_corpus_classifications_change() {
+    let digest = corpus_classification_digest();
+    let (pinned_version, pinned_digest) = PINNED_CLASSIFICATIONS;
+    assert!(
+        (CLASSIFIER_VERSION, digest) == (pinned_version, pinned_digest),
+        "the corpus now classifies to digest {digest:#018x} at CLASSIFIER_VERSION \
+         {CLASSIFIER_VERSION}, but {pinned_digest:#018x} is pinned at version \
+         {pinned_version}.\n\
+         If any path in the corpus now classifies or keys differently, bump \
+         CLASSIFIER_VERSION (and record why in its doc comment) so stored rows \
+         are reclassified. Then update PINNED_CLASSIFICATIONS in \
+         beam-domain/src/utils/media_path_corpus.rs to \
+         ({CLASSIFIER_VERSION}, {digest:#018x}).\n\
+         Adding a corpus row moves the digest too; if the new row only \
+         records what the classifier already did, update the digest alone."
+    );
+}
+
 #[test]
 fn season_folder_names() {
     let cases = [

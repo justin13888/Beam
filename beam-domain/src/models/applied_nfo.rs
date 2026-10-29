@@ -91,3 +91,94 @@ impl From<beam_entity::applied_nfo::Model> for AppliedNfo {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record() -> RecordAppliedNfo {
+        RecordAppliedNfo {
+            library_id: Uuid::from_u128(1),
+            path: PathBuf::from("/media/Heat (1995)/movie.nfo"),
+            size_bytes: 2_048,
+            content_hash: "3f2a".to_string(),
+            change_stamp: Some("2048:1700000000:1700000000".to_string()),
+        }
+    }
+
+    /// The row `record()` was stored as.
+    fn stored() -> AppliedNfo {
+        let RecordAppliedNfo {
+            library_id,
+            path,
+            size_bytes,
+            content_hash,
+            change_stamp,
+        } = record();
+        AppliedNfo {
+            id: Uuid::from_u128(2),
+            library_id,
+            path,
+            size_bytes,
+            content_hash,
+            change_stamp,
+            created_at: DateTime::UNIX_EPOCH,
+            updated_at: DateTime::UNIX_EPOCH,
+        }
+    }
+
+    /// An NFO is reapplied exactly when its content -- its size or its hash
+    /// -- differs from the row; its row is rewritten whenever anything it
+    /// carries differs, a new stat stamp or a move included; and what only
+    /// the store assigns decides neither.
+    #[test]
+    fn content_and_an_exact_match_are_decided_by_their_own_fields() {
+        type Change = fn(&mut AppliedNfo);
+        // (field changed, same content, exact match)
+        let cases: [(&str, Change, bool, bool); 9] = [
+            ("nothing", |_| {}, true, true),
+            ("id", |n| n.id = Uuid::from_u128(9), true, true),
+            (
+                "created_at",
+                |n| n.created_at = DateTime::UNIX_EPOCH + chrono::Duration::days(1),
+                true,
+                true,
+            ),
+            (
+                "updated_at",
+                |n| n.updated_at = DateTime::UNIX_EPOCH + chrono::Duration::days(1),
+                true,
+                true,
+            ),
+            ("change_stamp", |n| n.change_stamp = None, true, false),
+            (
+                "library_id",
+                |n| n.library_id = Uuid::from_u128(9),
+                true,
+                false,
+            ),
+            (
+                "path",
+                |n| n.path = PathBuf::from("/media/Heat (1995)/Heat.nfo"),
+                true,
+                false,
+            ),
+            ("size_bytes", |n| n.size_bytes += 1, false, false),
+            (
+                "content_hash",
+                |n| n.content_hash = "3f2b".to_string(),
+                false,
+                false,
+            ),
+        ];
+        for (field, change, same_content, matches) in cases {
+            let mut row = stored();
+            change(&mut row);
+            assert_eq!(
+                (record().same_content(&row), record().matches(&row)),
+                (same_content, matches),
+                "{field} changed"
+            );
+        }
+    }
+}

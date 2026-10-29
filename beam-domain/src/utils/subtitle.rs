@@ -520,13 +520,14 @@ mod tests {
         );
     }
 
-    /// The conversion is linear however many markup openers go unclosed: an
-    /// 8 MiB line of them -- the most the server converts -- takes well
-    /// under the bound even unoptimised, where scanning the rest of the line
-    /// at each opener took about half an hour.
+    /// A long line of unclosed markup openers -- the shape that once made
+    /// the conversion quadratic -- is text, escaped character for character.
+    /// Linearity itself is held structurally by
+    /// `a_closer_is_decided_by_the_first_delimiter_alone` below, not by a
+    /// wall-clock bound.
     #[test]
-    fn a_line_of_unclosed_markup_converts_in_linear_time() {
-        const LINE_BYTES: usize = 8 * 1024 * 1024;
+    fn a_line_of_unclosed_markup_is_text() {
+        const LINE_BYTES: usize = 64 * 1024;
         let shapes: &[(&str, &str, &str)] = &[
             ("unclosed tags", "<", "&lt;"),
             ("unclosed overrides", "{\\", "{\\"),
@@ -535,10 +536,7 @@ mod tests {
         for (name, unit, escaped) in shapes {
             let line = unit.repeat(LINE_BYTES / unit.len());
             let srt = format!("1\n00:00:01,000 --> 00:00:02,000\n{line}\n");
-            let started = std::time::Instant::now();
             let converted = srt_to_webvtt(srt.as_bytes());
-            let took = started.elapsed();
-            assert!(took < std::time::Duration::from_secs(5), "{name}: {took:?}");
             assert_eq!(converted.cues, 1, "{name}");
             let expected_text = escaped.repeat(LINE_BYTES / unit.len());
             assert!(
@@ -592,6 +590,21 @@ mod tests {
         for (name, input, expected) in cases {
             assert_eq!(normalize_webvtt(input), *expected, "{name}");
         }
+    }
+
+    /// Characterises a gap in idempotence, not a goal: text decoded to
+    /// many U+0000 characters -- here UTF-16 with a byte-order mark -- is
+    /// written as UTF-8 with NUL bytes beside ASCII ones, which a second pass
+    /// reads as unmarked UTF-16. No real subtitle carries NULs, so the
+    /// idempotence property below excludes them; this pins today's outcome
+    /// so a fix shows up as a deliberate change here.
+    #[test]
+    fn text_full_of_nul_characters_reads_as_utf16_when_normalised_again() {
+        let mut input = vec![0xFF, 0xFE];
+        input.extend("\0a".repeat(50).encode_utf16().flat_map(u16::to_le_bytes));
+        let once = normalize_webvtt(&input);
+        assert_eq!(once, format!("WEBVTT\n\n{}\n", "\0a".repeat(50)));
+        assert_ne!(normalize_webvtt(once.as_bytes()), once);
     }
 
     #[test]
@@ -700,6 +713,48 @@ mod tests {
             let line = parts.concat();
             let escaped = line.replace('&', "&amp;").replace('<', "&lt;");
             prop_assert_eq!(cue_text(&line), escaped);
+        }
+
+        /// What keeps `cue_text` linear: whether an opener is closed is
+        /// decided by the first `open` or `close` byte after it, and nothing
+        /// past that is read. So however the rest of the line goes on, the
+        /// answer is the same -- the bytes between two openers are scanned
+        /// once, never once per opener.
+        #[test]
+        fn a_closer_is_decided_by_the_first_delimiter_alone(
+            delimiters in proptest::sample::select(vec![(b'<', b'>'), (b'{', b'}')]),
+            head in "[^<>{}]{0,16}",
+            closes in any::<bool>(),
+            tail_a in ".{0,16}",
+            tail_b in ".{0,16}",
+        ) {
+            let (open, close) = delimiters;
+            let first = char::from(if closes { close } else { open });
+            let line = |tail: &str| format!("{}{head}{first}{tail}", char::from(open));
+            let decided = closer(&line(&tail_a), open, close);
+            prop_assert_eq!(decided, closer(&line(&tail_b), open, close));
+            prop_assert_eq!(decided, closes.then_some(1 + head.len()));
+        }
+
+        /// Normalising is idempotent: a file already in the form
+        /// `normalize_webvtt` writes is served unchanged.
+        #[test]
+        fn normalising_webvtt_twice_changes_nothing(
+            lines in prop::collection::vec(line(), 0..16),
+            header in proptest::option::of(proptest::sample::select(vec![
+                "WEBVTT", "WEBVTT - comment", "WEBVTT\tx", "WEBVTTX", "\u{feff}WEBVTT",
+            ])),
+            raw in prop::collection::vec(1_u8.., 0..64),
+        ) {
+            // NUL is excluded: see
+            // `text_full_of_nul_characters_reads_as_utf16_when_normalised_again`.
+            let lines = lines.into_iter().map(|line| line.replace('\0', ""));
+            let mut text = header.map(str::to_owned).into_iter().collect::<Vec<_>>();
+            text.extend(lines);
+            for input in [text.join("\n").into_bytes(), raw] {
+                let once = normalize_webvtt(&input);
+                prop_assert_eq!(normalize_webvtt(once.as_bytes()), once.clone(), "{:?}", input);
+            }
         }
 
         /// A file missing the blank lines between its cues converts to the

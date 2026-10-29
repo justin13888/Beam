@@ -73,6 +73,7 @@ pub async fn connection() -> std::sync::Arc<DatabaseConnection> {
 /// database standing has every test pay the connect timeout in turn, and
 /// "you forgot to start Postgres" takes minutes to say instead of seconds.
 fn migrate_once() {
+    sweep_once();
     static MIGRATED: OnceLock<Result<(), String>> = OnceLock::new();
     let outcome = MIGRATED.get_or_init(|| {
         // A dedicated thread and runtime: the connection and its background
@@ -92,9 +93,6 @@ fn migrate_once() {
                              `docker compose -f compose.dependencies.yaml up -d`."
                         )
                     })?;
-                    drop_stale_scoped_schemas(&db)
-                        .await
-                        .map_err(|e| format!("drop scoped schemas from an earlier run: {e}"))?;
                     beam_migration::up_all_or_nothing::<beam_migration::Migrator, _>(&db, None)
                         .await
                         .map_err(|e| format!("apply migrations: {e}"))
@@ -102,6 +100,47 @@ fn migrate_once() {
         })
         .join()
         .unwrap_or_else(|_| Err("the migration thread panicked".to_string()))
+    });
+
+    if let Err(message) = outcome {
+        panic!("{message}");
+    }
+}
+
+/// Sweep the scoped schemas of earlier runs, the first time this is called
+/// in the process -- and before this process creates any of its own.
+///
+/// Both [`connection`] and [`ScopedSchema::create`] call it first. When only
+/// `connection` swept, a test that created its [`ScopedSchema`] before some
+/// other test's first `connection` call had its live schema dropped under it:
+/// its tables vanished mid-test and, with `public` next on its
+/// `search_path`, its statements silently ran against the shared tables.
+fn sweep_once() {
+    static SWEPT: OnceLock<Result<(), String>> = OnceLock::new();
+    let outcome = SWEPT.get_or_init(|| {
+        // A dedicated thread and runtime, as for `migrate_once`.
+        std::thread::spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| format!("build the sweep runtime: {e}"))?
+                .block_on(async {
+                    let mut options = ConnectOptions::new(database_url());
+                    options.connect_timeout(CONNECT_TIMEOUT).sqlx_logging(false);
+                    let db = Database::connect(options).await.map_err(|e| {
+                        format!(
+                            "could not reach the pg-integration database at \
+                             {DATABASE_URL_ENV}: {e}. Start it with \
+                             `docker compose -f compose.dependencies.yaml up -d`."
+                        )
+                    })?;
+                    drop_stale_scoped_schemas(&db)
+                        .await
+                        .map_err(|e| format!("drop scoped schemas from an earlier run: {e}"))
+                })
+        })
+        .join()
+        .unwrap_or_else(|_| Err("the sweep thread panicked".to_string()))
     });
 
     if let Err(message) = outcome {
@@ -155,6 +194,7 @@ impl ScopedSchema {
     pub async fn create(label: &str) -> Result<Self, DbErr> {
         use sea_orm::{ConnectionTrait, Statement};
 
+        sweep_once();
         let name = format!("beam_test_{label}_{}", uuid::Uuid::new_v4().simple());
         let mut admin_options = ConnectOptions::new(database_url());
         admin_options

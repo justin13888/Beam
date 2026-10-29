@@ -354,6 +354,40 @@ pub mod fixture {
         async fn new_file(&self) -> Uuid;
     }
 
+    /// Everything the [`crate::admin_log_repository_contract`] suite needs:
+    /// a log of its own -- listing and counting are global -- and the clock
+    /// it stamps entries from, so entries are ordered without sleeping.
+    pub trait AdminLogFixture: Send + Sync {
+        /// The repository under contract, empty when the fixture is made.
+        fn repo(&self) -> &dyn crate::repositories::AdminLogRepository;
+
+        /// The clock the repository stamps `created_at` from.
+        fn clock(&self) -> &TestClock;
+    }
+
+    /// Everything the [`crate::library_repository_contract`] suite needs: a
+    /// store of its own -- listing and counting are global -- and the file
+    /// store whose rows a library's file count is read from.
+    pub trait LibraryRepositoryFixture: Send + Sync {
+        /// The repository under contract, empty when the fixture is made.
+        fn repo(&self) -> &dyn crate::repositories::LibraryRepository;
+
+        /// The file store sharing the repository's backing store.
+        fn files(&self) -> &dyn crate::repositories::FileRepository;
+    }
+
+    /// Everything the [`crate::media_stream_repository_contract`] suite
+    /// needs: the repository under contract and the files a stream belongs
+    /// to, which a real Postgres holds to a foreign key.
+    #[async_trait::async_trait]
+    pub trait MediaStreamFixture: Send + Sync {
+        /// The repository under contract.
+        fn repo(&self) -> &dyn crate::repositories::MediaStreamRepository;
+
+        /// A media file that exists as far as the backing store is concerned.
+        async fn new_file(&self) -> Uuid;
+    }
+
     /// The titles the list, collection, people and genre contracts apply an
     /// access policy to (issue #328): in the library `kids` a `PG` movie
     /// and a `TV-PG` show, in `grown` an `R` movie and a `TV-MA` show.
@@ -685,6 +719,654 @@ macro_rules! trickplay_repository_contract {
             assert_eq!(found, vec![ready(first, 1, 1), ready(second, 2, 2)]);
             assert!(repo.find_by_file_ids(&[]).await.unwrap().is_empty());
             assert_eq!(repo.find(without).await.unwrap(), None);
+        }
+    };
+}
+
+/// Behavioural contract for [`crate::repositories::AdminLogRepository`]
+/// (issue #349): an entry reads back as written -- every level and category
+/// included, which Postgres stores as enums -- stamped from the injected
+/// clock; the log lists newest first and pages by offset, a category lists
+/// only its own entries, and the count is of every entry.
+///
+/// `$setup` names an `async fn() -> impl AdminLogFixture` whose log starts
+/// empty.
+#[macro_export]
+macro_rules! admin_log_repository_contract {
+    ($setup:path) => {
+        use $crate::models::admin_log::{
+            AdminLog, AdminLogCategory, AdminLogLevel, CreateAdminLog,
+        };
+        use $crate::repositories::contract::fixture::AdminLogFixture;
+        use $crate::services::Clock as _;
+
+        /// Every level, listed by a match so a new one cannot be left out.
+        fn every_level() -> Vec<AdminLogLevel> {
+            let listed = |level: &AdminLogLevel| match level {
+                AdminLogLevel::Info | AdminLogLevel::Warning | AdminLogLevel::Error => true,
+            };
+            let levels = vec![
+                AdminLogLevel::Info,
+                AdminLogLevel::Warning,
+                AdminLogLevel::Error,
+            ];
+            assert!(levels.iter().all(listed));
+            levels
+        }
+
+        /// Every category, listed by a match so a new one cannot be left out.
+        fn every_category() -> Vec<AdminLogCategory> {
+            let listed = |category: &AdminLogCategory| match category {
+                AdminLogCategory::LibraryScan
+                | AdminLogCategory::System
+                | AdminLogCategory::Auth
+                | AdminLogCategory::Enrichment => true,
+            };
+            let categories = vec![
+                AdminLogCategory::LibraryScan,
+                AdminLogCategory::System,
+                AdminLogCategory::Auth,
+                AdminLogCategory::Enrichment,
+            ];
+            assert!(categories.iter().all(listed));
+            categories
+        }
+
+        fn entry(
+            level: AdminLogLevel,
+            category: AdminLogCategory,
+            message: &str,
+        ) -> CreateAdminLog {
+            CreateAdminLog {
+                level,
+                category,
+                message: message.to_string(),
+                details: None,
+            }
+        }
+
+        fn messages(logs: &[AdminLog]) -> Vec<&str> {
+            logs.iter().map(|log| log.message.as_str()).collect()
+        }
+
+        /// Write `count` entries of `category`, a second apart, named
+        /// `{prefix}{n}` from the oldest up.
+        async fn write(
+            fixture: &impl AdminLogFixture,
+            category: AdminLogCategory,
+            prefix: &str,
+            count: usize,
+        ) {
+            for n in 0..count {
+                fixture.clock().advance(::std::time::Duration::from_secs(1));
+                fixture
+                    .repo()
+                    .create(entry(
+                        AdminLogLevel::Info,
+                        category.clone(),
+                        &format!("{prefix}{n}"),
+                    ))
+                    .await
+                    .unwrap();
+            }
+        }
+
+        #[tokio::test]
+        async fn an_empty_log_lists_nothing_and_counts_none() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+
+            assert!(repo.list(10, 0).await.unwrap().is_empty());
+            assert!(
+                repo.list_by_category(AdminLogCategory::System, 10, 0)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(repo.count().await.unwrap(), 0);
+        }
+
+        #[tokio::test]
+        async fn an_entry_reads_back_as_written_stamped_from_the_clock() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let details = ::serde_json::json!({ "library": "Films", "files": 12, "ok": true });
+
+            let created = repo
+                .create(CreateAdminLog {
+                    level: AdminLogLevel::Warning,
+                    category: AdminLogCategory::LibraryScan,
+                    message: "Scan finished with warnings".to_string(),
+                    details: Some(details.clone()),
+                })
+                .await
+                .unwrap();
+
+            let listed = repo.list(10, 0).await.unwrap();
+            assert_eq!(listed.len(), 1);
+            for log in [&created, &listed[0]] {
+                let AdminLog {
+                    id,
+                    level,
+                    category,
+                    message,
+                    details: read_details,
+                    created_at,
+                } = log;
+                assert_eq!(*id, created.id);
+                assert_eq!(*level, AdminLogLevel::Warning);
+                assert_eq!(*category, AdminLogCategory::LibraryScan);
+                assert_eq!(message, "Scan finished with warnings");
+                assert_eq!(read_details.as_ref(), Some(&details));
+                assert_eq!(*created_at, fixture.clock().now());
+            }
+            assert_eq!(repo.count().await.unwrap(), 1);
+        }
+
+        #[tokio::test]
+        async fn every_level_and_category_round_trips() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let mut written = Vec::new();
+            for level in every_level() {
+                for category in every_category() {
+                    fixture.clock().advance(::std::time::Duration::from_secs(1));
+                    let message = format!("{level:?} {category:?}");
+                    repo.create(entry(level.clone(), category.clone(), &message))
+                        .await
+                        .unwrap();
+                    written.push((message, level.clone(), category));
+                }
+            }
+
+            let mut read: Vec<_> = repo
+                .list(100, 0)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|log| (log.message, log.level, log.category))
+                .collect();
+            read.reverse();
+            assert_eq!(read, written, "oldest first once reversed");
+            assert_eq!(repo.count().await.unwrap(), written.len() as u64);
+            for category in every_category() {
+                let only: Vec<_> = repo
+                    .list_by_category(category.clone(), 100, 0)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|log| log.category)
+                    .collect();
+                assert_eq!(only, vec![category; every_level().len()]);
+            }
+        }
+
+        #[tokio::test]
+        async fn the_log_lists_newest_first_and_pages_by_offset() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            write(&fixture, AdminLogCategory::System, "entry ", 5).await;
+
+            assert_eq!(
+                messages(&repo.list(2, 0).await.unwrap()),
+                ["entry 4", "entry 3"]
+            );
+            assert_eq!(
+                messages(&repo.list(2, 2).await.unwrap()),
+                ["entry 2", "entry 1"]
+            );
+            assert_eq!(messages(&repo.list(2, 4).await.unwrap()), ["entry 0"]);
+            assert!(repo.list(2, 5).await.unwrap().is_empty());
+            assert!(repo.list(0, 0).await.unwrap().is_empty());
+            assert_eq!(repo.count().await.unwrap(), 5);
+        }
+
+        #[tokio::test]
+        async fn a_category_lists_only_its_own_entries_newest_first_and_pages() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            write(&fixture, AdminLogCategory::LibraryScan, "scan ", 2).await;
+            write(&fixture, AdminLogCategory::Auth, "auth ", 1).await;
+            write(&fixture, AdminLogCategory::LibraryScan, "rescan ", 2).await;
+
+            assert_eq!(
+                messages(
+                    &repo
+                        .list_by_category(AdminLogCategory::LibraryScan, 10, 0)
+                        .await
+                        .unwrap()
+                ),
+                ["rescan 1", "rescan 0", "scan 1", "scan 0"]
+            );
+            assert_eq!(
+                messages(
+                    &repo
+                        .list_by_category(AdminLogCategory::LibraryScan, 2, 1)
+                        .await
+                        .unwrap()
+                ),
+                ["rescan 0", "scan 1"]
+            );
+            assert_eq!(
+                messages(
+                    &repo
+                        .list_by_category(AdminLogCategory::Auth, 10, 0)
+                        .await
+                        .unwrap()
+                ),
+                ["auth 0"]
+            );
+            assert!(
+                repo.list_by_category(AdminLogCategory::Enrichment, 10, 0)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(repo.count().await.unwrap(), 5, "the count is of every category");
+        }
+    };
+}
+
+/// Behavioural contract for [`crate::repositories::LibraryRepository`]
+/// (issue #349): a library reads back as created, by id and in the list; a
+/// scan's progress writes only the fields it is given, and for a library that
+/// does not exist -- deleted while its scan ran -- it is a no-op, as the user
+/// store's `set_admin` is for an unknown id;
+/// a library's file count is of its own present files, read from the file
+/// store; and a deleted library is gone, deleting an unknown one changing
+/// nothing.
+///
+/// `$setup` names an `async fn() -> impl LibraryRepositoryFixture` whose
+/// store starts empty.
+#[macro_export]
+macro_rules! library_repository_contract {
+    ($setup:path) => {
+        use ::chrono::{DateTime, TimeZone, Utc};
+        use ::std::path::PathBuf;
+        use ::uuid::Uuid;
+        use $crate::models::library::{CreateLibrary, Library};
+        use $crate::repositories::contract::fixture::LibraryRepositoryFixture;
+        use $crate::test_utils::{create_library, create_media_file};
+
+        /// A whole second, so no store rounds it.
+        fn at(secs: i64) -> DateTime<Utc> {
+            Utc.timestamp_opt(1_900_000_000 + secs, 0).unwrap()
+        }
+
+        async fn library(fixture: &impl LibraryRepositoryFixture, name: &str) -> Library {
+            fixture.repo().create(create_library(name)).await.unwrap()
+        }
+
+        /// A present file in `library_id`, returning its id.
+        async fn file_in(fixture: &impl LibraryRepositoryFixture, library_id: Uuid) -> Uuid {
+            fixture
+                .files()
+                .create(create_media_file(
+                    library_id,
+                    format!("/media/{library_id}/{}.mkv", Uuid::new_v4()),
+                ))
+                .await
+                .unwrap()
+                .id
+        }
+
+        fn scan(library: &Library) -> (Option<DateTime<Utc>>, Option<DateTime<Utc>>, Option<i32>) {
+            (
+                library.last_scan_started_at,
+                library.last_scan_finished_at,
+                library.last_scan_file_count,
+            )
+        }
+
+        #[tokio::test]
+        async fn a_library_reads_back_as_created_by_id_and_in_the_list() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            assert!(repo.find_all().await.unwrap().is_empty());
+            assert_eq!(repo.count().await.unwrap(), 0);
+
+            let created = repo
+                .create(CreateLibrary {
+                    name: "Films".to_string(),
+                    root_path: PathBuf::from("/media/films"),
+                    description: Some("Everything on the NAS".to_string()),
+                })
+                .await
+                .unwrap();
+            let other = library(&fixture, "Series").await;
+
+            let found = repo.find_by_id(created.id).await.unwrap().unwrap();
+            for library in [&created, &found] {
+                let Library {
+                    id,
+                    name,
+                    root_path,
+                    description,
+                    created_at: _,
+                    updated_at: _,
+                    last_scan_started_at,
+                    last_scan_finished_at,
+                    last_scan_file_count,
+                } = library;
+                assert_eq!(*id, created.id);
+                assert_eq!(name, "Films");
+                assert_eq!(root_path, &PathBuf::from("/media/films"));
+                assert_eq!(description.as_deref(), Some("Everything on the NAS"));
+                assert_eq!(
+                    (
+                        *last_scan_started_at,
+                        *last_scan_finished_at,
+                        *last_scan_file_count
+                    ),
+                    (None, None, None),
+                    "a new library has never been scanned"
+                );
+            }
+            assert_eq!(
+                (found.created_at, found.updated_at),
+                (created.created_at, created.updated_at)
+            );
+            assert_ne!(created.id, other.id);
+
+            let mut all: Vec<Uuid> = repo
+                .find_all()
+                .await
+                .unwrap()
+                .iter()
+                .map(|l| l.id)
+                .collect();
+            all.sort();
+            let mut expected = vec![created.id, other.id];
+            expected.sort();
+            assert_eq!(all, expected);
+            assert_eq!(repo.count().await.unwrap(), 2);
+            assert!(repo.find_by_id(Uuid::new_v4()).await.unwrap().is_none());
+        }
+
+        #[tokio::test]
+        async fn scan_progress_writes_only_the_fields_it_is_given() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let films = library(&fixture, "films").await;
+            let other = library(&fixture, "other").await;
+
+            repo.update_scan_progress(films.id, Some(at(0)), None, None)
+                .await
+                .unwrap();
+            let read = repo.find_by_id(films.id).await.unwrap().unwrap();
+            assert_eq!(scan(&read), (Some(at(0)), None, None));
+
+            repo.update_scan_progress(films.id, None, Some(at(30)), Some(12))
+                .await
+                .unwrap();
+            let read = repo.find_by_id(films.id).await.unwrap().unwrap();
+            assert_eq!(scan(&read), (Some(at(0)), Some(at(30)), Some(12)));
+
+            // Nothing given writes nothing.
+            repo.update_scan_progress(films.id, None, None, None)
+                .await
+                .unwrap();
+            let read = repo.find_by_id(films.id).await.unwrap().unwrap();
+            assert_eq!(scan(&read), (Some(at(0)), Some(at(30)), Some(12)));
+
+            // The next scan starts over the last one's record.
+            repo.update_scan_progress(films.id, Some(at(60)), None, None)
+                .await
+                .unwrap();
+            let read = repo.find_by_id(films.id).await.unwrap().unwrap();
+            assert_eq!(scan(&read), (Some(at(60)), Some(at(30)), Some(12)));
+
+            let untouched = repo.find_by_id(other.id).await.unwrap().unwrap();
+            assert_eq!(
+                scan(&untouched),
+                (None, None, None),
+                "libraries are kept apart"
+            );
+        }
+
+        #[tokio::test]
+        async fn scan_progress_for_a_library_that_does_not_exist_is_a_no_op() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let films = library(&fixture, "films").await;
+            let missing = Uuid::new_v4();
+
+            repo.update_scan_progress(missing, Some(at(0)), Some(at(5)), Some(3))
+                .await
+                .unwrap();
+            repo.update_scan_progress(missing, None, None, None)
+                .await
+                .unwrap();
+
+            assert!(repo.find_by_id(missing).await.unwrap().is_none());
+            assert_eq!(repo.count().await.unwrap(), 1, "no library was made");
+            let read = repo.find_by_id(films.id).await.unwrap().unwrap();
+            assert_eq!(scan(&read), (None, None, None));
+        }
+
+        #[tokio::test]
+        async fn a_library_counts_only_its_own_present_files() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let films = library(&fixture, "films").await;
+            let series = library(&fixture, "series").await;
+            let empty = library(&fixture, "empty").await;
+            for _ in 0..3 {
+                file_in(&fixture, films.id).await;
+            }
+            let gone = file_in(&fixture, films.id).await;
+            file_in(&fixture, series.id).await;
+            fixture
+                .files()
+                .mark_missing(vec![gone], at(0))
+                .await
+                .unwrap();
+
+            assert_eq!(
+                repo.count_files(films.id).await.unwrap(),
+                3,
+                "a missing file is not counted"
+            );
+            assert_eq!(repo.count_files(series.id).await.unwrap(), 1);
+            assert_eq!(repo.count_files(empty.id).await.unwrap(), 0);
+            assert_eq!(repo.count_files(Uuid::new_v4()).await.unwrap(), 0);
+        }
+
+        #[tokio::test]
+        async fn a_deleted_library_is_gone_and_deleting_an_unknown_one_changes_nothing() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let films = library(&fixture, "films").await;
+            let series = library(&fixture, "series").await;
+
+            repo.delete(films.id).await.unwrap();
+            assert!(repo.find_by_id(films.id).await.unwrap().is_none());
+            assert_eq!(repo.count().await.unwrap(), 1);
+
+            repo.delete(films.id).await.unwrap();
+            repo.delete(Uuid::new_v4()).await.unwrap();
+            let all: Vec<Uuid> = repo
+                .find_all()
+                .await
+                .unwrap()
+                .iter()
+                .map(|l| l.id)
+                .collect();
+            assert_eq!(all, vec![series.id]);
+        }
+    };
+}
+
+/// Behavioural contract for [`crate::repositories::MediaStreamRepository`]
+/// (issue #349): a file's streams read back in index order with every field
+/// of their metadata, whatever order they were inserted in; an insert reports
+/// how many it wrote; files are kept apart; and deleting a file's streams
+/// takes exactly those, reporting how many.
+///
+/// `$setup` names an `async fn() -> impl MediaStreamFixture`.
+#[macro_export]
+macro_rules! media_stream_repository_contract {
+    ($setup:path) => {
+        use ::uuid::Uuid;
+        use $crate::models::stream::{
+            AudioStreamMetadata, CreateMediaStream, MediaStream, StreamMetadata, StreamType,
+            SubtitleStreamMetadata, VideoStreamMetadata,
+        };
+        use $crate::repositories::contract::fixture::MediaStreamFixture;
+
+        fn video(file_id: Uuid, index: u32) -> CreateMediaStream {
+            CreateMediaStream {
+                file_id,
+                index,
+                stream_type: StreamType::Video,
+                codec: "hevc".to_string(),
+                metadata: StreamMetadata::Video(VideoStreamMetadata {
+                    width: 3840,
+                    height: 2160,
+                    frame_rate: Some(23.976),
+                    bit_rate: Some(42_000_000),
+                    color_space: Some("bt2020nc".to_string()),
+                    color_range: Some("tv".to_string()),
+                    hdr_format: Some("hdr10".to_string()),
+                }),
+            }
+        }
+
+        fn audio(file_id: Uuid, index: u32) -> CreateMediaStream {
+            CreateMediaStream {
+                file_id,
+                index,
+                stream_type: StreamType::Audio,
+                codec: "eac3".to_string(),
+                metadata: StreamMetadata::Audio(AudioStreamMetadata {
+                    language: Some("jpn".to_string()),
+                    title: Some("Original 5.1".to_string()),
+                    channels: 6,
+                    sample_rate: 48_000,
+                    channel_layout: Some("5.1(side)".to_string()),
+                    bit_rate: Some(640_000),
+                    is_default: true,
+                    is_forced: false,
+                }),
+            }
+        }
+
+        fn subtitle(file_id: Uuid, index: u32) -> CreateMediaStream {
+            CreateMediaStream {
+                file_id,
+                index,
+                stream_type: StreamType::Subtitle,
+                codec: "subrip".to_string(),
+                metadata: StreamMetadata::Subtitle(SubtitleStreamMetadata {
+                    language: Some("eng".to_string()),
+                    title: Some("SDH".to_string()),
+                    is_default: false,
+                    is_forced: true,
+                    is_hearing_impaired: true,
+                }),
+            }
+        }
+
+        /// Every field but the store-assigned id: the metadata types carry
+        /// no `PartialEq`, so they are compared through their full `Debug`
+        /// rendering, which names every field.
+        fn written(stream: &CreateMediaStream) -> String {
+            let CreateMediaStream {
+                file_id,
+                index,
+                stream_type,
+                codec,
+                metadata,
+            } = stream;
+            format!("{file_id} {index} {stream_type:?} {codec} {metadata:?}")
+        }
+
+        fn read(stream: &MediaStream) -> String {
+            let MediaStream {
+                id: _,
+                file_id,
+                index,
+                stream_type,
+                codec,
+                metadata,
+            } = stream;
+            format!("{file_id} {index} {stream_type:?} {codec} {metadata:?}")
+        }
+
+        #[tokio::test]
+        async fn a_files_streams_read_back_by_index_with_every_field() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let file = fixture.new_file().await;
+            let streams = vec![subtitle(file, 2), video(file, 0), audio(file, 1)];
+
+            assert_eq!(repo.insert_streams(streams).await.unwrap(), 3);
+
+            let found = repo.find_by_file_id(file).await.unwrap();
+            assert_eq!(
+                found.iter().map(read).collect::<Vec<_>>(),
+                [video(file, 0), audio(file, 1), subtitle(file, 2)]
+                    .iter()
+                    .map(written)
+                    .collect::<Vec<_>>()
+            );
+            let mut ids: Vec<Uuid> = found.iter().map(|stream| stream.id).collect();
+            ids.sort();
+            ids.dedup();
+            assert_eq!(ids.len(), 3, "every stream has an id of its own");
+        }
+
+        #[tokio::test]
+        async fn a_later_insert_adds_to_a_files_streams_and_an_empty_one_writes_none() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let file = fixture.new_file().await;
+
+            assert_eq!(repo.insert_streams(Vec::new()).await.unwrap(), 0);
+            assert!(repo.find_by_file_id(file).await.unwrap().is_empty());
+
+            repo.insert_streams(vec![audio(file, 1)]).await.unwrap();
+            repo.insert_streams(vec![video(file, 0)]).await.unwrap();
+            let indexes: Vec<u32> = repo
+                .find_by_file_id(file)
+                .await
+                .unwrap()
+                .iter()
+                .map(|stream| stream.index)
+                .collect();
+            assert_eq!(indexes, [0, 1]);
+        }
+
+        #[tokio::test]
+        async fn deleting_a_files_streams_takes_only_those() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let file = fixture.new_file().await;
+            let other = fixture.new_file().await;
+            repo.insert_streams(vec![video(file, 0), audio(file, 1), subtitle(file, 2)])
+                .await
+                .unwrap();
+            repo.insert_streams(vec![video(other, 0)]).await.unwrap();
+
+            assert_eq!(repo.delete_by_file_id(file).await.unwrap(), 3);
+            assert!(repo.find_by_file_id(file).await.unwrap().is_empty());
+            assert_eq!(
+                repo.find_by_file_id(other)
+                    .await
+                    .unwrap()
+                    .iter()
+                    .map(read)
+                    .collect::<Vec<_>>(),
+                [written(&video(other, 0))]
+            );
+            assert_eq!(repo.delete_by_file_id(file).await.unwrap(), 0);
+            assert_eq!(repo.delete_by_file_id(Uuid::new_v4()).await.unwrap(), 0);
+            assert!(
+                repo.find_by_file_id(Uuid::new_v4())
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
         }
     };
 }
@@ -1329,7 +2011,11 @@ macro_rules! watch_state_repository_contract {
             assert_eq!(rows[0].target, to);
             assert!(repo.find_for_show(alone, show).await.unwrap().is_empty());
 
-            assert!(repo.carry(kept, to).await.is_err(), "a movie is no episode");
+            assert_eq!(
+                repo.carry(kept, to).await.unwrap_err().to_string(),
+                $crate::repositories::watch_state::carry_kind_mismatch().to_string(),
+                "a movie is no episode"
+            );
             repo.carry(kept, kept).await.unwrap();
             assert_eq!(
                 state(&repo.find(alone, kept).await.unwrap().expect("unchanged")),
@@ -2905,7 +3591,14 @@ macro_rules! file_repository_contract {
                 .relink(vec![to(&heat, &free, 1, None)], vec![heat.id], at(60))
                 .await;
 
-            assert!(one_path.is_err() && one_row.is_err());
+            // Two rows onto one path is the path's unique index refusing, so
+            // its error is the store's own; a row named twice is refused by
+            // the shared constructor before anything is written.
+            assert!(one_path.is_err());
+            assert_eq!(
+                one_row.unwrap_err().to_string(),
+                $crate::repositories::file::file_named_twice(heat.id).to_string()
+            );
             assert!(at_path(&fixture, &free).await.is_none());
             assert_eq!(at_path(&fixture, &heat.path).await.map(|f| f.id), Some(heat.id));
             assert_eq!(at_path(&fixture, &ronin.path).await.map(|f| f.id), Some(ronin.id));
@@ -2923,15 +3616,20 @@ macro_rules! file_repository_contract {
                 ..heat.clone()
             };
 
-            assert!(
+            let not_found = $crate::repositories::file::file_not_found(ghost.id).to_string();
+            assert_eq!(
                 repo.relink(vec![to(&ghost, &path, 1, None)], Vec::new(), at(60))
                     .await
-                    .is_err()
+                    .unwrap_err()
+                    .to_string(),
+                not_found
             );
-            assert!(
+            assert_eq!(
                 repo.relink(Vec::new(), vec![ghost.id, heat.id], at(60))
                     .await
-                    .is_err()
+                    .unwrap_err()
+                    .to_string(),
+                not_found
             );
             assert!(at_path(&fixture, &path).await.is_none());
             let stored = at_path(&fixture, &heat.path).await.expect("left where it was");
@@ -3123,6 +3821,153 @@ macro_rules! show_repository_contract {
                 runtime: Some(Duration::from_secs(mins * 60)),
                 air_date: None,
             }
+        }
+
+        /// A season's enrichment fills the season and the episodes scanning
+        /// already made, an episode field it does not carry left as it was,
+        /// and makes no season or episode that no file stands for.
+        #[tokio::test]
+        async fn a_seasons_enrichment_fills_its_existing_episodes_and_fabricates_none() {
+            use ::chrono::NaiveDate;
+            use $crate::providers::enrichment::{EpisodeEnrichment, SeasonEnrichment};
+
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let show = repo
+                .find_or_create_by_identity(new_show("season enrichment"))
+                .await
+                .unwrap();
+            let one = repo.find_or_create_season(show.id, 1).await.unwrap();
+            let two = repo.find_or_create_season(show.id, 2).await.unwrap();
+            let pilot = repo
+                .find_or_create_episode(episode(one.id, 1, "Pilot", 30))
+                .await
+                .unwrap();
+            let second = repo
+                .find_or_create_episode(episode(one.id, 2, "Two", 30))
+                .await
+                .unwrap();
+            let elsewhere = repo
+                .find_or_create_episode(episode(two.id, 1, "S2E1", 30))
+                .await
+                .unwrap();
+            let aired = NaiveDate::from_ymd_opt(2005, 3, 24).unwrap();
+
+            let updated = repo
+                .apply_season_enrichment(
+                    show.id,
+                    &SeasonEnrichment {
+                        season_number: 1,
+                        poster_url: Some("https://img.example/s1.jpg".to_string()),
+                        air_date: Some(aired),
+                        episodes: vec![
+                            EpisodeEnrichment {
+                                episode_number: 1,
+                                absolute_number: Some(1),
+                                title: Some("Pilot (Diversity Day)".to_string()),
+                                description: Some(
+                                    "The office meets a documentary crew.".to_string(),
+                                ),
+                                air_date: Some(aired),
+                                runtime_mins: Some(22),
+                                thumbnail_url: Some("https://img.example/e1.jpg".to_string()),
+                            },
+                            // Carries nothing, so changes nothing -- but it
+                            // still names an episode that exists.
+                            EpisodeEnrichment {
+                                episode_number: 2,
+                                ..EpisodeEnrichment::default()
+                            },
+                            // No file stands for it: skipped, not made.
+                            EpisodeEnrichment {
+                                episode_number: 9,
+                                title: Some("Fabricated".to_string()),
+                                ..EpisodeEnrichment::default()
+                            },
+                        ],
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(updated, 2, "the two episodes that exist");
+
+            let season = repo.find_season_by_id(one.id).await.unwrap().unwrap();
+            assert_eq!(
+                season.poster_url.as_deref(),
+                Some("https://img.example/s1.jpg")
+            );
+            assert_eq!(season.first_aired, Some(aired));
+
+            let read = repo.find_episode_by_id(pilot.id).await.unwrap().unwrap();
+            assert_eq!(read.title, "Pilot (Diversity Day)");
+            assert_eq!(
+                read.description.as_deref(),
+                Some("The office meets a documentary crew.")
+            );
+            assert_eq!(read.air_date, Some(aired));
+            assert_eq!(read.runtime, Some(Duration::from_secs(22 * 60)));
+            assert_eq!(
+                read.thumbnail_url.as_deref(),
+                Some("https://img.example/e1.jpg")
+            );
+
+            let read = repo.find_episode_by_id(second.id).await.unwrap().unwrap();
+            assert_eq!(
+                (
+                    read.title.as_str(),
+                    read.description,
+                    read.air_date,
+                    read.runtime,
+                    read.thumbnail_url
+                ),
+                ("Two", None, None, Some(Duration::from_secs(30 * 60)), None),
+                "a field the enrichment does not carry is left as it was"
+            );
+
+            let mut numbers: Vec<u32> = repo
+                .find_episodes_by_season_id(one.id)
+                .await
+                .unwrap()
+                .iter()
+                .map(|e| e.episode_number)
+                .collect();
+            numbers.sort_unstable();
+            assert_eq!(numbers, [1, 2], "no episode 9 was made");
+            let untouched = repo
+                .find_episode_by_id(elsewhere.id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(untouched.title, "S2E1");
+            let other_season = repo.find_season_by_id(two.id).await.unwrap().unwrap();
+            assert_eq!(
+                (other_season.poster_url, other_season.first_aired),
+                (None, None)
+            );
+
+            // A season no file stands for is neither filled nor made, and nor
+            // is anything of a show that does not exist.
+            let missing_season = SeasonEnrichment {
+                season_number: 7,
+                poster_url: Some("https://img.example/s7.jpg".to_string()),
+                ..SeasonEnrichment::default()
+            };
+            assert_eq!(
+                repo.apply_season_enrichment(show.id, &missing_season)
+                    .await
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                repo.find_seasons_by_show_id(show.id).await.unwrap().len(),
+                2
+            );
+            assert_eq!(
+                repo.apply_season_enrichment(Uuid::new_v4(), &missing_season)
+                    .await
+                    .unwrap(),
+                0
+            );
         }
 
         /// Next-up walks the outline (issue #188): every episode of the show
@@ -4470,6 +5315,63 @@ macro_rules! movie_repository_contract {
             assert_eq!(
                 repo.find_entries_by_movie_id(movie.id).await.unwrap().len(),
                 3
+            );
+        }
+
+        /// The reverse lookup continue-watching resolves a file's entry by:
+        /// the entry reads back whole, and an id no entry has is `None`.
+        #[tokio::test]
+        async fn an_entry_is_found_by_its_id_whole_and_only_by_its_id() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let movie = repo
+                .find_or_create_by_identity(parsed("Entries", Some(2003)))
+                .await
+                .unwrap();
+            let other = repo
+                .find_or_create_by_identity(parsed("Other entries", Some(2004)))
+                .await
+                .unwrap();
+            let library = fixture.new_library().await;
+            let cut = repo
+                .find_or_create_entry(CreateMovieEntry {
+                    library_id: library,
+                    movie_id: movie.id,
+                    edition: Some("Extended".to_string()),
+                })
+                .await
+                .unwrap();
+            let theirs = repo
+                .find_or_create_entry(CreateMovieEntry {
+                    library_id: library,
+                    movie_id: other.id,
+                    edition: None,
+                })
+                .await
+                .unwrap();
+
+            let found = repo.find_entry_by_id(cut.id).await.unwrap().unwrap();
+            assert_eq!(
+                (
+                    found.id,
+                    found.library_id,
+                    found.movie_id,
+                    found.edition.as_deref(),
+                    found.created_at
+                ),
+                (cut.id, library, movie.id, Some("Extended"), cut.created_at)
+            );
+            let found = repo.find_entry_by_id(theirs.id).await.unwrap().unwrap();
+            assert_eq!((found.movie_id, found.edition), (other.id, None));
+            assert!(
+                repo.find_entry_by_id(movie.id).await.unwrap().is_none(),
+                "a movie's id is no entry's"
+            );
+            assert!(
+                repo.find_entry_by_id(Uuid::new_v4())
+                    .await
+                    .unwrap()
+                    .is_none()
             );
         }
 
@@ -6423,6 +7325,31 @@ macro_rules! sidecar_subtitle_repository_contract {
             }
         }
 
+        /// `row` holds every field `upsert` carries, each asserted on its own
+        /// so a failure names the field.
+        fn assert_records(
+            upsert: &UpsertSidecarSubtitle,
+            row: &$crate::models::sidecar::SidecarSubtitle,
+        ) {
+            let $crate::models::sidecar::SidecarSubtitle {
+                id: _,
+                file_id,
+                library_id,
+                path,
+                info,
+                size_bytes,
+                mtime,
+                created_at: _,
+                updated_at: _,
+            } = row;
+            assert_eq!(*file_id, upsert.file_id, "file_id");
+            assert_eq!(*library_id, upsert.library_id, "library_id");
+            assert_eq!(*path, upsert.path, "path");
+            assert_eq!(*info, upsert.info, "info");
+            assert_eq!(*size_bytes, upsert.size_bytes, "size_bytes");
+            assert_eq!(*mtime, upsert.mtime, "mtime");
+        }
+
         #[tokio::test]
         async fn an_upsert_inserts_once_then_updates_the_row_at_its_path_in_place() {
             let fixture = $setup().await;
@@ -6434,7 +7361,7 @@ macro_rules! sidecar_subtitle_repository_contract {
             let first = subtitle(library, video, &dir, "Movie.en.srt");
 
             let inserted = repo.upsert_by_path(first.clone()).await.unwrap();
-            assert!(first.matches(&inserted), "{inserted:?}");
+            assert_records(&first, &inserted);
             assert_eq!(
                 repo.find_by_path(&first.path).await.unwrap().map(|r| r.id),
                 Some(inserted.id)
@@ -6457,9 +7384,9 @@ macro_rules! sidecar_subtitle_repository_contract {
             let updated = repo.upsert_by_path(changed.clone()).await.unwrap();
             assert_eq!(updated.id, inserted.id, "one row per path, kept in place");
             assert_eq!(updated.created_at, inserted.created_at);
-            assert!(changed.matches(&updated), "{updated:?}");
+            assert_records(&changed, &updated);
             let stored = repo.find_by_path(&first.path).await.unwrap().unwrap();
-            assert!(changed.matches(&stored), "{stored:?}");
+            assert_records(&changed, &stored);
             assert!(repo.find_by_file_id(video).await.unwrap().is_empty());
             assert_eq!(repo.find_by_file_id(other_video).await.unwrap().len(), 1);
         }
@@ -6598,6 +7525,26 @@ macro_rules! applied_nfo_repository_contract {
             }
         }
 
+        /// `row` holds every field `record` carries, each asserted on its own
+        /// so a failure names the field.
+        fn assert_records(record: &RecordAppliedNfo, row: &AppliedNfo) {
+            let AppliedNfo {
+                id: _,
+                library_id,
+                path,
+                size_bytes,
+                content_hash,
+                change_stamp,
+                created_at: _,
+                updated_at: _,
+            } = row;
+            assert_eq!(*library_id, record.library_id, "library_id");
+            assert_eq!(*path, record.path, "path");
+            assert_eq!(*size_bytes, record.size_bytes, "size_bytes");
+            assert_eq!(*content_hash, record.content_hash, "content_hash");
+            assert_eq!(*change_stamp, record.change_stamp, "change_stamp");
+        }
+
         #[tokio::test]
         async fn a_record_inserts_once_then_updates_the_row_at_its_path_in_place() {
             let fixture = $setup().await;
@@ -6607,7 +7554,7 @@ macro_rules! applied_nfo_repository_contract {
             let first = nfo(library, &dir, "movie.nfo");
 
             let inserted = repo.record_by_path(first.clone()).await.unwrap();
-            assert!(first.matches(&inserted), "{inserted:?}");
+            assert_records(&first, &inserted);
             assert_eq!(
                 repo.find_by_path(&first.path).await.unwrap().map(|r| r.id),
                 Some(inserted.id)
@@ -6619,13 +7566,12 @@ macro_rules! applied_nfo_repository_contract {
                 change_stamp: None,
                 ..first.clone()
             };
-            assert!(!edited.same_content(&inserted));
             let updated = repo.record_by_path(edited.clone()).await.unwrap();
             assert_eq!(updated.id, inserted.id, "one row per path, kept in place");
             assert_eq!(updated.created_at, inserted.created_at);
+            assert_records(&edited, &updated);
             let stored = repo.find_by_path(&first.path).await.unwrap().unwrap();
-            assert!(edited.matches(&stored), "{stored:?}");
-            assert!(!first.same_content(&stored), "the edit is what is recorded");
+            assert_records(&edited, &stored);
         }
 
         #[tokio::test]
@@ -7652,21 +8598,24 @@ macro_rules! catalog_repository_contract {
         #[tokio::test]
         async fn a_position_keyed_for_another_sort_is_refused() {
             let fixture = $setup().await;
-            let result = fixture
-                .repo()
-                .browse(&CatalogQuery {
-                    filters: CatalogFilters::default(),
-                    access: $crate::models::access::AccessPolicy::unrestricted(),
-                    sort: by_title(),
-                    seek: Seek::Forward(Some(CatalogPosition {
-                        kind: TitleKind::Movie,
-                        id: Uuid::new_v4(),
-                        key: SortKey::Year(Some(2001)),
-                    })),
-                    limit: NonZeroU32::MIN,
-                })
-                .await;
-            assert!(result.is_err());
+            let query = CatalogQuery {
+                filters: CatalogFilters::default(),
+                access: $crate::models::access::AccessPolicy::unrestricted(),
+                sort: by_title(),
+                seek: Seek::Forward(Some(CatalogPosition {
+                    kind: TitleKind::Movie,
+                    id: Uuid::new_v4(),
+                    key: SortKey::Year(Some(2001)),
+                })),
+                limit: NonZeroU32::MIN,
+            };
+            let refused = fixture.repo().browse(&query).await.unwrap_err();
+            assert_eq!(
+                refused.to_string(),
+                $crate::repositories::catalog::mismatched_position(&query)
+                    .expect("a year position does not seek a title sort")
+                    .to_string()
+            );
         }
 
         /// The titles `relevance_ranks_the_closest_title_first` searches,
@@ -7760,17 +8709,20 @@ macro_rules! catalog_repository_contract {
         async fn relevance_without_a_query_is_refused() {
             let fixture = $setup().await;
             seed_matches(&fixture).await;
-            let result = fixture
-                .repo()
-                .browse(&CatalogQuery {
-                    filters: CatalogFilters::default(),
-                    access: $crate::models::access::AccessPolicy::unrestricted(),
-                    sort: sorted(CatalogSortField::Relevance, SortDirection::Asc),
-                    seek: Seek::Forward(None),
-                    limit: NonZeroU32::MIN,
-                })
-                .await;
-            assert!(result.is_err());
+            let query = CatalogQuery {
+                filters: CatalogFilters::default(),
+                access: $crate::models::access::AccessPolicy::unrestricted(),
+                sort: sorted(CatalogSortField::Relevance, SortDirection::Asc),
+                seek: Seek::Forward(None),
+                limit: NonZeroU32::MIN,
+            };
+            let refused = fixture.repo().browse(&query).await.unwrap_err();
+            assert_eq!(
+                refused.to_string(),
+                $crate::repositories::catalog::unranked_relevance(&query)
+                    .expect("relevance with no query is unranked")
+                    .to_string()
+            );
         }
     };
 }
@@ -8723,6 +9675,49 @@ macro_rules! enrichment_state_repository_contract {
         }
 
         #[tokio::test]
+        async fn count_by_status_counts_rows_per_status() {
+            use $crate::models::enrichment::EnrichmentStatusCounts;
+
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let empty = repo.count_by_status().await.unwrap();
+            assert_eq!(
+                (empty.pending, empty.enriched, empty.unmatched, empty.failed),
+                (0, 0, 0, 0)
+            );
+
+            // Distinct counts per status, so a column read from the wrong
+            // status cannot pass: one pending, two enriched, three unmatched,
+            // four failed.
+            let mut rows = Vec::new();
+            for _ in 0..10 {
+                let movie = new_movie(&fixture).await;
+                rows.push(queued(&fixture, movie).await);
+            }
+            for id in &rows[1..3] {
+                repo.mark_enriched(*id, "tmdb:1", 0.9, at(0)).await.unwrap();
+            }
+            for id in &rows[3..6] {
+                repo.mark_unmatched(*id, "no match", at(0)).await.unwrap();
+            }
+            for id in &rows[6..10] {
+                repo.mark_failed(*id, "boom", at(0)).await.unwrap();
+            }
+            // A retry stays pending: it is not a status of its own.
+            repo.mark_retrying(rows[0], "transient", 1, at(60))
+                .await
+                .unwrap();
+
+            let EnrichmentStatusCounts {
+                pending,
+                enriched,
+                unmatched,
+                failed,
+            } = repo.count_by_status().await.unwrap();
+            assert_eq!((pending, enriched, unmatched, failed), (1, 2, 3, 4));
+        }
+
+        #[tokio::test]
         async fn the_list_filters_by_status_and_kind_newest_change_first() {
             let fixture = $setup().await;
             let repo = fixture.repo();
@@ -9171,7 +10166,10 @@ macro_rules! user_list_repository_contract {
             let series = TitleRef::Show(fixture.new_show().await);
             repo.add(user, UserList::Watchlist, movie).await.unwrap();
 
-            assert!(repo.carry(movie, series).await.is_err());
+            assert_eq!(
+                repo.carry(movie, series).await.unwrap_err().to_string(),
+                $crate::repositories::user_list::carry_kind_mismatch().to_string()
+            );
             repo.carry(movie, movie).await.unwrap();
             assert_eq!(
                 repo.lists_of(user, movie).await.unwrap(),

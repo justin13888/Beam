@@ -17,6 +17,8 @@
 
 #[path = "pg_integration/access_policy.rs"]
 mod access_policy;
+#[path = "pg_integration/admin_log.rs"]
+mod admin_log;
 #[path = "pg_integration/applied_nfo.rs"]
 mod applied_nfo;
 #[path = "pg_integration/catalog_repository.rs"]
@@ -27,12 +29,16 @@ mod chapters_trickplay;
 mod collection_repository;
 #[path = "pg_integration/enrichment_state.rs"]
 mod enrichment_state;
+#[path = "pg_integration/entity.rs"]
+mod entity;
 #[path = "pg_integration/file_repository.rs"]
 mod file_repository;
 #[path = "pg_integration/genre_repository.rs"]
 mod genre_repository;
 #[path = "pg_integration/language_preferences.rs"]
 mod language_preferences;
+#[path = "pg_integration/library.rs"]
+mod library;
 #[path = "pg_integration/library_shape.rs"]
 mod library_shape;
 #[path = "pg_integration/movie_repository.rs"]
@@ -47,6 +53,8 @@ mod schema;
 mod show_repository;
 #[path = "pg_integration/sidecar_subtitle.rs"]
 mod sidecar_subtitle;
+#[path = "pg_integration/stream.rs"]
+mod stream;
 #[path = "pg_integration/user_list.rs"]
 mod user_list;
 #[path = "pg_integration/watch_state.rs"]
