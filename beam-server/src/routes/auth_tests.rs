@@ -14,6 +14,7 @@
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::sync::Arc;
 
     use beam_auth::utils::models::User;
@@ -320,6 +321,124 @@ mod tests {
         let (state_cookie, location) = do_login(&harness, None).await;
         assert!(!state_cookie.is_empty());
         assert!(location.starts_with("https://fake-idp.test/"));
+    }
+
+    /// The attributes of the live `name` cookie the response set, lowercased
+    /// and without the `name=value` pair, so the set is comparable whatever
+    /// order they are rendered in.
+    fn cookie_attributes(response: &TestResponse, name: &str) -> BTreeSet<String> {
+        let field = response
+            .headers("set-cookie")
+            .into_iter()
+            .find(|field| field.starts_with(&format!("{name}=")))
+            .unwrap_or_else(|| panic!("{name} should be set"));
+        field
+            .split(';')
+            .skip(1)
+            .map(|attribute| attribute.trim().to_ascii_lowercase())
+            .collect()
+    }
+
+    /// The cookie attributes are the session's security boundary: without
+    /// `HttpOnly` a script can read the session, without `SameSite=Lax` a
+    /// cross-site form can ride it, and without `Secure` an HTTPS deployment
+    /// leaks it over plain HTTP. The state cookie is scoped to `/v1/auth` and
+    /// lives only as long as the pending attempt; the session cookie lives as
+    /// long as the session's absolute lifetime.
+    #[tokio::test]
+    async fn the_session_and_state_cookies_are_http_only_lax_scoped_and_secure_when_configured() {
+        for secure in [false, true] {
+            let config = OidcRuntimeConfig {
+                cookie_secure: secure,
+                ..test_config()
+            };
+            let session_max_age = config.absolute_ttl_secs();
+            let harness = make_harness_full(
+                FakeOidcClient::with_identity(identity("user@example.com", true)),
+                Arc::new(InMemoryUserRepository::default()),
+                config,
+            );
+
+            let expected = |path: &str, max_age: u64| {
+                let mut attributes = BTreeSet::from([
+                    "httponly".to_owned(),
+                    "samesite=lax".to_owned(),
+                    format!("path={path}"),
+                    format!("max-age={max_age}"),
+                ]);
+                if secure {
+                    attributes.insert("secure".to_owned());
+                }
+                attributes
+            };
+
+            let login = harness.client.get("/v1/auth/login").send().await;
+            login.assert_status(StatusCode::FOUND);
+            assert_eq!(
+                cookie_attributes(&login, STATE_COOKIE),
+                expected("/v1/auth", super::super::STATE_TTL_SECS),
+                "state cookie, cookie_secure={secure}"
+            );
+
+            let state_cookie = live_cookie(&login, STATE_COOKIE).unwrap().to_owned();
+            let begin = harness.oidc_client.last_begin().unwrap();
+            let callback = do_callback(&harness, &state_cookie, &begin.state).await;
+            callback.assert_status(StatusCode::FOUND);
+            assert_eq!(
+                cookie_attributes(&callback, SESSION_COOKIE),
+                expected("/", session_max_age),
+                "session cookie, cookie_secure={secure}"
+            );
+        }
+    }
+
+    /// The open-redirect guard end to end: a hostile `redirect` on login is
+    /// stored as `/`, so the callback sends the browser to the web root rather
+    /// than off-site. Each is a form some browser reads as another host.
+    #[tokio::test]
+    async fn a_hostile_redirect_lands_on_the_web_root_after_callback() {
+        // URL-encoded: `//evil.example/x`, `https://evil.example/`, and
+        // `/\evil.example`.
+        for hostile in [
+            "%2F%2Fevil.example%2Fx",
+            "https%3A%2F%2Fevil.example%2F",
+            "%2F%5Cevil.example",
+        ] {
+            let harness = make_harness(FakeOidcClient::with_identity(identity(
+                "user@example.com",
+                true,
+            )));
+
+            let (state_cookie, _) = do_login(&harness, Some(hostile)).await;
+            let begin = harness.oidc_client.last_begin().unwrap();
+
+            do_callback(&harness, &state_cookie, &begin.state)
+                .await
+                .assert_status(StatusCode::FOUND)
+                .assert_redirect("http://localhost:5173/");
+        }
+    }
+
+    /// With no identity provider configured, login is a 503 -- the server is
+    /// up, sign-in is not -- and no login attempt is started. Driven through
+    /// the served router, whose default state carries the
+    /// `NotConfiguredOidcClient` a deployment without `BEAM_OIDC_*` gets.
+    #[tokio::test]
+    async fn login_with_an_unconfigured_idp_is_503() {
+        let service = crate::routes::create_router(&crate::bootstrap::AllowedOrigins::none())
+            .build(make_app_state())
+            .expect("the served router describes itself");
+
+        let response = TestClient::new(service).get("/v1/auth/login").send().await;
+
+        response
+            .assert_status(StatusCode::SERVICE_UNAVAILABLE)
+            .assert_problem_type("https://beam.justinchung.net/reference/errors/#oidc-unavailable");
+        assert_eq!(
+            live_cookie(&response, STATE_COOKIE),
+            None,
+            "no attempt was started, so there is no state to bind"
+        );
     }
 
     // ─── GET /v1/auth/callback ─────────────────────────────────────────────

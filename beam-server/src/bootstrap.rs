@@ -68,30 +68,78 @@ pub fn retired_env_warnings(is_set: impl Fn(&str) -> bool) -> Vec<String> {
         .collect()
 }
 
+/// The browser origins Beam trusts: `BEAM_WEB_URL`, `BEAM_SERVER_URL`, and
+/// each entry of `BEAM_EXTRA_ALLOWED_ORIGINS`.
+///
+/// One list for both halves of the cross-origin control. The CORS policy lets
+/// these origins *read* a credentialed response, and
+/// `middleware::EnforceSameOrigin` lets them *write*; deriving both from this
+/// type is what keeps an origin from being trusted for one and not the other.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AllowedOrigins(Vec<String>);
+
+impl AllowedOrigins {
+    /// No origin at all: every cross-origin browser request is refused.
+    ///
+    /// What a router built without a configuration gets -- the OpenAPI export
+    /// and the route-level tests, none of which send an `Origin`.
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// The origins `config` names, each with any trailing `/` removed, since
+    /// an `Origin` header never carries one.
+    pub fn from_config(config: &ServerConfig) -> Self {
+        let mut origins = vec![
+            config.web_url.trim_end_matches('/').to_owned(),
+            config.server_url.trim_end_matches('/').to_owned(),
+        ];
+        if let Some(extra) = &config.extra_allowed_origins {
+            origins.extend(
+                extra
+                    .split(',')
+                    .map(|s| s.trim().trim_end_matches('/').to_owned())
+                    .filter(|s| !s.is_empty()),
+            );
+        }
+        Self(origins)
+    }
+
+    /// Whether `origin` (`scheme://host[:port]`) is one of these.
+    ///
+    /// Compares ASCII case-insensitively, exactly as Kynos's CORS policy does
+    /// when it decides a read: scheme and host are case-insensitive, and a
+    /// stricter comparison here would let a configured origin with an
+    /// uppercase letter read with credentials but be refused every write.
+    pub fn contains(&self, origin: &str) -> bool {
+        self.0
+            .iter()
+            .any(|allowed| allowed.eq_ignore_ascii_case(origin))
+    }
+}
+
 /// The CORS policy every `/v1` response passes through.
 ///
-/// The origin is mirrored rather than allow-listed, and credentials are
-/// allowed -- which on its own would let any site read an authenticated
-/// response. It is safe here only because `/v1` sits behind
-/// `middleware::enforce_same_origin`, which rejects a cross-origin request
-/// before it reaches a handler. The two are a pair; neither is sufficient
-/// alone.
+/// Credentials are allowed, because the web client authenticates with the
+/// `beam_session` cookie, so the origins are an allow-list: only the ones
+/// `origins` names get `Access-Control-Allow-Origin` back, and a browser on
+/// any other origin cannot read the response. This used to mirror every
+/// origin on the grounds that `EnforceSameOrigin` rejects cross-origin
+/// writes -- but that check never looks at a safe method, so any site whose
+/// requests carry the cookie (a same-site sibling, under `SameSite=Lax`) could
+/// read `GET /v1/me`, `/v1/sessions` and the library (issue #348).
 ///
-/// Two things changed with the Kynos migration:
+/// A request with no `Origin` -- a native client, curl, a same-origin `GET` --
+/// is not a CORS request and is unaffected.
 ///
-/// * Mirroring is spelled `allow_origins_matching(|_| true)` rather than
-///   `AllowOrigin::mirror_request()`. Kynos refuses `allow_any_origin()`
-///   alongside `allow_credentials()` while the router is built, because the
-///   CORS protocol forbids `Access-Control-Allow-Origin: *` on a credentialed
-///   response -- a combination Salvo would have emitted for browsers to reject.
-/// * The advertised methods are no longer listed here. Kynos derives them from
-///   the operations declared on the matched path, so preflight and the
-///   description cannot disagree. The hand-written list this replaces was
-///   already wrong: it named GET, POST, PUT, DELETE and OPTIONS but not PATCH,
-///   which `/v1/admin/users/{id}` has used since issue #85.
-pub fn cors_policy() -> Cors {
+/// The advertised methods are not listed here. Kynos derives them from the
+/// operations declared on the matched path, so preflight and the description
+/// cannot disagree. The hand-written list this replaced was already wrong: it
+/// named GET, POST, PUT, DELETE and OPTIONS but not PATCH, which
+/// `/v1/admin/users/{id}` has used since issue #85.
+pub fn cors_policy(origins: &AllowedOrigins) -> Cors {
     Cors::new()
-        .allow_origins_matching(|_| true)
+        .allow_origins(origins.0.clone())
         .allow_headers([
             "authorization",
             "content-type",

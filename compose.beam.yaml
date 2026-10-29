@@ -91,11 +91,12 @@ services:
       # host-run server but would send the post-login redirect to a dead port
       # here.
       #
-      # This is also the CSRF allowed-origin set, not just the redirect target
-      # (routes/middleware.rs). So if you run the Vite dev server on :5173
-      # against *this* containerized server, reads succeed but every write gets
-      # a 403 -- set BEAM_EXTRA_ALLOWED_ORIGINS=http://localhost:5173, or
-      # override BEAM_WEB_URL, for that combination.
+      # This is also the allowed browser-origin set, not just the redirect
+      # target: the CSRF check on writes and the CORS grant on credentialed
+      # reads (bootstrap::AllowedOrigins). So if you run the Vite dev server on
+      # :5173 against *this* containerized server, the browser can neither read
+      # nor write the API -- set BEAM_EXTRA_ALLOWED_ORIGINS=http://localhost:5173,
+      # or override BEAM_WEB_URL, for that combination.
       - BEAM_WEB_URL=${BEAM_WEB_URL:-http://localhost:8080}
       - BEAM_EXTRA_ALLOWED_ORIGINS
       # Admin is granted by an IdP-asserted ID-token claim, not the server.

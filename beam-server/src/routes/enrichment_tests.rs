@@ -30,7 +30,7 @@ struct Fixture {
 
 async fn fixture(provider: InMemoryEnrichmentProvider) -> Fixture {
     let state = crate::routes::test_support::make_app_state_with_enrichment(Arc::new(provider));
-    let router = crate::routes::create_router()
+    let router = crate::routes::create_router(&crate::bootstrap::AllowedOrigins::none())
         .build(state.clone())
         .expect("the served router describes itself");
     let admin = session(&state, true).await;

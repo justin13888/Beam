@@ -73,7 +73,7 @@ fn fixture_over(enabled: bool, repo: Option<Arc<dyn PlaybackTelemetryRepository>
         clock.clone(),
         service,
     );
-    let router = crate::routes::create_router()
+    let router = crate::routes::create_router(&crate::bootstrap::AllowedOrigins::none())
         .build(state.clone())
         .expect("the served router describes itself");
     Fixture {

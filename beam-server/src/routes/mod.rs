@@ -208,20 +208,26 @@ pub fn rest_routes() -> Router<AppState, Propagate, (), RestScopes> {
 
 /// The router the process serves and the document is derived from.
 ///
-/// Takes no arguments on purpose. Kynos derives the dispatch table and the
-/// OpenAPI document from one walk of this value, so anything passed in at
-/// startup would be something the exported description cannot see -- and a
-/// served surface that disagrees with its document is the failure ADR-0010
-/// exists to remove. Everything that used to arrive as an argument (the
-/// Prometheus handle, the rate-limit numbers, the clock) is read off
-/// `AppState` at request time instead.
+/// Kynos derives the dispatch table and the OpenAPI document from one walk of
+/// this value, so anything passed in at startup is something the exported
+/// description cannot see -- and a served surface that disagrees with its
+/// document is the failure ADR-0010 exists to remove. Everything that used to
+/// arrive as an argument (the Prometheus handle, the rate-limit numbers, the
+/// clock) is read off `AppState` at request time instead.
+///
+/// `cors_origins` is the one exception, because it cannot be read at request
+/// time: Kynos answers a preflight from the policy itself, before any handler
+/// or context is involved, so the allow-list has to exist when the router is
+/// assembled. It changes no part of the description -- the CORS headers are
+/// undocumented, and `contract_tests` pins that the document is the same
+/// whatever origins are passed. The OpenAPI export and the route-level tests
+/// pass [`AllowedOrigins::none`](bootstrap::AllowedOrigins::none); `main`
+/// passes the configured ones.
 ///
 /// The CORS policy and the same-origin check are mounted in one expression
-/// because they are one control. `bootstrap::cors_policy` mirrors the request
-/// origin and allows credentials, which on its own would let any site read an
-/// authenticated response; it is safe only because `EnforceSameOrigin` rejects
-/// a cross-origin write before it reaches a handler. Dropping either is a
-/// one-line diff sitting next to the comment that says why it cannot be.
+/// because they are one control over one list. `bootstrap::cors_policy` lets
+/// the allowed origins read a credentialed response, and `EnforceSameOrigin`
+/// lets the same origins write; both read [`bootstrap::AllowedOrigins`].
 ///
 /// CORS is listed first so it is the outer of the two: a rejected cross-origin
 /// write still leaves with `Access-Control-Allow-Origin`, so the browser
@@ -231,7 +237,9 @@ pub fn rest_routes() -> Router<AppState, Propagate, (), RestScopes> {
 /// and Kynos copies a nested router's interceptors onto that router's own
 /// operations only -- which is what we want: a scrape target has no session to
 /// forge, and a cross-origin reader of `/openapi` has nothing to steal.
-pub fn create_router() -> Router<AppState, Propagate, (), ServedScopes> {
+pub fn create_router(
+    cors_origins: &bootstrap::AllowedOrigins,
+) -> Router<AppState, Propagate, (), ServedScopes> {
     Router::new()
         // The release's own version: release-please bumps it in `Cargo.toml`,
         // and the release workflow regenerates both committed copies of the
@@ -242,7 +250,7 @@ pub fn create_router() -> Router<AppState, Propagate, (), ServedScopes> {
         .nest(
             "/v1",
             rest_routes()
-                .intercept(bootstrap::cors_policy())
+                .intercept(bootstrap::cors_policy(cors_origins))
                 .intercept(middleware::EnforceSameOrigin),
         )
         .mount(kynos::routes![metrics_mw::render_metrics])

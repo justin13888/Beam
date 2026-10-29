@@ -107,6 +107,12 @@ Two deliberate layers protect cookie-authenticated state changes:
   neither header pass (NFR-104): browsers always send `Origin` on a non-GET request, so its
   absence marks a non-browser client — a native app signing in by the device grant sends neither —
   while SameSite already stops the browser-based attack.
+- Credentialed cross-origin *reads* are allowed only from the same origins: `/v1`'s CORS policy
+  answers `Access-Control-Allow-Origin` (with `Access-Control-Allow-Credentials: true`) only for
+  `BEAM_WEB_URL`, `BEAM_SERVER_URL`, and `BEAM_EXTRA_ALLOWED_ORIGINS`, so any other page —
+  including a same-site sibling whose requests do carry the `SameSite=Lax` cookie — cannot read
+  `GET /v1/me`, `/v1/sessions`, or the library (issue #348). Both layers read one list,
+  `bootstrap::AllowedOrigins`, so an origin is never trusted to read but not write, or the reverse.
 
 ## Admin gating
 

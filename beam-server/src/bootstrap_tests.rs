@@ -126,18 +126,21 @@ mod cors {
     }
 
     /// `Cors` is an `Interceptor<C>` for any context, so the policy needs no
-    /// `AppState` to be exercised.
+    /// `AppState` to be exercised. The allowed origin is the web one
+    /// [`https_deployment`] configures.
     fn client() -> TestClient<()> {
         let service = Router::new()
             .mount(kynos::routes![probe, probe_patch, probe_delete])
-            .intercept(cors_policy())
+            .intercept(cors_policy(&AllowedOrigins::from_config(
+                &https_deployment(),
+            )))
             .build(())
             .expect("the probe router describes itself");
 
         TestClient::new(service)
     }
 
-    /// A preflight proposing `method`, from an origin that is not ours.
+    /// A preflight proposing `method`, from the configured web origin.
     async fn preflight(method: &str) -> kynos::test::TestResponse {
         client()
             .options("/thing")
@@ -228,20 +231,242 @@ mod cors {
         }
     }
 
+    /// The origin is allow-listed, not mirrored: a credentialed response is
+    /// readable only by an origin the configuration names (issue #348).
     #[tokio::test]
-    async fn the_origin_is_mirrored_rather_than_allow_listed() {
-        // Documented posture, not an accident: `/v1` is protected by
-        // `EnforceSameOrigin` instead. Pinning it here means a change to
-        // either half has to be a deliberate change to both.
+    async fn an_origin_the_configuration_does_not_name_gets_no_cors_headers() {
         let response = client()
             .get("/thing")
             .header("origin", "https://somewhere.else.example")
             .send()
             .await;
 
+        assert_eq!(response.header("access-control-allow-origin"), None);
+        assert_eq!(response.header("access-control-allow-credentials"), None);
+    }
+}
+
+mod allowed_origins {
+    use super::*;
+
+    #[test]
+    fn the_web_server_and_extra_origins_are_all_named_without_trailing_slashes() {
+        let origins = AllowedOrigins::from_config(&ServerConfig {
+            web_url: "https://app.example.com/".to_string(),
+            server_url: "https://api.example.com".to_string(),
+            extra_allowed_origins: Some(
+                " https://one.example.com/ ,,https://two.example.com".to_string(),
+            ),
+            ..Default::default()
+        });
+
+        for origin in [
+            "https://app.example.com",
+            "https://api.example.com",
+            "https://one.example.com",
+            "https://two.example.com",
+        ] {
+            assert!(origins.contains(origin), "{origin} is configured");
+        }
+        assert!(
+            !origins.contains(""),
+            "an empty list entry is not an origin"
+        );
+        assert!(!origins.contains("https://app.example.com/"));
+    }
+
+    #[test]
+    fn an_origin_matches_whatever_the_case_of_its_scheme_and_host() {
+        let origins = AllowedOrigins::from_config(&ServerConfig {
+            web_url: "https://App.Example.com".to_string(),
+            server_url: "https://api.example.com".to_string(),
+            ..Default::default()
+        });
+
+        assert!(origins.contains("https://app.example.com"));
+        assert!(origins.contains("HTTPS://API.EXAMPLE.COM"));
+        assert!(!origins.contains("https://app.example.org"));
+    }
+}
+
+/// The policy as `/v1` serves it: through `create_router`, over a real
+/// `AppState`, with a session the stores' own traits minted. These are the
+/// tests the mirrored policy would have failed -- the router is the subject,
+/// so dropping or reordering the CORS interceptor is caught here.
+mod served_router {
+    use beam_auth::utils::models::CreateUser;
+    use beam_auth::utils::session_store::SessionData;
+    use kynos::http::StatusCode;
+    use kynos::test::TestClient;
+
+    use super::*;
+    use crate::routes::create_router;
+    use crate::routes::test_support::make_app_state_with;
+    use crate::state::AppState;
+
+    const WEB_ORIGIN: &str = "https://beam.example.com";
+    const EXTRA_ORIGIN: &str = "https://admin.example.com";
+    /// A same-site sibling: its requests carry a `SameSite=Lax` cookie, so
+    /// only CORS stands between it and the response.
+    const SIBLING_ORIGIN: &str = "https://evil.example.com";
+
+    /// The served router over a state configured with [`WEB_ORIGIN`] and
+    /// [`EXTRA_ORIGIN`], built with the origins `main` would pass.
+    fn served() -> (TestClient<AppState>, AppState) {
+        let state = make_app_state_with(|config| {
+            config.web_url = WEB_ORIGIN.to_string();
+            config.server_url = "https://api.example.com".to_string();
+            config.extra_allowed_origins = Some(EXTRA_ORIGIN.to_string());
+        });
+        let service = create_router(&AllowedOrigins::from_config(&state.config))
+            .build(state.clone())
+            .expect("the served router describes itself");
+        (TestClient::new(service), state)
+    }
+
+    /// Seeds a user and a session through the stores' own traits and returns
+    /// the `beam_session` cookie value.
+    async fn session(state: &AppState) -> String {
+        let user = state
+            .services
+            .user_repo
+            .create(CreateUser {
+                oidc_issuer: "https://idp.example".to_string(),
+                oidc_subject: "subject".to_string(),
+                email: Some("someone@example.com".to_string()),
+                display_name: "Someone".to_string(),
+                avatar_url: None,
+                is_admin: false,
+            })
+            .await
+            .unwrap();
+        let now = chrono::Utc::now().timestamp();
+        state
+            .services
+            .session_store
+            .create(
+                &SessionData {
+                    user_id: user.id.to_string(),
+                    device_hash: "test-device".to_string(),
+                    ip: "127.0.0.1".to_string(),
+                    created_at: now,
+                    last_active: now,
+                },
+                86400,
+                86400,
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn me_from(origin: &str) -> kynos::test::TestResponse {
+        let (client, state) = served();
+        let token = session(&state).await;
+        client
+            .get("/v1/me")
+            .header("origin", origin)
+            .cookie("beam_session", &token)
+            .send()
+            .await
+    }
+
+    #[tokio::test]
+    async fn a_cross_origin_reader_cannot_read_an_authenticated_response() {
+        let response = me_from(SIBLING_ORIGIN).await;
+
+        // The server still answers -- CORS is enforced by the browser, which
+        // withholds a response that carries no grant for the asking origin.
+        response.assert_status(StatusCode::OK);
         assert_eq!(
             response.header("access-control-allow-origin"),
-            Some("https://somewhere.else.example"),
+            None,
+            "an origin nobody configured must not be granted a credentialed read"
         );
+        assert_eq!(response.header("access-control-allow-credentials"), None);
+    }
+
+    #[tokio::test]
+    async fn the_configured_web_origin_may_read_with_credentials() {
+        for origin in [WEB_ORIGIN, EXTRA_ORIGIN] {
+            let response = me_from(origin).await;
+
+            response.assert_status(StatusCode::OK);
+            assert_eq!(
+                response.header("access-control-allow-origin"),
+                Some(origin),
+                "{origin} is configured"
+            );
+            assert_eq!(
+                response.header("access-control-allow-credentials"),
+                Some("true"),
+                "{origin} is configured"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_mixed_case_configured_origin_may_both_read_and_write() {
+        // The CORS grant compares case-insensitively; the same-origin write
+        // check must agree, or the origin reads but every write is a 403.
+        let state = make_app_state_with(|config| {
+            config.web_url = "https://Beam.Example.com".to_string();
+            config.server_url = "https://api.example.com".to_string();
+        });
+        let client = TestClient::new(
+            create_router(&AllowedOrigins::from_config(&state.config))
+                .build(state.clone())
+                .expect("the served router describes itself"),
+        );
+        let token = session(&state).await;
+
+        let read = client
+            .get("/v1/me")
+            .header("origin", WEB_ORIGIN)
+            .cookie("beam_session", &token)
+            .send()
+            .await;
+        read.assert_status(StatusCode::OK);
+        assert_eq!(read.header("access-control-allow-origin"), Some(WEB_ORIGIN));
+
+        let write = client
+            .post("/v1/logout")
+            .header("origin", WEB_ORIGIN)
+            .cookie("beam_session", &token)
+            .send()
+            .await;
+        assert_ne!(
+            write.status(),
+            StatusCode::FORBIDDEN,
+            "an origin trusted to read must be trusted to write"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_preflight_from_an_unconfigured_origin_is_not_granted() {
+        let (client, _) = served();
+        let response = client
+            .options("/v1/me")
+            .header("origin", SIBLING_ORIGIN)
+            .header("access-control-request-method", "GET")
+            .send()
+            .await;
+
+        assert_eq!(response.header("access-control-allow-origin"), None);
+    }
+
+    #[tokio::test]
+    async fn a_request_without_an_origin_is_answered_without_cors_headers() {
+        // A native client sends no `Origin`; this is not a CORS request, and
+        // the allow-list must not get in its way.
+        let (client, state) = served();
+        let token = session(&state).await;
+        let response = client
+            .get("/v1/me")
+            .cookie("beam_session", &token)
+            .send()
+            .await;
+
+        response.assert_status(StatusCode::OK);
+        assert_eq!(response.header("access-control-allow-origin"), None);
     }
 }

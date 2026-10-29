@@ -135,7 +135,7 @@ fn fixture_over(destination: Option<&str>, shape_repo: Arc<dyn LibraryShapeRepos
         None,
         service.clone(),
     );
-    let router = crate::routes::create_router()
+    let router = crate::routes::create_router(&crate::bootstrap::AllowedOrigins::none())
         .build(state.clone())
         .expect("the served router describes itself");
     Fixture {

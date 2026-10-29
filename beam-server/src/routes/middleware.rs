@@ -21,6 +21,7 @@ use kynos::http::{HeaderMap, Method, Request};
 use kynos::middleware::{Continued, Interceptor, Next};
 use kynos::prelude::*;
 
+use crate::bootstrap::AllowedOrigins;
 use crate::state::AppState;
 
 /// Extracts `scheme://host[:port]` from an Origin or Referer header value,
@@ -31,22 +32,6 @@ fn extract_origin(value: &str) -> Option<String> {
         .find('/')
         .map_or(value.len(), |i| scheme_end + i);
     Some(value[..authority_end].to_owned())
-}
-
-fn allowed_origins(state: &AppState) -> Vec<String> {
-    let mut origins = vec![
-        state.config.web_url.trim_end_matches('/').to_owned(),
-        state.config.server_url.trim_end_matches('/').to_owned(),
-    ];
-    if let Some(extra) = &state.config.extra_allowed_origins {
-        origins.extend(
-            extra
-                .split(',')
-                .map(|s| s.trim().trim_end_matches('/').to_owned())
-                .filter(|s| !s.is_empty()),
-        );
-    }
-    origins
 }
 
 /// The two headers this check reads.
@@ -166,7 +151,7 @@ impl Interceptor<AppState> for EnforceSameOrigin {
 
         let origin = extract_origin(&raw_origin).ok_or(CrossOriginRejected::Malformed)?;
 
-        if allowed_origins(context).iter().any(|a| a == &origin) {
+        if AllowedOrigins::from_config(&context.config).contains(&origin) {
             Ok(next.run(request).await)
         } else {
             Err(CrossOriginRejected::NotAllowed)

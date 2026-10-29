@@ -5,6 +5,7 @@ use eyre::{Result, eyre};
 use kynos::server::{Server, error::ServerError, shutdown::Shutdown};
 use tracing::info;
 
+use beam_server::bootstrap::AllowedOrigins;
 use beam_server::config::ServerConfig;
 use beam_server::routes::create_router;
 
@@ -178,7 +179,10 @@ async fn main() -> Result<()> {
     // `build` is where Kynos checks that every operation can be described and
     // that no two interceptors contribute the same header or status. A router
     // that cannot describe itself never reaches a listener.
-    let service = create_router()
+    // The browser origins that may read and write `/v1` with the session
+    // cookie. Passed in rather than read off the state because Kynos answers a
+    // preflight from the CORS policy itself; the document does not carry it.
+    let service = create_router(&AllowedOrigins::from_config(&config))
         // Which hops may say who the client is. This is a dispatch-time policy
         // rather than part of the description, so it is the one thing set here
         // instead of in `create_router` -- the exported document is unaffected.
