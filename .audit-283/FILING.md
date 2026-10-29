@@ -6,7 +6,9 @@ because the GitHub API budget ran out before the issues could be filed. The lane
 
 1. Files each body below in order with `gh issue create --repo justin13888/Beam --title TITLE --body-file FILE`.
 2. Before filing a dependent body, adds its `Blocked by #N, #M` line using the numbers it got back.
-3. Deletes this directory in its own commit before opening the pull request.
+3. Deletes this directory in its own commit, then opens the pull request with `PR-BODY.md` as the
+   body, its `## Filed` placeholder replaced by the issue numbers. Each filed issue is returned as
+   a `split:` line, `remainder` or `handoff` as the table says.
 
 None of this directory is meant to merge.
 
