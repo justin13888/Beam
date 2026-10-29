@@ -9,6 +9,7 @@ use std::sync::atomic::AtomicUsize;
 
 use super::*;
 use crate::disc::fixtures::{TitleSet, mpls, ticks, write_blu_ray, write_dvd};
+use crate::library_file::test_support::snapshot;
 use crate::probe::metadata::MetadataError;
 use crate::services::admin_log::LocalAdminLogService;
 use crate::services::filesystem_probe::{FilesystemKind, FixedFilesystemProbe};
@@ -419,6 +420,69 @@ async fn a_disc_moved_as_a_folder_relinks() {
         Some(before[1].id),
         "the watch state still names the part it was on"
     );
+}
+
+/// Reading a disc for its main title -- its IFOs and playlists as well as
+/// its streams -- and reconciling it as it arrives, moves and leaves, write
+/// nothing into the library (FR-202). Each step is a change the test makes
+/// and then the indexer's reaction, and the tree after the reaction is the
+/// tree the change left.
+#[tokio::test]
+async fn reading_and_reconciling_discs_never_writes_into_the_library() {
+    let h = Harness::new().await;
+    heat_dvd(&h.root.join("Heat (1995)"));
+    let ronin = write_blu_ray(
+        &h.root.join("Ronin (1998)"),
+        &[("00001", 2000), ("00002", 3000)],
+        &[
+            ("00000.mpls", mpls(&[("00002", 0, ticks(120))])),
+            ("00001.mpls", mpls(&[("00001", 0, ticks(6000))])),
+        ],
+    );
+    let before = snapshot(&h.root);
+    h.scan().await.expect("the scan runs");
+    assert_eq!(h.movies().await.len(), 2, "both discs were read");
+    assert_eq!(snapshot(&h.root), before, "a scan reading two discs");
+
+    write_dvd(
+        &h.root.join("Heat (1995)"),
+        &[TitleSet {
+            set: 3,
+            parts: &[1500, 700],
+            duration: Some(200 * MINUTE),
+        }],
+    );
+    let before = snapshot(&h.root);
+    h.reconcile(
+        &h.root.join("Heat (1995)/VIDEO_TS/VTS_03_0.IFO"),
+        FsEventKind::Created,
+    )
+    .await;
+    assert_eq!(snapshot(&h.root), before, "a watcher event inside a disc");
+
+    std::fs::create_dir_all(h.root.join("Movies")).unwrap();
+    std::fs::rename(
+        h.root.join("Heat (1995)"),
+        h.root.join("Movies/Heat (1995)"),
+    )
+    .unwrap();
+    let before = snapshot(&h.root);
+    h.scan().await.expect("the scan runs");
+    assert!(
+        h.present()
+            .iter()
+            .any(|(rel, _)| rel == "Movies/Heat (1995)/VIDEO_TS/VTS_03_1.VOB"),
+        "the moved disc was read where it went: {:?}",
+        h.present()
+    );
+    assert_eq!(snapshot(&h.root), before, "a moved disc");
+
+    std::fs::remove_dir_all(&ronin).unwrap();
+    let before = snapshot(&h.root);
+    h.reconcile(&ronin.join("STREAM/00001.m2ts"), FsEventKind::Removed)
+        .await;
+    h.scan().await.expect("the scan runs");
+    assert_eq!(snapshot(&h.root), before, "a removed disc");
 }
 
 /// A watcher event anywhere inside a disc reconciles the disc whole: a
