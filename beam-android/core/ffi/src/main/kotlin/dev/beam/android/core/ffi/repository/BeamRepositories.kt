@@ -251,6 +251,8 @@ internal class BeamPlaybackRepository
             }
 
         override suspend fun flushProgress(): UInt = changes.watching { client.flushProgress() }
+
+        override suspend fun pendingProgressCount(): UInt = changes.watching { client.pendingProgressCount() }
     }
 
 @Singleton

@@ -205,6 +205,9 @@ public class FakePlaybackRepository : PlaybackRepository {
     /** How many times [flushProgress] was called. */
     public var flushCalls: Int = 0
 
+    /** Set while the server is unreachable: [flushProgress] sends nothing and keeps [pending]. */
+    public var serverDown: Boolean = false
+
     override suspend fun setDeviceProfile(profile: DeviceProfile) {
         deviceProfile = profile
     }
@@ -321,9 +324,17 @@ public class FakePlaybackRepository : PlaybackRepository {
     override suspend fun flushProgress(): UInt {
         flushCalls += 1
         failWith?.let { throw it }
+        // The core does not throw for an unreachable server: it stops at the
+        // first failed send, backs that entry off and answers what it sent.
+        if (serverDown) return 0u
         val sent = pending
         pending = 0u
         return sent
+    }
+
+    override suspend fun pendingProgressCount(): UInt {
+        failWith?.let { throw it }
+        return pending
     }
 }
 

@@ -10,6 +10,9 @@ import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Test
 import uniffi.beam_client_core.BeamException
+import kotlin.time.Duration.Companion.hours
+import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.seconds
 
 /**
  * Positions recorded while offline reach the server: the queue is drained at
@@ -85,5 +88,73 @@ class ProgressFlusherTest {
             testScheduler.runCurrent()
             assertEquals("signing in again drains it, and the owner outlived the failure", 2, playback.flushCalls)
             assertEquals(0u, playback.pending)
+        }
+
+    @Test
+    fun a_server_that_recovers_while_the_device_stays_online_gets_the_queue_on_the_backoff() =
+        runTest {
+            val servers = FakeServerRepository(listOf(Fixtures.server(id = "home", isActive = true)))
+            val playback =
+                FakePlaybackRepository().apply {
+                    pending = 2u
+                    serverDown = true
+                }
+            val network = Network(initial = true)
+            backgroundScope.launch { ProgressFlusher(servers, playback, network).run() }
+
+            testScheduler.runCurrent()
+            assertEquals(1, playback.flushCalls)
+            assertEquals("a down server takes nothing", 2u, playback.pending)
+
+            testScheduler.advanceTimeBy(1.seconds)
+            testScheduler.runCurrent()
+            assertEquals("no retry before the first entry falls due", 1, playback.flushCalls)
+
+            testScheduler.advanceTimeBy(1.seconds)
+            testScheduler.runCurrent()
+            assertEquals("the retry follows the core's backoff", 2, playback.flushCalls)
+
+            playback.serverDown = false
+            testScheduler.advanceTimeBy(4.seconds)
+            testScheduler.runCurrent()
+            assertEquals("the recovered server gets the queue with no network change", 3, playback.flushCalls)
+            assertEquals(0u, playback.pending)
+
+            testScheduler.advanceTimeBy(1.hours)
+            testScheduler.runCurrent()
+            assertEquals("an empty queue is not asked again", 3, playback.flushCalls)
+        }
+
+    @Test
+    fun retries_stop_at_a_refused_session_and_a_new_trigger_starts_the_schedule_over() =
+        runTest {
+            val servers = FakeServerRepository(listOf(Fixtures.server(id = "home", isActive = true)))
+            val playback =
+                FakePlaybackRepository().apply {
+                    pending = 1u
+                    serverDown = true
+                }
+            val network = Network(initial = true)
+            backgroundScope.launch { ProgressFlusher(servers, playback, network).run() }
+
+            testScheduler.runCurrent()
+            testScheduler.advanceTimeBy(2.seconds + 4.seconds + 1.milliseconds)
+            testScheduler.runCurrent()
+            assertEquals("two retries, 2 s then 4 s apart", 3, playback.flushCalls)
+
+            network.state.value = false
+            testScheduler.runCurrent()
+            network.state.value = true
+            testScheduler.runCurrent()
+            assertEquals("a reconnect drains at once rather than at the next retry", 4, playback.flushCalls)
+            testScheduler.advanceTimeBy(2.seconds)
+            testScheduler.runCurrent()
+            assertEquals("and the backoff starts again from its first step", 5, playback.flushCalls)
+
+            servers.expire("home")
+            testScheduler.advanceTimeBy(1.hours)
+            testScheduler.runCurrent()
+            assertEquals("nothing is retried towards a refused session", 5, playback.flushCalls)
+            assertEquals(1u, playback.pending)
         }
 }
