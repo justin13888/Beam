@@ -222,41 +222,89 @@ mod tests {
         ));
     }
 
+    /// A provider holding a title under every id, named `who`, so an answer
+    /// says which provider gave it.
+    fn answering_as(
+        names: &[&str],
+        who: &str,
+        ids: &[&ExternalMediaRef],
+    ) -> InMemoryEnrichmentProvider {
+        let mut provider = InMemoryEnrichmentProvider::new(names);
+        for id in ids {
+            provider = provider
+                .with_movie_enrichment_at(
+                    (*id).clone(),
+                    MovieEnrichment {
+                        title: who.to_string(),
+                        ..Default::default()
+                    },
+                )
+                .with_show_enrichment(
+                    (*id).clone(),
+                    ShowEnrichment {
+                        title: who.to_string(),
+                        ..Default::default()
+                    },
+                )
+                .with_season_enrichment(
+                    (*id).clone(),
+                    SeasonEnrichment {
+                        season_number: 1,
+                        poster_url: Some(who.to_string()),
+                        ..Default::default()
+                    },
+                );
+        }
+        provider
+    }
+
+    /// Both providers could answer either id, so only the routing decides
+    /// who does: each lookup reaches the provider the id names, and only it.
     #[tokio::test]
-    async fn a_lookup_goes_to_the_provider_the_id_names() {
+    async fn every_lookup_is_answered_by_the_provider_the_id_names_and_no_other() {
         let tmdb_ref = ExternalMediaRef::new("tmdb", "1399");
         let tvdb_ref = ExternalMediaRef::new("tvdb", "121361");
-        let tvdb = Arc::new(
-            InMemoryEnrichmentProvider::new(&["tvdb"]).with_show_enrichment(
-                tvdb_ref.clone(),
-                ShowEnrichment {
-                    tvdb_id: Some(121361),
-                    title: "Game of Thrones".to_string(),
-                    ..Default::default()
-                },
-            ),
-        );
-        let provider = CompositeEnrichmentProvider::new(vec![
-            Arc::new(InMemoryEnrichmentProvider::new(&["tmdb"])),
-            tvdb.clone(),
-        ]);
+        let both = [&tmdb_ref, &tvdb_ref];
+        let tmdb = Arc::new(answering_as(&["tmdb"], "tmdb", &both));
+        let tvdb = Arc::new(answering_as(&["tvdb"], "tvdb", &both));
+        let provider = CompositeEnrichmentProvider::new(vec![tmdb.clone(), tvdb.clone()]);
 
-        let found = provider.show_enrichment(&tvdb_ref).await.unwrap();
-        assert_eq!(found.tvdb_id, Some(121361));
-        assert!(matches!(
-            provider.show_enrichment(&tmdb_ref).await,
-            Err(EnrichmentError::NotFound)
-        ));
-        assert!(matches!(
-            provider.season_enrichment(&tvdb_ref, 1).await,
-            Err(EnrichmentError::NotFound)
-        ));
-
-        provider.invalidate(&tvdb_ref).await;
+        for (id, owner) in [(&tmdb_ref, "tmdb"), (&tvdb_ref, "tvdb")] {
+            assert_eq!(provider.movie_enrichment(id).await.unwrap().title, owner);
+            assert_eq!(provider.show_enrichment(id).await.unwrap().title, owner);
+            assert_eq!(
+                provider
+                    .season_enrichment(id, 1)
+                    .await
+                    .unwrap()
+                    .poster_url
+                    .as_deref(),
+                Some(owner)
+            );
+            provider.invalidate(id).await;
+        }
+        // An id no provider resolves invalidates nothing, and fails nothing.
         provider
             .invalidate(&ExternalMediaRef::new("imdb", "tt0944947"))
             .await;
+        assert_eq!(tmdb.invalidated_refs(), ["tmdb:1399"]);
         assert_eq!(tvdb.invalidated_refs(), ["tvdb:121361"]);
+    }
+
+    /// Where two providers claim the same name, the first in priority order
+    /// answers for it.
+    #[tokio::test]
+    async fn the_first_provider_to_claim_a_name_answers_for_it() {
+        let id = ExternalMediaRef::new("tmdb", "603");
+        let first = Arc::new(answering_as(&["anilist", "tmdb"], "first", &[&id]));
+        let second = Arc::new(answering_as(&["tmdb"], "second", &[&id]));
+        let provider = CompositeEnrichmentProvider::new(vec![first.clone(), second.clone()]);
+
+        assert_eq!(provider.movie_enrichment(&id).await.unwrap().title, "first");
+        assert_eq!(provider.show_enrichment(&id).await.unwrap().title, "first");
+        provider.invalidate(&id).await;
+        assert_eq!(first.invalidated_refs(), ["tmdb:603"]);
+        assert!(second.invalidated_refs().is_empty());
     }
 
     #[tokio::test]

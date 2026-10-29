@@ -604,3 +604,139 @@ async fn a_series_episodes_are_listed_across_pages_once_for_all_its_seasons() {
     provider.season_enrichment(&series, 1).await.unwrap();
     assert_eq!(listings(), 6, "a stale list is listed again");
 }
+
+fn any_query() -> MediaQuery {
+    MediaQuery {
+        title: "x".to_string(),
+        year: None,
+    }
+}
+
+/// A `200` whose body is not the document TheTVDB promises is the
+/// provider's fault, not a match of nothing.
+#[tokio::test]
+async fn a_malformed_success_body_is_a_provider_error_not_an_empty_answer() {
+    let (base, _received) = stand_in(Arc::new(|request: &Received| {
+        match request.target.as_str() {
+            "/v4/login" => login("token"),
+            target if target.starts_with("/v4/search") => {
+                (200, Vec::new(), "<html>maintenance</html>".to_string())
+            }
+            _ => ok(serde_json::json!({"data": {"id": "not a number"}})),
+        }
+    }))
+    .await;
+    let provider = provider(base, Arc::new(TestClock::new()));
+
+    let searched = provider.search_shows(&any_query()).await;
+    assert!(
+        matches!(&searched, Err(EnrichmentError::Provider(m)) if m.contains("deserialization error")),
+        "{searched:?}"
+    );
+    let fetched = provider
+        .show_enrichment(&ExternalMediaRef::new("tvdb", "1"))
+        .await;
+    assert!(
+        matches!(&fetched, Err(EnrichmentError::Provider(m)) if m.contains("deserialization error")),
+        "{fetched:?}"
+    );
+}
+
+/// A TheTVDB nobody answers at is a transport failure, which enrichment
+/// retries, never a "not found" it would act on.
+#[tokio::test]
+async fn an_unreachable_tvdb_is_a_transport_error() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = Url::parse(&format!("http://{}/v4/", listener.local_addr().unwrap())).unwrap();
+    drop(listener);
+    let provider = provider(base, Arc::new(TestClock::new()));
+
+    let searched = provider.search_movies(&any_query()).await;
+    assert!(
+        matches!(searched, Err(EnrichmentError::Transport(_))),
+        "{searched:?}"
+    );
+}
+
+/// A login TheTVDB answers without a token -- or with an empty one -- is an
+/// error, and no request is sent with a blank bearer.
+#[tokio::test]
+async fn a_login_answered_without_a_token_is_an_error() {
+    for answer in [
+        serde_json::json!({"status": "success", "data": null}),
+        serde_json::json!({"status": "success", "data": {"token": ""}}),
+    ] {
+        let (base, received) = stand_in(Arc::new(move |request: &Received| {
+            match request.target.as_str() {
+                "/v4/login" => ok(answer.clone()),
+                _ => ok(serde_json::json!({"data": []})),
+            }
+        }))
+        .await;
+        let provider = provider(base, Arc::new(TestClock::new()));
+
+        let err = provider.search_shows(&any_query()).await.unwrap_err();
+        assert!(
+            matches!(&err, EnrichmentError::Provider(m) if m.contains("no token")),
+            "{err:?}"
+        );
+        assert_eq!(targets(&received), ["POST /v4/login"]);
+    }
+}
+
+/// A rate limit on the login itself is a rate limit, carrying its delay;
+/// one whose `Retry-After` is an HTTP date rather than seconds still limits,
+/// and leaves the delay to the caller's default.
+#[tokio::test]
+async fn a_rate_limited_login_is_a_rate_limit_whatever_its_retry_after() {
+    for (retry_after, expected) in [
+        ("9", Some(Duration::from_secs(9))),
+        ("Wed, 21 Oct 2026 07:28:00 GMT", None),
+    ] {
+        let (base, _received) = stand_in(Arc::new(move |_: &Received| {
+            (
+                429,
+                vec![("retry-after", retry_after.to_string())],
+                "{}".to_string(),
+            )
+        }))
+        .await;
+        let provider = provider(base, Arc::new(TestClock::new()));
+
+        let err = provider.search_shows(&any_query()).await.unwrap_err();
+        assert!(
+            matches!(&err, EnrichmentError::RateLimited { retry_after } if *retry_after == expected),
+            "{retry_after}: {err:?}"
+        );
+    }
+}
+
+/// A listing that always names a next page is read to the page cap and no
+/// further, and what it read is kept.
+#[tokio::test]
+async fn an_endless_episode_listing_stops_at_the_page_cap() {
+    let (base, received) = stand_in(Arc::new(|request: &Received| {
+        match request.target.as_str() {
+            "/v4/login" => login("token"),
+            _ => ok(serde_json::json!({
+                "data": {"episodes": [
+                    {"seasonNumber": 1, "number": 1, "name": "Again"}
+                ]},
+                "links": {"next": "https://api4.thetvdb.com/v4/more"}
+            })),
+        }
+    }))
+    .await;
+    let provider = provider(base, Arc::new(TestClock::new()));
+
+    let season = provider
+        .season_enrichment(&ExternalMediaRef::new("tvdb", "5"), 1)
+        .await
+        .unwrap();
+    let pages = targets(&received)
+        .into_iter()
+        .filter(|target| target.contains("/episodes/"))
+        .count();
+    assert_eq!(pages, MAX_EPISODE_PAGES as usize);
+    assert!(!season.episodes.is_empty());
+}
