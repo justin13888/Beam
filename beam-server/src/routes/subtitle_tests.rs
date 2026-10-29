@@ -16,6 +16,7 @@ use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
 use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
 use beam_domain::repositories::sidecar_subtitle::in_memory::InMemorySidecarSubtitleRepository;
 use beam_domain::repositories::{FileRepository, LibraryRepository, SidecarSubtitleRepository};
+use beam_domain::test_utils::media_file;
 use kynos::http::StatusCode;
 use kynos::prelude::*;
 use kynos::test::TestClient;
@@ -144,23 +145,9 @@ impl Fixture {
     /// A present video file row.
     fn video(&self) -> Uuid {
         let file = MediaFile {
-            id: Uuid::new_v4(),
-            library_id: self.library_id,
-            path: self.dir.path().join("Movie.mkv"),
-            hash: 0,
-            size_bytes: 1,
-            mtime: None,
-            mime_type: None,
-            duration: None,
-            container_format: None,
             content: Some(MediaFileContent::movie(Uuid::new_v4())),
             status: FileStatus::Known,
-            scanned_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-            missing_since: None,
-            classifier_version: 0,
-            container_tags: None,
-            identity: None,
+            ..media_file(self.library_id, self.dir.path().join("Movie.mkv"))
         };
         let id = file.id;
         self.files.files.lock().unwrap().insert(file.id, file);

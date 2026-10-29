@@ -370,6 +370,7 @@ async fn indexed_movie(
         CreateMediaFile, CreateMovie, CreateMovieEntry, FileStatus, MediaFileContent,
     };
     use beam_domain::repositories::{FileRepository, MovieRepository};
+    use beam_domain::test_utils::create_media_file;
 
     let library_id = uuid::Uuid::new_v4();
     let movie = movies
@@ -386,19 +387,9 @@ async fn indexed_movie(
         .unwrap();
     let file = files
         .create(CreateMediaFile {
-            library_id,
-            path: std::path::PathBuf::from(format!("/videos/{title}.mkv")),
-            hash: movie.id.as_u128() as u64,
-            size_bytes: 1024,
-            mtime: None,
-            identity: None,
-            mime_type: Some("video/x-matroska".to_string()),
-            duration: None,
-            container_format: None,
             content: Some(MediaFileContent::movie(entry.id)),
             status: FileStatus::Known,
-            classifier_version: 0,
-            container_tags: None,
+            ..create_media_file(library_id, format!("/videos/{title}.mkv"))
         })
         .await
         .unwrap();
@@ -522,6 +513,7 @@ impl Library {
         };
         use beam_domain::providers::enrichment::ShowEnrichment;
         use beam_domain::repositories::{FileRepository, GenreRepository, ShowRepository};
+        use beam_domain::test_utils::create_media_file;
 
         let show = self
             .shows
@@ -556,19 +548,9 @@ impl Library {
             .unwrap();
         self.files
             .create(CreateMediaFile {
-                library_id: uuid::Uuid::new_v4(),
-                path: std::path::PathBuf::from(format!("/videos/{title}/S01E01.mkv")),
-                hash: show.id.as_u128() as u64,
-                size_bytes: 1024,
-                mtime: None,
-                identity: None,
-                mime_type: None,
-                duration: None,
-                container_format: None,
                 content: Some(MediaFileContent::episode(episode.id)),
                 status: FileStatus::Known,
-                classifier_version: 0,
-                container_tags: None,
+                ..create_media_file(uuid::Uuid::new_v4(), format!("/videos/{title}/S01E01.mkv"))
             })
             .await
             .unwrap();
@@ -1416,6 +1398,7 @@ async fn each_part_names_its_default_subtitle_from_its_own_tracks() {
         CreateMediaFile, CreateMovie, CreateMovieEntry, FileStatus, MediaFileContent,
     };
     use beam_domain::repositories::{FileRepository, MovieRepository, SidecarSubtitleRepository};
+    use beam_domain::test_utils::create_media_file;
 
     let library = Library::new();
     let library_id = uuid::Uuid::new_v4();
@@ -1438,22 +1421,15 @@ async fn each_part_names_its_default_subtitle_from_its_own_tracks() {
         let file = library
             .files
             .create(CreateMediaFile {
-                library_id,
-                path: std::path::PathBuf::from(format!("/videos/Heat/Heat - CD{part_number}.mkv")),
-                hash: u64::from(part_number),
-                size_bytes: 1024,
-                mtime: None,
-                identity: None,
-                mime_type: Some("video/x-matroska".to_string()),
-                duration: None,
-                container_format: None,
                 content: Some(MediaFileContent::Movie {
                     movie_entry_id: entry.id,
                     part_number: Some(part_number),
                 }),
                 status: FileStatus::Known,
-                classifier_version: 0,
-                container_tags: None,
+                ..create_media_file(
+                    library_id,
+                    format!("/videos/Heat/Heat - CD{part_number}.mkv"),
+                )
             })
             .await
             .unwrap();

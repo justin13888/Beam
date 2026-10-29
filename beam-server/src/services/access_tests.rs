@@ -2,7 +2,6 @@
 //! how a season, an episode or a file follows the title it belongs to.
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use uuid::Uuid;
@@ -18,6 +17,7 @@ use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
 use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
 use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
 use beam_domain::repositories::{FileRepository, MovieRepository, ShowRepository};
+use beam_domain::test_utils::create_media_file;
 
 use super::{AccessRepositories, AccessService};
 
@@ -59,15 +59,6 @@ impl Fixture {
         let unique = Uuid::new_v4();
         self.files
             .create(CreateMediaFile {
-                library_id,
-                path: PathBuf::from(format!("/media/{library_id}/{unique}.mkv")),
-                hash: unique.as_u128() as u64,
-                size_bytes: 1024,
-                mtime: None,
-                identity: None,
-                mime_type: Some("video/x-matroska".to_string()),
-                duration: None,
-                container_format: Some("matroska".to_string()),
                 // A file with no content is one the classifier could not
                 // place, which is what `Unknown` records.
                 status: if content.is_some() {
@@ -76,8 +67,7 @@ impl Fixture {
                     FileStatus::Unknown
                 },
                 content,
-                classifier_version: 0,
-                container_tags: None,
+                ..create_media_file(library_id, format!("/media/{library_id}/{unique}.mkv"))
             })
             .await
             .unwrap()

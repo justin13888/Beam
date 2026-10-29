@@ -2,7 +2,6 @@
 //! (issue #143) through the served router and handlers, over the real
 //! service, with in-memory stores and a test clock below the trait line.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,6 +19,7 @@ use beam_domain::repositories::{
     FileRepository, MediaStreamRepository, PlaybackTelemetryRepository,
 };
 use beam_domain::services::{Clock, TestClock};
+use beam_domain::test_utils::create_media_file;
 use chrono::{TimeZone, Utc};
 use kynos::http::StatusCode;
 use kynos::test::TestClient;
@@ -126,22 +126,19 @@ async fn seed_hevc_file(fixture: &Fixture) -> Uuid {
     let file = fixture
         .files
         .create(CreateMediaFile {
-            library_id: Uuid::new_v4(),
-            // One row per path: a test that seeds two files gives each its own.
-            path: PathBuf::from(format!("/m/SECRET-TITLE (2001) {}.mkv", Uuid::new_v4())),
-            hash: 1,
+            // Over two hours, a bit rate between 20 and 50 Mb/s.
             size_bytes: 20_000_000_000,
-            mtime: None,
-            identity: None,
-            mime_type: Some("video/x-matroska".to_string()),
             duration: Some(Duration::from_secs(7_200)),
             container_format: Some("matroska,webm".to_string()),
             // A known file is always some title's content; which title does
             // not matter here, since telemetry never records it.
             content: Some(MediaFileContent::movie(Uuid::new_v4())),
             status: FileStatus::Known,
-            classifier_version: 0,
-            container_tags: None,
+            ..create_media_file(
+                Uuid::new_v4(),
+                // One row per path: a test that seeds two files gives each its own.
+                format!("/m/SECRET-TITLE (2001) {}.mkv", Uuid::new_v4()),
+            )
         })
         .await
         .unwrap();

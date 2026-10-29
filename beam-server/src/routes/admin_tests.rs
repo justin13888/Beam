@@ -24,10 +24,10 @@ use beam_auth::utils::{
     session_store::{SessionData, SessionStore, in_memory::InMemorySessionStore},
 };
 use beam_domain::models::enrichment::EnrichmentTargetId;
-use beam_domain::models::file::{CreateMediaFile, FileStatus};
 use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
 use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
 use beam_domain::repositories::{EnrichmentStateRepository, FileRepository};
+use beam_domain::test_utils::create_media_file;
 use beam_index::probe::metadata::MetadataError as ProbeError;
 use beam_index::services::IndexService;
 use beam_index::services::LocalIndexService;
@@ -640,21 +640,7 @@ async fn a_regular_user_listing_library_files_never_sees_a_filesystem_path() {
     for path in ["/videos/movies/A (2016)/A.mkv", "/videos/movies/b.mp4"] {
         fixture
             .file_repo
-            .create(CreateMediaFile {
-                library_id,
-                path: PathBuf::from(path),
-                hash: 1,
-                size_bytes: 10,
-                mtime: None,
-                identity: None,
-                mime_type: None,
-                duration: None,
-                container_format: None,
-                content: None,
-                status: FileStatus::Unknown,
-                classifier_version: 0,
-                container_tags: None,
-            })
+            .create(create_media_file(library_id, path))
             .await
             .unwrap();
     }
@@ -685,21 +671,7 @@ async fn a_regular_user_listing_library_files_never_sees_a_filesystem_path() {
 async fn seed_file(fixture: &TestFixture, library_id: uuid::Uuid, path: &str) {
     fixture
         .file_repo
-        .create(CreateMediaFile {
-            library_id,
-            path: PathBuf::from(path),
-            hash: 1,
-            size_bytes: 10,
-            mtime: None,
-            identity: None,
-            mime_type: None,
-            duration: None,
-            container_format: None,
-            content: None,
-            status: FileStatus::Unknown,
-            classifier_version: 0,
-            container_tags: None,
-        })
+        .create(create_media_file(library_id, path))
         .await
         .unwrap();
 }
@@ -2129,21 +2101,7 @@ async fn the_status_endpoint_reports_counts_queue_state_and_recent_scans() {
 
     fixture
         .file_repo
-        .create(CreateMediaFile {
-            library_id: library.id,
-            path: PathBuf::from("/videos/movies/a.mkv"),
-            hash: 1,
-            size_bytes: 10,
-            mtime: None,
-            identity: None,
-            mime_type: None,
-            duration: None,
-            container_format: None,
-            content: None,
-            status: FileStatus::Unknown,
-            classifier_version: 0,
-            container_tags: None,
-        })
+        .create(create_media_file(library.id, "/videos/movies/a.mkv"))
         .await
         .unwrap();
 

@@ -44,6 +44,7 @@ use beam_domain::repositories::{
     PersonRepository, ShowRepository, UserListRepository,
 };
 use beam_domain::services::{RealClock, TestClock};
+use beam_domain::test_utils::create_media_file;
 use kynos::http::StatusCode;
 use kynos::prelude::*;
 use kynos::test::TestClient;
@@ -392,19 +393,11 @@ impl Fixture {
         std::fs::write(&path, FILE_BYTES).expect("write a file");
         self.files
             .create(CreateMediaFile {
-                library_id,
-                path,
-                hash: 0,
                 size_bytes: FILE_BYTES.len() as u64,
-                mtime: None,
-                identity: None,
-                mime_type: Some("video/x-matroska".to_string()),
                 duration: Some(Duration::from_secs(100)),
-                container_format: Some("matroska".to_string()),
                 content: Some(content),
                 status: FileStatus::Known,
-                classifier_version: 0,
-                container_tags: None,
+                ..create_media_file(library_id, path)
             })
             .await
             .expect("a file row")

@@ -2,11 +2,10 @@
 //! report's range and shape, the retention cutoff -- and the retention loop
 //! over an in-memory store and a test clock.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use beam_domain::models::file::{FileStatus, MediaFile};
+use beam_domain::models::file::MediaFile;
 use beam_domain::models::playback_telemetry::test_utils::{rebuffer_key, start_key, switch_key};
 use beam_domain::models::playback_telemetry::{
     FailureReason, FailureStage, NO_STREAM_LABEL, PlaybackTelemetrySummary, RebufferCount,
@@ -161,23 +160,12 @@ proptest! {
 
 fn media_file(container: Option<&str>, size_bytes: u64, duration: Option<Duration>) -> MediaFile {
     MediaFile {
+        // The file the streams below belong to.
         id: Uuid::from_u128(9),
-        library_id: Uuid::from_u128(8),
-        path: PathBuf::from("/m/a.mkv"),
-        hash: 0,
         size_bytes,
-        mtime: None,
-        identity: None,
-        mime_type: None,
         duration,
         container_format: container.map(str::to_owned),
-        content: None,
-        status: FileStatus::Known,
-        classifier_version: 0,
-        container_tags: None,
-        scanned_at: Utc::now(),
-        updated_at: Utc::now(),
-        missing_since: None,
+        ..beam_domain::test_utils::media_file(Uuid::from_u128(8), "/m/a.mkv")
     }
 }
 

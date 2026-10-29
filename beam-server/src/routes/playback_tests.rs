@@ -7,7 +7,6 @@
 //! tests assert is how one request's state comes back out of another -- a
 //! multi-step change no stub could stand in for.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -23,6 +22,7 @@ use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
 use beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository;
 use beam_domain::repositories::{FileRepository, MovieRepository, ShowRepository};
 use beam_domain::services::TestClock;
+use beam_domain::test_utils::create_media_file;
 use kynos::http::StatusCode;
 use kynos::prelude::*;
 use kynos::test::TestClient;
@@ -205,19 +205,11 @@ impl Fixture {
         let unique = Uuid::new_v4();
         self.files
             .create(CreateMediaFile {
-                library_id: self.library_id,
-                path: PathBuf::from(format!("/videos/{unique}.mkv")),
-                hash: 0,
                 size_bytes,
-                mtime: None,
-                identity: None,
-                mime_type: Some("video/x-matroska".to_string()),
                 duration: Some(Duration::from_secs(duration_secs)),
-                container_format: Some("matroska".to_string()),
                 content: Some(content),
                 status: FileStatus::Known,
-                classifier_version: 0,
-                container_tags: None,
+                ..create_media_file(self.library_id, format!("/videos/{unique}.mkv"))
             })
             .await
             .unwrap()
