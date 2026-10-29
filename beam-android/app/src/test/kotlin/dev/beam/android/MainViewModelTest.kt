@@ -20,11 +20,14 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import uniffi.beam_client_core.BeamException
 import uniffi.beam_client_core.SessionState
 
 /**
  * Admin access follows the active server: it is per server, so a switch in
- * settings or a sign-in to another server changes it without a restart.
+ * settings or a sign-in to another server changes it without a restart. So
+ * does whether the viewer is signed in at all -- at a cold start, and when the
+ * server refuses the session mid-use.
  *
  * Robolectric only for the [android.content.Context] the device profile is
  * built from; a plain [Application] keeps the app's own, which loads the
@@ -79,5 +82,54 @@ class MainViewModelTest {
             servers.completeLogin(added.id, "cookie")
             testScheduler.advanceUntilIdle()
             assertTrue("signing in there as an admin grants it", model.state.value.isAdmin)
+        }
+
+    @Test
+    fun `a stored session starts signed in`() =
+        runTest(dispatcher) {
+            // What the core restores a stored session as, with no request.
+            val model = viewModel(FakeServerRepository(listOf(Fixtures.server(isActive = true))))
+            testScheduler.advanceUntilIdle()
+
+            val state = model.state.value
+            assertTrue("the restore has answered", state.isReady)
+            assertTrue("a cold start lands signed in", state.isSignedIn)
+            assertFalse(state.isSessionExpired)
+        }
+
+    @Test
+    fun `a restore that fails is ready and signed out`() =
+        runTest(dispatcher) {
+            // Empty, because the real repository publishes the list only from
+            // a restore that succeeded: one that throws publishes nothing.
+            val servers =
+                FakeServerRepository(emptyList()).apply {
+                    failWith = BeamException.Storage("the keystore is locked")
+                }
+            val model = viewModel(servers)
+            testScheduler.advanceUntilIdle()
+
+            val state = model.state.value
+            assertTrue("the splash screen is not held forever", state.isReady)
+            assertFalse("nothing restored is nothing signed in", state.isSignedIn)
+        }
+
+    @Test
+    fun `a session expiring mid-use returns to sign-in`() =
+        runTest(dispatcher) {
+            val servers = FakeServerRepository(listOf(Fixtures.server(id = "home", isActive = true)))
+            val model = viewModel(servers)
+            testScheduler.advanceUntilIdle()
+            assertTrue(model.state.value.isSignedIn)
+
+            servers.expire("home")
+            testScheduler.advanceUntilIdle()
+            assertFalse("a refused session is not a usable one", model.state.value.isSignedIn)
+            assertTrue("and the shell is told to send the viewer to sign in", model.state.value.isSessionExpired)
+
+            servers.completeLogin("home", "cookie")
+            testScheduler.advanceUntilIdle()
+            assertTrue("signing in again restores it", model.state.value.isSignedIn)
+            assertFalse(model.state.value.isSessionExpired)
         }
 }

@@ -269,6 +269,79 @@ impl std::fmt::Debug for SessionCookie {
     }
 }
 
+/// The secret-storage key a server's session cookie lives under.
+fn session_key(server_id: &str) -> String {
+    format!("session/{server_id}")
+}
+
+/// The secret-storage key holding who the server said a stored cookie
+/// belongs to.
+///
+/// Secret rather than plain storage because it carries the user's email.
+/// Written beside the cookie once the server confirms it, and deleted with
+/// it, so a cold start can restore a signed-in session -- admin role
+/// included -- without asking `/v1/me` first.
+fn identity_key(server_id: &str) -> String {
+    format!("identity/{server_id}")
+}
+
+/// [`UserSummary`] as it is stored, decoupled from the FFI record so that a
+/// change to what the foreign side sees is not silently a change to what is
+/// on disk.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct StoredIdentity {
+    id: String,
+    display_name: String,
+    email: Option<String>,
+    is_admin: bool,
+    avatar_url: Option<String>,
+}
+
+impl From<&UserSummary> for StoredIdentity {
+    fn from(user: &UserSummary) -> Self {
+        let UserSummary {
+            id,
+            display_name,
+            email,
+            is_admin,
+            avatar_url,
+        } = user;
+        Self {
+            id: id.clone(),
+            display_name: display_name.clone(),
+            email: email.clone(),
+            is_admin: *is_admin,
+            avatar_url: avatar_url.clone(),
+        }
+    }
+}
+
+impl From<StoredIdentity> for UserSummary {
+    fn from(stored: StoredIdentity) -> Self {
+        let StoredIdentity {
+            id,
+            display_name,
+            email,
+            is_admin,
+            avatar_url,
+        } = stored;
+        Self {
+            id,
+            display_name,
+            email,
+            is_admin,
+            avatar_url,
+        }
+    }
+}
+
+/// `user` as [`identity_key`] stores it.
+fn encode_identity(user: &UserSummary) -> Result<String, BeamError> {
+    serde_json::to_string(&StoredIdentity::from(user)).map_err(|error| BeamError::Storage {
+        detail: error.to_string(),
+    })
+}
+
 /// One server's live state.
 struct ServerContext {
     record: ServerRecord,
@@ -441,9 +514,10 @@ impl BeamClient {
 
     /// Load the server registry and any stored sessions.
     ///
-    /// Sessions are restored optimistically: the first real request either
-    /// confirms one or reports it expired, which keeps app start off the
-    /// network.
+    /// Sessions are restored optimistically: a stored cookie comes back
+    /// [`SessionState::Authenticated`] as the identity the server confirmed
+    /// when it was stored, and the first request the server refuses with a
+    /// `401` expires it. That keeps app start off the network.
     ///
     /// # Errors
     ///
@@ -461,28 +535,34 @@ impl BeamClient {
             let Ok(record) = serde_json::from_str::<ServerRecord>(&raw) else {
                 continue;
             };
-            let cookie = if self.is_abandoned(&id) {
+            let session = if self.is_abandoned(&id) {
                 // A cookie the device could not delete is not a session: the
                 // server rejected it, and registering it again would put it
                 // straight back on the wire. The delete is retried first,
                 // because the keystore that refused it may since have
                 // unlocked; the cookie is dropped either way.
-                if self
-                    .storage
-                    .remove_secret(format!("session/{id}"))
-                    .await
-                    .is_ok()
-                {
+                if self.storage.remove_secret(session_key(&id)).await.is_ok() {
                     self.forget_abandoned(&id);
                 }
+                let _ = self.storage.remove_secret(identity_key(&id)).await;
                 None
             } else {
-                self.storage
-                    .get_secret(format!("session/{id}"))
-                    .await?
-                    .map(SecretString::from)
+                self.stored_session(&id).await?
             };
-            self.install(record, cookie, None)?;
+            // A stored session is signed in as the identity the server
+            // confirmed when it was stored: no request is made, and the first
+            // `401` on the cookie expires it like any other session.
+            let (cookie, state) = match session {
+                Some((cookie, user)) => {
+                    let (state, _) = crate::session::transition(
+                        &SessionState::LoggedOut,
+                        SessionEvent::StoredSessionRestored(Box::new(user)),
+                    );
+                    (Some(cookie), state)
+                }
+                None => (None, SessionState::LoggedOut),
+            };
+            self.install(record, cookie, state)?;
         }
 
         *self.active.write().expect("active lock") =
@@ -513,7 +593,7 @@ impl BeamClient {
             // that did not yet contain this server, so the very first server
             // added was never in it -- and `restore` found nothing, sending
             // the viewer back to the address field on every cold start.
-            self.install(record.clone(), None, None)?;
+            self.install(record.clone(), None, SessionState::LoggedOut)?;
             self.persist_record(&record).await?;
         }
 
@@ -578,9 +658,8 @@ impl BeamClient {
             .expect("servers lock")
             .remove(&server_id);
         self.storage.remove(format!("servers/{server_id}")).await?;
-        self.storage
-            .remove_secret(format!("session/{server_id}"))
-            .await?;
+        self.storage.remove_secret(session_key(&server_id)).await?;
+        self.storage.remove_secret(identity_key(&server_id)).await?;
         self.forget_abandoned(&server_id);
         self.storage
             .remove(format!("progress_queue/{server_id}"))
@@ -728,8 +807,14 @@ impl BeamClient {
             Ok(user) => {
                 // `PersistCookie`, performed here because this is the only
                 // place that holds the cookie the server has just confirmed.
+                // Written before the transition, so a server that reads as
+                // signed in always has its session on disk; the identity goes
+                // with it, which is what a cold start restores from.
                 self.storage
-                    .put_secret(format!("session/{server_id}"), session_cookie)
+                    .put_secret(session_key(&server_id), session_cookie)
+                    .await?;
+                self.storage
+                    .put_secret(identity_key(&server_id), encode_identity(&user)?)
                     .await?;
                 // Whatever was stranded under this key has just been
                 // overwritten by a cookie the server has confirmed.
@@ -738,6 +823,22 @@ impl BeamClient {
                     &server_id,
                     SessionEvent::IdentityConfirmed(Box::new(user.clone())),
                 )?;
+                if !effects.contains(&SessionEffect::PersistCookie) {
+                    // The machine ignored the confirmation: the user signed
+                    // out while `/v1/me` was in flight. Whatever this sign-in wrote is withdrawn, so a
+                    // cold start does not sign the device back in. A refused
+                    // delete is swallowed: the answer is still that nobody is
+                    // signed in, and the session is marked abandoned so a
+                    // restore drops it instead of signing back in with it.
+                    if let Err(error) = self.clear_stored_session(&server_id).await {
+                        tracing::warn!(
+                            server_id,
+                            %error,
+                            "could not withdraw a sign-in confirmed after sign-out"
+                        );
+                    }
+                    return Err(BeamError::Unauthenticated);
+                }
                 self.perform(&server_id, &effects, Some(&captured)).await?;
                 Ok(user)
             }
@@ -936,7 +1037,7 @@ impl BeamClient {
         // `install` derive the state afresh reset a signed-in server to
         // `Expired`, so forgetting a certificate told the viewer their session
         // had expired.
-        self.install(record.clone(), cookie, Some(state))?;
+        self.install(record.clone(), cookie, state)?;
         self.persist_record(&record).await
     }
 
@@ -2019,18 +2120,18 @@ fn parse_day(field: &str, value: &str) -> Result<crate::api::Date, BeamError> {
 impl BeamClient {
     /// Build a server's context from scratch and put it in the registry.
     ///
-    /// `carried` is the session state to keep across the rebuild, for the one
-    /// caller that is rebuilding a server it already had. `None` derives it
-    /// from the cookie, which is what a cold start and a newly added server
-    /// want. Deliberately only the *state*: the queue is persisted under the
-    /// server's own key and reloads itself, and the throttle and the metadata
-    /// cache are operational rather than security-bearing, so rebuilding them
-    /// costs a round trip and no correctness.
+    /// `state` is the session state the server starts in: what a cold start
+    /// restored, `LoggedOut` for a newly added server, or the state carried
+    /// across a rebuild of a server it already had. Deliberately only the
+    /// *state*: the queue is persisted under the server's own key and reloads
+    /// itself, and the throttle and the metadata cache are operational rather
+    /// than security-bearing, so rebuilding them costs a round trip and no
+    /// correctness.
     fn install(
         &self,
         record: ServerRecord,
         cookie: Option<SecretString>,
-        carried: Option<SessionState>,
+        state: SessionState,
     ) -> Result<(), BeamError> {
         let middleware = Arc::new(SessionMiddleware::new());
 
@@ -2056,14 +2157,6 @@ impl BeamClient {
         let transport: Arc<dyn crate::api::HttpBackend> = Arc::new(ReqwestBackend::new(http));
         let cookie = Arc::new(SessionCookie::new(cookie));
         let client = Self::client_over(transport, &middleware, &record.base_url, &cookie)?;
-
-        // A restored cookie is trusted until a request says otherwise, which
-        // is what keeps a cold start off the network.
-        let state = carried.unwrap_or(if cookie.is_registered() {
-            SessionState::Expired
-        } else {
-            SessionState::LoggedOut
-        });
 
         let queue = Arc::new(ProgressQueue::new(
             Arc::clone(&self.storage),
@@ -2220,12 +2313,7 @@ impl BeamClient {
                     self.with_context(server_id, |context| context.set_session(cookie))?;
                 }
                 SessionEffect::ClearCookie => {
-                    // Removing an absent key succeeds, so this asks no
-                    // question the caller would have to answer twice.
-                    self.storage
-                        .remove_secret(format!("session/{server_id}"))
-                        .await?;
-                    self.forget_abandoned(server_id);
+                    self.clear_stored_session(server_id).await?;
                 }
                 // Performed by the call site, which has what the effect needs
                 // and this does not: the confirmed cookie for `PersistCookie`,
@@ -2242,6 +2330,37 @@ impl BeamClient {
             }
         }
         Ok(())
+    }
+
+    /// Delete this server's stored session -- its cookie and the identity a
+    /// cold start restores from -- or, where the keystore refuses, mark it
+    /// abandoned so `restore` does not sign the device back in with it.
+    ///
+    /// Every path that withdraws a stored session goes through here, so no
+    /// failed delete can leave a session on disk unmarked.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::Storage`] when either delete fails; the mark is
+    /// set by then, so a caller may swallow it.
+    async fn clear_stored_session(&self, server_id: &str) -> Result<(), BeamError> {
+        // Removing an absent key succeeds, so this asks no question the
+        // caller would have to answer twice. The cookie goes first: it is the
+        // credential, and an identity left without one restores nothing.
+        let cleared = match self.storage.remove_secret(session_key(server_id)).await {
+            Ok(()) => self.storage.remove_secret(identity_key(server_id)).await,
+            Err(error) => Err(error),
+        };
+        match cleared {
+            Ok(()) => {
+                self.forget_abandoned(server_id);
+                Ok(())
+            }
+            Err(error) => {
+                self.abandon_session(server_id);
+                Err(error.into())
+            }
+        }
     }
 
     /// Note that this server's stored cookie could not be deleted.
@@ -2446,11 +2565,11 @@ impl BeamClient {
             let expired = effects.contains(&SessionEffect::InstallCookie(false));
             if let Err(error) = self.perform(server_id, &effects, None).await {
                 // Swallowed: the caller's error is the expired session, which
-                // stands, and the credential is already off the client. Marked,
-                // because the cookie the server rejected is still in the
-                // keystore and a restore would otherwise send it again.
+                // stands, and the credential is already off the client. The
+                // cookie the server rejected is still in the keystore, but
+                // `ClearCookie` has marked it abandoned, so a restore does not
+                // send it again.
                 tracing::warn!(server_id, %error, "could not delete the rejected session cookie");
-                self.abandon_session(server_id);
             }
             if expired {
                 return BeamError::SessionExpired;
@@ -2470,6 +2589,30 @@ impl BeamClient {
             is_admin: me.is_admin,
             avatar_url: me.avatar_url,
         })
+    }
+
+    /// The session a cold start can restore for `server_id`: its stored
+    /// cookie, and who the server confirmed it belongs to.
+    ///
+    /// Both or neither. A cookie with no readable identity beside it -- one
+    /// stored before identities were, or whose identity was lost -- is not
+    /// restored, because a signed-in state has to say who is signed in and
+    /// inventing an identity would grant whatever the invention claimed. It
+    /// stays where it is; the next sign-in overwrites it, and a sign-out
+    /// deletes it.
+    async fn stored_session(
+        &self,
+        server_id: &str,
+    ) -> Result<Option<(SecretString, UserSummary)>, BeamError> {
+        let Some(cookie) = self.storage.get_secret(session_key(server_id)).await? else {
+            return Ok(None);
+        };
+        let identity = self
+            .storage
+            .get_secret(identity_key(server_id))
+            .await?
+            .and_then(|raw| serde_json::from_str::<StoredIdentity>(&raw).ok());
+        Ok(identity.map(|stored| (SecretString::from(cookie), UserSummary::from(stored))))
     }
 
     async fn persist_record(&self, record: &ServerRecord) -> Result<(), BeamError> {
@@ -2621,6 +2764,7 @@ fn subtitle_views(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::StorageError;
     use crate::ports::kv::{FailureMode, InMemoryKeyValueStore};
     use crate::transport::CannedBackend;
 
@@ -2712,9 +2856,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_restored_session_is_expired_until_a_request_confirms_it() {
-        // Optimistic restore keeps app start off the network, but the cookie
-        // has not been checked, so claiming Authenticated would be a lie.
+    async fn a_restored_session_is_usable_without_a_request() {
+        // A cold start lands signed in, as the identity the server confirmed
+        // at sign-in, and the cookie is ready for the player -- all before
+        // this client has sent anything. Its transport is the real one,
+        // pointed at a host that does not resolve, so a request would fail.
+        let (_, client, id) = restarted_after_sign_in(ADMIN_ME, "opaque").await;
+
+        let SessionState::Authenticated { user } = client.session_state(id).expect("known") else {
+            panic!("a stored session restores signed in");
+        };
+        assert_eq!(user.display_name, "Ada");
+        assert!(
+            user.is_admin,
+            "the role the server confirmed survives the restart"
+        );
+        assert_eq!(
+            client
+                .server_http_config()
+                .expect("the cookie is registered")
+                .headers
+                .get("Cookie")
+                .map(String::as_str),
+            Some("beam_session=opaque")
+        );
+    }
+
+    /// A cookie stored without the identity beside it cannot say who is
+    /// signed in, so it does not restore a session.
+    #[tokio::test]
+    async fn a_cookie_stored_without_an_identity_restores_signed_out() {
         let storage = Arc::new(InMemoryKeyValueStore::new());
         let first = BeamClient::new(Arc::clone(&storage) as Arc<dyn KeyValueStore>);
         let summary = first
@@ -2722,17 +2893,232 @@ mod tests {
             .await
             .expect("added");
         storage
-            .put_secret(format!("session/{}", summary.id), "opaque".to_owned())
+            .put_secret(session_key(&summary.id), "opaque".to_owned())
             .await
             .expect("stored");
 
         let second = BeamClient::new(storage as Arc<dyn KeyValueStore>);
         second.restore().await.expect("restored");
 
-        assert!(matches!(
+        assert_eq!(
             second.session_state(summary.id).expect("known"),
-            SessionState::Expired
+            SessionState::LoggedOut
+        );
+        assert!(
+            matches!(second.server_http_config(), Err(BeamError::Unauthenticated)),
+            "and the cookie is not registered"
+        );
+    }
+
+    /// Everything a `401` on a restored cookie must withdraw: the state, the
+    /// client's credential, the player's copy, and both stored halves --
+    /// leaving any behind sends the refused cookie again, or restores it on
+    /// the next cold start.
+    #[tokio::test]
+    async fn a_401_on_a_restored_cookie_withdraws_it_everywhere() {
+        let (storage, client, id) = restarted_after_sign_in(ME, "opaque").await;
+        let backend = Arc::new(CannedBackend::answering(
+            401,
+            "application/problem+json",
+            r#"{"type":"about:blank","status":401,"detail":"session expired"}"#,
         ));
+        client
+            .use_transport(
+                &id,
+                Arc::clone(&backend) as Arc<dyn crate::api::HttpBackend>,
+            )
+            .expect("the server is registered");
+
+        assert_eq!(
+            client.media_sources(MEDIA_ID.to_owned()).await,
+            Err(BeamError::SessionExpired)
+        );
+        assert_eq!(
+            client.session_state(id.clone()).expect("known"),
+            SessionState::Expired
+        );
+        let sent_before = backend.recorded().len();
+        assert_eq!(
+            client.media_sources(MEDIA_ID.to_owned()).await,
+            Err(BeamError::SessionExpired)
+        );
+        assert_eq!(
+            backend.recorded().len(),
+            sent_before,
+            "the refused cookie is not sent again"
+        );
+        assert!(
+            matches!(client.server_http_config(), Err(BeamError::Unauthenticated)),
+            "nor handed to the player"
+        );
+        assert!(!storage.has_secret(&session_key(&id)));
+        assert!(!storage.has_secret(&identity_key(&id)));
+
+        let restarted = BeamClient::new(storage as Arc<dyn KeyValueStore>);
+        restarted.restore().await.expect("restored");
+        assert_eq!(
+            restarted.session_state(id).expect("known"),
+            SessionState::LoggedOut,
+            "nor restored by the next cold start"
+        );
+    }
+
+    /// The user signs out while the sign-in's `/v1/me` is in flight. The
+    /// confirmation arrives for a sign-in nobody is waiting on, and must
+    /// leave the device signed out -- now, and after a restart.
+    #[tokio::test]
+    async fn a_sign_in_confirmed_after_a_sign_out_stays_signed_out() {
+        let storage = Arc::new(InMemoryKeyValueStore::new());
+        let client = BeamClient::new(Arc::clone(&storage) as Arc<dyn KeyValueStore>);
+        let id = client
+            .add_server("https://beam.test".to_owned(), None)
+            .await
+            .expect("added")
+            .id;
+        let backend = Arc::new(SignsOutDuringMe {
+            client: Arc::downgrade(&client),
+            server_id: id.clone(),
+        });
+        client
+            .use_transport(&id, backend as Arc<dyn crate::api::HttpBackend>)
+            .expect("the server is registered");
+
+        assert_eq!(
+            client.complete_login(id.clone(), "late".to_owned()).await,
+            Err(BeamError::Unauthenticated)
+        );
+        assert_eq!(
+            client.session_state(id.clone()).expect("known"),
+            SessionState::LoggedOut
+        );
+        assert!(!storage.has_secret(&session_key(&id)));
+        assert!(!storage.has_secret(&identity_key(&id)));
+    }
+
+    /// The same late confirmation over a keystore that refuses the withdrawal.
+    /// The cookie and identity this sign-in wrote stay on disk, so the session
+    /// is marked abandoned: the next `restore` drops it rather than signing
+    /// the device back in as the user who signed out.
+    #[tokio::test]
+    async fn a_late_sign_in_the_keystore_will_not_withdraw_is_not_restored() {
+        let inner = Arc::new(InMemoryKeyValueStore::new());
+        let storage = Arc::new(RefusesStoredSecretRemoval {
+            inner: Arc::clone(&inner),
+        });
+        let client = BeamClient::new(storage as Arc<dyn KeyValueStore>);
+        let id = client
+            .add_server("https://beam.test".to_owned(), None)
+            .await
+            .expect("added")
+            .id;
+        let backend = Arc::new(SignsOutDuringMe {
+            client: Arc::downgrade(&client),
+            server_id: id.clone(),
+        });
+        client
+            .use_transport(&id, backend as Arc<dyn crate::api::HttpBackend>)
+            .expect("the server is registered");
+
+        assert_eq!(
+            client.complete_login(id.clone(), "late".to_owned()).await,
+            Err(BeamError::Unauthenticated),
+            "a refused delete does not change the answer"
+        );
+        assert!(
+            inner.has_secret(&session_key(&id)) && inner.has_secret(&identity_key(&id)),
+            "the deletes really did fail, which is what the mark is for"
+        );
+
+        client
+            .restore()
+            .await
+            .expect("the registry itself is still readable");
+
+        assert_eq!(
+            client.session_state(id.clone()).expect("known"),
+            SessionState::LoggedOut,
+            "the stranded session is not restored"
+        );
+        assert!(
+            matches!(client.server_http_config(), Err(BeamError::Unauthenticated)),
+            "nor its cookie handed to the player"
+        );
+    }
+
+    /// A keystore that refuses to delete a secret it holds. Deleting an absent
+    /// key still succeeds, so the sign-out that races the sign-in -- which runs
+    /// before anything is stored -- goes through.
+    #[derive(Debug)]
+    struct RefusesStoredSecretRemoval {
+        inner: Arc<InMemoryKeyValueStore>,
+    }
+
+    #[async_trait::async_trait]
+    impl KeyValueStore for RefusesStoredSecretRemoval {
+        async fn get(&self, key: String) -> Result<Option<String>, StorageError> {
+            self.inner.get(key).await
+        }
+
+        async fn put(&self, key: String, value: String) -> Result<(), StorageError> {
+            self.inner.put(key, value).await
+        }
+
+        async fn remove(&self, key: String) -> Result<(), StorageError> {
+            self.inner.remove(key).await
+        }
+
+        async fn list_keys(&self, prefix: String) -> Result<Vec<String>, StorageError> {
+            self.inner.list_keys(prefix).await
+        }
+
+        async fn get_secret(&self, key: String) -> Result<Option<String>, StorageError> {
+            self.inner.get_secret(key).await
+        }
+
+        async fn put_secret(&self, key: String, value: String) -> Result<(), StorageError> {
+            self.inner.put_secret(key, value).await
+        }
+
+        async fn remove_secret(&self, key: String) -> Result<(), StorageError> {
+            if self.inner.has_secret(&key) {
+                return Err(StorageError::Unavailable {
+                    detail: "keystore locked".to_owned(),
+                });
+            }
+            self.inner.remove_secret(key).await
+        }
+    }
+
+    /// A transport that, asked for `/v1/me`, signs the user out before it
+    /// answers -- the sign-out racing a sign-in, made deterministic.
+    #[derive(Debug)]
+    struct SignsOutDuringMe {
+        client: std::sync::Weak<BeamClient>,
+        server_id: String,
+    }
+
+    impl crate::api::HttpBackend for SignsOutDuringMe {
+        fn execute(&self, request: reqwest::Request) -> crate::api::ExecuteFuture<'_> {
+            let is_me = request.url().path() == "/v1/me";
+            Box::pin(async move {
+                let (status, body) = if is_me {
+                    let client = self.client.upgrade().expect("the client outlives its call");
+                    client
+                        .logout(self.server_id.clone())
+                        .await
+                        .expect("signing out is local");
+                    (200, ME)
+                } else {
+                    (204, "")
+                };
+                let response = ::http::Response::builder()
+                    .status(status)
+                    .header("content-type", "application/json")
+                    .body(body.to_owned())
+                    .expect("a canned response is well-formed");
+                Ok(reqwest::Response::from(response))
+            })
+        }
     }
 
     #[tokio::test]
@@ -2806,18 +3192,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_playback_config_carries_the_cookie_and_the_stream_url() {
-        let storage = Arc::new(InMemoryKeyValueStore::new());
-        let client = BeamClient::new(Arc::clone(&storage) as Arc<dyn KeyValueStore>);
-        let summary = client
-            .add_server("https://beam.test".to_owned(), None)
-            .await
-            .expect("added");
-        storage
-            .put_secret(format!("session/{}", summary.id), "opaque-value".to_owned())
-            .await
-            .expect("stored");
-        let client = BeamClient::new(storage as Arc<dyn KeyValueStore>);
-        client.restore().await.expect("restored");
+        let (_, client, _) = restarted_after_sign_in(ME, "opaque-value").await;
 
         let config = client
             .playback_config("file-1".to_owned())
@@ -2927,6 +3302,9 @@ mod tests {
     /// What `GET /v1/me` answers for the signed-in user in these tests.
     const ME: &str =
         r#"{"id":"00000000-0000-0000-0000-0000000000a1","display_name":"Ada","is_admin":false}"#;
+    /// [`ME`], for a user the server says administers it.
+    const ADMIN_ME: &str =
+        r#"{"id":"00000000-0000-0000-0000-0000000000a1","display_name":"Ada","is_admin":true}"#;
 
     /// What `GET /v1/media/{id}/sources` answers for a title with no file.
     const NO_SOURCES: &str = r#"{"items":[],"page_info":{"has_next_page":false,"has_previous_page":false,"start_cursor":null,"end_cursor":null}}"#;
@@ -3317,6 +3695,36 @@ mod tests {
             .await
             .expect("the canned /v1/me confirms the cookie");
         (client, id, backend)
+    }
+
+    /// A cold start on a device that signed in with `cookie`, the server
+    /// answering `/v1/me` with `me`: the session a real sign-in stored, read
+    /// back by a fresh client over the same storage.
+    async fn restarted_after_sign_in(
+        me: &'static str,
+        cookie: &str,
+    ) -> (Arc<InMemoryKeyValueStore>, Arc<BeamClient>, String) {
+        let storage = Arc::new(InMemoryKeyValueStore::new());
+        let first = BeamClient::new(Arc::clone(&storage) as Arc<dyn KeyValueStore>);
+        let id = first
+            .add_server("https://beam.test".to_owned(), None)
+            .await
+            .expect("adding a server is offline")
+            .id;
+        first
+            .use_transport(
+                &id,
+                Arc::new(CannedBackend::answering(200, "application/json", me)),
+            )
+            .expect("the server is registered");
+        first
+            .complete_login(id.clone(), cookie.to_owned())
+            .await
+            .expect("the canned /v1/me confirms the cookie");
+
+        let second = BeamClient::new(Arc::clone(&storage) as Arc<dyn KeyValueStore>);
+        second.restore().await.expect("restored");
+        (storage, second, id)
     }
 
     /// The `Cookie` header values one recorded request carried.
@@ -3929,22 +4337,7 @@ mod tests {
     /// carries it.
     #[tokio::test]
     async fn a_restored_cookie_is_sent_with_the_first_secured_call() {
-        let storage = Arc::new(InMemoryKeyValueStore::new());
-        let first = BeamClient::new(Arc::clone(&storage) as Arc<dyn KeyValueStore>);
-        let summary = first
-            .add_server("https://beam.test".to_owned(), None)
-            .await
-            .expect("added");
-        storage
-            .put_secret(
-                format!("session/{}", summary.id),
-                "restored-value".to_owned(),
-            )
-            .await
-            .expect("stored");
-
-        let second = BeamClient::new(storage as Arc<dyn KeyValueStore>);
-        second.restore().await.expect("restored");
+        let (_, second, id) = restarted_after_sign_in(ME, "restored-value").await;
         let backend = Arc::new(CannedBackend::answering(
             200,
             "application/json",
@@ -3952,7 +4345,7 @@ mod tests {
         ));
         second
             .use_transport(
-                &summary.id,
+                &id,
                 Arc::clone(&backend) as Arc<dyn crate::api::HttpBackend>,
             )
             .expect("the server is registered");

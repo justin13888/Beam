@@ -465,6 +465,18 @@ public class FakeServerRepository(
             }
     }
 
+    /**
+     * The server refusing [serverId]'s session: what the core's state reads
+     * after any secured call is answered `401`, re-published as the real
+     * repository re-publishes it.
+     */
+    public fun expire(serverId: String) {
+        state.value =
+            state.value.map {
+                if (it.id == serverId) it.copy(state = SessionState.Expired) else it
+            }
+    }
+
     /** Fingerprints accepted, per server. */
     public val trusted: MutableMap<String, MutableList<String>> = mutableMapOf()
 

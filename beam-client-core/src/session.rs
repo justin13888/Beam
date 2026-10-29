@@ -86,7 +86,13 @@ pub enum SessionState {
     LoggedOut,
     /// The in-app browser is open and the flow is in progress.
     AwaitingLogin,
-    /// A cookie was captured and the server confirmed it.
+    /// A cookie the server confirmed, either just now or at the sign-in that
+    /// stored it.
+    ///
+    /// A cookie restored at a cold start is in this state without a request:
+    /// it carries the identity the server confirmed when it was stored, and
+    /// the first `401` on it moves to [`SessionState::Expired`]. That is what
+    /// keeps app start off the network.
     Authenticated {
         /// Who the server says this is.
         user: UserSummary,
@@ -120,7 +126,8 @@ pub enum SessionEvent {
     CertificateTrusted,
     /// The user signed out.
     LogoutRequested,
-    /// A stored cookie was found at startup.
+    /// A stored cookie was found at startup, with the identity the server
+    /// confirmed when it was stored.
     StoredSessionRestored(Box<UserSummary>),
 }
 
@@ -167,7 +174,11 @@ pub fn transition(state: &SessionState, event: SessionEvent) -> (SessionState, V
             vec![Effect::InstallCookie(true), Effect::VerifyIdentity],
         ),
 
-        (_, Event::IdentityConfirmed(user)) => (
+        // Only a sign-in in progress is confirmed. A confirmation landing
+        // after the user signed out, or after the login was abandoned, is the
+        // answer to a request nobody is waiting for any more; honouring it
+        // would sign the device back in behind the user's back.
+        (State::AwaitingLogin, Event::IdentityConfirmed(user)) => (
             State::Authenticated { user: *user },
             vec![Effect::PersistCookie, Effect::NotifyObserver],
         ),
@@ -386,8 +397,30 @@ mod tests {
     }
 
     #[test]
-    fn every_state_and_event_pair_terminates_without_panicking() {
-        // The machine is total by construction; this pins that it stays so.
+    fn a_late_identity_confirmation_after_logout_does_not_sign_in() {
+        // The user signed out while `/v1/me` was in flight. Its answer is
+        // for a sign-in that no longer exists.
+        let (state, effects) = transition(
+            &SessionState::LoggedOut,
+            SessionEvent::IdentityConfirmed(Box::new(user())),
+        );
+        assert_eq!(state, SessionState::LoggedOut);
+        assert!(
+            !effects.contains(&SessionEffect::PersistCookie),
+            "a cookie the user signed out of is not stored again"
+        );
+
+        let (state, _) = transition(
+            &SessionState::Expired,
+            SessionEvent::IdentityConfirmed(Box::new(user())),
+        );
+        assert_eq!(state, SessionState::Expired);
+    }
+
+    #[test]
+    fn every_state_and_event_pair_keeps_the_credential_invariants() {
+        // The machine is total by construction; this pins that it stays so,
+        // and that no pair breaks the rules the façade's effects rely on.
         let states = [
             SessionState::LoggedOut,
             SessionState::AwaitingLogin,
@@ -410,7 +443,57 @@ mod tests {
         ];
         for state in &states {
             for event in &events {
-                let _ = transition(state, event.clone());
+                let (next, effects) = transition(state, event.clone());
+                let case = format!("{state:?} + {event:?} -> {next:?}");
+                // A stored cookie deleted while the client still sends it is
+                // the rejected credential going out on every later call.
+                if effects.contains(&SessionEffect::ClearCookie) {
+                    assert!(
+                        effects.contains(&SessionEffect::InstallCookie(false)),
+                        "clearing the cookie withdraws it too: {case}"
+                    );
+                }
+                // A cookie is only ever put on the client by a sign-in in
+                // progress or a session that counts as signed in.
+                if effects.contains(&SessionEffect::InstallCookie(true)) {
+                    assert!(
+                        matches!(
+                            next,
+                            SessionState::AwaitingLogin | SessionState::Authenticated { .. }
+                        ),
+                        "a cookie is installed only into a usable session: {case}"
+                    );
+                }
+                // `Expired` and `LoggedOut` are never entered with a cookie
+                // left on the client.
+                if matches!(next, SessionState::Expired | SessionState::LoggedOut)
+                    && !matches!(state, SessionState::Expired | SessionState::LoggedOut)
+                    && !matches!(event, SessionEvent::CertificateTrusted)
+                {
+                    assert!(
+                        effects.contains(&SessionEffect::InstallCookie(false)),
+                        "leaving a session withdraws its cookie: {case}"
+                    );
+                }
+                // Only a sign-in in progress or a stored session reaches
+                // `Authenticated` from somewhere else.
+                if matches!(next, SessionState::Authenticated { .. })
+                    && !matches!(state, SessionState::Authenticated { .. })
+                {
+                    assert!(
+                        matches!(
+                            (state, event),
+                            (
+                                SessionState::AwaitingLogin,
+                                SessionEvent::IdentityConfirmed(_)
+                            ) | (
+                                SessionState::LoggedOut | SessionState::Expired,
+                                SessionEvent::StoredSessionRestored(_)
+                            )
+                        ),
+                        "nothing else signs a device in: {case}"
+                    );
+                }
             }
         }
     }
