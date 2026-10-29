@@ -89,6 +89,21 @@ pub struct CreateMovieEntry {
     pub edition: Option<String>,
 }
 
+/// Reads a stored `runtime_mins` column as a [`Duration`], shared by the
+/// movie and episode conversions.
+///
+/// The column is a signed `INTEGER`, so it admits values no write produces: a
+/// negative runtime, or one whose length in seconds does not fit the
+/// column's own `i32`. Either is read as no runtime (`None`) rather than cast
+/// unchecked, which would turn `-1` into some 584 billion years and overflow
+/// `mins * 60` for a large value (issue #367). Zero stays a zero duration.
+#[cfg(feature = "entity")]
+pub(crate) fn runtime_from_stored_minutes(mins: i32) -> Option<Duration> {
+    let secs = mins.checked_mul(60)?;
+    let secs = u64::try_from(secs).ok()?;
+    Some(Duration::from_secs(secs))
+}
+
 #[cfg(feature = "entity")]
 impl From<beam_entity::movie::Model> for Movie {
     fn from(model: beam_entity::movie::Model) -> Self {
@@ -105,9 +120,7 @@ impl From<beam_entity::movie::Model> for Movie {
             description: model.description,
             year: model.year.map(|y| y as u32),
             release_date: model.release_date,
-            runtime: model
-                .runtime_mins
-                .map(|mins| Duration::from_secs((mins * 60) as u64)),
+            runtime: model.runtime_mins.and_then(runtime_from_stored_minutes),
             poster_url: model.poster_url,
             backdrop_url: model.backdrop_url,
             tmdb_id: model.tmdb_id.map(|id| id as u32),
@@ -193,16 +206,26 @@ mod entity_conversion_tests {
         assert_eq!(Movie::from(model(None)).runtime, None);
     }
 
-    /// Characterises, not endorses: the conversion casts `mins * 60` to
-    /// `u64` unchecked, so a negative stored runtime -- which the column's
-    /// `INTEGER` type admits -- wraps to a duration of some 584 billion
-    /// years instead of being refused. Pinned so a fix is a deliberate
-    /// change to this test.
+    /// The column's `INTEGER` type admits a negative runtime no write
+    /// produces; an unchecked cast would serve it as some 584 billion years.
     #[test]
-    fn a_negative_runtime_wraps_into_an_enormous_duration() {
+    fn a_negative_runtime_reads_as_no_runtime() {
+        assert_eq!(Movie::from(model(Some(-1))).runtime, None);
+        assert_eq!(Movie::from(model(Some(i32::MIN))).runtime, None);
+    }
+
+    /// The largest runtime whose length in seconds fits the column's `i32`
+    /// is kept; one minute more overflows `mins * 60` and is refused.
+    #[test]
+    fn a_runtime_whose_seconds_overflow_reads_as_no_runtime() {
+        let largest = i32::MAX / 60;
         assert_eq!(
-            Movie::from(model(Some(-1))).runtime,
-            Some(Duration::from_secs(u64::MAX - 59))
+            Movie::from(model(Some(largest))).runtime,
+            Some(Duration::from_secs(
+                u64::try_from(largest).expect("positive") * 60
+            ))
         );
+        assert_eq!(Movie::from(model(Some(largest + 1))).runtime, None);
+        assert_eq!(Movie::from(model(Some(i32::MAX))).runtime, None);
     }
 }
