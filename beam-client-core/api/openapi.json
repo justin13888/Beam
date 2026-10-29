@@ -14077,7 +14077,7 @@
           "auth"
         ],
         "summary": "Logs out the current session (deletes it and clears the cookie).",
-        "description": "Deliberately not `SessionAuth`-gated: signing out of a session that has\nalready expired should succeed rather than answer 401, so the cookie is read\ndirectly and a miss is a no-op.",
+        "description": "Deliberately not `SessionAuth`-gated: signing out of a session that has\nalready expired should succeed rather than answer 401, so the cookie is read\ndirectly and a miss is a no-op.\n\nA store that fails to delete is a 500 that leaves the cookie alone (FR-109).\nAnswering 204 and clearing it would tell the client it had signed out while\nthe session stayed valid on the server; keeping the cookie lets it retry.",
         "operationId": "logout",
         "parameters": [
           {
