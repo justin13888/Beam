@@ -15,6 +15,7 @@ import javax.inject.Inject
 plugins {
     id("beam.android.library")
     id("beam.android.hilt")
+    id("beam.android.pitest")
 }
 
 android {
@@ -33,58 +34,60 @@ android {
 val repoRoot: java.io.File = rootProject.layout.projectDirectory.asFile.parentFile
 
 @CacheableTask
-abstract class MiseTask @Inject constructor(
-    private val execOperations: ExecOperations,
-) : DefaultTask() {
+abstract class MiseTask
+    @Inject
+    constructor(
+        private val execOperations: ExecOperations,
+    ) : DefaultTask() {
+        @get:Internal
+        abstract val workingDirectory: DirectoryProperty
 
-    @get:Internal
-    abstract val workingDirectory: DirectoryProperty
+        @get:Input
+        abstract val miseTask: Property<String>
 
-    @get:Input
-    abstract val miseTask: Property<String>
+        /**
+         * Environment for the task, which is how the cargo profile is selected.
+         *
+         * An `@Input` rather than `@Internal`: the profile changes the bytes of
+         * the output, so a build that switches profile must not be considered
+         * up to date against the other profile's artifacts.
+         */
+        @get:Input
+        abstract val environment: MapProperty<String, String>
 
-    /**
-     * Environment for the task, which is how the cargo profile is selected.
-     *
-     * An `@Input` rather than `@Internal`: the profile changes the bytes of
-     * the output, so a build that switches profile must not be considered
-     * up to date against the other profile's artifacts.
-     */
-    @get:Input
-    abstract val environment: MapProperty<String, String>
+        /** The core's sources; a change here invalidates the output. */
+        @get:InputDirectory
+        @get:PathSensitive(PathSensitivity.RELATIVE)
+        abstract val coreSources: DirectoryProperty
 
-    /** The core's sources; a change here invalidates the output. */
-    @get:InputDirectory
-    @get:PathSensitive(PathSensitivity.RELATIVE)
-    abstract val coreSources: DirectoryProperty
+        /** The vendored contract the client is generated from. */
+        @get:InputFile
+        @get:PathSensitive(PathSensitivity.RELATIVE)
+        abstract val manifest: RegularFileProperty
 
-    /** The vendored contract the client is generated from. */
-    @get:InputFile
-    @get:PathSensitive(PathSensitivity.RELATIVE)
-    abstract val manifest: RegularFileProperty
+        @get:OutputDirectory
+        abstract val outputDirectory: DirectoryProperty
 
-    @get:OutputDirectory
-    abstract val outputDirectory: DirectoryProperty
-
-    @TaskAction
-    fun run() {
-        execOperations.exec {
-            workingDir = workingDirectory.get().asFile
-            environment(this@MiseTask.environment.get())
-            commandLine("mise", "run", miseTask.get())
+        @TaskAction
+        fun run() {
+            execOperations.exec {
+                workingDir = workingDirectory.get().asFile
+                environment(this@MiseTask.environment.get())
+                commandLine("mise", "run", miseTask.get())
+            }
         }
     }
-}
 
-val uniffiBindgen = tasks.register<MiseTask>("uniffiBindgen") {
-    group = "beam"
-    description = "Generate the Kotlin bindings for beam-client-core"
-    workingDirectory.set(repoRoot)
-    miseTask.set("core:bindgen")
-    coreSources.set(File(repoRoot, "beam-client-core/src"))
-    manifest.set(File(repoRoot, "beam-client-core/Cargo.toml"))
-    outputDirectory.set(layout.buildDirectory.dir("generated/uniffi"))
-}
+val uniffiBindgen =
+    tasks.register<MiseTask>("uniffiBindgen") {
+        group = "beam"
+        description = "Generate the Kotlin bindings for beam-client-core"
+        workingDirectory.set(repoRoot)
+        miseTask.set("core:bindgen")
+        coreSources.set(File(repoRoot, "beam-client-core/src"))
+        manifest.set(File(repoRoot, "beam-client-core/Cargo.toml"))
+        outputDirectory.set(layout.buildDirectory.dir("generated/uniffi"))
+    }
 
 /**
  * Cross-compile the core, at the profile the variant needs.
@@ -116,7 +119,10 @@ fun registerCargoNdk(variantName: String): TaskProvider<MiseTask> {
             mapOf(
                 "BEAM_CARGO_PROFILE" to profile,
                 "BEAM_JNI_LIBS_DIR" to
-                    layout.buildDirectory.dir("jniLibs/$profile").get().asFile.absolutePath,
+                    layout.buildDirectory
+                        .dir("jniLibs/$profile")
+                        .get()
+                        .asFile.absolutePath,
             ),
         )
         outputDirectory.set(layout.buildDirectory.dir("jniLibs/$profile"))

@@ -230,6 +230,21 @@ mise run rust:mutants:shard 0/12               # one slice of the full run
 (resolve these first -- a bad timeout corrupts every other result), and `outcomes.json` the
 machine-readable form, with the exact source change for each mutant under `diff/`.
 
+### The Android client
+
+The Android modules use [PIT](https://pitest.org) through the Android fork of the Gradle plugin,
+pinned in `beam-android/gradle/libs.versions.toml` and configured once in the `beam.android.pitest`
+convention plugin, which the app, `:core:ffi`, `:core:media` and every `:feature:*` module apply.
+That plugin is where the exclusions live: UniFFI's generated bindings, Hilt and Dagger output, and
+`:core:testing`'s fakes -- the Kotlin counterpart of marking test doubles `#[mutants::skip]`.
+
+`mise run android:mutants` runs `pitestDebug` in every one of those modules and writes each report
+under the module's `build/reports/pitest/`. It is advisory on exactly the terms above: outside
+`mise run ci`, and run by the `Mutants (Android)` job in `.github/workflows/mutants.yml` on the
+schedule and on dispatch, `continue-on-error`. It does not run on pull requests, because PIT has no
+free equivalent of `cargo mutants --in-diff` and a PR run would mutate every module each time. The
+resolution order for a survivor is the same as for a Rust one.
+
 ## The `pg-integration` tier
 
 The hermetic suite covers "the business logic behaves correctly given any trait response". It cannot

@@ -69,6 +69,13 @@ robolectric = "4.16.1"
 roborazzi = "1.73.0"
 turbine = "1.2.1"
 androidxTestExt = "1.3.0"
+# Mutation testing. Advisory, like cargo-mutants on the Rust side: the
+# `android:mutants` mise task sits outside `ci`. This is the Android fork of
+# gradle-pitest-plugin -- the upstream plugin only reads the `java` plugin's
+# source sets, which an Android module does not have. `pitest` pins the engine
+# the plugin runs, rather than whichever one the plugin release defaulted to.
+pitestGradle = "0.3.0"
+pitest = "1.30.1"
 
 [libraries]
 # Compose
@@ -161,6 +168,7 @@ kotlin-gradlePlugin = { group = "org.jetbrains.kotlin", name = "kotlin-gradle-pl
 ksp-gradlePlugin = { group = "com.google.devtools.ksp", name = "com.google.devtools.ksp.gradle.plugin", version.ref = "ksp" }
 compose-gradlePlugin = { group = "org.jetbrains.kotlin", name = "compose-compiler-gradle-plugin", version.ref = "kotlin" }
 roborazzi-gradlePlugin = { group = "io.github.takahirom.roborazzi", name = "io.github.takahirom.roborazzi.gradle.plugin", version.ref = "roborazzi" }
+pitest-gradlePlugin = { group = "pl.droidsonroids.gradle", name = "gradle-pitest-plugin", version.ref = "pitestGradle" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
@@ -172,3 +180,4 @@ kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", versi
 ksp = { id = "com.google.devtools.ksp", version.ref = "ksp" }
 hilt = { id = "com.google.dagger.hilt.android", version.ref = "hilt" }
 roborazzi = { id = "io.github.takahirom.roborazzi", version.ref = "roborazzi" }
+pitest = { id = "pl.droidsonroids.pitest", version.ref = "pitestGradle" }

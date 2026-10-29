@@ -152,6 +152,62 @@ jobs:
           path: mutants.out/
           retention-days: 14
 
+  # ---------------------------------------------------------------------
+  # Scheduled: the Android client, through PIT.
+  #
+  # Schedule and dispatch only, not every pull request: PIT has no free
+  # changed-lines mode equivalent to `cargo mutants --in-diff`, so a PR run
+  # would mutate every module every time. Like the shards it is
+  # `continue-on-error`, and nothing in ci.yml depends on it.
+  # ---------------------------------------------------------------------
+  android:
+    name: Mutants (Android)
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v4
+      # The Gradle build generates the UniFFI bindings from beam-client-core,
+      # so the Rust toolchain is needed even though no Rust is mutated here.
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+      - uses: ./.github/actions/setup-android
+      - uses: gradle/actions/setup-gradle@v6
+
+      - name: Mutate the Android modules
+        continue-on-error: true
+        run: mise run android:mutants
+
+      - name: Summarise
+        if: always()
+        run: |
+          {
+            echo "## Android mutation testing (advisory)"
+            echo
+            reports=$(find beam-android -path '*/build/reports/pitest/*' -name mutations.xml)
+            if [ -z "$reports" ]; then
+              echo "No PIT report was produced -- the run failed before mutating anything."
+              exit 0
+            fi
+            echo "| outcome | count |"
+            echo "|---|---|"
+            for status in KILLED SURVIVED NO_COVERAGE TIMED_OUT; do
+              # $reports is unquoted on purpose: one path per word.
+              # shellcheck disable=SC2086
+              n=$(cat $reports | grep -o "status='$status'" | wc -l)
+              echo "| $status | $n |"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: mutants-android
+          path: beam-android/**/build/reports/pitest/
+          if-no-files-found: ignore
+          retention-days: 14
+
   report:
     name: Aggregate
     needs: full

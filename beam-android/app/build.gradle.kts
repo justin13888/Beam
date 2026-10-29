@@ -3,6 +3,7 @@ plugins {
     id("beam.android.compose")
     id("beam.android.hilt")
     alias(libs.plugins.kotlin.serialization)
+    id("beam.android.pitest")
 }
 
 android {

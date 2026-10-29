@@ -17,6 +17,7 @@ dependencies {
     compileOnly(libs.ksp.gradlePlugin)
     compileOnly(libs.compose.gradlePlugin)
     compileOnly(libs.roborazzi.gradlePlugin)
+    compileOnly(libs.pitest.gradlePlugin)
 }
 
 gradlePlugin {
@@ -44,6 +45,10 @@ gradlePlugin {
         register("androidScreenshot") {
             id = "beam.android.screenshot"
             implementationClass = "AndroidScreenshotConventionPlugin"
+        }
+        register("androidPitest") {
+            id = "beam.android.pitest"
+            implementationClass = "AndroidPitestConventionPlugin"
         }
         register("jvmLibrary") {
             id = "beam.jvm.library"
