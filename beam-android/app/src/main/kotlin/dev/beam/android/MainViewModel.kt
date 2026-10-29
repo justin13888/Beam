@@ -7,7 +7,6 @@ import dev.beam.android.core.ffi.DeviceProfiles
 import dev.beam.android.core.ffi.preferences.PreferencesRepository
 import dev.beam.android.core.ffi.repository.PlaybackRepository
 import dev.beam.android.core.ffi.repository.ServerRepository
-import dev.beam.android.core.media.download.DownloadRepository
 import dev.beam.android.core.model.UserPreferences
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -44,10 +43,7 @@ public data class MainUiState(
     val preferences: UserPreferences = UserPreferences(),
 )
 
-/**
- * Restores the session, tells the core what this device can decode, and tells
- * the download manager which networks it may download over.
- */
+/** Restores the session and tells the core what this device can decode. */
 @HiltViewModel
 public class MainViewModel
     @Inject
@@ -55,7 +51,6 @@ public class MainViewModel
         private val servers: ServerRepository,
         private val playback: PlaybackRepository,
         private val preferences: PreferencesRepository,
-        private val downloads: DownloadRepository,
         @dagger.hilt.android.qualifiers.ApplicationContext private val context: android.content.Context,
     ) : ViewModel() {
         private val mutableState = MutableStateFlow(MainUiState())
@@ -66,17 +61,6 @@ public class MainViewModel
                 preferences.preferences.collect { value ->
                     mutableState.update { it.copy(preferences = value) }
                 }
-            }
-            viewModelScope.launch {
-                // A preference the viewer cannot change their mind about is
-                // not a preference: each change of the cellular toggle reaches
-                // the download manager, the stored one included at start.
-                preferences.preferences
-                    .map { it.downloadOverCellular }
-                    .distinctUntilChanged()
-                    .collect { overCellular ->
-                        runCatching { downloads.setRequiresUnmeteredNetwork(!overCellular) }
-                    }
             }
             viewModelScope.launch {
                 val softwareDecode = preferences.preferences.map { it.allowSoftwareDecode }.distinctUntilChanged()

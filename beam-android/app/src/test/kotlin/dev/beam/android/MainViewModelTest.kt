@@ -2,9 +2,6 @@ package dev.beam.android
 
 import android.app.Application
 import androidx.test.core.app.ApplicationProvider
-import dev.beam.android.core.media.download.DownloadRepository
-import dev.beam.android.core.model.DownloadRecord
-import dev.beam.android.core.model.ThemeMode
 import dev.beam.android.core.model.UserPreferences
 import dev.beam.android.core.testing.FakePlaybackRepository
 import dev.beam.android.core.testing.FakePreferencesRepository
@@ -12,8 +9,6 @@ import dev.beam.android.core.testing.FakeServerRepository
 import dev.beam.android.core.testing.Fixtures
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
@@ -56,12 +51,10 @@ class MainViewModelTest {
         servers: FakeServerRepository = FakeServerRepository(listOf(Fixtures.server(isActive = true))),
         playback: FakePlaybackRepository = FakePlaybackRepository(),
         preferences: FakePreferencesRepository = FakePreferencesRepository(),
-        downloads: RecordingDownloadRepository = RecordingDownloadRepository(),
     ) = MainViewModel(
         servers = servers,
         playback = playback,
         preferences = preferences,
-        downloads = downloads,
         context = ApplicationProvider.getApplicationContext(),
     )
 
@@ -90,58 +83,6 @@ class MainViewModelTest {
                 playback.deviceProfile?.allowSoftwareDecode,
             )
         }
-
-    @Test
-    fun `the cellular preference reaches the download manager`() =
-        runTest(dispatcher) {
-            val downloads = RecordingDownloadRepository()
-            val preferences = FakePreferencesRepository(UserPreferences(downloadOverCellular = false))
-            viewModel(preferences = preferences, downloads = downloads)
-            testScheduler.advanceUntilIdle()
-            assertEquals("the stored preference is applied at start", listOf(true), downloads.unmeteredRequirements)
-
-            preferences.update { it.copy(downloadOverCellular = true) }
-            testScheduler.advanceUntilIdle()
-            preferences.update { it.copy(themeMode = ThemeMode.Dark) }
-            testScheduler.advanceUntilIdle()
-
-            assertEquals(
-                "allowing cellular lifts the requirement, and an unrelated change resends nothing",
-                listOf(true, false),
-                downloads.unmeteredRequirements,
-            )
-        }
-
-    /** Records what the shell asks of downloads; nothing here downloads. */
-    class RecordingDownloadRepository : DownloadRepository {
-        /** Every value passed to [setRequiresUnmeteredNetwork], in order. */
-        val unmeteredRequirements: MutableList<Boolean> = mutableListOf()
-
-        override val downloads: Flow<List<DownloadRecord>> = flowOf(emptyList())
-
-        override suspend fun enqueue(
-            fileId: String,
-            serverId: String,
-            mediaId: String,
-            title: String,
-            subtitle: String?,
-            posterUrl: String?,
-        ) = Unit
-
-        override suspend fun pause(fileId: String) = Unit
-
-        override suspend fun resume(fileId: String) = Unit
-
-        override suspend fun remove(fileId: String) = Unit
-
-        override suspend fun removeAll() = Unit
-
-        override suspend fun setRequiresUnmeteredNetwork(required: Boolean) {
-            unmeteredRequirements += required
-        }
-
-        override suspend fun isDownloaded(fileId: String): Boolean = false
-    }
 
     @Test
     fun `admin access follows a switch of server and a sign-in to another`() =
