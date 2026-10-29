@@ -19,6 +19,8 @@ mod tests {
 
     use kynos::openapi::{SpecError, SpecVersion};
 
+    use crate::bootstrap::AllowedOrigins;
+    use crate::config::ServerConfig;
     use crate::routes::create_router;
 
     /// Every method the OpenAPI Path Item Object can carry.
@@ -59,7 +61,7 @@ mod tests {
     /// is the same check the process makes at startup -- run without one.
     #[test]
     fn the_router_describes_itself_without_violations() {
-        let violations = create_router()
+        let violations = create_router(&AllowedOrigins::none())
             .validate()
             .expect("the router is describable");
 
@@ -88,9 +90,32 @@ mod tests {
     /// gate rather than a test. Asserting it here names the cause instead.
     #[test]
     fn the_contract_exports_as_openapi_3_2() {
-        create_router()
+        create_router(&AllowedOrigins::none())
             .openapi_as(SpecVersion::V3_2)
             .expect("the contract exports as OpenAPI 3.2");
+    }
+
+    /// The CORS allow-list is the one thing `create_router` takes, and it is
+    /// a dispatch-time policy: the document a configured server serves is the
+    /// one the export commits, whatever origins the deployment names.
+    #[test]
+    fn the_document_does_not_depend_on_the_allowed_origins() {
+        let document = |origins: &AllowedOrigins| {
+            serde_json::to_value(
+                create_router(origins)
+                    .openapi_as(SpecVersion::V3_2)
+                    .expect("the contract exports"),
+            )
+            .expect("the document serializes")
+        };
+
+        let configured = AllowedOrigins::from_config(&ServerConfig {
+            web_url: "https://beam.example.com".to_owned(),
+            extra_allowed_origins: Some("https://other.example.com".to_owned()),
+            ..Default::default()
+        });
+
+        assert_eq!(document(&AllowedOrigins::none()), document(&configured));
     }
 
     /// No operation describes a transport header as one of its parameters
@@ -116,7 +141,7 @@ mod tests {
             .map(|name| name.to_ascii_lowercase())
             .collect();
 
-        let exported = create_router()
+        let exported = create_router(&AllowedOrigins::none())
             .openapi_as(SpecVersion::V3_2)
             .expect("the contract exports");
         let exported = serde_json::to_value(&exported).expect("the document serializes");
@@ -161,7 +186,7 @@ mod tests {
     /// same assertion that drifts on its own schedule.
     #[test]
     fn the_exported_operation_set_matches_the_committed_contract() {
-        let exported = create_router()
+        let exported = create_router(&AllowedOrigins::none())
             .openapi_as(SpecVersion::V3_2)
             .expect("the contract exports");
         let exported = serde_json::to_value(&exported).expect("the document serializes");

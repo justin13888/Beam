@@ -68,12 +68,13 @@ mod tests {
     use kynos::openapi::SpecVersion;
     use serde_json::{Value, json};
 
+    use crate::bootstrap::AllowedOrigins;
     use crate::routes::create_router;
 
     /// The document every client is generated from.
     fn exported_document() -> Value {
         serde_json::to_value(
-            create_router()
+            create_router(&AllowedOrigins::none())
                 .openapi_as(SpecVersion::V3_2)
                 .expect("the router exports"),
         )

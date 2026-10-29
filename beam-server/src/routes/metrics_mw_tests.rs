@@ -28,6 +28,7 @@ use metrics_util::debugging::{DebugValue, DebuggingRecorder};
 use serde_json::Value;
 
 use super::UNMATCHED;
+use crate::bootstrap::AllowedOrigins;
 use crate::config::ServerConfig;
 use crate::routes::create_router;
 use crate::routes::test_support::make_app_state_full;
@@ -37,7 +38,7 @@ use crate::state::AppState;
 /// The whole router, over a state carrying `metrics` and the configuration the
 /// caller wrote.
 ///
-/// `create_router` takes no arguments now: the Prometheus handle arrives on
+/// The Prometheus handle is not an argument to `create_router`: it arrives on
 /// `AppState`, which is what lets the served surface and the exported document
 /// come from one walk of the same value.
 fn service(
@@ -51,7 +52,7 @@ fn service(
         metrics,
     );
 
-    create_router()
+    create_router(&AllowedOrigins::none())
         .build(state)
         .expect("the server router describes itself")
 }

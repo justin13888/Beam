@@ -30,6 +30,7 @@ use kynos::http::StatusCode;
 use kynos::test::{TestClient, TestResponse};
 use serde_json::{Value, json};
 
+use crate::bootstrap::AllowedOrigins;
 use crate::routes::api_error::SESSION_COOKIE;
 use crate::routes::auth::DEVICE_LOGIN_MAX_SECS;
 use crate::routes::create_router;
@@ -168,7 +169,7 @@ fn build(
         .config
         .trusted_proxy_policy()
         .expect("the test configuration names valid networks");
-    let service = create_router()
+    let service = create_router(&AllowedOrigins::none())
         .trusted_proxies(trusted_proxies)
         .build(state)
         .expect("the served router describes itself");
