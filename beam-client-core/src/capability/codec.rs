@@ -305,6 +305,27 @@ mod tests {
                 "V_VP9",
                 VideoCodec::Vp9,
             ),
+            (
+                "vp8",
+                "video/x-vnd.on2.vp8",
+                "vp08",
+                "V_VP8",
+                VideoCodec::Vp8,
+            ),
+            (
+                "mpeg2video",
+                "video/mpeg2",
+                "mp2v",
+                "V_MPEG2",
+                VideoCodec::Mpeg2,
+            ),
+            (
+                "mpeg4",
+                "video/mp4v-es",
+                "mp4v",
+                "V_MPEG4/ISO/SP",
+                VideoCodec::Mpeg4,
+            ),
         ] {
             assert_eq!(VideoCodec::from_probe(probe), expected);
             assert_eq!(VideoCodec::from_android_mime(mime), expected);
@@ -323,6 +344,14 @@ mod tests {
             ("ac3", "audio/ac3", "ac-3", "A_AC3", AudioCodec::Ac3),
             ("eac3", "audio/eac3", "ec-3", "A_EAC3", AudioCodec::Eac3),
             ("flac", "audio/flac", "flac", "A_FLAC", AudioCodec::Flac),
+            ("mp3", "audio/mpeg", ".mp3", "A_MPEG/L3", AudioCodec::Mp3),
+            (
+                "pcm_s16le",
+                "audio/raw",
+                "lpcm",
+                "A_PCM/INT/LIT",
+                AudioCodec::Pcm,
+            ),
         ] {
             assert_eq!(AudioCodec::from_probe(probe), expected);
             assert_eq!(AudioCodec::from_android_mime(mime), expected);
@@ -332,16 +361,31 @@ mod tests {
     }
 
     #[test]
+    fn vc1_meets_in_every_vocabulary_but_apples() {
+        // No Apple decoder takes VC-1, so its four-character code is not in
+        // that table; the other three must still agree, or a VC-1 source an
+        // Android device can play is reported as an unknown codec.
+        assert_eq!(VideoCodec::from_probe("vc1"), VideoCodec::Vc1);
+        assert_eq!(VideoCodec::from_android_mime("video/wvc1"), VideoCodec::Vc1);
+        assert_eq!(
+            VideoCodec::from_matroska_codec_id("V_MS/VFW/WVC1"),
+            VideoCodec::Vc1
+        );
+    }
+
+    #[test]
     fn codecs_with_no_apple_decoder_still_normalise_from_the_container() {
         // The Apple table has no entry for these, but the Matroska table must:
         // a track the sample-buffer engine cannot play still has to be
         // identified, so `select_source` can reject it with a reason rather
         // than reporting an unknown codec.
-        for (codec_id, expected) in [
-            ("A_DTS", AudioCodec::Dts),
-            ("A_TRUEHD", AudioCodec::TrueHd),
-            ("A_VORBIS", AudioCodec::Vorbis),
+        for (probe, mime, codec_id, expected) in [
+            ("dts", "audio/vnd.dts", "A_DTS", AudioCodec::Dts),
+            ("truehd", "audio/true-hd", "A_TRUEHD", AudioCodec::TrueHd),
+            ("vorbis", "audio/vorbis", "A_VORBIS", AudioCodec::Vorbis),
         ] {
+            assert_eq!(AudioCodec::from_probe(probe), expected);
+            assert_eq!(AudioCodec::from_android_mime(mime), expected);
             assert_eq!(AudioCodec::from_matroska_codec_id(codec_id), expected);
             assert_eq!(AudioCodec::from_apple_fourcc(codec_id), AudioCodec::Unknown);
         }
