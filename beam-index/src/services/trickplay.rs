@@ -58,3 +58,23 @@ impl TrickplayGenerator for LocalTrickplayGenerator {
             .map_err(|err| TrickplayError::Write(std::io::Error::other(err)))?
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The flag the blocking generation reads before each tile is clear
+    /// while the guard lives -- the generation runs -- and set once it is
+    /// dropped, as it is with the future that holds it, whether that future
+    /// finished or a shutting-down runtime dropped it part-way.
+    #[test]
+    fn dropping_the_guard_cancels_the_generation_it_guards() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let guard = CancelOnDrop(Arc::clone(&cancel));
+        assert!(!cancel.load(Ordering::Relaxed), "running while guarded");
+
+        drop(guard);
+
+        assert!(cancel.load(Ordering::Relaxed), "cancelled once dropped");
+    }
+}

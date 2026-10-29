@@ -355,42 +355,45 @@ fn a_file_without_chapters_reads_none() {
     assert!(probe(&path).expect("probe").chapters.is_empty());
 }
 
+/// The sheets are written to their own folder and nowhere else: the
+/// library the file is read from is left byte for byte as it was (FR-202).
 #[test]
 fn trickplay_sheets_tile_the_files_frames_into_jpegs() {
+    use crate::library_file::test_support::snapshot;
     use crate::probe::trickplay::{TrickplaySpec, generate_sheets};
 
-    let path = chaptered_fixture();
+    let library = tempfile::tempdir().expect("a library");
+    let path = library.path().join("Clip (2020).mkv");
+    std::fs::copy(chaptered_fixture(), &path).expect("copy the fixture into the library");
     let out = tempfile::tempdir().expect("an output directory");
-    let root = path.parent().expect("a file has a folder");
-    let file = LibraryFile::open(root, &path).expect("open the fixture");
+    let file = LibraryFile::open(library.path(), &path).expect("open the fixture");
+    // A tile every 1.2 seconds: the fixture's 75 frames at 25 fps last
+    // 2.96 seconds to its last frame's start and 3 to its end, so whichever
+    // a muxer records as its duration it starts exactly three intervals.
     let spec = TrickplaySpec {
-        interval_ms: 1_000,
+        interval_ms: 1_200,
         tile_width: 32,
         columns: 2,
         rows: 1,
         max_tiles: 100,
     };
+    let before = snapshot(library.path());
 
     let layout = generate_sheets(file, out.path(), &spec, &AtomicBool::new(false))
         .expect("sheets are made")
         .expect("a video file has a layout");
 
-    // Three seconds at one a second; a 64x64 picture is a square tile.
+    // A 64x64 picture is a square tile; three tiles, two to a sheet.
     assert_eq!((layout.tile_width, layout.tile_height), (32, 32));
-    assert!(
-        (3..=4).contains(&layout.tile_count),
-        "{} tiles",
-        layout.tile_count
-    );
+    assert_eq!(layout.tile_count, 3);
+    assert_eq!(layout.sheet_count(), 2);
     let mut written: Vec<String> = std::fs::read_dir(out.path())
         .unwrap()
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     written.sort();
-    let expected: Vec<String> = (0..layout.sheet_count())
-        .map(|sheet| format!("{sheet}.jpg"))
-        .collect();
-    assert_eq!(written, expected);
+    assert_eq!(written, ["0.jpg", "1.jpg"]);
+    assert_eq!(snapshot(library.path()), before, "the library is unchanged");
 
     // Each sheet is a JPEG of the whole grid: two tiles across, one down.
     for name in &written {

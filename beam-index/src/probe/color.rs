@@ -143,19 +143,82 @@ impl PixelFormat {
         }
     }
 
-    /// Check if this is a hardware-accelerated pixel format
+    /// Check if this is a hardware-accelerated pixel format.
+    ///
+    /// A format Beam does not name is hardware when FFmpeg's own descriptor
+    /// flags it `AV_PIX_FMT_FLAG_HWACCEL` (DRM PRIME, MediaCodec, OpenCL,
+    /// D3D12 and the like), so a GPU surface is never reported as software
+    /// for want of a variant here.
     pub fn is_hardware(&self) -> bool {
-        matches!(
-            self,
+        match self {
             PixelFormat::VAAPI
-                | PixelFormat::DXVA2_VLD
-                | PixelFormat::VDPAU
-                | PixelFormat::VIDEOTOOLBOX
-                | PixelFormat::D3D11
-                | PixelFormat::CUDA
-                | PixelFormat::QSV
-                | PixelFormat::VULKAN
-        )
+            | PixelFormat::DXVA2_VLD
+            | PixelFormat::VDPAU
+            | PixelFormat::VIDEOTOOLBOX
+            | PixelFormat::D3D11
+            | PixelFormat::CUDA
+            | PixelFormat::QSV
+            | PixelFormat::VULKAN => true,
+            PixelFormat::Other(raw) => {
+                // SAFETY: `av_pix_fmt_desc_get` accepts any pixel format
+                // value and returns null for one it does not describe, or a
+                // pointer into FFmpeg's static descriptor table, which lives
+                // as long as the process.
+                let descriptor = unsafe { ffmpeg::ffi::av_pix_fmt_desc_get(*raw).as_ref() };
+                // The flag is a positive `i32` bit (`1 << 3`), so its
+                // magnitude is the bit.
+                let hwaccel = u64::from(ffmpeg::ffi::AV_PIX_FMT_FLAG_HWACCEL.unsigned_abs());
+                descriptor.is_some_and(|descriptor| descriptor.flags & hwaccel != 0)
+            }
+            PixelFormat::YUV420P
+            | PixelFormat::YUV422P
+            | PixelFormat::YUV444P
+            | PixelFormat::YUV410P
+            | PixelFormat::YUV411P
+            | PixelFormat::YUV440P
+            | PixelFormat::YUVJ420P
+            | PixelFormat::YUVJ422P
+            | PixelFormat::YUVJ444P
+            | PixelFormat::YUVJ440P
+            | PixelFormat::NV12
+            | PixelFormat::NV21
+            | PixelFormat::GRAY8
+            | PixelFormat::RGB24
+            | PixelFormat::BGR24
+            | PixelFormat::ARGB
+            | PixelFormat::RGBA
+            | PixelFormat::ABGR
+            | PixelFormat::BGRA
+            | PixelFormat::YUVA420P
+            | PixelFormat::GBRP
+            | PixelFormat::YUV420P9LE
+            | PixelFormat::YUV420P9BE
+            | PixelFormat::YUV422P9LE
+            | PixelFormat::YUV422P9BE
+            | PixelFormat::YUV444P9LE
+            | PixelFormat::YUV444P9BE
+            | PixelFormat::YUV420P10LE
+            | PixelFormat::YUV420P10BE
+            | PixelFormat::YUV422P10LE
+            | PixelFormat::YUV422P10BE
+            | PixelFormat::YUV444P10LE
+            | PixelFormat::YUV444P10BE
+            | PixelFormat::GBRP10LE
+            | PixelFormat::YUV420P12LE
+            | PixelFormat::YUV420P12BE
+            | PixelFormat::YUV422P12LE
+            | PixelFormat::YUV422P12BE
+            | PixelFormat::YUV444P12LE
+            | PixelFormat::YUV444P12BE
+            | PixelFormat::GBRP12LE
+            | PixelFormat::YUV420P16LE
+            | PixelFormat::YUV420P16BE
+            | PixelFormat::YUV422P16LE
+            | PixelFormat::YUV422P16BE
+            | PixelFormat::YUV444P16LE
+            | PixelFormat::YUV444P16BE
+            | PixelFormat::None => false,
+        }
     }
 }
 
@@ -212,6 +275,7 @@ impl From<ffmpeg::format::Pixel> for PixelFormat {
             // Alpha
             ffmpeg::format::Pixel::YUVA420P => PixelFormat::YUVA420P,
             // Hardware
+            ffmpeg::format::Pixel::VAAPI => PixelFormat::VAAPI,
             ffmpeg::format::Pixel::DXVA2_VLD => PixelFormat::DXVA2_VLD,
             ffmpeg::format::Pixel::VDPAU => PixelFormat::VDPAU,
             ffmpeg::format::Pixel::VIDEOTOOLBOX => PixelFormat::VIDEOTOOLBOX,
@@ -730,6 +794,261 @@ mod description_tests {
             PixelFormat::Other(ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_RGB24),
         ] {
             assert!(!software.is_hardware(), "{software:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod conversion_tests {
+    use super::*;
+
+    /// Every pixel format the linked FFmpeg describes, with its descriptor.
+    fn every_pixel_format() -> Vec<(
+        ffmpeg::format::Pixel,
+        &'static ffmpeg::ffi::AVPixFmtDescriptor,
+    )> {
+        let mut formats = Vec::new();
+        let mut desc: *const ffmpeg::ffi::AVPixFmtDescriptor = std::ptr::null();
+        loop {
+            // SAFETY: `av_pix_fmt_desc_next` takes null or a descriptor it
+            // returned, and returns the next of FFmpeg's static table, or null
+            // after the last; a descriptor lives as long as the process.
+            desc = unsafe { ffmpeg::ffi::av_pix_fmt_desc_next(desc) };
+            // SAFETY: as above -- null, or a pointer into the static table.
+            let Some(descriptor) = (unsafe { desc.as_ref() }) else {
+                break;
+            };
+            // SAFETY: `desc` is one of FFmpeg's own descriptors.
+            let id = unsafe { ffmpeg::ffi::av_pix_fmt_desc_get_id(desc) };
+            formats.push((ffmpeg::format::Pixel::from(id), descriptor));
+        }
+        formats
+    }
+
+    /// A pixel format's bit depth is the depth FFmpeg's own descriptor gives
+    /// its first component -- 8, 9, 10, 12 or 16 bits -- for every software
+    /// format Beam names; a hardware surface (`AV_PIX_FMT_FLAG_HWACCEL`) has
+    /// none, and is the only kind counted as hardware -- named or not. Every
+    /// hardware variant Beam names is reached from FFmpeg's value, so none is
+    /// left to fall through to `Other`. The expectation is FFmpeg's, so a
+    /// format given the wrong depth here is caught however the table in
+    /// [`PixelFormat::bit_depth`] is edited.
+    #[test]
+    fn every_named_pixel_format_has_the_bit_depth_ffmpeg_describes() {
+        let mut depths = std::collections::BTreeSet::new();
+        let mut named_hardware = std::collections::HashSet::new();
+        for (pixel, descriptor) in every_pixel_format() {
+            let format = PixelFormat::from(pixel);
+            let hwaccel = u64::try_from(ffmpeg::ffi::AV_PIX_FMT_FLAG_HWACCEL).unwrap();
+            let hardware = descriptor.flags & hwaccel != 0;
+            match format {
+                PixelFormat::Other(raw) => {
+                    assert_eq!(
+                        raw,
+                        ffmpeg::ffi::AVPixelFormat::from(pixel),
+                        "an unnamed format carries its own value"
+                    );
+                    assert_eq!(format.bit_depth(), None, "{pixel:?}");
+                    assert_eq!(
+                        format.is_hardware(),
+                        hardware,
+                        "{pixel:?} is hardware exactly when FFmpeg flags it HWACCEL"
+                    );
+                }
+                PixelFormat::None => panic!("{pixel:?} is a described format, not none"),
+                named if hardware => {
+                    assert!(named.is_hardware(), "{pixel:?}");
+                    assert_eq!(named.bit_depth(), None, "{pixel:?}");
+                    named_hardware.insert(named);
+                }
+                named => {
+                    let depth = u8::try_from(descriptor.comp[0].depth).unwrap();
+                    assert!(!named.is_hardware(), "{pixel:?}");
+                    assert_eq!(named.bit_depth(), Some(depth), "{pixel:?}");
+                    depths.insert(depth);
+                }
+            }
+        }
+        assert_eq!(
+            depths.into_iter().collect::<Vec<_>>(),
+            [8, 9, 10, 12, 16],
+            "every depth Beam names a format at is checked"
+        );
+        for hardware in [
+            PixelFormat::VAAPI,
+            PixelFormat::DXVA2_VLD,
+            PixelFormat::VDPAU,
+            PixelFormat::VIDEOTOOLBOX,
+            PixelFormat::D3D11,
+            PixelFormat::CUDA,
+            PixelFormat::QSV,
+            PixelFormat::VULKAN,
+        ] {
+            assert!(
+                named_hardware.contains(&hardware),
+                "no FFmpeg format converts to {hardware:?}"
+            );
+        }
+    }
+
+    /// No two pixel formats FFmpeg describes convert to one Beam value: a
+    /// 10-bit format read as its 8-bit sibling, or one byte order as the
+    /// other, would misreport a file.
+    #[test]
+    fn no_two_pixel_formats_convert_to_one() {
+        let mut seen = std::collections::HashMap::new();
+        for (pixel, _) in every_pixel_format() {
+            if let Some(previous) = seen.insert(PixelFormat::from(pixel), pixel) {
+                panic!(
+                    "{previous:?} and {pixel:?} both convert to {:?}",
+                    PixelFormat::from(pixel)
+                );
+            }
+        }
+    }
+
+    /// Each value converted from FFmpeg's is described as itself: none of
+    /// FFmpeg's named values reads as "Unknown", and no two of them -- save
+    /// the reserved code points -- share a description.
+    fn described_distinctly<T: std::fmt::Debug + Copy, B>(
+        values: &[T],
+        convert: impl Fn(T) -> B,
+        describe: impl Fn(&B) -> &'static str,
+    ) {
+        let mut seen: std::collections::HashMap<&'static str, String> =
+            std::collections::HashMap::new();
+        for value in values {
+            let description = describe(&convert(*value));
+            assert_ne!(description, "Unknown", "{value:?}");
+            if let Some(previous) = seen.insert(description, format!("{value:?}")) {
+                assert_eq!(
+                    description, "Reserved",
+                    "{value:?} and {previous} both describe as {description:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_colour_space_ffmpeg_names_is_described_as_itself() {
+        use ffmpeg::color::Space;
+        described_distinctly(
+            &[
+                Space::RGB,
+                Space::BT709,
+                Space::Unspecified,
+                Space::Reserved,
+                Space::FCC,
+                Space::BT470BG,
+                Space::SMPTE170M,
+                Space::SMPTE240M,
+                Space::YCGCO,
+                Space::BT2020NCL,
+                Space::BT2020CL,
+                Space::SMPTE2085,
+                Space::ChromaDerivedNCL,
+                Space::ChromaDerivedCL,
+                Space::ICTCP,
+            ],
+            ColorSpace::from,
+            ColorSpace::description,
+        );
+    }
+
+    #[test]
+    fn every_colour_primaries_ffmpeg_names_is_described_as_itself() {
+        use ffmpeg::color::Primaries;
+        described_distinctly(
+            &[
+                Primaries::Reserved0,
+                Primaries::BT709,
+                Primaries::Unspecified,
+                Primaries::Reserved,
+                Primaries::BT470M,
+                Primaries::BT470BG,
+                Primaries::SMPTE170M,
+                Primaries::SMPTE240M,
+                Primaries::Film,
+                Primaries::BT2020,
+                Primaries::SMPTE428,
+                Primaries::SMPTE431,
+                Primaries::SMPTE432,
+                Primaries::EBU3213,
+            ],
+            ColorPrimaries::from,
+            ColorPrimaries::description,
+        );
+    }
+
+    #[test]
+    fn every_transfer_characteristic_ffmpeg_names_is_described_as_itself() {
+        use ffmpeg::color::TransferCharacteristic as Transfer;
+        described_distinctly(
+            &[
+                Transfer::Reserved0,
+                Transfer::BT709,
+                Transfer::Unspecified,
+                Transfer::Reserved,
+                Transfer::GAMMA22,
+                Transfer::GAMMA28,
+                Transfer::SMPTE170M,
+                Transfer::SMPTE240M,
+                Transfer::Linear,
+                Transfer::Log,
+                Transfer::LogSqrt,
+                Transfer::IEC61966_2_4,
+                Transfer::BT1361_ECG,
+                Transfer::IEC61966_2_1,
+                Transfer::BT2020_10,
+                Transfer::BT2020_12,
+                Transfer::SMPTE2084,
+                Transfer::SMPTE428,
+                Transfer::ARIB_STD_B67,
+            ],
+            ColorTransferCharacteristic::from,
+            ColorTransferCharacteristic::description,
+        );
+    }
+
+    /// Only the two transfer curves FFmpeg names `smpte2084` (PQ) and
+    /// `arib-std-b67` (HLG) are HDR.
+    #[test]
+    fn a_transfer_is_hdr_exactly_when_ffmpeg_names_it_pq_or_hlg() {
+        use ffmpeg::color::TransferCharacteristic as Transfer;
+        for transfer in [
+            Transfer::BT709,
+            Transfer::GAMMA22,
+            Transfer::Linear,
+            Transfer::IEC61966_2_1,
+            Transfer::BT2020_10,
+            Transfer::BT2020_12,
+            Transfer::SMPTE2084,
+            Transfer::SMPTE428,
+            Transfer::ARIB_STD_B67,
+        ] {
+            let hdr = matches!(transfer.name(), Some("smpte2084" | "arib-std-b67"));
+            assert_eq!(
+                ColorTransferCharacteristic::from(transfer).is_hdr(),
+                hdr,
+                "{transfer:?}"
+            );
+        }
+    }
+
+    /// A range is described as FFmpeg names it: `tv` is the limited range a
+    /// television signal uses, `pc` the full one.
+    #[test]
+    fn a_colour_range_is_described_as_ffmpeg_names_it() {
+        use ffmpeg::color::Range;
+        for range in [Range::MPEG, Range::JPEG, Range::Unspecified] {
+            let description = ColorRange::from(range).description();
+            match range.name() {
+                Some(name) => assert!(
+                    description.contains(&format!("({})", name.to_ascii_uppercase())),
+                    "{range:?} ({name}) is described as {description:?}"
+                ),
+                None => assert_eq!(description, "Unspecified", "{range:?}"),
+            }
         }
     }
 }

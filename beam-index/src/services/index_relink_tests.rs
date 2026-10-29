@@ -13,6 +13,7 @@
 use std::sync::atomic::AtomicUsize;
 
 use super::*;
+use crate::library_file::test_support::snapshot;
 use crate::probe::metadata::MetadataError;
 use crate::services::admin_log::LocalAdminLogService;
 use crate::services::filesystem_probe::{FilesystemKind, FixedFilesystemProbe};
@@ -1099,6 +1100,58 @@ async fn a_removed_directory_marks_only_its_own_files_missing() {
     let gone = h.row(&inside).await.expect("kept, not deleted");
     assert!(gone.missing_since.is_some());
     h.present(&sibling).await;
+}
+
+/// Relinking a moved file, and reconciling a renamed directory and a removed
+/// one, write nothing into the library (FR-202). Each step is a move the
+/// test makes and then the indexer's reaction to it -- the watcher's events
+/// and a scan -- and the tree after the reaction is the tree the move left.
+#[tokio::test]
+async fn relinks_renames_and_removals_never_write_into_the_library() {
+    let h = Harness::new().await;
+    let heat = h.write("Heat (1995)/Heat (1995).mkv", "heat");
+    let episode = h.write("Show/S01/Show S01E01.mkv", "one");
+    h.write("Show/S01/Show S01E02.mkv", "two");
+    let ronin = h.write("Ronin (1998)/Ronin (1998).mkv", "ronin");
+    h.scan().await;
+    let (heat_id, episode_id) = (h.present(&heat).await.id, h.present(&episode).await.id);
+
+    let moved = h.mv(&heat, "Crime/Heat (1995).mkv");
+    let before = snapshot(&h.root);
+    h.reconcile(&heat, FsEventKind::Removed).await;
+    h.reconcile(&moved, FsEventKind::Created).await;
+    h.scan().await;
+    assert_eq!(
+        h.present(&moved).await.id,
+        heat_id,
+        "the moved file relinked"
+    );
+    assert_eq!(snapshot(&h.root), before, "relinking a moved file");
+
+    let old_dir = h.root.join("Show/S01");
+    let new_dir = h.root.join("Show/Season 1");
+    std::fs::rename(&old_dir, &new_dir).unwrap();
+    let before = snapshot(&h.root);
+    h.reconcile(&old_dir, FsEventKind::Modified).await;
+    h.reconcile(&new_dir, FsEventKind::Modified).await;
+    h.scan().await;
+    assert_eq!(
+        h.present(&new_dir.join("Show S01E01.mkv")).await.id,
+        episode_id,
+        "the renamed directory's files relinked"
+    );
+    assert_eq!(snapshot(&h.root), before, "reconciling a renamed directory");
+
+    std::fs::remove_dir_all(h.root.join("Ronin (1998)")).unwrap();
+    let before = snapshot(&h.root);
+    h.reconcile(&h.root.join("Ronin (1998)"), FsEventKind::Removed)
+        .await;
+    h.scan().await;
+    assert!(
+        h.row(&ronin).await.expect("kept").missing_since.is_some(),
+        "the removed directory's file is missing"
+    );
+    assert_eq!(snapshot(&h.root), before, "reconciling a removed directory");
 }
 
 /// A directory moved in from outside the library is walked and its files
