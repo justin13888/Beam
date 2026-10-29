@@ -30,7 +30,8 @@ use crate::models::{
 use crate::routes::api_error::{
     AdminAuth, AdminListError, AdminUserError, InternalError, LibraryCreateError,
     LibraryFilesError, LibraryRefError, LibraryScanError, LibraryScanReadError, MediaRefreshError,
-    PlaybackTelemetryReportError, SessionAuth, UserAccessReadError, UserAccessUpdateError,
+    PlaybackTelemetryReportError, ServerFault, SessionAuth, UserAccessReadError,
+    UserAccessUpdateError,
 };
 use crate::routes::playback::{caller_access, page_size};
 use crate::routes::tags::Admin;
@@ -67,7 +68,7 @@ impl From<ControlError> for MediaRefreshError {
             | ControlError::FieldNotLockable(_)
             | ControlError::Provider(_)
             | ControlError::Db(_)
-            | ControlError::Index(_) => Self::Internal(err.to_string()),
+            | ControlError::Index(_) => Self::Internal(ServerFault::new(err)),
         }
     }
 }
@@ -83,7 +84,7 @@ impl From<LibraryError> for LibraryRefError {
             | LibraryError::PathOverlapsLibrary
             | LibraryError::PathOverlapsDataDir
             | LibraryError::ScanInProgress
-            | LibraryError::Db(_) => Self::Internal(err.to_string()),
+            | LibraryError::Db(_) => Self::Internal(ServerFault::new(err)),
         }
     }
 }
@@ -99,7 +100,7 @@ impl From<LibraryError> for LibraryFilesError {
             | LibraryError::PathOverlapsLibrary
             | LibraryError::PathOverlapsDataDir
             | LibraryError::ScanInProgress
-            | LibraryError::Db(_) => Self::Internal(err.to_string()),
+            | LibraryError::Db(_) => Self::Internal(ServerFault::new(err)),
         }
     }
 }
@@ -114,7 +115,7 @@ impl From<LibraryError> for LibraryCreateError {
             // Unreachable: creation names no existing library and starts no
             // scan.
             LibraryError::LibraryNotFound | LibraryError::ScanInProgress | LibraryError::Db(_) => {
-                Self::Internal(err.to_string())
+                Self::Internal(ServerFault::new(err))
             }
         }
     }
@@ -134,7 +135,7 @@ impl From<LibraryError> for LibraryScanError {
             LibraryError::PathOutsideRoot(_)
             | LibraryError::PathOverlapsLibrary
             | LibraryError::PathOverlapsDataDir
-            | LibraryError::Db(_) => Self::Internal(err.to_string()),
+            | LibraryError::Db(_) => Self::Internal(ServerFault::new(err)),
         }
     }
 }
@@ -150,7 +151,7 @@ impl From<LibraryError> for LibraryScanReadError {
             | LibraryError::PathOverlapsLibrary
             | LibraryError::PathOverlapsDataDir
             | LibraryError::ScanInProgress
-            | LibraryError::Db(_) => Self::Internal(err.to_string()),
+            | LibraryError::Db(_) => Self::Internal(ServerFault::new(err)),
         }
     }
 }
@@ -252,7 +253,7 @@ pub async fn list_libraries(
         .library
         .get_libraries(auth.0.user_id.clone())
         .await
-        .map_err(|e| InternalError::Internal(e.to_string()))?
+        .map_err(|e| InternalError::Internal(ServerFault::new(e)))?
         .into_iter()
         .filter(|library| policy.admits_library(library.id))
         .collect();
@@ -306,7 +307,7 @@ pub async fn get_library_files(
 ) -> Result<Json<LibraryFileConnection>, LibraryFilesError> {
     let (_, policy) = caller_access(&state, &auth)
         .await
-        .map_err(|err| LibraryFilesError::Internal(err.to_string()))?;
+        .map_err(|err| LibraryFilesError::Internal(ServerFault::new(err)))?;
     if !policy.admits_library(path.id) || policy.max_rating.is_some() {
         return Err(LibraryFilesError::LibraryNotFound(format!(
             "library {} not found",
@@ -493,8 +494,9 @@ pub async fn get_admin_logs(
     Query(query): Query<LogsQuery>,
     Inject(state): Inject<AppState>,
 ) -> Result<Json<AdminLogConnection>, AdminListError> {
-    let internal =
-        |e: crate::services::admin_log::AdminLogError| AdminListError::Internal(e.to_string());
+    let internal = |e: crate::services::admin_log::AdminLogError| {
+        AdminListError::Internal(ServerFault::new(e))
+    };
     let LogsQuery { first, after } = query;
     let first =
         page_size(first, LOGS_DEFAULT, LOGS_MAX).map_err(AdminListError::InvalidPagination)?;
@@ -639,7 +641,7 @@ pub async fn list_admin_users(
     Query(query): Query<UsersQuery>,
     Inject(state): Inject<AppState>,
 ) -> Result<Json<AdminUserConnection>, AdminListError> {
-    let internal = |e: sea_orm::DbErr| AdminListError::Internal(e.to_string());
+    let internal = |e: sea_orm::DbErr| AdminListError::Internal(ServerFault::new(e));
 
     let UsersQuery { first, after } = query;
     let first =
@@ -678,7 +680,7 @@ pub async fn update_admin_user(
     Inject(state): Inject<AppState>,
     Json(body): Json<UpdateAdminUserRequest>,
 ) -> Result<NoContent, AdminUserError> {
-    let internal = |e: sea_orm::DbErr| AdminUserError::Internal(e.to_string());
+    let internal = |e: sea_orm::DbErr| AdminUserError::Internal(ServerFault::new(e));
 
     let target = state
         .services
@@ -709,7 +711,7 @@ pub async fn update_admin_user(
             .session_store
             .delete_all_for_user(&target.id.to_string())
             .await
-            .map_err(|e| AdminUserError::Internal(e.to_string()))?;
+            .map_err(|e| AdminUserError::Internal(ServerFault::new(e)))?;
     }
 
     Ok(NoContent)
@@ -730,7 +732,7 @@ pub async fn get_admin_user_access(
     Path(path): Path<UserPath>,
     Inject(state): Inject<AppState>,
 ) -> Result<Json<UserAccess>, UserAccessReadError> {
-    let internal = |e: sea_orm::DbErr| UserAccessReadError::Internal(e.to_string());
+    let internal = |e: sea_orm::DbErr| UserAccessReadError::Internal(ServerFault::new(e));
 
     let target = state
         .services
@@ -766,7 +768,7 @@ pub async fn set_admin_user_access(
     Inject(state): Inject<AppState>,
     Json(body): Json<UserAccess>,
 ) -> Result<Json<UserAccess>, UserAccessUpdateError> {
-    let internal = |e: sea_orm::DbErr| UserAccessUpdateError::Internal(e.to_string());
+    let internal = |e: sea_orm::DbErr| UserAccessUpdateError::Internal(ServerFault::new(e));
 
     let target = state
         .services
@@ -840,7 +842,7 @@ pub async fn get_admin_status(
     _auth: AdminAuth,
     Inject(state): Inject<AppState>,
 ) -> Result<Json<AdminStatus>, InternalError> {
-    let internal = |e: sea_orm::DbErr| InternalError::Internal(e.to_string());
+    let internal = |e: sea_orm::DbErr| InternalError::Internal(ServerFault::new(e));
 
     let users = state.services.user_repo.count().await.map_err(internal)?;
     let libraries = state
@@ -870,7 +872,7 @@ pub async fn get_admin_status(
             0,
         )
         .await
-        .map_err(|e| InternalError::Internal(e.to_string()))?;
+        .map_err(|e| InternalError::Internal(ServerFault::new(e)))?;
     let library_ids = state
         .services
         .library_repo
@@ -930,7 +932,7 @@ pub async fn preview_library_telemetry(
     } = telemetry
         .preview()
         .await
-        .map_err(|e| InternalError::Internal(e.to_string()))?;
+        .map_err(|e| InternalError::Internal(ServerFault::new(e)))?;
     Ok(Json(LibraryTelemetryPreview {
         destination_configured: telemetry.destination_configured(),
         destination_origin,
@@ -960,7 +962,7 @@ impl From<ReportError> for PlaybackTelemetryReportError {
     fn from(err: ReportError) -> Self {
         match err {
             ReportError::InvalidDateRange(message) => Self::InvalidDateRange(message),
-            ReportError::Db(_) => Self::Internal(err.to_string()),
+            ReportError::Db(_) => Self::Internal(ServerFault::new(err)),
         }
     }
 }

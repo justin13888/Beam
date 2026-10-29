@@ -20,7 +20,7 @@ use crate::models::playback_telemetry::PlaybackTelemetryBatch;
 use crate::models::{FieldError, PageInfo};
 use crate::routes::api_error::{
     ContinueWatchingError, HistoryError, InternalError, MediaRefLookupError,
-    PlaybackTelemetryError, ProgressError, SessionAuth, TitleProgressError,
+    PlaybackTelemetryError, ProgressError, ServerFault, SessionAuth, TitleProgressError,
 };
 use crate::routes::tags::Playback;
 use crate::services::history_cursor;
@@ -43,7 +43,7 @@ impl From<PlaybackError> for ProgressError {
                     })
                     .collect(),
             },
-            PlaybackError::Db(_) => Self::Internal(err.to_string()),
+            PlaybackError::Db(_) => Self::Internal(ServerFault::new(err)),
         }
     }
 }
@@ -53,7 +53,7 @@ impl From<TitleStateError> for TitleProgressError {
         match err {
             TitleStateError::NotFound(_) => Self::MediaNotFound(err.to_string()),
             TitleStateError::NotPlayable(_) => Self::ProgressNotAvailableForShow(err.to_string()),
-            TitleStateError::Db(_) => Self::Internal(err.to_string()),
+            TitleStateError::Db(_) => Self::Internal(ServerFault::new(err)),
         }
     }
 }
@@ -65,7 +65,7 @@ impl From<TitleStateError> for MediaRefLookupError {
         match err {
             TitleStateError::NotFound(_) => Self::MediaNotFound(err.to_string()),
             TitleStateError::NotPlayable(_) | TitleStateError::Db(_) => {
-                Self::Internal(err.to_string())
+                Self::Internal(ServerFault::new(err))
             }
         }
     }
@@ -74,19 +74,19 @@ impl From<TitleStateError> for MediaRefLookupError {
 impl From<PlaybackReadError> for InternalError {
     fn from(err: PlaybackReadError) -> Self {
         let PlaybackReadError::Db(_) = &err;
-        Self::Internal(err.to_string())
+        Self::Internal(ServerFault::new(err))
     }
 }
 
 impl From<PlaybackReadError> for ContinueWatchingError {
     fn from(err: PlaybackReadError) -> Self {
-        Self::Internal(err.to_string())
+        Self::Internal(ServerFault::new(err))
     }
 }
 
 impl From<PlaybackReadError> for HistoryError {
     fn from(err: PlaybackReadError) -> Self {
-        Self::Internal(err.to_string())
+        Self::Internal(ServerFault::new(err))
     }
 }
 
@@ -166,7 +166,7 @@ pub struct HistoryQuery {
 /// affected user's history and progress into one shared, unowned account.
 pub(crate) fn parse_user_id(user_id: &str) -> Result<Uuid, InternalError> {
     Uuid::parse_str(user_id)
-        .map_err(|_| InternalError::Internal("invalid user id in session".to_owned()))
+        .map_err(|_| InternalError::Internal(ServerFault::new("invalid user id in session")))
 }
 
 /// The session's user id and their access policy (issue #263): what every
@@ -181,7 +181,7 @@ pub(crate) async fn caller_access(
         .access
         .policy(user_id)
         .await
-        .map_err(|err| InternalError::Internal(err.to_string()))?;
+        .map_err(|err| InternalError::Internal(ServerFault::new(err)))?;
     Ok((user_id, policy))
 }
 
@@ -196,7 +196,7 @@ pub(crate) async fn hides(
         .access
         .hides(policy, id)
         .await
-        .map_err(|err| InternalError::Internal(err.to_string()))
+        .map_err(|err| InternalError::Internal(ServerFault::new(err)))
 }
 
 /// The detail of the 404 a hidden id answers with: the one an id naming
@@ -221,7 +221,7 @@ pub(crate) async fn visible_rows<T>(
         .access
         .visible_titles(policy, &titles)
         .await
-        .map_err(|err| InternalError::Internal(err.to_string()))?;
+        .map_err(|err| InternalError::Internal(ServerFault::new(err)))?;
     Ok(rows
         .into_iter()
         .filter(|row| visible.contains(&title_of(row)))
@@ -273,7 +273,7 @@ pub async fn report_playback_progress(
         .access
         .hides_file(&policy, path.file_id)
         .await
-        .map_err(|err| ProgressError::Internal(err.to_string()))?
+        .map_err(|err| ProgressError::Internal(ServerFault::new(err)))?
     {
         return Err(ProgressError::FileNotFound(format!(
             "file {} not found",
@@ -508,7 +508,7 @@ impl From<IngestError> for PlaybackTelemetryError {
         match err {
             IngestError::Disabled => Self::Disabled(err.to_string()),
             IngestError::Invalid(errors) => Self::ValidationFailed { errors },
-            IngestError::Db(_) => Self::Internal(err.to_string()),
+            IngestError::Db(_) => Self::Internal(ServerFault::new(err)),
         }
     }
 }

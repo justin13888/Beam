@@ -6,7 +6,9 @@ use kynos::prelude::*;
 use beam_domain::models::language_preferences::{LanguageCode, LanguagePreferences};
 
 use crate::models::{FieldError, LanguagePreferenceSettings};
-use crate::routes::api_error::{InternalError, LanguagePreferencesUpdateError, SessionAuth};
+use crate::routes::api_error::{
+    InternalError, LanguagePreferencesUpdateError, ServerFault, SessionAuth,
+};
 use crate::routes::playback::parse_user_id;
 use crate::routes::tags::Auth;
 use crate::state::AppState;
@@ -29,7 +31,7 @@ pub async fn get_language_preferences(
         .language_preferences
         .find(user_id)
         .await
-        .map_err(|err| InternalError::Internal(err.to_string()))?;
+        .map_err(|err| InternalError::Internal(ServerFault::new(err)))?;
     Ok(Json(LanguagePreferenceSettings::from(&preferences)))
 }
 
@@ -69,7 +71,7 @@ pub async fn set_language_preferences(
                 .language_preferences
                 .replace(user_id, &preferences)
                 .await
-                .map_err(|err| LanguagePreferencesUpdateError::Internal(err.to_string()))?;
+                .map_err(|err| LanguagePreferencesUpdateError::Internal(ServerFault::new(err)))?;
             Ok(Json(LanguagePreferenceSettings::from(&preferences)))
         }
         Ok(_) => Err(LanguagePreferencesUpdateError::ValidationFailed { errors }),

@@ -30,7 +30,7 @@ use uuid::Uuid;
 
 use beam_index::library_file::{open_regular_file, relative_to};
 
-use crate::routes::api_error::{DeliveryError, SessionAuth};
+use crate::routes::api_error::{DeliveryError, ServerFault, SessionAuth};
 use crate::routes::delivery::{AnyMedia, MediaRanges, RuntimeDelivery};
 use crate::routes::playback::caller_access;
 use crate::routes::tags::Playback;
@@ -142,7 +142,9 @@ async fn locate_file(
         Ok(None) => return Err(DeliveryError::FileNotFound("File not found".into())),
         Err(err) => {
             error!(?err, "failed to look up file");
-            return Err(DeliveryError::Internal("Failed to look up file".into()));
+            return Err(DeliveryError::Internal(ServerFault::logged(
+                "Failed to look up file",
+            )));
         }
     };
 
@@ -167,7 +169,7 @@ pub(crate) async fn hides_file(
 ) -> Result<bool, DeliveryError> {
     let internal = |err: &dyn std::fmt::Display| {
         error!(%err, "failed to read the caller's access to a file");
-        DeliveryError::Internal("Failed to look up file".into())
+        DeliveryError::Internal(ServerFault::logged("Failed to look up file"))
     };
     let (_, policy) = caller_access(state, auth)
         .await
@@ -237,7 +239,7 @@ async fn deliver(
 
     let delivery = served.deliver(conditions).await.map_err(|err| {
         error!(?err, "failed to read source file span");
-        DeliveryError::Internal("Failed to read source file".into())
+        DeliveryError::Internal(ServerFault::logged("Failed to read source file"))
     })?;
 
     Ok(MediaDelivery::new(delivery, content_type))

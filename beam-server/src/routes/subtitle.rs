@@ -19,7 +19,7 @@ use uuid::Uuid;
 
 use beam_domain::models::sidecar::SubtitleFormat;
 
-use crate::routes::api_error::{SessionAuth, SubtitleDeliveryError};
+use crate::routes::api_error::{ServerFault, SessionAuth, SubtitleDeliveryError};
 use crate::routes::delivery::{AnyMedia, MediaRanges, RuntimeDelivery};
 use crate::routes::stream::{FileByteSource, hides_file, validator_tag};
 use crate::routes::tags::Playback;
@@ -91,7 +91,7 @@ impl From<SubtitleError> for SubtitleDeliveryError {
             SubtitleError::RenditionUnavailable => Self::RenditionUnavailable(
                 "This subtitle is served only as stored; fetch its `url` instead".into(),
             ),
-            SubtitleError::Internal(message) => Self::Internal(message),
+            SubtitleError::Internal(message) => Self::Internal(ServerFault::new(message)),
         }
     }
 }
@@ -143,9 +143,10 @@ async fn refuse_hidden_file(
     match hides_file(state, auth, file_id).await {
         Ok(false) => Ok(()),
         Ok(true) => Err(SubtitleError::FileNotFound.into()),
-        Err(_) => Err(SubtitleDeliveryError::Internal(
-            "Failed to look up file".into(),
-        )),
+        // `hides_file` logged the cause when it built its own fault.
+        Err(_) => Err(SubtitleDeliveryError::Internal(ServerFault::logged(
+            "Failed to look up file",
+        ))),
     }
 }
 
@@ -181,7 +182,7 @@ async fn deliver_stored(
         .await
         .map_err(|err| {
             error!(?err, "failed to read subtitle file span");
-            SubtitleDeliveryError::Internal("Failed to read subtitle file".into())
+            SubtitleDeliveryError::Internal(ServerFault::logged("Failed to read subtitle file"))
         })?;
 
     Ok(RuntimeDelivery::new(

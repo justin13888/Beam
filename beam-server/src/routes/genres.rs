@@ -6,7 +6,7 @@ use kynos::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::models::PageInfo;
-use crate::routes::api_error::{InternalError, SessionAuth};
+use crate::routes::api_error::{InternalError, ServerFault, SessionAuth};
 use crate::routes::playback::caller_access;
 use crate::routes::tags::Media;
 use crate::state::AppState;
@@ -43,7 +43,7 @@ pub async fn list_genres(
         .genre_repo
         .find_carried(&policy)
         .await
-        .map_err(|e| InternalError::Internal(e.to_string()))?
+        .map_err(|e| InternalError::Internal(ServerFault::new(e)))?
         .into_iter()
         .map(|genre| genre.name)
         .collect();

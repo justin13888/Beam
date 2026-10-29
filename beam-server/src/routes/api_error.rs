@@ -44,6 +44,67 @@ pub const SESSION_COOKIE: &str = "beam_session";
 /// that every `type` the exported document declares starts with this constant.
 pub const ERROR_BASE: &str = "https://beam.justinchung.net/reference/errors/#";
 
+// ── Server faults ────────────────────────────────────────────────────────────
+
+/// The `detail` of every `500 #internal` problem, whatever caused it.
+///
+/// Kynos takes `detail` from the error's `Display`, so a variant whose
+/// `#[error]` printed its cause put a database driver's message, or a provider's
+/// response, on the wire to any signed-in viewer (NFR-108). The cause belongs
+/// to the operator, and reaches them through [`ServerFault`]; the client gets
+/// the status and the `type`, which is everything it can act on.
+pub const INTERNAL_DETAIL: &str = "An internal error occurred.";
+
+/// The `detail` of a `502 #enrichment-provider-error`.
+pub const PROVIDER_FAILED_DETAIL: &str = "The metadata provider did not answer.";
+
+/// The `detail` of a `503 #oidc-unavailable`.
+pub const OIDC_UNAVAILABLE_DETAIL: &str = "The identity provider is unavailable.";
+
+/// The cause of a 5xx problem: recorded for the operator, never sent.
+///
+/// The only constructor, [`ServerFault::new`], emits it as a structured
+/// `tracing` event, so no server-fault variant can be built without its cause
+/// reaching the log. It deliberately implements no `Display`: the variants
+/// holding one print a fixed sentence instead, and there is no format string
+/// that could put the cause back into `detail`.
+#[derive(Debug)]
+pub struct ServerFault {
+    cause: String,
+}
+
+impl ServerFault {
+    /// Records `cause` as an `error` event at the caller's location.
+    ///
+    /// `#[track_caller]` so the event names the handler that failed rather
+    /// than this constructor, which every server fault shares.
+    #[track_caller]
+    pub fn new(cause: impl std::fmt::Display) -> Self {
+        let cause = cause.to_string();
+        let location = std::panic::Location::caller();
+        tracing::error!(error = %cause, at = %location, "request failed with a server fault");
+        Self { cause }
+    }
+
+    /// A fault whose cause the caller has already logged.
+    ///
+    /// For a site that emits its own `error!` event, with fields `new` cannot
+    /// carry -- the URL a fetch refused, the path a read failed on -- so the
+    /// failure is not logged twice. A `&'static str`, so it can only ever
+    /// summarise, never smuggle a runtime cause past the log.
+    pub fn logged(summary: &'static str) -> Self {
+        Self {
+            cause: summary.to_owned(),
+        }
+    }
+
+    /// What went wrong, for a caller that converts it into another error type
+    /// or a test asserting what was recorded.
+    pub fn cause(&self) -> &str {
+        &self.cause
+    }
+}
+
 // ── Errors ───────────────────────────────────────────────────────────────────
 //
 // Not one enum but a family, one per distinct set of reachable failures. Kynos
@@ -78,13 +139,13 @@ pub const ERROR_BASE: &str = "https://beam.justinchung.net/reference/errors/#";
 /// three session operations that only ever fail on the store.
 #[derive(Debug, thiserror::Error, ApiError)]
 pub enum InternalError {
-    #[error("{0}")]
+    #[error("{}", INTERNAL_DETAIL)]
     #[problem(
         status = 500,
         type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
-    Internal(String),
+    Internal(ServerFault),
 }
 
 /// `GET /v1/media/{id}`. A malformed id is the `Path` extractor's 400: every
@@ -99,13 +160,13 @@ pub enum MediaLookupError {
     )]
     MediaNotFound(String),
 
-    #[error("{0}")]
+    #[error("{}", INTERNAL_DETAIL)]
     #[problem(
         status = 500,
         type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
-    Internal(String),
+    Internal(ServerFault),
 }
 
 /// `GET /v1/media`: browse and search (issue #187).
@@ -157,13 +218,13 @@ pub enum MediaBrowseError {
     )]
     InvalidFilter(String),
 
-    #[error("{0}")]
+    #[error("{}", INTERNAL_DETAIL)]
     #[problem(
         status = 500,
         type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
-    Internal(String),
+    Internal(ServerFault),
 }
 
 /// `GET /v1/media/{id}/sources`.
@@ -189,13 +250,13 @@ pub enum MediaSourcesError {
     )]
     MediaNotFound(String),
 
-    #[error("{0}")]
+    #[error("{}", INTERNAL_DETAIL)]
     #[problem(
         status = 500,
         type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
-    Internal(String),
+    Internal(ServerFault),
 }
 
 /// `POST /v1/admin/media/{id}/refresh`. A malformed id is the `Path`
@@ -210,13 +271,13 @@ pub enum MediaRefreshError {
     )]
     MediaNotFound(String),
 
-    #[error("{0}")]
+    #[error("{}", INTERNAL_DETAIL)]
     #[problem(
         status = 500,
         type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
-    Internal(String),
+    Internal(ServerFault),
 }
 
 /// `GET /v1/admin/enrichment`: the titles by enrichment status (issue #185).
@@ -242,13 +303,13 @@ pub enum EnrichmentListError {
     )]
     InvalidPagination(String),
 
-    #[error("{0}")]
+    #[error("{}", INTERNAL_DETAIL)]
     #[problem(
         status = 500,
         type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
-    Internal(String),
+    Internal(ServerFault),
 }
 
 /// `GET /v1/admin/media/{id}/enrichment` and `DELETE /v1/admin/media/{id}/match`.
@@ -263,13 +324,13 @@ pub enum MediaEnrichmentError {
     )]
     MediaNotFound(String),
 
-    #[error("{0}")]
+    #[error("{}", INTERNAL_DETAIL)]
     #[problem(
         status = 500,
         type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
-    Internal(String),
+    Internal(ServerFault),
 }
 
 /// `GET /v1/admin/media/{id}/match-candidates`: a live search of the
@@ -294,21 +355,21 @@ pub enum MatchCandidatesError {
     ProviderNotConfigured(String),
 
     /// The provider failed to answer: down, rate-limited, or erroring.
-    #[error("{0}")]
+    #[error("{}", PROVIDER_FAILED_DETAIL)]
     #[problem(
         status = 502,
         type = "https://beam.justinchung.net/reference/errors/#enrichment-provider-error",
         title = "Metadata provider failed"
     )]
-    ProviderError(String),
+    ProviderError(ServerFault),
 
-    #[error("{0}")]
+    #[error("{}", INTERNAL_DETAIL)]
     #[problem(
         status = 500,
         type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
-    Internal(String),
+    Internal(ServerFault),
 }
 
 /// `POST /v1/admin/media/{id}/match`.
@@ -355,13 +416,13 @@ pub enum FixMatchError {
         errors: Vec<crate::models::FieldError>,
     },
 
-    #[error("{0}")]
+    #[error("{}", INTERNAL_DETAIL)]
     #[problem(
         status = 500,
         type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
-    Internal(String),
+    Internal(ServerFault),
 }
 
 /// `PUT /v1/admin/media/{id}/enrichment/locks`.
@@ -389,13 +450,13 @@ pub enum FieldLocksError {
         errors: Vec<crate::models::FieldError>,
     },
 
-    #[error("{0}")]
+    #[error("{}", INTERNAL_DETAIL)]
     #[problem(
         status = 500,
         type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
-    Internal(String),
+    Internal(ServerFault),
 }
 
 /// `POST /v1/admin/libraries/{id}/refresh`. A malformed id is the `Path`
@@ -410,13 +471,13 @@ pub enum LibraryRefreshError {
     )]
     LibraryNotFound(String),
 
-    #[error("{0}")]
+    #[error("{}", INTERNAL_DETAIL)]
     #[problem(
         status = 500,
         type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
-    Internal(String),
+    Internal(ServerFault),
 }
 
 /// An operation naming one library by id: `GET /v1/libraries/{id}`, its
@@ -432,13 +493,13 @@ pub enum LibraryRefError {
     )]
     LibraryNotFound(String),
 
-    #[error("{0}")]
+    #[error("{}", INTERNAL_DETAIL)]
     #[problem(
         status = 500,
         type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
-    Internal(String),
+    Internal(ServerFault),
 }
 
 /// `POST /v1/admin/libraries`. No 404: nothing is looked up by id.
@@ -495,13 +556,13 @@ pub enum LibraryCreateError {
         errors: Vec<crate::models::FieldError>,
     },
 
-    #[error("{0}")]
+    #[error("{}", INTERNAL_DETAIL)]
     #[problem(
         status = 500,
         type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
-    Internal(String),
+    Internal(ServerFault),
 }
 
 /// `POST /v1/admin/libraries/{id}/scan`.
@@ -536,13 +597,13 @@ pub enum LibraryScanError {
     )]
     LibraryNotFound(String),
 
-    #[error("{0}")]
+    #[error("{}", INTERNAL_DETAIL)]
     #[problem(
         status = 500,
         type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
-    Internal(String),
+    Internal(ServerFault),
 }
 
 /// `GET /v1/admin/libraries/{id}/scan`. A malformed id is the `Path`
@@ -567,13 +628,13 @@ pub enum LibraryScanReadError {
     )]
     ScanNotFound(String),
 
-    #[error("{0}")]
+    #[error("{}", INTERNAL_DETAIL)]
     #[problem(
         status = 500,
         type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
-    Internal(String),
+    Internal(ServerFault),
 }
 
 /// `PATCH /v1/admin/users/{id}`.
@@ -596,13 +657,13 @@ pub enum AdminUserError {
     )]
     UserNotFound(String),
 
-    #[error("{0}")]
+    #[error("{}", INTERNAL_DETAIL)]
     #[problem(
         status = 500,
         type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
-    Internal(String),
+    Internal(ServerFault),
 }
 
 /// `PUT /v1/me/language-preferences` (issue #264).
@@ -622,13 +683,13 @@ pub enum LanguagePreferencesUpdateError {
         errors: Vec<crate::models::FieldError>,
     },
 
-    #[error("{0}")]
+    #[error("{}", INTERNAL_DETAIL)]
     #[problem(
         status = 500,
         type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
-    Internal(String),
+    Internal(ServerFault),
 }
 
 impl From<InternalError> for LanguagePreferencesUpdateError {
@@ -649,13 +710,13 @@ pub enum UserAccessReadError {
     )]
     UserNotFound(String),
 
-    #[error("{0}")]
+    #[error("{}", INTERNAL_DETAIL)]
     #[problem(
         status = 500,
         type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
-    Internal(String),
+    Internal(ServerFault),
 }
 
 /// `PUT /v1/admin/users/{id}/access`.
@@ -684,13 +745,13 @@ pub enum UserAccessUpdateError {
         errors: Vec<crate::models::FieldError>,
     },
 
-    #[error("{0}")]
+    #[error("{}", INTERNAL_DETAIL)]
     #[problem(
         status = 500,
         type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
-    Internal(String),
+    Internal(ServerFault),
 }
 
 /// `PUT /v1/files/{file_id}/progress`.
@@ -725,13 +786,13 @@ pub enum ProgressError {
         errors: Vec<crate::models::FieldError>,
     },
 
-    #[error("{0}")]
+    #[error("{}", INTERNAL_DETAIL)]
     #[problem(
         status = 500,
         type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
-    Internal(String),
+    Internal(ServerFault),
 }
 
 /// `GET` and `DELETE /v1/media/{id}/progress` (issue #188).
@@ -753,13 +814,13 @@ pub enum TitleProgressError {
         title = "Media not found"
     )]
     MediaNotFound(String),
-    #[error("{0}")]
+    #[error("{}", INTERNAL_DETAIL)]
     #[problem(
         status = 500,
         type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
-    Internal(String),
+    Internal(ServerFault),
 }
 
 /// `PUT` and `DELETE /v1/media/{id}/watched`, `DELETE
@@ -775,13 +836,13 @@ pub enum MediaRefLookupError {
         title = "Media not found"
     )]
     MediaNotFound(String),
-    #[error("{0}")]
+    #[error("{}", INTERNAL_DETAIL)]
     #[problem(
         status = 500,
         type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
-    Internal(String),
+    Internal(ServerFault),
 }
 
 /// `GET /v1/people` (issue #261). A store failure is a 500, never an empty
@@ -814,13 +875,13 @@ pub enum PeopleSearchError {
         title = "Invalid search query"
     )]
     InvalidSearchQuery(String),
-    #[error("{0}")]
+    #[error("{}", INTERNAL_DETAIL)]
     #[problem(
         status = 500,
         type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
-    Internal(String),
+    Internal(ServerFault),
 }
 
 /// `GET /v1/people/{id}` (issue #261): an id that names no person, or a store
@@ -834,13 +895,13 @@ pub enum PersonLookupError {
         title = "Person not found"
     )]
     PersonNotFound(String),
-    #[error("{0}")]
+    #[error("{}", INTERNAL_DETAIL)]
     #[problem(
         status = 500,
         type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
-    Internal(String),
+    Internal(ServerFault),
 }
 
 /// `GET /v1/continue-watching`.
@@ -856,13 +917,13 @@ pub enum ContinueWatchingError {
         title = "Invalid pagination"
     )]
     InvalidPagination(String),
-    #[error("{0}")]
+    #[error("{}", INTERNAL_DETAIL)]
     #[problem(
         status = 500,
         type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
-    Internal(String),
+    Internal(ServerFault),
 }
 
 /// `GET /v1/history`.
@@ -886,13 +947,13 @@ pub enum HistoryError {
         title = "Invalid pagination"
     )]
     InvalidPagination(String),
-    #[error("{0}")]
+    #[error("{}", INTERNAL_DETAIL)]
     #[problem(
         status = 500,
         type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
-    Internal(String),
+    Internal(ServerFault),
 }
 
 /// `PUT` and `DELETE` on `/v1/watchlist/{id}` and `/v1/favourites/{id}`
@@ -916,13 +977,13 @@ pub enum ListMembershipError {
         title = "Media not found"
     )]
     MediaNotFound(String),
-    #[error("{0}")]
+    #[error("{}", INTERNAL_DETAIL)]
     #[problem(
         status = 500,
         type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
-    Internal(String),
+    Internal(ServerFault),
 }
 
 /// `GET /v1/watchlist` and `GET /v1/favourites` (issue #262).
@@ -946,13 +1007,13 @@ pub enum ListPageError {
         title = "Invalid pagination"
     )]
     InvalidPagination(String),
-    #[error("{0}")]
+    #[error("{}", INTERNAL_DETAIL)]
     #[problem(
         status = 500,
         type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
-    Internal(String),
+    Internal(ServerFault),
 }
 
 /// `GET /v1/collections` (issue #262). A store failure is a 500, never an
@@ -976,13 +1037,13 @@ pub enum CollectionListError {
         title = "Invalid pagination"
     )]
     InvalidPagination(String),
-    #[error("{0}")]
+    #[error("{}", INTERNAL_DETAIL)]
     #[problem(
         status = 500,
         type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
-    Internal(String),
+    Internal(ServerFault),
 }
 
 /// `GET /v1/collections/{id}` (issue #262): an id that names no collection
@@ -996,13 +1057,13 @@ pub enum CollectionLookupError {
         title = "Collection not found"
     )]
     CollectionNotFound(String),
-    #[error("{0}")]
+    #[error("{}", INTERNAL_DETAIL)]
     #[problem(
         status = 500,
         type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
-    Internal(String),
+    Internal(ServerFault),
 }
 
 /// `GET /v1/admin/users` and `GET /v1/admin/logs`: the lists paged by an
@@ -1027,13 +1088,13 @@ pub enum AdminListError {
         title = "Invalid pagination"
     )]
     InvalidPagination(String),
-    #[error("{0}")]
+    #[error("{}", INTERNAL_DETAIL)]
     #[problem(
         status = 500,
         type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
-    Internal(String),
+    Internal(ServerFault),
 }
 
 /// `GET /v1/libraries/{id}/files` (issue #190). A malformed id is the `Path`
@@ -1065,13 +1126,13 @@ pub enum LibraryFilesError {
         title = "Library not found"
     )]
     LibraryNotFound(String),
-    #[error("{0}")]
+    #[error("{}", INTERNAL_DETAIL)]
     #[problem(
         status = 500,
         type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
-    Internal(String),
+    Internal(ServerFault),
 }
 
 /// `POST /v1/telemetry/playback` (issue #143).
@@ -1109,13 +1170,13 @@ pub enum PlaybackTelemetryError {
         errors: Vec<crate::models::FieldError>,
     },
 
-    #[error("{0}")]
+    #[error("{}", INTERNAL_DETAIL)]
     #[problem(
         status = 500,
         type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
-    Internal(String),
+    Internal(ServerFault),
 }
 
 /// `GET /v1/admin/telemetry/playback` (issue #143).
@@ -1131,13 +1192,13 @@ pub enum PlaybackTelemetryReportError {
     )]
     InvalidDateRange(String),
 
-    #[error("{0}")]
+    #[error("{}", INTERNAL_DETAIL)]
     #[problem(
         status = 500,
         type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
-    Internal(String),
+    Internal(ServerFault),
 }
 
 /// Byte-range file delivery.
@@ -1185,13 +1246,13 @@ pub enum DeliveryError {
     )]
     SourceFileMissing(String),
 
-    #[error("{0}")]
+    #[error("{}", INTERNAL_DETAIL)]
     #[problem(
         status = 500,
         type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
-    Internal(String),
+    Internal(ServerFault),
 }
 
 /// What `/v1/files/{file_id}/subtitles/{subtitle_id}` and its `/webvtt`
@@ -1247,13 +1308,13 @@ pub enum SubtitleDeliveryError {
     )]
     RenditionUnavailable(String),
 
-    #[error("{0}")]
+    #[error("{}", INTERNAL_DETAIL)]
     #[problem(
         status = 500,
         type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
-    Internal(String),
+    Internal(ServerFault),
 }
 
 /// What `/v1/files/{file_id}/trickplay/{sheet}` can fail with (issue #265).
@@ -1281,13 +1342,13 @@ pub enum TrickplayDeliveryError {
     )]
     TrickplayNotFound(String),
 
-    #[error("{0}")]
+    #[error("{}", INTERNAL_DETAIL)]
     #[problem(
         status = 500,
         type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
-    Internal(String),
+    Internal(ServerFault),
 }
 
 /// What `/v1/artwork/{kind}/{id}/{variant}` can fail with.
@@ -1335,13 +1396,13 @@ pub enum ArtworkError {
     /// read back, or enrichment stored a URL Beam itself will not fetch (not
     /// `https`, or unparseable) -- bad data Beam wrote, not a provider that
     /// misbehaved.
-    #[error("{0}")]
+    #[error("{}", INTERNAL_DETAIL)]
     #[problem(
         status = 500,
         type = "https://beam.justinchung.net/reference/errors/#internal",
         title = "Internal server error"
     )]
-    Internal(String),
+    Internal(ServerFault),
 }
 
 // Widening conversions. Each is total and each maps like to like; there is no
