@@ -274,6 +274,19 @@ mod allowed_origins {
         );
         assert!(!origins.contains("https://app.example.com/"));
     }
+
+    #[test]
+    fn an_origin_matches_whatever_the_case_of_its_scheme_and_host() {
+        let origins = AllowedOrigins::from_config(&ServerConfig {
+            web_url: "https://App.Example.com".to_string(),
+            server_url: "https://api.example.com".to_string(),
+            ..Default::default()
+        });
+
+        assert!(origins.contains("https://app.example.com"));
+        assert!(origins.contains("HTTPS://API.EXAMPLE.COM"));
+        assert!(!origins.contains("https://app.example.org"));
+    }
 }
 
 /// The policy as `/v1` serves it: through `create_router`, over a real
@@ -389,6 +402,43 @@ mod served_router {
                 "{origin} is configured"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_mixed_case_configured_origin_may_both_read_and_write() {
+        // The CORS grant compares case-insensitively; the same-origin write
+        // check must agree, or the origin reads but every write is a 403.
+        let state = make_app_state_with(|config| {
+            config.web_url = "https://Beam.Example.com".to_string();
+            config.server_url = "https://api.example.com".to_string();
+        });
+        let client = TestClient::new(
+            create_router(&AllowedOrigins::from_config(&state.config))
+                .build(state.clone())
+                .expect("the served router describes itself"),
+        );
+        let token = session(&state).await;
+
+        let read = client
+            .get("/v1/me")
+            .header("origin", WEB_ORIGIN)
+            .cookie("beam_session", &token)
+            .send()
+            .await;
+        read.assert_status(StatusCode::OK);
+        assert_eq!(read.header("access-control-allow-origin"), Some(WEB_ORIGIN));
+
+        let write = client
+            .post("/v1/logout")
+            .header("origin", WEB_ORIGIN)
+            .cookie("beam_session", &token)
+            .send()
+            .await;
+        assert_ne!(
+            write.status(),
+            StatusCode::FORBIDDEN,
+            "an origin trusted to read must be trusted to write"
+        );
     }
 
     #[tokio::test]

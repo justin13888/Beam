@@ -106,8 +106,15 @@ impl AllowedOrigins {
     }
 
     /// Whether `origin` (`scheme://host[:port]`) is one of these.
+    ///
+    /// Compares ASCII case-insensitively, exactly as Kynos's CORS policy does
+    /// when it decides a read: scheme and host are case-insensitive, and a
+    /// stricter comparison here would let a configured origin with an
+    /// uppercase letter read with credentials but be refused every write.
     pub fn contains(&self, origin: &str) -> bool {
-        self.0.iter().any(|allowed| allowed == origin)
+        self.0
+            .iter()
+            .any(|allowed| allowed.eq_ignore_ascii_case(origin))
     }
 }
 
