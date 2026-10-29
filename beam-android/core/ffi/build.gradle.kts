@@ -155,4 +155,15 @@ dependencies {
 
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
+    // The DataStore-backed stores and the device profile run under
+    // Robolectric: `android.util.Base64` and `MediaCodecList` are platform.
+    testImplementation(libs.robolectric)
+}
+
+// The API level Robolectric can run is pinned once for every module, in this
+// shared file. Configured through the typed DSL, as in core/media.
+configure<com.android.build.api.dsl.LibraryExtension> {
+    sourceSets.getByName("test").resources.srcDir(
+        rootProject.layout.projectDirectory.dir("gradle/robolectric"),
+    )
 }
