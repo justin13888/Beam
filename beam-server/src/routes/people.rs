@@ -51,9 +51,7 @@ pub async fn search_people(
         first,
         after,
     } = params;
-    let (_, policy) = caller_access(&state, &auth)
-        .await
-        .map_err(|err| PeopleSearchError::Internal(ServerFault::new(err)))?;
+    let (_, policy) = caller_access(&state, &auth).await?;
     match state
         .services
         .people
@@ -85,9 +83,7 @@ pub async fn get_person(
     Path(path): Path<PersonPath>,
     Inject(state): Inject<AppState>,
 ) -> Result<Json<PersonDetail>, PersonLookupError> {
-    let (_, policy) = caller_access(&state, &auth)
-        .await
-        .map_err(|err| PersonLookupError::Internal(ServerFault::new(err)))?;
+    let (_, policy) = caller_access(&state, &auth).await?;
     // A failed read is a 500: answering 404 would tell the client the person
     // is gone when the server only failed to read them.
     match state.services.people.detail(path.id, &policy).await {

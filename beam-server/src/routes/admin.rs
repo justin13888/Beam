@@ -305,9 +305,7 @@ pub async fn get_library_files(
     Query(query): Query<FilesQuery>,
     Inject(state): Inject<AppState>,
 ) -> Result<Json<LibraryFileConnection>, LibraryFilesError> {
-    let (_, policy) = caller_access(&state, &auth)
-        .await
-        .map_err(|err| LibraryFilesError::Internal(ServerFault::new(err)))?;
+    let (_, policy) = caller_access(&state, &auth).await?;
     if !policy.admits_library(path.id) || policy.max_rating.is_some() {
         return Err(LibraryFilesError::LibraryNotFound(format!(
             "library {} not found",

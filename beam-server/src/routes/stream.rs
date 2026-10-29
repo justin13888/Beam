@@ -167,19 +167,15 @@ pub(crate) async fn hides_file(
     auth: &SessionAuth,
     file_id: Uuid,
 ) -> Result<bool, DeliveryError> {
-    let internal = |err: &dyn std::fmt::Display| {
-        error!(%err, "failed to read the caller's access to a file");
-        DeliveryError::Internal(ServerFault::logged("Failed to look up file"))
-    };
-    let (_, policy) = caller_access(state, auth)
-        .await
-        .map_err(|err| internal(&err))?;
+    // `caller_access` logged its cause where it built the fault, so it moves
+    // across as is; the file lookup's own failure is logged here.
+    let (_, policy) = caller_access(state, auth).await?;
     state
         .services
         .access
         .hides_file(&policy, file_id)
         .await
-        .map_err(|err| internal(&err))
+        .map_err(|err| DeliveryError::Internal(ServerFault::new(err)))
 }
 
 /// A validator that changes whenever the bytes do.

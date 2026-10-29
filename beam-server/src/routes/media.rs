@@ -97,9 +97,7 @@ pub async fn browse_media(
     Query(params): Query<BrowseQuery>,
     Inject(state): Inject<AppState>,
 ) -> Result<Json<MediaConnection>, MediaBrowseError> {
-    let (user_id, access) = caller_access(&state, &auth)
-        .await
-        .map_err(|err| MediaBrowseError::Internal(ServerFault::new(err)))?;
+    let (user_id, access) = caller_access(&state, &auth).await?;
     let BrowseQuery {
         first,
         after,

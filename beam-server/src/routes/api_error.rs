@@ -1464,6 +1464,66 @@ impl From<InternalError> for ProgressError {
     }
 }
 
+// The fault an `InternalError` carries was logged when it was built, so these
+// move it across rather than wrapping it in a second `ServerFault`, whose
+// event would record only the fixed `INTERNAL_DETAIL` sentence.
+
+impl From<InternalError> for MediaBrowseError {
+    fn from(e: InternalError) -> Self {
+        let InternalError::Internal(m) = e;
+        Self::Internal(m)
+    }
+}
+
+impl From<InternalError> for LibraryFilesError {
+    fn from(e: InternalError) -> Self {
+        let InternalError::Internal(m) = e;
+        Self::Internal(m)
+    }
+}
+
+impl From<InternalError> for CollectionListError {
+    fn from(e: InternalError) -> Self {
+        let InternalError::Internal(m) = e;
+        Self::Internal(m)
+    }
+}
+
+impl From<InternalError> for CollectionLookupError {
+    fn from(e: InternalError) -> Self {
+        let InternalError::Internal(m) = e;
+        Self::Internal(m)
+    }
+}
+
+impl From<InternalError> for PeopleSearchError {
+    fn from(e: InternalError) -> Self {
+        let InternalError::Internal(m) = e;
+        Self::Internal(m)
+    }
+}
+
+impl From<InternalError> for PersonLookupError {
+    fn from(e: InternalError) -> Self {
+        let InternalError::Internal(m) = e;
+        Self::Internal(m)
+    }
+}
+
+impl From<InternalError> for ArtworkError {
+    fn from(e: InternalError) -> Self {
+        let InternalError::Internal(m) = e;
+        Self::Internal(m)
+    }
+}
+
+impl From<InternalError> for DeliveryError {
+    fn from(e: InternalError) -> Self {
+        let InternalError::Internal(m) = e;
+        Self::Internal(m)
+    }
+}
+
 // ── Authentication ───────────────────────────────────────────────────────────
 
 /// The caller's identity, resolved from the `beam_session` cookie.

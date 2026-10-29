@@ -32,7 +32,7 @@ use tracing::error;
 use uuid::Uuid;
 
 use crate::models::media::{ArtworkKind, ArtworkSize, ArtworkVariant};
-use crate::routes::api_error::{ArtworkError, InternalError, ServerFault, SessionAuth};
+use crate::routes::api_error::{ArtworkError, ServerFault, SessionAuth};
 use crate::routes::delivery::{AnyMedia, MediaRanges, RuntimeDelivery};
 use crate::routes::playback::{caller_access, hides};
 use crate::routes::tags::Media;
@@ -162,20 +162,14 @@ async fn deliver(
     // does not exist (issue #263). A person's portrait and a collection's art
     // belong to no one title: they are served while the policy admits one
     // title the person or collection is on (issue #328).
-    let access_failed = |err: InternalError| {
-        error!(%err, "artwork access lookup failed");
-        ArtworkError::Internal(ServerFault::logged("Failed to look up artwork"))
-    };
-    let (_, policy) = caller_access(state, auth).await.map_err(access_failed)?;
+    // Both lookups log their cause where they build the fault, so it moves
+    // across as is.
+    let (_, policy) = caller_access(state, auth).await?;
     let of_a_title = matches!(
         path.kind,
         ArtworkKind::Movie | ArtworkKind::Show | ArtworkKind::Season | ArtworkKind::Episode
     );
-    if of_a_title
-        && hides(state, &policy, path.id)
-            .await
-            .map_err(access_failed)?
-    {
+    if of_a_title && hides(state, &policy, path.id).await? {
         return Err(ArtworkError::NotFound("No artwork for this title".into()));
     }
     let Some(url) = upstream_url(state, path, &policy).await? else {
