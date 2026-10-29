@@ -67,6 +67,8 @@ pub struct SrtConversion {
 /// [`unmarked_utf16`]), UTF-8 when they are valid UTF-8, and Windows-1252
 /// otherwise -- the encoding a subtitle saved by an older Windows tool almost
 /// always has, and one in which every byte decodes, so no input is refused.
+/// U+0000 is dropped: no subtitle carries it, and the text this returns holds
+/// no NUL for [`unmarked_utf16`] to read as UTF-16 when it is decoded again.
 /// Line ends become LF.
 pub fn decode_subtitle_text(bytes: &[u8]) -> String {
     let text: Cow<'_, str> = if let Some(rest) = bytes.strip_prefix(b"\xEF\xBB\xBF") {
@@ -87,7 +89,9 @@ pub fn decode_subtitle_text(bytes: &[u8]) -> String {
             }
         }
     };
-    text.replace("\r\n", "\n").replace('\r', "\n")
+    text.replace('\0', "")
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
 }
 
 /// The byte order of UTF-16 saved without a byte-order mark, or `None` when
@@ -592,19 +596,16 @@ mod tests {
         }
     }
 
-    /// Characterises a gap in idempotence, not a goal: text decoded to
-    /// many U+0000 characters -- here UTF-16 with a byte-order mark -- is
-    /// written as UTF-8 with NUL bytes beside ASCII ones, which a second pass
-    /// reads as unmarked UTF-16. No real subtitle carries NULs, so the
-    /// idempotence property below excludes them; this pins today's outcome
-    /// so a fix shows up as a deliberate change here.
+    /// Text decoded to many U+0000 characters -- here UTF-16 with a
+    /// byte-order mark -- loses them, so the UTF-8 written holds no NUL
+    /// beside an ASCII byte for a second pass to read as unmarked UTF-16.
     #[test]
-    fn text_full_of_nul_characters_reads_as_utf16_when_normalised_again() {
+    fn text_full_of_nul_characters_normalises_once_and_for_all() {
         let mut input = vec![0xFF, 0xFE];
         input.extend("\0a".repeat(50).encode_utf16().flat_map(u16::to_le_bytes));
         let once = normalize_webvtt(&input);
-        assert_eq!(once, format!("WEBVTT\n\n{}\n", "\0a".repeat(50)));
-        assert_ne!(normalize_webvtt(once.as_bytes()), once);
+        assert_eq!(once, format!("WEBVTT\n\n{}\n", "a".repeat(50)));
+        assert_eq!(normalize_webvtt(once.as_bytes()), once);
     }
 
     #[test]
@@ -744,11 +745,8 @@ mod tests {
             header in proptest::option::of(proptest::sample::select(vec![
                 "WEBVTT", "WEBVTT - comment", "WEBVTT\tx", "WEBVTTX", "\u{feff}WEBVTT",
             ])),
-            raw in prop::collection::vec(1_u8.., 0..64),
+            raw in prop::collection::vec(any::<u8>(), 0..64),
         ) {
-            // NUL is excluded: see
-            // `text_full_of_nul_characters_reads_as_utf16_when_normalised_again`.
-            let lines = lines.into_iter().map(|line| line.replace('\0', ""));
             let mut text = header.map(str::to_owned).into_iter().collect::<Vec<_>>();
             text.extend(lines);
             for input in [text.join("\n").into_bytes(), raw] {
