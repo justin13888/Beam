@@ -155,7 +155,7 @@ impl From<beam_entity::episode::Model> for Episode {
             air_date: model.air_date,
             runtime: model
                 .runtime_mins
-                .map(|mins| Duration::from_secs((mins * 60) as u64)),
+                .and_then(crate::models::movie::runtime_from_stored_minutes),
             thumbnail_url: model.thumbnail_url,
             created_at: model.created_at.with_timezone(&Utc),
         }
@@ -198,14 +198,20 @@ mod entity_conversion_tests {
         assert_eq!(Episode::from(episode_model(None)).runtime, None);
     }
 
-    /// Characterises, not endorses: as for a movie, a negative stored
-    /// runtime wraps through the unchecked cast to `u64` rather than being
-    /// refused.
+    /// As for a movie, a negative stored runtime reads as no runtime rather
+    /// than wrapping through a cast into some 584 billion years.
     #[test]
-    fn a_negative_episode_runtime_wraps_into_an_enormous_duration() {
+    fn a_negative_episode_runtime_reads_as_no_runtime() {
+        assert_eq!(Episode::from(episode_model(Some(-1))).runtime, None);
+    }
+
+    /// As for a movie, a runtime whose length in seconds overflows the
+    /// column's `i32` reads as no runtime.
+    #[test]
+    fn an_episode_runtime_whose_seconds_overflow_reads_as_no_runtime() {
         assert_eq!(
-            Episode::from(episode_model(Some(-1))).runtime,
-            Some(Duration::from_secs(u64::MAX - 59))
+            Episode::from(episode_model(Some(i32::MAX / 60 + 1))).runtime,
+            None
         );
     }
 }
