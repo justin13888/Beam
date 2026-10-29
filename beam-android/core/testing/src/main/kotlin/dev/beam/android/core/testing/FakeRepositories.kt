@@ -199,11 +199,11 @@ public class FakePlaybackRepository : PlaybackRepository {
     /** What [reportProgress] returns. */
     public var progressOutcome: ProgressOutcome = ProgressOutcome.Sent(0.0)
 
-    /** How many entries [flushProgress] claims to have sent. */
-    public var flushed: UInt = 0u
-
-    /** How many entries are waiting. */
+    /** How many positions are queued; [flushProgress] sends them all. */
     public var pending: UInt = 0u
+
+    /** How many times [flushProgress] was called. */
+    public var flushCalls: Int = 0
 
     override suspend fun setDeviceProfile(profile: DeviceProfile) {
         deviceProfile = profile
@@ -319,11 +319,12 @@ public class FakePlaybackRepository : PlaybackRepository {
     }
 
     override suspend fun flushProgress(): UInt {
+        flushCalls += 1
         failWith?.let { throw it }
-        return flushed
+        val sent = pending
+        pending = 0u
+        return sent
     }
-
-    override suspend fun pendingProgressCount(): UInt = pending
 }
 
 /** A server registry that actually holds servers. */
@@ -506,9 +507,6 @@ public class FakeServerRepository(
         failWith?.let { throw it }
         return trusted[serverId].orEmpty()
     }
-
-    override suspend fun sessionState(serverId: String): SessionState =
-        state.value.firstOrNull { it.id == serverId }?.state ?: SessionState.LoggedOut
 
     override suspend fun activeServer(): ServerSummary? = state.value.firstOrNull { it.isActive }
 }

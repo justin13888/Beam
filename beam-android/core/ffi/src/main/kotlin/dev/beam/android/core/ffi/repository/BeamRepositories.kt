@@ -31,7 +31,6 @@ import uniffi.beam_client_core.QualityPolicy
 import uniffi.beam_client_core.ScanJob
 import uniffi.beam_client_core.ServerHealth
 import uniffi.beam_client_core.ServerSummary
-import uniffi.beam_client_core.SessionState
 import uniffi.beam_client_core.SourceSelection
 import uniffi.beam_client_core.StartFailureCause
 import uniffi.beam_client_core.SwitchTrigger
@@ -164,8 +163,6 @@ internal class BeamServerRepository
 
         override suspend fun trustedCertificates(serverId: String): List<String> = client.trustedCertificates(serverId)
 
-        override suspend fun sessionState(serverId: String): SessionState = client.sessionState(serverId)
-
         override suspend fun activeServer(): ServerSummary? = client.listServers().firstOrNull { it.isActive }
 
         private suspend fun republish() = changes.republish()
@@ -254,8 +251,6 @@ internal class BeamPlaybackRepository
             }
 
         override suspend fun flushProgress(): UInt = changes.watching { client.flushProgress() }
-
-        override suspend fun pendingProgressCount(): UInt = client.pendingProgressCount()
     }
 
 @Singleton

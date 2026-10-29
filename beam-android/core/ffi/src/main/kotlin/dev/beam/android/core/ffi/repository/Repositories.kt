@@ -26,7 +26,6 @@ import uniffi.beam_client_core.QualityPolicy
 import uniffi.beam_client_core.ScanJob
 import uniffi.beam_client_core.ServerHealth
 import uniffi.beam_client_core.ServerSummary
-import uniffi.beam_client_core.SessionState
 import uniffi.beam_client_core.SourceSelection
 import uniffi.beam_client_core.StartFailureCause
 import uniffi.beam_client_core.SwitchTrigger
@@ -101,9 +100,6 @@ public interface ServerRepository {
 
     /** The certificates the viewer has accepted for a server. */
     public suspend fun trustedCertificates(serverId: String): List<String>
-
-    /** The current authentication state of a server. */
-    public suspend fun sessionState(serverId: String): SessionState
 
     /** The active server, or null when none is chosen. */
     public suspend fun activeServer(): ServerSummary?
@@ -198,11 +194,11 @@ public interface PlaybackRepository {
         force: Boolean,
     ): ProgressOutcome
 
-    /** Send every queued position that is due. Returns how many landed. */
+    /**
+     * Send every queued position that is due, to the active server. Returns
+     * how many landed.
+     */
     public suspend fun flushProgress(): UInt
-
-    /** How many positions are waiting to be sent. */
-    public suspend fun pendingProgressCount(): UInt
 }
 
 /**
