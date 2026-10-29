@@ -380,17 +380,29 @@ mod tests {
         assert_eq!(kept, vec![EventCategory::System]);
     }
 
+    /// The log is bounded: past its size the oldest event is evicted, and a
+    /// limited read is the newest `limit` events, oldest of them first.
     #[test]
-    fn test_in_memory_notification_service() {
-        let svc = InMemoryNotificationService::new();
-        svc.publish(AdminEvent::info(
-            EventCategory::LibraryScan,
-            "Test event",
-            Some(Uuid::from_u128(1)),
-            None,
-        ));
-        let events = svc.published_events();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].library_id, Some(Uuid::from_u128(1)));
+    fn the_log_evicts_its_oldest_event_and_a_limited_read_is_the_newest() {
+        let svc = LocalNotificationService::new();
+        let published = DEFAULT_LOG_SIZE + 3;
+        for n in 0..published {
+            svc.publish(AdminEvent::info(
+                EventCategory::LibraryScan,
+                n.to_string(),
+                None,
+                None,
+            ));
+        }
+        let messages = |events: Vec<AdminEvent>| -> Vec<String> {
+            events.into_iter().map(|event| event.message).collect()
+        };
+
+        let kept = messages(svc.recent_events(usize::MAX));
+        let expected: Vec<String> = (3..published).map(|n| n.to_string()).collect();
+        assert_eq!(kept, expected, "the three oldest are evicted, in order");
+        let newest: Vec<String> = (published - 2..published).map(|n| n.to_string()).collect();
+        assert_eq!(messages(svc.recent_events(2)), newest);
+        assert!(svc.recent_events(0).is_empty());
     }
 }

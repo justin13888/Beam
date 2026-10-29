@@ -156,54 +156,136 @@ mod tests {
     use super::*;
     use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
 
-    #[tokio::test]
-    async fn test_log_and_retrieve() {
-        let repo = Arc::new(InMemoryAdminLogRepository::default());
-        let service = LocalAdminLogService::new(repo);
+    // The store's ordering and paging are its contract's to prove
+    // (`admin_log_repository_contract`); what is the service's own is that it
+    // writes an entry through whole, hands the store the page it was asked
+    // for, and reports a store failure rather than swallowing it.
 
+    #[tokio::test]
+    async fn an_entry_is_stored_whole_and_a_page_is_the_one_asked_for() {
+        let repo = Arc::new(InMemoryAdminLogRepository::default());
+        let service = LocalAdminLogService::new(repo.clone());
+        let details = serde_json::json!({"free_gb": 5});
+        for n in 0..4 {
+            service
+                .log(
+                    AdminLogLevel::Warning,
+                    AdminLogCategory::System,
+                    format!("system {n}"),
+                    Some(details.clone()),
+                )
+                .await
+                .unwrap();
+        }
         service
             .log(
                 AdminLogLevel::Info,
                 AdminLogCategory::LibraryScan,
-                "Scan started".to_string(),
+                "scan".to_string(),
                 None,
             )
             .await
             .unwrap();
 
-        service
-            .log(
-                AdminLogLevel::Warning,
-                AdminLogCategory::System,
-                "Disk space low".to_string(),
-                Some(serde_json::json!({"free_gb": 5})),
+        let stored = repo.list(10, 0).await.unwrap();
+        let system = stored
+            .iter()
+            .find(|entry| entry.message == "system 0")
+            .expect("written through to the store");
+        assert_eq!(
+            (&system.level, &system.category, system.details.as_ref()),
+            (
+                &AdminLogLevel::Warning,
+                &AdminLogCategory::System,
+                Some(&details)
             )
+        );
+        // A limit and an offset that differ, so a swap of the two is seen.
+        let ids = |entries: Vec<AdminLog>| -> Vec<uuid::Uuid> {
+            entries.into_iter().map(|entry| entry.id).collect()
+        };
+        let page = ids(service.get_logs(1, 2).await.unwrap());
+        assert_eq!(page.len(), 1);
+        assert_eq!(page, ids(repo.list(1, 2).await.unwrap()));
+        let category_page = ids(service
+            .get_logs_by_category(AdminLogCategory::System, 3, 1)
             .await
-            .unwrap();
-
-        let logs = service.get_logs(10, 0).await.unwrap();
-        assert_eq!(logs.len(), 2);
-        // Most recent first
-        assert_eq!(logs[0].message, "Disk space low");
-        assert_eq!(logs[1].message, "Scan started");
-
-        let count = service.count().await.unwrap();
-        assert_eq!(count, 2);
+            .unwrap());
+        assert_eq!(category_page.len(), 3);
+        assert_eq!(
+            category_page,
+            ids(repo
+                .list_by_category(AdminLogCategory::System, 3, 1)
+                .await
+                .unwrap())
+        );
+        assert_eq!(service.count().await.unwrap(), 5);
     }
 
+    /// A store that fails every call.
+    #[derive(Debug)]
+    struct UnavailableStore;
+
+    fn unavailable() -> sea_orm::DbErr {
+        sea_orm::DbErr::Custom("the database is down".to_string())
+    }
+
+    #[async_trait]
+    impl AdminLogRepository for UnavailableStore {
+        async fn create(
+            &self,
+            _entry: CreateAdminLog,
+        ) -> std::result::Result<AdminLog, sea_orm::DbErr> {
+            Err(unavailable())
+        }
+
+        async fn list(
+            &self,
+            _limit: u64,
+            _offset: u64,
+        ) -> std::result::Result<Vec<AdminLog>, sea_orm::DbErr> {
+            Err(unavailable())
+        }
+
+        async fn list_by_category(
+            &self,
+            _category: AdminLogCategory,
+            _limit: u64,
+            _offset: u64,
+        ) -> std::result::Result<Vec<AdminLog>, sea_orm::DbErr> {
+            Err(unavailable())
+        }
+
+        async fn count(&self) -> std::result::Result<u64, sea_orm::DbErr> {
+            Err(unavailable())
+        }
+    }
+
+    /// NFR-205: a store failure reaches the caller as a database error, on
+    /// every operation.
     #[tokio::test]
-    async fn test_noop_service() {
-        let service = NoOpAdminLogService;
-        service
+    async fn a_store_failure_is_reported_on_every_operation() {
+        let service = LocalAdminLogService::new(Arc::new(UnavailableStore));
+        let is_database = |err: AdminLogError| match err {
+            AdminLogError::Database(message) => message.contains("the database is down"),
+        };
+
+        let logged = service
             .log(
                 AdminLogLevel::Error,
                 AdminLogCategory::Auth,
-                "Should not panic".to_string(),
+                "denied".to_string(),
                 None,
             )
-            .await
-            .unwrap();
-        let logs = service.get_logs(10, 0).await.unwrap();
-        assert!(logs.is_empty());
+            .await;
+        assert!(logged.is_err_and(is_database));
+        assert!(service.get_logs(10, 0).await.is_err_and(is_database));
+        assert!(
+            service
+                .get_logs_by_category(AdminLogCategory::Auth, 10, 0)
+                .await
+                .is_err_and(is_database)
+        );
+        assert!(service.count().await.is_err_and(is_database));
     }
 }
