@@ -380,6 +380,32 @@ mod tests {
         assert!(!details.spki_sha256_base64.is_empty());
     }
 
+    /// A certificate whose validity ended reads as expired, which the trust
+    /// prompt shows rather than inviting the user to accept it unawares.
+    #[test]
+    fn a_certificate_past_its_validity_reads_as_expired() {
+        let mut params =
+            rcgen::CertificateParams::new(vec!["beam.local".to_owned()]).expect("params");
+        params.not_before = rcgen::date_time_ymd(2000, 1, 1);
+        params.not_after = rcgen::date_time_ymd(2001, 1, 1);
+        let key = rcgen::KeyPair::generate().expect("a key");
+        let der = params.self_signed(&key).expect("signed").der().clone();
+
+        let details = describe(&der).expect("parses");
+
+        assert!(details.is_expired);
+    }
+
+    /// An IPv6 SAN is rendered as the address is written, so a server
+    /// reached by one can be matched against it.
+    #[test]
+    fn an_ipv6_subject_alt_name_is_rendered_as_written() {
+        let details = describe(&certificate(&["fd00::10"])).expect("parses");
+
+        assert_eq!(details.subject_alt_names, vec!["fd00::10".to_owned()]);
+        assert!(details.covers_host("fd00::10"));
+    }
+
     #[test]
     fn the_fingerprint_is_over_the_whole_certificate() {
         // The digest must match what `openssl x509 -fingerprint -sha256`

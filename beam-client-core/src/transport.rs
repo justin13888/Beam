@@ -1141,6 +1141,16 @@ mod tests {
             Some(MAX_RETRY_AFTER_SECS),
             "the ceiling itself is not clamped below itself"
         );
+        // The ceiling is an hour: a proxy's maintenance window of a whole
+        // hour is believed, and a second past it is not.
+        assert_eq!(
+            retry_after_secs(&headers_with_retry_after("3600")),
+            Some(3600)
+        );
+        assert_eq!(
+            retry_after_secs(&headers_with_retry_after("3601")),
+            Some(3600)
+        );
     }
 
     /// A `reqwest::Error` without a client or a network: the status check on
