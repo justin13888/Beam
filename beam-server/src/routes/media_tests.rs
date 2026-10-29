@@ -113,9 +113,19 @@ fn state_with_service(metadata: Arc<dyn MetadataService>) -> AppState {
 /// `base` with `metadata` as its metadata service, and fresh subtitle,
 /// watcher and telemetry services.
 fn state_over(base: AppState, metadata: Arc<dyn MetadataService>) -> AppState {
+    let access = base.services.access.clone();
+    state_over_access(base, metadata, access)
+}
+
+/// [`state_over`] with the access service chosen too.
+fn state_over_access(
+    base: AppState,
+    metadata: Arc<dyn MetadataService>,
+    access: Arc<crate::services::access::AccessService>,
+) -> AppState {
     let services = AppServices {
         hash: base.services.hash.clone(),
-        access: base.services.access.clone(),
+        access,
         library: base.services.library.clone(),
         metadata,
         subtitles: crate::routes::test_support::idle_subtitles(),
@@ -909,6 +919,125 @@ async fn an_internal_failure_never_echoes_its_cause() {
         assert!(
             logged.contains(CAUSE),
             "{route}: the cause is logged for the operator: {logged}"
+        );
+    }
+}
+
+/// An access-policy store that fails every read with a cause naming a host.
+#[derive(Debug)]
+struct FailingPolicies;
+
+const POLICY_CAUSE: &str = "policy read from 10.0.0.9:5432 timed out";
+
+#[async_trait::async_trait]
+impl beam_domain::repositories::AccessPolicyRepository for FailingPolicies {
+    async fn find(
+        &self,
+        _user_id: uuid::Uuid,
+    ) -> Result<beam_domain::models::access::AccessPolicy, sea_orm::DbErr> {
+        Err(sea_orm::DbErr::Custom(POLICY_CAUSE.to_owned()))
+    }
+
+    async fn replace(
+        &self,
+        _user_id: uuid::Uuid,
+        _policy: &beam_domain::models::access::AccessPolicy,
+    ) -> Result<(), sea_orm::DbErr> {
+        Err(sea_orm::DbErr::Custom(POLICY_CAUSE.to_owned()))
+    }
+}
+
+/// NFR-108 across every route module that reads the caller's access policy:
+/// genres, media, people, collections, artwork, stream, subtitle, trickplay,
+/// playback, lists and the library reads. Each answers the fixed `detail`,
+/// keeps the cause off the wire, and logs it exactly once -- a second
+/// `ServerFault` wrapped around the one the access lookup built would log a
+/// second event carrying only the fixed sentence.
+#[tokio::test]
+async fn an_access_lookup_failure_never_echoes_its_cause_on_any_route() {
+    let library = Library::new();
+    let access = Arc::new(crate::services::access::AccessService::new(
+        crate::services::access::AccessRepositories {
+            policies: Arc::new(FailingPolicies),
+            movies: library.movies.clone(),
+            shows: library.shows.clone(),
+            files: library.files.clone(),
+        },
+    ));
+    let state = state_over_access(make_app_state(), real_service(library), access);
+    let token = seed_session(&state).await;
+    let client = TestClient::new(
+        Router::new()
+            .nest("/v1", crate::routes::rest_routes())
+            .build(state)
+            .expect("the REST router describes itself"),
+    );
+
+    let logs: Arc<std::sync::Mutex<Vec<u8>>> = Arc::default();
+    let _subscriber = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer({
+                let logs = logs.clone();
+                move || LogWriter(logs.clone())
+            })
+            .finish(),
+    );
+
+    let id = uuid::Uuid::new_v4();
+    for path in [
+        "/v1/genres".to_owned(),
+        "/v1/media".to_owned(),
+        format!("/v1/media/{id}"),
+        format!("/v1/media/{id}/sources"),
+        format!("/v1/episodes/{id}"),
+        format!("/v1/seasons/{id}"),
+        "/v1/people?query=keanu".to_owned(),
+        format!("/v1/people/{id}"),
+        "/v1/collections".to_owned(),
+        format!("/v1/collections/{id}"),
+        format!("/v1/artwork/movie/{id}/poster"),
+        format!("/v1/files/{id}/stream"),
+        format!("/v1/files/{id}/download"),
+        format!("/v1/files/{id}/subtitles/{id}"),
+        format!("/v1/files/{id}/trickplay/0"),
+        format!("/v1/media/{id}/progress"),
+        "/v1/continue-watching".to_owned(),
+        "/v1/history".to_owned(),
+        "/v1/watchlist".to_owned(),
+        "/v1/favourites".to_owned(),
+        "/v1/libraries".to_owned(),
+        format!("/v1/libraries/{id}"),
+        format!("/v1/libraries/{id}/files"),
+    ] {
+        logs.lock().unwrap().clear();
+        let response = client
+            .get(&path)
+            .cookie("beam_session", &token)
+            .send()
+            .await;
+        response
+            .assert_status(StatusCode::INTERNAL_SERVER_ERROR)
+            .assert_problem_type("https://beam.justinchung.net/reference/errors/#internal");
+        let body = response.json::<serde_json::Value>();
+        assert_eq!(
+            body["detail"],
+            crate::routes::api_error::INTERNAL_DETAIL,
+            "{path}"
+        );
+        assert!(
+            !body.to_string().contains("10.0.0.9"),
+            "{path}: the cause reached the wire: {body}"
+        );
+        let logged = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
+        assert_eq!(
+            logged.matches(POLICY_CAUSE).count(),
+            1,
+            "{path}: the cause is logged once for the operator: {logged}"
+        );
+        assert!(
+            !logged.contains(crate::routes::api_error::INTERNAL_DETAIL),
+            "{path}: an event recorded only the fixed sentence: {logged}"
         );
     }
 }
