@@ -168,7 +168,7 @@ type InMemoryEnrichmentRepo =
 struct TestFixture {
     state: AppState,
     session_store: Arc<InMemorySessionStore>,
-    user_repo: Arc<InMemoryUserRepository>,
+    user_repo: Arc<dyn UserRepository>,
     file_repo: Arc<InMemoryFileRepo>,
     enrichment_repo: Arc<InMemoryEnrichmentRepo>,
     movie_repo: Arc<beam_domain::repositories::movie::in_memory::InMemoryMovieRepository>,
@@ -260,6 +260,19 @@ fn make_test_state_with_data_dir(
         None,
         data_dir,
         Gate::Open,
+        Arc::new(InMemoryUserRepository::default()),
+    )
+}
+
+/// Like [`make_test_state`], over the user store `users`.
+fn make_test_state_with_users(users: Arc<dyn UserRepository>) -> TestFixture {
+    build_fixture(
+        Arc::new(InMemoryNotificationService::new()),
+        PathBuf::from("/videos/movies"),
+        None,
+        PathBuf::from("/beam-data"),
+        Gate::Open,
+        users,
     )
 }
 
@@ -275,6 +288,7 @@ fn make_scan_test_state(gate: Gate) -> TestFixture {
         Some(scratch),
         PathBuf::from("/beam-data"),
         gate,
+        Arc::new(InMemoryUserRepository::default()),
     )
 }
 
@@ -284,9 +298,9 @@ fn build_fixture(
     scratch: Option<TempDir>,
     data_dir: PathBuf,
     gate: Gate,
+    user_repo: Arc<dyn UserRepository>,
 ) -> TestFixture {
     let session_store = Arc::new(InMemorySessionStore::default());
-    let user_repo = Arc::new(InMemoryUserRepository::default());
 
     let admin_log: Arc<dyn AdminLogService> = Arc::new(LocalAdminLogService::new(Arc::new(
         InMemoryAdminLogRepository::default(),
@@ -846,10 +860,11 @@ async fn creating_a_library_with_a_bad_name_or_root_is_422_and_changes_nothing()
 }
 
 #[tokio::test]
-async fn creating_a_library_as_a_regular_user_is_403() {
+async fn creating_a_library_as_a_regular_user_is_403_and_stores_nothing() {
     let fixture = make_test_state();
     let client = build_client(&fixture);
     let token = seed_user_session(&fixture, false).await;
+    let admin = seed_user_session(&fixture, true).await;
 
     let response = client
         .post("/v1/admin/libraries")
@@ -866,6 +881,20 @@ async fn creating_a_library_as_a_regular_user_is_403() {
     response
         .assert_status(StatusCode::FORBIDDEN)
         .assert_problem_type("https://beam.justinchung.net/reference/errors/#admin-required");
+
+    let listed = client
+        .get("/v1/libraries")
+        .cookie("beam_session", &admin)
+        .send()
+        .await
+        .assert_status(StatusCode::OK)
+        .json::<LibraryConnection>()
+        .items;
+    assert!(listed.is_empty(), "a refused create stores no library");
+    assert!(
+        fixture.watcher.watched_libraries().is_empty(),
+        "a refused create watches nothing"
+    );
 }
 
 #[tokio::test]
@@ -1268,6 +1297,55 @@ async fn scans_are_closed_to_a_regular_user() {
 }
 
 #[tokio::test]
+async fn deleting_a_library_is_closed_to_a_regular_user_and_keeps_it() {
+    let fixture = make_test_state();
+    let client = build_client(&fixture);
+    let admin = seed_user_session(&fixture, true).await;
+    let token = seed_user_session(&fixture, false).await;
+
+    let created: Library = client
+        .post("/v1/admin/libraries")
+        .cookie("beam_session", &admin)
+        .json(&CreateLibraryRequest {
+            name: "Movies".to_string(),
+            root_path: "movies".to_string(),
+        })
+        .send()
+        .await
+        .assert_status(StatusCode::OK)
+        .json();
+    fixture.watcher.until_watched(created.id).await;
+    let path = format!("/v1/admin/libraries/{}", created.id);
+
+    client
+        .delete(&path)
+        .cookie("beam_session", &token)
+        .send()
+        .await
+        .assert_status(StatusCode::FORBIDDEN)
+        .assert_problem_type("https://beam.justinchung.net/reference/errors/#admin-required");
+    client
+        .delete(&path)
+        .send()
+        .await
+        .assert_status(StatusCode::UNAUTHORIZED);
+
+    let kept: Library = client
+        .get(&format!("/v1/libraries/{}", created.id))
+        .cookie("beam_session", &admin)
+        .send()
+        .await
+        .assert_status(StatusCode::OK)
+        .json();
+    assert_eq!(kept.id, created.id, "the refused delete kept the library");
+    assert_eq!(
+        fixture.watcher.watched_libraries(),
+        vec![created.id],
+        "and kept watching it"
+    );
+}
+
+#[tokio::test]
 async fn deleting_a_library_returns_204_then_404_on_repeat() {
     let fixture = make_test_state();
     let client = build_client(&fixture);
@@ -1518,6 +1596,36 @@ async fn the_admin_event_snapshot_returns_the_newest_events_within_the_limit() {
     assert_eq!(messages, ["middle", "newest"]);
 }
 
+/// The snapshot carries operational detail -- library names, scan failures
+/// -- so a regular user is refused it by name and an anonymous caller is
+/// asked to sign in, and neither body leaks an event.
+#[tokio::test]
+async fn the_admin_event_snapshot_is_admin_only() {
+    let fixture = make_test_state();
+    fixture.notification.publish(AdminEvent::info(
+        EventCategory::LibraryScan,
+        "scan of a private library",
+        None,
+        Some("Private".to_string()),
+    ));
+    let client = build_client(&fixture);
+    let token = seed_user_session(&fixture, false).await;
+
+    let refused = client
+        .get("/v1/admin/events")
+        .cookie("beam_session", &token)
+        .send()
+        .await;
+    refused
+        .assert_status(StatusCode::FORBIDDEN)
+        .assert_problem_type("https://beam.justinchung.net/reference/errors/#admin-required");
+    assert!(!refused.text().contains("Private"));
+
+    let anonymous = client.get("/v1/admin/events").send().await;
+    anonymous.assert_status(StatusCode::UNAUTHORIZED);
+    assert!(!anonymous.text().contains("Private"));
+}
+
 #[tokio::test]
 async fn the_admin_event_stream_is_admin_only() {
     let fixture = make_test_state_with_notification(Arc::new(FiniteEventFeed { events: vec![] }));
@@ -1654,21 +1762,116 @@ async fn the_admin_event_stream_encodes_each_event_as_json() {
     assert_eq!(third["scan"]["progress"]["added_count"], 3);
 }
 
-// ─── Refresh metadata ────────────────────────────────────────────────────────
+/// A feed whose subscriber has already fallen behind: the channel holds one
+/// event, every event is sent before the receiver reads, and the sender is
+/// dropped -- so the first read reports `Lagged`, the next returns the one
+/// event the buffer kept, and the one after that `Closed`.
+#[derive(Debug)]
+struct LaggingEventFeed {
+    events: Vec<AdminEvent>,
+}
 
+impl NotificationService for LaggingEventFeed {
+    fn publish(&self, _event: AdminEvent) {}
+
+    fn subscribe(&self) -> broadcast::Receiver<AdminEvent> {
+        let (sender, receiver) = broadcast::channel(1);
+        for event in &self.events {
+            let _ = sender.send(event.clone());
+        }
+        receiver
+    }
+
+    fn recent_events(&self, _limit: usize) -> Vec<AdminEvent> {
+        Vec::new()
+    }
+}
+
+/// A dashboard that fell behind the broadcast buffer skips what it missed and
+/// keeps receiving, rather than having its stream ended under it.
 #[tokio::test]
-async fn refreshing_media_metadata_as_a_regular_user_is_403() {
-    let fixture = make_test_state();
+async fn a_lagging_event_stream_skips_and_keeps_delivering() {
+    let fixture = make_test_state_with_notification(Arc::new(LaggingEventFeed {
+        events: ["missed", "also missed", "delivered"]
+            .into_iter()
+            .map(|message| AdminEvent::info(EventCategory::System, message, None, None))
+            .collect(),
+    }));
     let client = build_client(&fixture);
-    let token = seed_user_session(&fixture, false).await;
+    let token = seed_user_session(&fixture, true).await;
 
     let response = client
-        .post("/v1/admin/media/some-id/refresh")
+        .get("/v1/admin/events/stream")
         .cookie("beam_session", &token)
         .send()
         .await;
 
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    response.assert_status(StatusCode::OK);
+    let messages: Vec<String> = response
+        .events()
+        .iter()
+        .map(|event| {
+            event.json::<Value>()["message"]
+                .as_str()
+                .expect("a message string")
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(messages, ["delivered"]);
+}
+
+// ─── Refresh metadata ────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn refreshing_media_metadata_as_a_regular_user_is_403_and_queues_nothing() {
+    use beam_domain::models::CreateMovie;
+    use beam_domain::models::enrichment::EnrichmentStatus;
+    use beam_domain::repositories::MovieRepository;
+
+    let fixture = make_test_state();
+    let client = build_client(&fixture);
+    let token = seed_user_session(&fixture, false).await;
+    // A real title, enriched, so a refresh that got through would be visible
+    // as the row going back to pending.
+    let movie = fixture
+        .movie_repo
+        .find_or_create_by_identity(CreateMovie::new("Heat".to_string(), Some(1995), None))
+        .await
+        .unwrap();
+    let target = EnrichmentTargetId::Movie(movie.id);
+    fixture
+        .enrichment_repo
+        .ensure_pending(target)
+        .await
+        .unwrap();
+    let row = fixture
+        .enrichment_repo
+        .find_by_target(target)
+        .await
+        .unwrap()
+        .unwrap();
+    fixture
+        .enrichment_repo
+        .mark_enriched(row.id, "tmdb:949", 0.9, chrono::Utc::now())
+        .await
+        .unwrap();
+
+    client
+        .post(&format!("/v1/admin/media/{}/refresh", movie.id))
+        .cookie("beam_session", &token)
+        .send()
+        .await
+        .assert_status(StatusCode::FORBIDDEN)
+        .assert_problem_type("https://beam.justinchung.net/reference/errors/#admin-required");
+
+    let row = fixture
+        .enrichment_repo
+        .find_by_target(target)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.status, EnrichmentStatus::Enriched, "nothing was queued");
+    assert!(!row.force_refresh, "nothing was marked for a fresh fetch");
 }
 
 #[tokio::test]
@@ -1798,11 +2001,13 @@ async fn seed_session_for(fixture: &TestFixture, user_id: &str) {
 }
 
 #[tokio::test]
-async fn the_admin_user_and_status_endpoints_are_closed_to_a_regular_user() {
+async fn the_admin_user_and_status_endpoints_are_closed_to_a_regular_user_and_leave_the_target_enabled_with_its_sessions()
+ {
     let fixture = make_test_state();
     let client = build_client(&fixture);
     let token = seed_user_session(&fixture, false).await;
     let target = seed_plain_user(&fixture, "target-subj", "Target").await;
+    seed_session_for(&fixture, &target.id.to_string()).await;
 
     assert_eq!(
         client
@@ -1833,6 +2038,88 @@ async fn the_admin_user_and_status_endpoints_are_closed_to_a_regular_user() {
             .await
             .status(),
         StatusCode::FORBIDDEN
+    );
+
+    let stored = fixture
+        .user_repo
+        .find_by_id(target.id)
+        .await
+        .unwrap()
+        .expect("the target still exists");
+    assert!(
+        !stored.disabled,
+        "the refused patch left the target enabled"
+    );
+    assert_eq!(
+        fixture
+            .session_store
+            .list_for_user(&target.id.to_string())
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "and revoked none of its sessions"
+    );
+}
+
+/// The admin scope is checked against the user row, so a session whose user
+/// row has gone is no longer anyone's: it is 401, never the 403 a known
+/// non-admin gets and never an admin answer.
+#[tokio::test]
+async fn an_admin_whose_row_is_gone_is_401_on_admin_routes() {
+    let fixture = make_test_state();
+    let client = build_client(&fixture);
+    let orphan = uuid::Uuid::from_u128(0xdead);
+    let token = fixture
+        .session_store
+        .create(
+            &SessionData {
+                user_id: orphan.to_string(),
+                device_hash: "orphan-device".to_string(),
+                ip: "127.0.0.1".to_string(),
+                created_at: chrono::Utc::now().timestamp(),
+                last_active: chrono::Utc::now().timestamp(),
+            },
+            86400,
+            86400,
+        )
+        .await
+        .expect("seed session should succeed");
+
+    for path in ["/v1/admin/status", "/v1/admin/users", "/v1/admin/logs"] {
+        client
+            .get(path)
+            .cookie("beam_session", &token)
+            .send()
+            .await
+            .assert_status(StatusCode::UNAUTHORIZED);
+    }
+}
+
+/// NFR-205: a user store that cannot list is a 500, never an empty page that
+/// tells an administrator there are no accounts.
+#[tokio::test]
+async fn a_user_store_failure_is_a_500_never_an_empty_user_list() {
+    use beam_auth::utils::repository::in_memory::{FailingUserRepository, UserRepositoryOperation};
+
+    let fixture = make_test_state_with_users(Arc::new(FailingUserRepository::new(
+        InMemoryUserRepository::default(),
+        UserRepositoryOperation::ListPage,
+    )));
+    let client = build_client(&fixture);
+    let token = seed_user_session(&fixture, true).await;
+
+    let response = client
+        .get("/v1/admin/users")
+        .cookie("beam_session", &token)
+        .send()
+        .await;
+    response
+        .assert_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .assert_problem_type("https://beam.justinchung.net/reference/errors/#internal");
+    assert!(
+        !response.text().contains("injected failure"),
+        "the store's message never reaches the wire"
     );
 }
 

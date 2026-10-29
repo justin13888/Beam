@@ -754,27 +754,62 @@ mod tests {
     use super::*;
     use uuid::Uuid;
 
+    /// Every field of the wire event is destructured, so a field added to it
+    /// without being mapped here fails to compile rather than going unchecked.
     #[test]
     fn admin_event_maps_all_fields() {
+        use beam_domain::models::enrichment::{
+            EnrichmentStatus as DomainEnrichmentStatus, EnrichmentTargetId,
+        };
+
         let occurred_at = Utc::now();
         let event = notification::AdminEvent {
             id: Uuid::from_u128(1),
             timestamp: occurred_at,
             level: EventLevel::Warning,
-            category: EventCategory::LibraryScan,
-            message: "scan finished".to_string(),
+            category: EventCategory::Enrichment,
+            message: "enrichment finished".to_string(),
             library_id: Some(Uuid::from_u128(2)),
             library_name: Some("Movies".to_string()),
             scan: None,
-            enrichment: None,
+            enrichment: Some(notification::EnrichmentEvent {
+                target: EnrichmentTargetId::Show(Uuid::from_u128(3)),
+                title: Some("Show".to_string()),
+                status: DomainEnrichmentStatus::Unmatched,
+                matched_ref: Some("tmdb:9".to_string()),
+                error: Some("no candidate".to_string()),
+            }),
         };
-        let wire = AdminEvent::from(event.clone());
-        assert_eq!(wire.id, Uuid::from_u128(1));
-        assert_eq!(wire.occurred_at, occurred_at);
-        assert_eq!(wire.level, LogLevel::Warning);
-        assert_eq!(wire.category, AdminEventCategory::LibraryScan);
-        assert_eq!(wire.message, "scan finished");
-        assert_eq!(wire.library_id, Some(Uuid::from_u128(2)));
+        let AdminEvent {
+            id,
+            occurred_at: wire_occurred_at,
+            level,
+            category,
+            message,
+            library_id,
+            library_name,
+            scan,
+            enrichment,
+        } = AdminEvent::from(event);
+        assert_eq!(id, Uuid::from_u128(1));
+        assert_eq!(wire_occurred_at, occurred_at);
+        assert_eq!(level, LogLevel::Warning);
+        assert_eq!(category, AdminEventCategory::Enrichment);
+        assert_eq!(message, "enrichment finished");
+        assert_eq!(library_id, Some(Uuid::from_u128(2)));
+        assert_eq!(library_name.as_deref(), Some("Movies"));
+        assert!(scan.is_none(), "an enrichment event carries no scan");
+        assert_eq!(
+            enrichment,
+            Some(crate::models::enrichment::EnrichmentEvent {
+                media_id: Uuid::from_u128(3),
+                kind: crate::models::search::TitleKind::Show,
+                title: Some("Show".to_string()),
+                status: crate::models::enrichment::EnrichmentStatus::Unmatched,
+                matched_ref: Some("tmdb:9".to_string()),
+                error: Some("no candidate".to_string()),
+            })
+        );
     }
 
     /// An admin log category is spelled on the wire exactly as it is stored:

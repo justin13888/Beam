@@ -239,53 +239,67 @@ mod tests {
     use super::*;
     use std::str::FromStr;
 
-    /// The invariant that matters: every variant the document lists is one
-    /// `FromStr` accepts, spelled identically. The expected spelling is taken
-    /// from serde rather than restated here, so adding a variant without
-    /// teaching `FromStr` about it fails this test instead of silently
-    /// rejecting a documented value at run time.
-    #[test]
-    fn every_documented_sort_field_parses() {
-        for field in [
-            MediaSortField::Title,
-            MediaSortField::Year,
-            MediaSortField::Rating,
-            MediaSortField::DateAdded,
-            MediaSortField::Runtime,
-            MediaSortField::Relevance,
-        ] {
-            let json = serde_json::to_string(&field).expect("serializes");
-            let wire = json.trim_matches('"');
+    /// The values the served document lists for the component schema `name`,
+    /// read from the router's own export -- the list a client is generated
+    /// from -- rather than restated here.
+    fn documented_values(name: &str) -> Vec<String> {
+        use kynos::openapi::SpecVersion;
+
+        let document = crate::routes::create_router(&crate::bootstrap::AllowedOrigins::none())
+            .openapi_as(SpecVersion::V3_2)
+            .expect("the contract exports");
+        let document = serde_json::to_value(&document).expect("the document serializes");
+        let values: Vec<String> = document["components"]["schemas"][name]["enum"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{name} is documented as an enumeration"))
+            .iter()
+            .map(|value| value.as_str().expect("a string value").to_owned())
+            .collect();
+        assert!(!values.is_empty(), "{name} documents no values");
+        values
+    }
+
+    /// Every value the document lists for `T` is one `FromStr` accepts, and it
+    /// reads back through serde and `Display` spelled identically. The values
+    /// come from the document, so a variant added to the enum (and hence to
+    /// the derived schema) without teaching `FromStr` about it fails here
+    /// instead of silently rejecting a documented value at run time.
+    fn assert_every_documented_value_round_trips<T>(name: &str)
+    where
+        T: std::str::FromStr<Err = UnknownVariant>
+            + std::fmt::Display
+            + Serialize
+            + PartialEq
+            + std::fmt::Debug,
+    {
+        for wire in documented_values(name) {
+            let parsed =
+                T::from_str(&wire).unwrap_or_else(|err| panic!("{name}: {wire} is refused: {err}"));
             assert_eq!(
-                MediaSortField::from_str(wire).expect("round-trips"),
-                field,
-                "{wire} did not round-trip"
+                serde_json::to_value(&parsed).expect("serializes"),
+                serde_json::Value::String(wire.clone()),
+                "{name}: {wire} is spelled differently by serde"
             );
             // `Display` is what builds a query string a client sends back,
-            // so it has to agree with serde too -- otherwise a value read
-            // out of the document could not be written into a request.
-            assert_eq!(field.to_string(), wire);
+            // so it has to agree too -- otherwise a value read out of the
+            // document could not be written into a request.
+            assert_eq!(parsed.to_string(), wire, "{name}: Display disagrees");
         }
+    }
+
+    #[test]
+    fn every_documented_sort_field_parses() {
+        assert_every_documented_value_round_trips::<MediaSortField>("MediaSortField");
     }
 
     #[test]
     fn every_documented_sort_order_parses() {
-        for order in [SortOrder::Asc, SortOrder::Desc] {
-            let json = serde_json::to_string(&order).expect("serializes");
-            let wire = json.trim_matches('"');
-            assert_eq!(SortOrder::from_str(wire).expect("round-trips"), order);
-            assert_eq!(order.to_string(), wire);
-        }
+        assert_every_documented_value_round_trips::<SortOrder>("SortOrder");
     }
 
     #[test]
     fn every_documented_media_type_parses() {
-        for kind in [TitleKind::Movie, TitleKind::Show] {
-            let json = serde_json::to_string(&kind).expect("serializes");
-            let wire = json.trim_matches('"');
-            assert_eq!(TitleKind::from_str(wire).expect("round-trips"), kind);
-            assert_eq!(kind.to_string(), wire);
-        }
+        assert_every_documented_value_round_trips::<TitleKind>("TitleKind");
     }
 
     #[test]

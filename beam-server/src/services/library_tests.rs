@@ -382,10 +382,11 @@ mod tests {
         assert_eq!(lib.name, "Movies");
         assert_eq!(lib.file_count, 0);
 
-        // Library stored in repo
-        let stored = lib_repo_ref.libraries.lock().unwrap();
+        // Library stored in repo, as the repository itself reads it back.
+        let stored = lib_repo_ref.find_all().await.unwrap();
         assert_eq!(stored.len(), 1);
-        assert!(stored.values().any(|l| l.name == "Movies"));
+        assert_eq!(stored[0].id, lib.id);
+        assert_eq!(stored[0].name, "Movies");
 
         // Notification published
         let events = notif_ref.published_events();
@@ -393,98 +394,54 @@ mod tests {
         assert!(events[0].message.contains("Movies"));
     }
 
+    /// A root the validator refuses is refused as the validator refused it,
+    /// and the service acts on nothing: no library is stored and no event is
+    /// published. The subject is the service's handling of the refusal --
+    /// what `OsPathValidator` refuses is covered by its own tests below.
     #[tokio::test]
-    async fn test_create_library_propagates_validator_success_for_absolute_path() {
-        let video_dir = PathBuf::from("/media/videos");
-        let service = LocalLibraryService::new(
-            Arc::new(InMemoryLibraryRepository::default()),
-            Arc::new(InMemoryFileRepository::default()),
-            video_dir.clone(),
-            PathBuf::from("/beam-data"),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(MockIndexService::new()),
-            Arc::new(InMemoryPathValidator::success(video_dir.clone())),
-            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
-        );
+    async fn a_root_the_validator_refuses_stores_nothing_and_publishes_nothing() {
+        type Expect = fn(&LibraryError) -> bool;
+        let cases: [(InMemoryPathValidator, Expect); 2] = [
+            (
+                InMemoryPathValidator::path_outside_root("path escapes root"),
+                |err| matches!(err, LibraryError::PathOutsideRoot(_)),
+            ),
+            (
+                InMemoryPathValidator::path_not_found("no such directory"),
+                |err| matches!(err, LibraryError::PathNotFound(_)),
+            ),
+        ];
 
-        let result = service
-            .create_library("Movies".to_string(), "/media/videos/movies".to_string())
-            .await;
+        for (validator, expected) in cases {
+            let video_dir = PathBuf::from("/media/videos");
+            let lib_repo = Arc::new(InMemoryLibraryRepository::default());
+            let notif = Arc::new(InMemoryNotificationService::new());
+            let service = LocalLibraryService::new(
+                lib_repo.clone(),
+                Arc::new(InMemoryFileRepository::default()),
+                video_dir,
+                PathBuf::from("/beam-data"),
+                notif.clone() as Arc<dyn NotificationService>,
+                Arc::new(MockIndexService::new()),
+                Arc::new(validator),
+                Arc::new(beam_index::runtime::LibraryWatches::new(None)),
+            );
 
-        assert!(
-            result.is_ok(),
-            "a successful validation should be passed through: {:?}",
-            result.err()
-        );
-    }
+            let err = service
+                .create_library("Movies".to_string(), "/etc/secret".to_string())
+                .await
+                .expect_err("the validator refused the root");
 
-    #[tokio::test]
-    async fn test_create_library_propagates_validator_success_for_relative_path() {
-        let video_dir = PathBuf::from("/media/videos");
-        let service = LocalLibraryService::new(
-            Arc::new(InMemoryLibraryRepository::default()),
-            Arc::new(InMemoryFileRepository::default()),
-            video_dir.clone(),
-            PathBuf::from("/beam-data"),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(MockIndexService::new()),
-            Arc::new(InMemoryPathValidator::success(video_dir.clone())),
-            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
-        );
-
-        let result = service
-            .create_library("Movies".to_string(), "movies".to_string())
-            .await;
-
-        assert!(
-            result.is_ok(),
-            "a successful validation should be passed through: {:?}",
-            result.err()
-        );
-    }
-
-    #[tokio::test]
-    async fn test_create_library_propagates_a_path_outside_the_root() {
-        let video_dir = PathBuf::from("/media/videos");
-        let service = LocalLibraryService::new(
-            Arc::new(InMemoryLibraryRepository::default()),
-            Arc::new(InMemoryFileRepository::default()),
-            video_dir.clone(),
-            PathBuf::from("/beam-data"),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(MockIndexService::new()),
-            Arc::new(InMemoryPathValidator::path_outside_root(
-                "path escapes root",
-            )),
-            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
-        );
-
-        let result = service
-            .create_library("Outside".to_string(), "/etc/secret".to_string())
-            .await;
-
-        assert!(matches!(result, Err(LibraryError::PathOutsideRoot(_))));
-    }
-
-    #[tokio::test]
-    async fn test_create_library_propagates_validator_path_not_found_error() {
-        let video_dir = PathBuf::from("/media/videos");
-        let service = LocalLibraryService::new(
-            Arc::new(InMemoryLibraryRepository::default()),
-            Arc::new(InMemoryFileRepository::default()),
-            video_dir.clone(),
-            PathBuf::from("/beam-data"),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(MockIndexService::new()),
-            Arc::new(InMemoryPathValidator::path_not_found("no such directory")),
-            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
-        );
-
-        let result = service
-            .create_library("Movies".to_string(), "/nonexistent/path".to_string())
-            .await;
-
-        assert!(matches!(result, Err(LibraryError::PathNotFound(_))));
+            assert!(expected(&err), "got {err:?}");
+            assert!(
+                lib_repo.find_all().await.unwrap().is_empty(),
+                "{err:?}: a refused root stores no library"
+            );
+            assert!(
+                notif.recent_events(10).is_empty(),
+                "{err:?}: a refused root announces nothing"
+            );
+        }
     }
 
     #[tokio::test]
@@ -546,19 +503,8 @@ mod tests {
         let video_dir = PathBuf::from("/media/videos");
         let indexed = Arc::new(InMemoryFileRepository::default());
         let lib_repo = Arc::new(InMemoryLibraryRepository::with_files(indexed.clone()));
-        let id1 = Uuid::new_v4();
-        let id2 = Uuid::new_v4();
-
-        lib_repo
-            .libraries
-            .lock()
-            .unwrap()
-            .insert(id1, make_domain_library(id1, "Movies"));
-        lib_repo
-            .libraries
-            .lock()
-            .unwrap()
-            .insert(id2, make_domain_library(id2, "Shows"));
+        let id1 = stored_library(&lib_repo, "Movies", "/media/videos/movies").await;
+        let id2 = stored_library(&lib_repo, "Shows", "/media/videos/shows").await;
         store_files(&indexed, id1, 5).await;
         store_files(&indexed, id2, 12).await;
 
@@ -646,13 +592,7 @@ mod tests {
         let video_dir = PathBuf::from("/media/videos");
         let indexed = Arc::new(InMemoryFileRepository::default());
         let lib_repo = Arc::new(InMemoryLibraryRepository::with_files(indexed.clone()));
-        let lib_id = Uuid::new_v4();
-
-        lib_repo
-            .libraries
-            .lock()
-            .unwrap()
-            .insert(lib_id, make_domain_library(lib_id, "Movies"));
+        let lib_id = stored_library(&lib_repo, "Movies", "/media/videos").await;
         store_files(&indexed, lib_id, 7).await;
 
         let service = LocalLibraryService::new(
@@ -934,13 +874,7 @@ mod tests {
     async fn test_delete_library_publishes_notification() {
         let video_dir = PathBuf::from("/media/videos");
         let lib_repo = Arc::new(InMemoryLibraryRepository::default());
-        let lib_id = Uuid::new_v4();
-
-        lib_repo
-            .libraries
-            .lock()
-            .unwrap()
-            .insert(lib_id, make_domain_library(lib_id, "Movies"));
+        let lib_id = stored_library(&lib_repo, "Movies", "/media/videos").await;
 
         let notif = Arc::new(InMemoryNotificationService::new());
         let notif_ref = Arc::clone(&notif);
@@ -1034,7 +968,7 @@ mod tests {
             "got {err:?}"
         );
         assert!(!err.to_string().contains('/'), "no path in {err}");
-        assert_eq!(lib_repo.libraries.lock().unwrap().len(), 1);
+        assert_eq!(lib_repo.find_all().await.unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -1051,7 +985,7 @@ mod tests {
             "got {err:?}"
         );
         assert!(!err.to_string().contains('/'), "no path in {err}");
-        assert!(lib_repo.libraries.lock().unwrap().is_empty());
+        assert!(lib_repo.find_all().await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1067,7 +1001,7 @@ mod tests {
             .await
             .expect("/media/movies2 is not inside /media/movies");
 
-        assert_eq!(lib_repo.libraries.lock().unwrap().len(), 2);
+        assert_eq!(lib_repo.find_all().await.unwrap().len(), 2);
     }
 
     // ── startup audit of stored roots (issue #186) ───────────────────────────
