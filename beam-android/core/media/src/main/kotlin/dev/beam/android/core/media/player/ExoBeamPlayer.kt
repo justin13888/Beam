@@ -39,6 +39,7 @@ import uniffi.beam_client_core.BeamException
 import uniffi.beam_client_core.PlaybackPart
 import uniffi.beam_client_core.PlaybackPlan
 import uniffi.beam_client_core.RebufferMonitor
+import uniffi.beam_client_core.ServerHttpConfig
 import uniffi.beam_client_core.SwitchTrigger
 import uniffi.beam_client_core.TelemetryClientKind
 
@@ -256,8 +257,12 @@ internal class ExoBeamPlayer(
                 beamDataSourceFactory(
                     context,
                     clients,
-                    plan.headers,
-                    plan.trustedFingerprints,
+                    ServerHttpConfig(
+                        baseUrl = plan.baseUrl,
+                        headers = plan.headers,
+                        trustedFingerprints = plan.trustedFingerprints,
+                        host = plan.pinnedHost,
+                    ),
                 ),
             )
         // One item per part (issue #233): the player moves to the next as one

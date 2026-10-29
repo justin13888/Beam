@@ -119,6 +119,63 @@ fn normalize(fingerprint: &str) -> String {
         .collect()
 }
 
+/// Whether a pin admits a certificate the public roots refused.
+///
+/// Three conditions, all required. Dropping the SAN check would turn a pin
+/// into a wildcard for every host the device later connects to, and dropping
+/// the window check would make a pin permanent. The whole validity window,
+/// not just the far end: a certificate whose window has not opened yet is as
+/// invalid as an expired one, and checking only expiry would accept one a
+/// public CA would refuse.
+///
+/// The one rule, shared by this crate's own verifier and -- through
+/// [`pinned_certificate_accepted`] -- by every platform HTTP stack that does
+/// its own TLS, so the two cannot drift apart.
+fn pin_admits(details: &CertificateDetails, host: &str, pinned: bool, now_unix: u64) -> bool {
+    let covers = details.covers_host(host);
+    let live = now_unix >= details.not_before_unix.max(0).unsigned_abs()
+        && now_unix <= details.not_after_unix.max(0).unsigned_abs();
+    pinned && covers && live
+}
+
+/// Whether a certificate the platform's public trust store refused may be
+/// accepted anyway, because the user pinned it for `host`.
+///
+/// Exported for the platform HTTP stacks that do their own TLS -- Media3's
+/// data sources, the image loader and downloads on Android -- so they decide
+/// with the rule this crate's own verifier applies rather than a second copy
+/// of it. `der` is the leaf certificate as presented, `host` the host the
+/// connection was made to, `trusted_fingerprints` the whole-certificate
+/// SHA-256 digests the user accepted for that server in any formatting, and
+/// `now_unix` the current time in Unix seconds.
+///
+/// Bytes that do not parse as a certificate are never accepted, and neither
+/// is a time before the epoch.
+#[uniffi::export]
+#[must_use]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "an exported function receives its arguments owned from the foreign side"
+)]
+pub fn pinned_certificate_accepted(
+    der: Vec<u8>,
+    host: String,
+    trusted_fingerprints: Vec<String>,
+    now_unix: i64,
+) -> bool {
+    let Ok(now_unix) = u64::try_from(now_unix) else {
+        return false;
+    };
+    let Some(details) = describe(&CertificateDer::from(der)) else {
+        return false;
+    };
+    let fingerprint = normalize(&details.sha256_fingerprint);
+    let pinned = trusted_fingerprints
+        .iter()
+        .any(|trusted| normalize(trusted) == fingerprint);
+    pin_admits(&details, &host, pinned, now_unix)
+}
+
 /// The platform verifier, with a user-approved exception.
 #[derive(Debug)]
 struct TofuVerifier {
@@ -162,19 +219,8 @@ impl ServerCertVerifier for TofuVerifier {
             return Err(public_error);
         };
 
-        // Three conditions, all required. Dropping the SAN check would turn a
-        // pin into a wildcard for every host the device later connects to,
-        // and dropping the expiry check would make a pin permanent.
         let pinned = self.decision.is_trusted(&details.sha256_fingerprint);
-        let covers = details.covers_host(&host);
-        // The whole validity window, not just the far end. A certificate whose
-        // window has not opened yet is as invalid as an expired one, and
-        // checking only expiry would accept one a public CA would refuse.
-        let seconds = now.as_secs();
-        let live = seconds >= details.not_before_unix.max(0).unsigned_abs()
-            && seconds <= details.not_after_unix.max(0).unsigned_abs();
-
-        if pinned && covers && live {
+        if pin_admits(&details, &host, pinned, now.as_secs()) {
             return Ok(ServerCertVerified::assertion());
         }
 
@@ -544,6 +590,64 @@ mod tests {
                 .use_preconfigured_tls(config.expect("config"))
                 .build()
                 .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_pin_is_honoured_only_for_its_host_and_window() {
+        // The exported predicate the platform HTTP stacks call. Each case
+        // breaks exactly one of the three conditions, so none of them can be
+        // dropped without a case failing.
+        let der = certificate(&["beam.local"]);
+        let details = describe(&der).expect("parses");
+        let pinned = vec![details.sha256_fingerprint.clone()];
+        let inside = details.not_before_unix + 60;
+        let before = details.not_before_unix - 3_600;
+        let after = details.not_after_unix + 3_600;
+        let unrelated = describe(&certificate(&["beam.local"]))
+            .expect("parses")
+            .sha256_fingerprint;
+
+        let accepted = |host: &str, trusted: &[String], now: i64| {
+            pinned_certificate_accepted(der.to_vec(), host.to_owned(), trusted.to_vec(), now)
+        };
+
+        assert!(
+            accepted("beam.local", &pinned, inside),
+            "pinned, covered, live"
+        );
+        assert!(
+            accepted(
+                "beam.local",
+                &[details.sha256_fingerprint.replace(':', "").to_lowercase()],
+                inside
+            ),
+            "a pin stored in another formatting still matches"
+        );
+        assert!(
+            !accepted("bank.example.com", &pinned, inside),
+            "another host"
+        );
+        assert!(
+            !accepted("beam.local", &pinned, before),
+            "before the window opens"
+        );
+        assert!(
+            !accepted("beam.local", &pinned, after),
+            "after the window closes"
+        );
+        assert!(!accepted("beam.local", &[], inside), "nothing pinned");
+        assert!(
+            !accepted("beam.local", &[unrelated], inside),
+            "another certificate pinned"
+        );
+        assert!(
+            !accepted("beam.local", &pinned, -1),
+            "a time before the epoch"
+        );
+        assert!(
+            !pinned_certificate_accepted(vec![0x00, 0x01], "beam.local".to_owned(), pinned, inside),
+            "bytes that are not a certificate"
         );
     }
 }

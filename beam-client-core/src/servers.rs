@@ -120,21 +120,34 @@ impl ServerRecord {
     /// (`/v1/files/{id}/stream`), and Media3 needs an absolute URL. Doing this
     /// in one place stops each call site inventing its own concatenation.
     ///
+    /// The result is always on this server's origin. Every URL resolved here
+    /// is one the platform fetches with the session attached, so an absolute
+    /// URL to another origin -- from a hostile or misconfigured server -- is
+    /// refused rather than followed: following it would hand the viewer's
+    /// cookie to a third party.
+    ///
     /// # Errors
     ///
     /// Returns [`BeamError::InvalidServerUrl`] if the stored origin or the
-    /// path cannot be joined.
+    /// path cannot be joined, or if the result would leave this server's
+    /// origin.
     pub fn absolute_url(&self, relative: &str) -> Result<String, BeamError> {
         let base = Url::parse(&format!("{}/", self.base_url)).map_err(|error| {
             BeamError::InvalidServerUrl {
                 detail: format!("stored server URL is unusable: {error}"),
             }
         })?;
-        base.join(relative.trim_start_matches('/'))
-            .map(|url| url.to_string())
+        let resolved = base
+            .join(relative.trim_start_matches('/'))
             .map_err(|error| BeamError::InvalidServerUrl {
                 detail: format!("could not resolve {relative}: {error}"),
-            })
+            })?;
+        if resolved.origin() != base.origin() {
+            return Err(BeamError::InvalidServerUrl {
+                detail: format!("{relative} is not on this server's origin"),
+            });
+        }
+        Ok(resolved.to_string())
     }
 }
 
@@ -235,6 +248,40 @@ mod tests {
         assert_eq!(
             record.absolute_url("v1/files/abc/stream").expect("joins"),
             "https://beam.local:8000/v1/files/abc/stream"
+        );
+    }
+
+    #[test]
+    fn an_absolute_url_from_the_server_does_not_leave_its_origin() {
+        // Every resolved URL is fetched with the session attached, so one that
+        // leaves the origin would hand the viewer's cookie to whoever it names.
+        let record = ServerRecord::new(&url("https://beam.local:8000"), None, 0);
+        for elsewhere in [
+            "https://other.example/v1/files/abc/stream",
+            "http://beam.local:8000/v1/files/abc/stream",
+            "https://beam.local:9000/v1/files/abc/stream",
+            "https://beam.local/v1/files/abc/stream",
+            "file:///etc/passwd",
+        ] {
+            assert!(
+                matches!(
+                    record.absolute_url(elsewhere),
+                    Err(BeamError::InvalidServerUrl { .. })
+                ),
+                "{elsewhere} must be refused"
+            );
+        }
+        // An absolute URL on the server's own origin is still accepted, and a
+        // scheme-relative one is read as a path on the server.
+        assert_eq!(
+            record
+                .absolute_url("https://BEAM.local:8000/v1/files/abc/stream")
+                .expect("same origin"),
+            "https://beam.local:8000/v1/files/abc/stream"
+        );
+        assert_eq!(
+            record.absolute_url("//other.example/x").expect("a path"),
+            "https://beam.local:8000/other.example/x"
         );
     }
 

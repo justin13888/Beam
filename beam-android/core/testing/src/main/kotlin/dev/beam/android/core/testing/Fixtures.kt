@@ -269,6 +269,7 @@ public object Fixtures {
             headers = mapOf("Cookie" to "beam_session=test"),
             trustedFingerprints = emptyList(),
             pinnedHost = "beam.test",
+            baseUrl = "https://beam.test",
         )
 
     /** One part of a [plan]. */

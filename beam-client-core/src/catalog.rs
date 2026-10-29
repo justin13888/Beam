@@ -625,9 +625,11 @@ fn rating_percent(tmdb: Option<f64>) -> Option<u32> {
 
 /// Resolve an optional server-relative URL against the server that served it.
 ///
-/// A URL that cannot be resolved is dropped rather than failing the whole
-/// page: a missing poster is a cosmetic defect, and refusing to show the
-/// library because one artwork path is malformed is not an improvement.
+/// A URL that cannot be resolved -- malformed, or off the server's origin,
+/// which [`ServerRecord::absolute_url`] refuses -- is dropped rather than
+/// failing the whole page: a missing poster is a cosmetic defect, and refusing
+/// to show the library because one artwork path is unusable is not an
+/// improvement.
 fn absolute(record: &ServerRecord, url: Option<String>) -> Option<String> {
     url.and_then(|raw| record.absolute_url(&raw).ok())
 }

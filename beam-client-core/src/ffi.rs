@@ -144,6 +144,10 @@ pub struct PlaybackPlan {
     pub trusted_fingerprints: Vec<String>,
     /// The host those fingerprints apply to.
     pub pinned_host: String,
+    /// The server's normalised origin, which every part's URL is on. The
+    /// player attaches [`Self::headers`] only to requests for this origin, so
+    /// a redirect elsewhere loses the session at the hop that leaves.
+    pub base_url: String,
 }
 
 /// One file of a [`PlaybackPlan`].
@@ -1106,6 +1110,7 @@ impl BeamClient {
             trusted_fingerprints,
             pinned_host,
         } = self.playback_config(file_id.clone())?;
+        let base_url = self.server_http_config()?.base_url;
 
         let sources = match title_id {
             Some(title_id) => {
@@ -1134,6 +1139,7 @@ impl BeamClient {
             headers,
             trusted_fingerprints,
             pinned_host,
+            base_url,
         })
     }
 
@@ -4120,6 +4126,13 @@ mod tests {
             Some("beam_session=opaque-value")
         );
         assert_eq!(plan.pinned_host, "beam.test");
+        // The origin the player scopes the session to, and every part is on it.
+        assert_eq!(plan.base_url, "https://beam.test");
+        assert!(
+            plan.parts
+                .iter()
+                .all(|part| part.url.starts_with("https://beam.test/"))
+        );
     }
 
     /// A plan never lists a file's own streams as files to fetch: only a

@@ -1,15 +1,52 @@
 package dev.beam.android.core.media.http
 
 import android.annotation.SuppressLint
-import java.security.MessageDigest
+import uniffi.beam_client_core.pinnedCertificateAccepted
+import java.net.Socket
 import java.security.cert.CertificateException
 import java.security.cert.X509Certificate
 import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLEngine
+import javax.net.ssl.SSLSocket
 import javax.net.ssl.TrustManagerFactory
+import javax.net.ssl.X509ExtendedTrustManager
 import javax.net.ssl.X509TrustManager
 
 /**
- * Accepts the platform's chain, plus certificates the user explicitly trusted.
+ * Whether a certificate the platform refused may be accepted because the user
+ * pinned it.
+ *
+ * The rule is the core's (`pinned_certificate_accepted`, beside the verifier
+ * the core's own client uses): the whole-certificate SHA-256 is one the user
+ * accepted, the certificate covers the host, and the time is inside its
+ * validity window. Android decides by calling it rather than keeping a second
+ * copy, because a second copy has already drifted once -- it checked the
+ * fingerprint alone, and accepted an expired pinned certificate the core
+ * refused. A seam rather than a direct call so the trust manager can be tested
+ * on the JVM, where the core's native library is not loaded.
+ */
+internal fun interface PinnedCertificatePolicy {
+    fun accepts(
+        der: ByteArray,
+        host: String,
+        trustedFingerprints: List<String>,
+        nowUnix: Long,
+    ): Boolean
+}
+
+/** The core's rule, which is the only one production uses. */
+internal object CorePinnedCertificatePolicy : PinnedCertificatePolicy {
+    override fun accepts(
+        der: ByteArray,
+        host: String,
+        trustedFingerprints: List<String>,
+        nowUnix: Long,
+    ): Boolean = pinnedCertificateAccepted(der, host, trustedFingerprints, nowUnix)
+}
+
+/**
+ * Accepts the platform's chain, plus certificates the user explicitly trusted
+ * for [pinnedHost].
  *
  * This exists because OkHttp's `CertificatePinner` cannot do the job. Pinning
  * runs *after* the trust manager has already accepted a chain, so it can only
@@ -17,27 +54,58 @@ import javax.net.ssl.X509TrustManager
  * presents, which is the case Beam actually has to handle. Widening trust is a
  * trust manager's job, so that is what this is.
  *
- * The exception is deliberately narrow. A certificate is accepted only when its
- * whole-certificate SHA-256 matches one the user was shown and agreed to. There
- * is no "accept all", no host wildcard, and no relaxation of the public path:
- * the platform trust manager is always consulted first and its verdict is
- * final when it accepts.
+ * The exception is deliberately narrow. The platform trust manager is always
+ * consulted first and its verdict is final when it accepts. Only when it
+ * refuses, and only on a connection to [pinnedHost] -- the server the pins were
+ * recorded for, never a host a redirect leads to -- is [policy] asked, and it
+ * decides by the core's rule. There is no "accept all" and no host wildcard.
  *
- * The digest matches [dev.beam.android.core.ffi] and the Rust core's
- * `tls.rs` -- whole DER certificate, not SubjectPublicKeyInfo -- so the app and
- * the core agree about which certificate the user approved, and it is the same
- * value `openssl x509 -fingerprint -sha256` prints.
+ * Extended rather than plain [X509TrustManager] because only the extended
+ * overloads say which host the connection is to; both Conscrypt and the JDK
+ * call them when the trust manager offers them.
  */
 @SuppressLint("CustomX509TrustManager")
 internal class TofuTrustManager(
     private val platform: X509TrustManager,
-    trustedFingerprints: Collection<String>,
-) : X509TrustManager {
-    private val trusted: Set<String> = trustedFingerprints.map(::normalizeFingerprint).toSet()
+    private val trustedFingerprints: List<String>,
+    pinnedHost: String,
+    private val policy: PinnedCertificatePolicy = CorePinnedCertificatePolicy,
+    private val nowUnix: () -> Long = { System.currentTimeMillis() / MILLIS_PER_SECOND },
+) : X509ExtendedTrustManager() {
+    private val pinnedHost: String = canonicalHost(pinnedHost)
 
     override fun checkServerTrusted(
         chain: Array<out X509Certificate>?,
         authType: String?,
+        socket: Socket?,
+    ) {
+        check(chain, authType, (socket as? SSLSocket)?.handshakeSession?.peerHost)
+    }
+
+    override fun checkServerTrusted(
+        chain: Array<out X509Certificate>?,
+        authType: String?,
+        engine: SSLEngine?,
+    ) {
+        check(chain, authType, engine?.handshakeSession?.peerHost ?: engine?.peerHost)
+    }
+
+    /**
+     * Without a connection to read the host from, the pin is held to the host
+     * it was recorded for. Only a caller outside any TLS stack reaches this:
+     * both stacks Beam runs on call the overloads above.
+     */
+    override fun checkServerTrusted(
+        chain: Array<out X509Certificate>?,
+        authType: String?,
+    ) {
+        check(chain, authType, pinnedHost)
+    }
+
+    private fun check(
+        chain: Array<out X509Certificate>?,
+        authType: String?,
+        peerHost: String?,
     ) {
         val certificates =
             chain?.takeIf { it.isNotEmpty() }
@@ -49,19 +117,34 @@ internal class TofuTrustManager(
                 ?: throw CertificateException("no certificate presented")
         try {
             platform.checkServerTrusted(certificates, authType)
-            return
         } catch (publicFailure: CertificateException) {
-            val leaf = certificates.firstOrNull() ?: throw publicFailure
-            if (fingerprintOf(leaf) !in trusted) {
-                // Rethrowing the platform's own failure keeps the diagnostic
-                // the platform produced, which is more informative than
-                // anything this class could invent.
-                throw publicFailure
-            }
+            // Rethrowing the platform's own failure keeps the diagnostic the
+            // platform produced, which is more informative than anything this
+            // class could invent.
+            val host = peerHost?.let(::canonicalHost)
+            if (host == null || pinnedHost.isEmpty() || host != pinnedHost) throw publicFailure
+            val leaf = certificates.first()
+            if (!policy.accepts(leaf.encoded, host, trustedFingerprints, nowUnix())) throw publicFailure
             // Hostname is still verified, by OkHttp's verifier over the SANs of
             // this same certificate. A pin is permission to trust one
             // certificate for one server, never a blanket exemption.
         }
+    }
+
+    override fun checkClientTrusted(
+        chain: Array<out X509Certificate>?,
+        authType: String?,
+        socket: Socket?,
+    ) {
+        platform.checkClientTrusted(chain, authType)
+    }
+
+    override fun checkClientTrusted(
+        chain: Array<out X509Certificate>?,
+        authType: String?,
+        engine: SSLEngine?,
+    ) {
+        platform.checkClientTrusted(chain, authType)
     }
 
     override fun checkClientTrusted(
@@ -74,6 +157,21 @@ internal class TofuTrustManager(
     override fun getAcceptedIssuers(): Array<X509Certificate> = platform.acceptedIssuers
 
     internal companion object {
+        private const val MILLIS_PER_SECOND = 1_000L
+
+        /**
+         * A host as both sides spell it: lower-cased, without a trailing root
+         * dot, and an IPv6 literal without the brackets a URL wraps it in --
+         * the core reports `[::1]`, the TLS stack `::1`.
+         */
+        fun canonicalHost(host: String): String =
+            host
+                .trim()
+                .removePrefix("[")
+                .removeSuffix("]")
+                .trimEnd('.')
+                .lowercase()
+
         /** The platform's own trust manager, over the system CA store. */
         fun platformTrustManager(): X509TrustManager {
             val factory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
@@ -92,26 +190,3 @@ internal class TofuTrustManager(
         }
     }
 }
-
-/**
- * Compare digests without being defeated by formatting.
- *
- * The same digest arrives as `AB:CD:EF`, `ab:cd:ef` or `abcdef` depending on
- * whether it came from the core, from storage, or from a paste. Comparing raw
- * strings would silently reject a certificate the user had already trusted --
- * and the symptom would be an unexplained connection failure, not an obvious
- * bug.
- */
-internal fun normalizeFingerprint(value: String): String =
-    value
-        .filter {
-            it.isDigit() || it in 'a'..'f' ||
-                it in 'A'..'F'
-        }.lowercase()
-
-/** Whole-certificate SHA-256, lowercase hex with no separators. */
-internal fun fingerprintOf(certificate: X509Certificate): String =
-    MessageDigest
-        .getInstance("SHA-256")
-        .digest(certificate.encoded)
-        .joinToString(separator = "") { byte -> "%02x".format(byte) }
