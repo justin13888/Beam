@@ -58,7 +58,8 @@ strength. Each requirement is independently testable. See `product.md` for narra
 - **FR-202**: The server MUST access configured media library root paths in a strictly read-only
   fashion. The indexer MUST NOT write, rename, move, or delete files under a library root.
 - **FR-203**: The server MUST maintain a separate, writable data directory (`BEAM_DATA_DIR`)
-  distinct from any library root, used for its own state (e.g., the enrichment metadata cache).
+  distinct from any library root, used for its own state (e.g., the artwork cache and trickplay
+  sheets).
 - **FR-204**: The server MUST classify indexed filesystem entries into movies and TV
   shows/seasons/episodes, persisting them as `movie_entries` and `episode`-family rows respectively.
   Classification MUST read the file's path relative to its library root, folders included:
@@ -400,7 +401,8 @@ strength. Each requirement is independently testable. See `product.md` for narra
 
 - **FR-301**: The server MUST enrich indexed movies and shows with metadata (poster URL, backdrop
   URL, description, ratings, genres, release date) via the `cameo` crate, which unifies TMDB and
-  AniList sources ([ADR-0006](../architecture/decisions/ADR-0006-cameo-enrichment.md)).
+  AniList sources, and via Beam's own TheTVDB adapter, asked after cameo's providers
+  ([ADR-0006](../architecture/decisions/ADR-0006-cameo-enrichment.md)).
 - **FR-302**: Metadata enrichment MUST run as a background pipeline that begins after a title has been
   indexed and classified, and MUST NOT block the indexing/classification scan itself.
 - **FR-303**: The server MUST persist enrichment status per title (e.g., pending, enriched, failed)
@@ -420,8 +422,6 @@ strength. Each requirement is independently testable. See `product.md` for narra
 - **FR-308**: The server MUST expose an admin-triggerable "re-enrich" action, scoped to a single title,
   to one library's titles, or to all titles, that re-runs enrichment regardless of current status,
   keeping each title's match unless the administrator asks for a rematch.
-  Operator-facing enrichment tuning knobs (batch size, minimum confidence, metadata language) are
-  deferred — tracked in [#71](https://github.com/justin13888/beam/issues/71).
 - **FR-309**: The server MUST emit enrichment progress/status-change events over SSE, in the same
   manner as scan progress (FR-208): one per title an enrichment pass attempts, naming the title and
   carrying its new status, match and error; like progress events, they MUST NOT displace other
@@ -436,11 +436,12 @@ strength. Each requirement is independently testable. See `product.md` for narra
 - **FR-311**: An artwork URL MUST remain stable when enrichment refreshes a title's art, so that a
   client which stored one — a download record, rendered offline — still resolves. Freshness is
   carried by the `ETag` instead, which is derived from the provider URL and therefore changes
-  exactly when the artwork does.
+  exactly when the artwork does. A resized rendition (the `size` query parameter) is cached beside
+  the original and carries its own `ETag`.
 - **FR-312**: A title an NFO pins (FR-219) MUST be enriched in this order: a match an administrator
-  set first; else, when a configured provider resolves the pin's id (TMDB or AniList), a fetch by
-  that id at full confidence, with no search; else a search as usual, whose match MUST be left
-  unmatched, with the reason recorded, when it carries a different id of the pinned provider.
+  set first; else, when a configured provider resolves the pin's id (TMDB, AniList or TheTVDB), a
+  fetch by that id at full confidence, with no search; else a search as usual, whose match MUST be
+  left unmatched, with the reason recorded, when it carries a different id of the pinned provider.
   Pinning a title, or re-pinning it, MUST queue it for enrichment with its stored match cleared; a
   rematch MUST clear the match and keep the pin. A pin MUST record who set it, an NFO or an
   administrator: an administrator's manual match

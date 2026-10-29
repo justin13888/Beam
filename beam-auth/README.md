@@ -17,8 +17,8 @@ convention.
 Feature flags:
 
 - **`utils`** -- Core domain types and trait abstractions: `UserRepository`, `SessionStore`,
-  `PendingAuthStore`, `OidcClient`, plus their sea-orm-backed (`Sql*`) and `InMemory*` fake
-  implementations.
+  `PendingAuthStore`, `DeviceAuthStore`, `OidcClient`, plus their sea-orm-backed (`Sql*`) and
+  `InMemory*` fake implementations.
 - **`oidc`** (the default) -- real discovery and token exchange via `openidconnect` + `reqwest`.
 - **`test-utils`** -- `FakeOidcClient` and the in-memory doubles, with no HTTP client.
 
@@ -35,11 +35,13 @@ See [ADR-0003](../docs/architecture/decisions/ADR-0003-oidc-bff-auth.md) for the
 |---|---|---|
 | `GET` | `/v1/auth/login` | Begins the Authorization Code + PKCE flow: redirects to the IdP. Accepts a `redirect` query param (sanitized to a same-origin-relative path) for where to send the browser after a successful login. |
 | `GET` | `/v1/auth/callback` | IdP redirects back here with `code`/`state`. Verifies state/nonce/PKCE, exchanges the code, JIT-provisions the user, mints a session, and redirects into the web app. |
-| `GET` | `/me` | Returns the current session's user (id, email, display name, avatar, admin status). |
-| `POST` | `/logout` | Revokes the current session. |
-| `POST` | `/logout-all` | Revokes every session for the current user. |
-| `GET` | `/sessions` | Lists the current user's active sessions (id, device hash, IP, timestamps -- never the raw session token). |
-| `DELETE` | `/sessions/{id}` | Revokes one specific session by id. |
+| `POST` | `/v1/auth/device` | Begins a device-authorization-grant sign-in (RFC 8628) for a client with no browser: returns a user code, a verification URI and an opaque device handle. `501` when the IdP has no device endpoint. |
+| `POST` | `/v1/auth/device/token` | Polls a device sign-in by its handle; on approval mints the same session the browser callback does and returns it in the body. |
+| `GET` | `/v1/me` | Returns the current session's user (id, email, display name, avatar, admin status). |
+| `POST` | `/v1/logout` | Revokes the current session. |
+| `POST` | `/v1/logout-all` | Revokes every session for the current user. |
+| `GET` | `/v1/sessions` | Lists the current user's active sessions (id, device hash, IP, timestamps -- never the raw session token). |
+| `DELETE` | `/v1/sessions/{id}` | Revokes one specific session by id. |
 
 ### Session strategy
 
@@ -60,8 +62,8 @@ See [ADR-0003](../docs/architecture/decisions/ADR-0003-oidc-bff-auth.md) for the
 
 ## Testing
 
-Zero-dependency: `InMemoryUserRepository`, `InMemorySessionStore`, `InMemoryPendingAuthStore`, and
-`FakeOidcClient` (a programmable fake IdP that verifies the state/nonce/PKCE round-trip the same
+Zero-dependency: `InMemoryUserRepository`, `InMemorySessionStore`, `InMemoryPendingAuthStore`,
+`InMemoryDeviceAuthStore`, and `FakeOidcClient` (a programmable fake IdP that verifies the state/nonce/PKCE round-trip the same
 way a real one would, including rejecting a mismatched verifier/nonce) let the full login/
 callback/me/logout/sessions flow be exercised with no real IdP, network, or database. The
 HTTP-level round-trip runs in `beam-server` through `kynos::test::TestClient`, over these same

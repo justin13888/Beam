@@ -6,7 +6,10 @@ order and are additive by file name (`m<timestamp>_<description>.rs`); see
 [`docs/architecture/data-model.md`](../docs/architecture/data-model.md) for the current schema
 and its invariants.
 
-Requires `DATABASE_URL` to be set (see [`docs/operations/configuration.md`](../docs/operations/configuration.md)).
+Requires `DATABASE_URL` to be set. This CLI reads `sea-orm-migration`'s own `DATABASE_URL`, not
+the `BEAM_DATABASE_URL` that `beam-server` reads
+([`docs/operations/configuration.md`](../docs/operations/configuration.md)); point both at the same
+database.
 
 ```sh
 # Apply all pending migrations
