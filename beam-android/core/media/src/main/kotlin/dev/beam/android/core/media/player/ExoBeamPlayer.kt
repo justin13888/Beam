@@ -39,6 +39,7 @@ import uniffi.beam_client_core.BeamException
 import uniffi.beam_client_core.PlaybackPart
 import uniffi.beam_client_core.PlaybackPlan
 import uniffi.beam_client_core.RebufferMonitor
+import uniffi.beam_client_core.RebufferMonitorInterface
 import uniffi.beam_client_core.ServerHttpConfig
 import uniffi.beam_client_core.SwitchTrigger
 import uniffi.beam_client_core.TelemetryClientKind
@@ -57,6 +58,15 @@ internal class ExoBeamPlayer(
     telemetry: TelemetryRepository,
     private val clients: BeamHttpClientFactory,
     private val scope: CoroutineScope,
+    /**
+     * Whether rebuffering on this file is sustained. The rule is the core's;
+     * this side only reports the stalls, timed on the player's own monotonic
+     * clock, so a test player built with a fake clock drives it too.
+     *
+     * A parameter only so a JVM test can build the player without loading
+     * the native core; production always takes the core's own monitor.
+     */
+    private val rebuffers: RebufferMonitorInterface = RebufferMonitor(),
 ) : BeamPlayer,
     Player.Listener {
     private val mutableState = MutableStateFlow(PlaybackUiState())
@@ -76,13 +86,6 @@ internal class ExoBeamPlayer(
 
     /** Where the loaded source's parts sit end to end, for a switch to hold position. */
     private var timeline: PartTimeline? = null
-
-    /**
-     * Whether rebuffering on this file is sustained. The rule is the core's;
-     * this side only reports the stalls, timed on the player's own monotonic
-     * clock, so a test player built with a fake clock drives it too.
-     */
-    private val rebuffers = RebufferMonitor()
 
     /**
      * True from a prepare or a seek until playback is next ready. Buffering
@@ -227,7 +230,9 @@ internal class ExoBeamPlayer(
         positionTicker = null
         exoPlayer.removeListener(this)
         exoPlayer.release()
-        rebuffers.close()
+        // The core's monitor holds a native handle; the interface does not
+        // declare `close`, which UniFFI puts on the object itself.
+        (rebuffers as? RebufferMonitor)?.close()
     }
 
     /**
