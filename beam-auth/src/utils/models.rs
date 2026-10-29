@@ -48,3 +48,25 @@ impl From<beam_entity::user::Model> for User {
         }
     }
 }
+
+/// Builders for tests, beside the type they build.
+#[mutants::skip]
+#[cfg(any(test, feature = "test-utils"))]
+pub mod test_utils {
+    use super::CreateUser;
+
+    /// A first-login provisioning request for `subject` at `issuer`: an
+    /// ordinary, non-admin user with a name and nothing else. Override a
+    /// field with struct-update syntax where a test needs another.
+    #[must_use]
+    pub fn create_user(issuer: &str, subject: &str) -> CreateUser {
+        CreateUser {
+            oidc_issuer: issuer.to_owned(),
+            oidc_subject: subject.to_owned(),
+            email: None,
+            display_name: "Ada".to_owned(),
+            avatar_url: None,
+            is_admin: false,
+        }
+    }
+}

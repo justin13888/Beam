@@ -252,6 +252,21 @@ pub mod in_memory {
         }
 
         async fn create(&self, user: CreateUser) -> Result<User, DbErr> {
+            let mut users = self.users.lock().unwrap();
+            // `(oidc_issuer, oidc_subject)` carries a unique index in SQL
+            // (`idx_users_oidc_identity`), so provisioning an identity that
+            // already has a user fails the insert there. Accepting it here
+            // let two rows resolve to one login.
+            if users
+                .values()
+                .any(|u| u.oidc_issuer == user.oidc_issuer && u.oidc_subject == user.oidc_subject)
+            {
+                return Err(DbErr::Custom(format!(
+                    "duplicate key value violates unique constraint \"idx_users_oidc_identity\": \
+                     ({}, {}) already has a user",
+                    user.oidc_issuer, user.oidc_subject
+                )));
+            }
             let now = self.clock.now();
             let new_user = User {
                 id: Uuid::new_v4(),
@@ -266,10 +281,7 @@ pub mod in_memory {
                 created_at: now,
                 updated_at: now,
             };
-            self.users
-                .lock()
-                .unwrap()
-                .insert(new_user.id, new_user.clone());
+            users.insert(new_user.id, new_user.clone());
             Ok(new_user)
         }
 
@@ -319,6 +331,102 @@ pub mod in_memory {
                 user.avatar_url = avatar_url;
             }
             Ok(())
+        }
+    }
+
+    /// One [`UserRepository`] method, for [`FailingUserRepository`] to fail.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum UserRepositoryOperation {
+        FindById,
+        FindByOidcIdentity,
+        Create,
+        SetAdmin,
+        ListPage,
+        Count,
+        SetDisabled,
+        UpdateOidcProfile,
+    }
+
+    /// An [`InMemoryUserRepository`] whose one chosen method fails as an
+    /// unreachable database would, so a caller's storage-failure path can be
+    /// driven without one. Every other method behaves as the repository it
+    /// wraps.
+    #[derive(Debug)]
+    pub struct FailingUserRepository {
+        inner: InMemoryUserRepository,
+        failing: UserRepositoryOperation,
+    }
+
+    impl FailingUserRepository {
+        pub fn new(inner: InMemoryUserRepository, failing: UserRepositoryOperation) -> Self {
+            Self { inner, failing }
+        }
+
+        /// The wrapped repository, for seeding and for asserting what was
+        /// written.
+        pub fn inner(&self) -> &InMemoryUserRepository {
+            &self.inner
+        }
+
+        fn check(&self, operation: UserRepositoryOperation) -> Result<(), DbErr> {
+            if operation == self.failing {
+                return Err(DbErr::Custom(format!("injected failure in {operation:?}")));
+            }
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl UserRepository for FailingUserRepository {
+        async fn find_by_id(&self, id: Uuid) -> Result<Option<User>, DbErr> {
+            self.check(UserRepositoryOperation::FindById)?;
+            self.inner.find_by_id(id).await
+        }
+
+        async fn find_by_oidc_identity(
+            &self,
+            issuer: &str,
+            subject: &str,
+        ) -> Result<Option<User>, DbErr> {
+            self.check(UserRepositoryOperation::FindByOidcIdentity)?;
+            self.inner.find_by_oidc_identity(issuer, subject).await
+        }
+
+        async fn create(&self, user: CreateUser) -> Result<User, DbErr> {
+            self.check(UserRepositoryOperation::Create)?;
+            self.inner.create(user).await
+        }
+
+        async fn set_admin(&self, id: Uuid, is_admin: bool) -> Result<(), DbErr> {
+            self.check(UserRepositoryOperation::SetAdmin)?;
+            self.inner.set_admin(id, is_admin).await
+        }
+
+        async fn list_page(&self, limit: u64, offset: u64) -> Result<Vec<User>, DbErr> {
+            self.check(UserRepositoryOperation::ListPage)?;
+            self.inner.list_page(limit, offset).await
+        }
+
+        async fn count(&self) -> Result<u64, DbErr> {
+            self.check(UserRepositoryOperation::Count)?;
+            self.inner.count().await
+        }
+
+        async fn set_disabled(&self, id: Uuid, disabled: bool) -> Result<(), DbErr> {
+            self.check(UserRepositoryOperation::SetDisabled)?;
+            self.inner.set_disabled(id, disabled).await
+        }
+
+        async fn update_oidc_profile(
+            &self,
+            id: Uuid,
+            display_name: String,
+            avatar_url: Option<String>,
+        ) -> Result<(), DbErr> {
+            self.check(UserRepositoryOperation::UpdateOidcProfile)?;
+            self.inner
+                .update_oidc_profile(id, display_name, avatar_url)
+                .await
         }
     }
 }

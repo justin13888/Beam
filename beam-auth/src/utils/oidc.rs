@@ -1132,17 +1132,21 @@ mod discovered {
     mod wire_tests {
         use super::DiscoveredOidcClient;
         use super::http_client_tests::read_request;
-        use crate::utils::oidc::{ClientAuthMethod, DevicePoll, OidcClient, OidcError};
+        use crate::utils::oidc::{
+            ClientAuthMethod, DeviceAuthStart, DevicePoll, OidcClient, OidcError,
+        };
         use base64::Engine as _;
         use openidconnect::core::{
-            CoreIdToken, CoreIdTokenClaims, CoreJwsSigningAlgorithm, CoreRsaPrivateSigningKey,
+            CoreGenderClaim, CoreJweContentEncryptionAlgorithm, CoreJwsSigningAlgorithm,
+            CoreRsaPrivateSigningKey,
         };
         use openidconnect::{
-            Audience, EmptyAdditionalClaims, IssuerUrl, JsonWebKeyId, Nonce, PrivateSigningKey,
-            StandardClaims, SubjectIdentifier,
+            AdditionalClaims, Audience, EndUserEmail, EndUserName, EndUserPictureUrl, IdToken,
+            IdTokenClaims, IssuerUrl, JsonWebKeyId, Nonce, PrivateSigningKey, StandardClaims,
+            SubjectIdentifier,
         };
         use serde_json::json;
-        use std::collections::VecDeque;
+        use std::collections::{HashMap, VecDeque};
         use std::sync::{Arc, Mutex};
         use tokio::io::AsyncWriteExt;
         use tokio::net::TcpListener;
@@ -1177,12 +1181,21 @@ mod discovered {
         /// One request the fake IdP received.
         #[derive(Clone, Debug)]
         struct Received {
+            /// The request path, without its query string.
             path: String,
+            query: Vec<(String, String)>,
             authorization: Option<String>,
             form: Vec<(String, String)>,
         }
 
         impl Received {
+            fn query_value(&self, name: &str) -> Option<&str> {
+                self.query
+                    .iter()
+                    .find(|(key, _)| key == name)
+                    .map(|(_, value)| value.as_str())
+            }
+
             fn form_value(&self, name: &str) -> Option<&str> {
                 self.form
                     .iter()
@@ -1219,25 +1232,69 @@ mod discovered {
             }
         }
 
+        /// How a [`FakeIdp`] is set up, beyond the method it is registered
+        /// for.
+        #[derive(Clone, Debug)]
+        struct IdpSetup {
+            registered: ClientAuthMethod,
+            /// Whether discovery names a device authorization endpoint.
+            device_endpoint: bool,
+            /// The `issuer` discovery claims, when not the URL it is served
+            /// from.
+            claimed_issuer: Option<String>,
+        }
+
+        impl IdpSetup {
+            fn registered_for(registered: ClientAuthMethod) -> Self {
+                Self {
+                    registered,
+                    device_endpoint: true,
+                    claimed_issuer: None,
+                }
+            }
+        }
+
+        /// What the IdP's listener task shares with the test.
+        struct IdpState {
+            setup: IdpSetup,
+            issuer: String,
+            jwks: serde_json::Value,
+            received: Mutex<Vec<Received>>,
+            /// Bodies the token endpoint answers with, front first, once the
+            /// request authenticated (and, for a code, its verifier matched).
+            /// Empty: `authorization_pending`.
+            tokens: Mutex<VecDeque<String>>,
+            /// Every code the authorization endpoint issued and not yet
+            /// redeemed, with the PKCE challenge it was issued against.
+            challenges: Mutex<HashMap<String, String>>,
+            codes_issued: Mutex<u64>,
+        }
+
         struct FakeIdp {
             issuer: String,
-            received: Arc<Mutex<Vec<Received>>>,
-            /// Bodies the token endpoint answers with, front first, once the
-            /// request authenticated. Empty: `authorization_pending`.
-            tokens: Arc<Mutex<VecDeque<String>>>,
+            state: Arc<IdpState>,
         }
 
         impl FakeIdp {
             /// An IdP whose registration for Beam names `registered`.
             async fn start(registered: ClientAuthMethod) -> Self {
+                Self::start_with(IdpSetup::registered_for(registered)).await
+            }
+
+            async fn start_with(setup: IdpSetup) -> Self {
                 let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
                 let issuer = format!("http://{}", listener.local_addr().unwrap());
-                let received = Arc::new(Mutex::new(Vec::new()));
-                let tokens = Arc::new(Mutex::new(VecDeque::new()));
-                let jwks = json!({ "keys": [signing_key().as_verification_key()] });
+                let state = Arc::new(IdpState {
+                    setup,
+                    issuer: issuer.clone(),
+                    jwks: json!({ "keys": [signing_key().as_verification_key()] }),
+                    received: Mutex::new(Vec::new()),
+                    tokens: Mutex::new(VecDeque::new()),
+                    challenges: Mutex::new(HashMap::new()),
+                    codes_issued: Mutex::new(0),
+                });
 
-                let (server_issuer, server_received, server_tokens) =
-                    (issuer.clone(), received.clone(), tokens.clone());
+                let server_state = state.clone();
                 tokio::spawn(async move {
                     loop {
                         let Ok((mut stream, _)) = listener.accept().await else {
@@ -1245,12 +1302,11 @@ mod discovered {
                         };
                         let raw = read_request(&mut stream).await;
                         let request = parse(&raw);
-                        let (status, body) =
-                            answer(registered, &server_issuer, &jwks, &request, &server_tokens);
-                        if request.path != "/.well-known/openid-configuration"
-                            && request.path != "/keys"
+                        let (status, body) = answer(&server_state, &request);
+                        if !["/.well-known/openid-configuration", "/keys", "/auth"]
+                            .contains(&request.path.as_str())
                         {
-                            server_received.lock().unwrap().push(request);
+                            server_state.received.lock().unwrap().push(request);
                         }
                         let response = format!(
                             "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n\
@@ -1261,11 +1317,29 @@ mod discovered {
                     }
                 });
 
-                Self {
-                    issuer,
-                    received,
-                    tokens,
-                }
+                Self { issuer, state }
+            }
+
+            /// What the browser does with `begin_auth`'s URL: visits the
+            /// authorization endpoint, which records the PKCE challenge and
+            /// hands back a code. The user approving is implied.
+            async fn authorize(&self, auth_url: &str) -> String {
+                let response = reqwest::Client::builder()
+                    .no_proxy()
+                    .build()
+                    .unwrap()
+                    .get(auth_url)
+                    .send()
+                    .await
+                    .unwrap();
+                let status = response.status();
+                let body = response.text().await.unwrap();
+                assert!(
+                    status.is_success(),
+                    "the authorization endpoint refused {auth_url}: {status} {body}"
+                );
+                let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+                body["code"].as_str().unwrap().to_owned()
             }
 
             /// Beam's client, configured with `method`.
@@ -1285,27 +1359,51 @@ mod discovered {
             /// Every request it received other than discovery and the JWKS,
             /// in order.
             fn received(&self) -> Vec<Received> {
-                self.received.lock().unwrap().clone()
+                self.state.received.lock().unwrap().clone()
             }
 
             fn will_issue(&self, body: String) {
-                self.tokens.lock().unwrap().push_back(body);
+                self.state.tokens.lock().unwrap().push_back(body);
             }
 
             /// A token response carrying an ID token with these claims,
             /// signed with the key the JWKS serves.
             fn id_token(&self, issuer: &str, audience: &str, nonce: Option<&str>) -> String {
+                self.id_token_with(
+                    issuer,
+                    audience,
+                    nonce,
+                    StandardClaims::new(SubjectIdentifier::new("tv-user".to_owned())),
+                    GroupsClaim::default(),
+                )
+            }
+
+            /// [`Self::id_token`] with every standard claim and the
+            /// non-standard `groups` under the test's control.
+            fn id_token_with(
+                &self,
+                issuer: &str,
+                audience: &str,
+                nonce: Option<&str>,
+                standard: StandardClaims<CoreGenderClaim>,
+                extra: GroupsClaim,
+            ) -> String {
                 let now = chrono::Utc::now();
-                let claims = CoreIdTokenClaims::new(
+                let claims = IdTokenClaims::new(
                     IssuerUrl::new(issuer.to_owned()).unwrap(),
                     vec![Audience::new(audience.to_owned())],
                     now + chrono::Duration::minutes(5),
                     now,
-                    StandardClaims::new(SubjectIdentifier::new("tv-user".to_owned())),
-                    EmptyAdditionalClaims {},
+                    standard,
+                    extra,
                 )
                 .set_nonce(nonce.map(|nonce| Nonce::new(nonce.to_owned())));
-                let token = CoreIdToken::new(
+                let token = IdToken::<
+                    GroupsClaim,
+                    CoreGenderClaim,
+                    CoreJweContentEncryptionAlgorithm,
+                    CoreJwsSigningAlgorithm,
+                >::new(
                     claims,
                     &signing_key(),
                     CoreJwsSigningAlgorithm::RsaSsaPkcs1V15Sha256,
@@ -1322,80 +1420,160 @@ mod discovered {
             }
         }
 
+        /// A successful token response that carries no ID token: what an
+        /// OAuth-only authorization server answers.
+        fn token_without_id_token() -> String {
+            json!({ "access_token": "access", "token_type": "Bearer" }).to_string()
+        }
+
+        /// The one non-standard claim these tests need: the `groups` a
+        /// deployment binds admin to, which the typed claim set drops.
+        #[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
+        struct GroupsClaim {
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            groups: Option<Vec<String>>,
+        }
+
+        impl AdditionalClaims for GroupsClaim {}
+
         fn parse(raw: &str) -> Received {
             let (head, body) = raw.split_once("\r\n\r\n").unwrap_or((raw, ""));
             let mut lines = head.lines();
-            let path = lines
+            let target = lines
                 .next()
                 .and_then(|line| line.split_whitespace().nth(1))
-                .unwrap_or_default()
-                .to_owned();
+                .unwrap_or_default();
+            let (path, query) = target.split_once('?').unwrap_or((target, ""));
             let authorization = lines.find_map(|line| {
                 let (name, value) = line.split_once(':')?;
                 name.eq_ignore_ascii_case("authorization")
                     .then(|| value.trim().to_owned())
             });
-            let form = openidconnect::url::form_urlencoded::parse(body.as_bytes())
-                .into_owned()
-                .collect();
+            let decode = |raw: &str| -> Vec<(String, String)> {
+                openidconnect::url::form_urlencoded::parse(raw.as_bytes())
+                    .into_owned()
+                    .collect()
+            };
             Received {
-                path,
+                path: path.to_owned(),
+                query: decode(query),
                 authorization,
-                form,
+                form: decode(body),
             }
         }
 
-        fn answer(
-            registered: ClientAuthMethod,
-            issuer: &str,
-            jwks: &serde_json::Value,
-            request: &Received,
-            tokens: &Mutex<VecDeque<String>>,
-        ) -> (&'static str, String) {
+        /// RFC 7636 section 4.2's `S256` transform: what a challenge must be
+        /// for the verifier later presented with the code.
+        fn s256(verifier: &str) -> String {
+            use sha2::Digest as _;
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(sha2::Sha256::digest(verifier.as_bytes()))
+        }
+
+        fn oauth_error(status: &'static str, code: &str) -> (&'static str, String) {
+            (status, json!({ "error": code }).to_string())
+        }
+
+        fn answer(idp: &IdpState, request: &Received) -> (&'static str, String) {
+            let issuer = idp.issuer.as_str();
+            let registered = idp.setup.registered;
             match request.path.as_str() {
-                "/.well-known/openid-configuration" => (
-                    "200 OK",
-                    json!({
-                        "issuer": issuer,
+                "/.well-known/openid-configuration" => {
+                    let mut document = json!({
+                        "issuer": idp.setup.claimed_issuer.as_deref().unwrap_or(issuer),
                         "authorization_endpoint": format!("{issuer}/auth"),
                         "token_endpoint": format!("{issuer}/token"),
                         "jwks_uri": format!("{issuer}/keys"),
-                        "device_authorization_endpoint": format!("{issuer}/device/code"),
                         "response_types_supported": ["code"],
                         "subject_types_supported": ["public"],
                         "id_token_signing_alg_values_supported": ["RS256"],
+                        "code_challenge_methods_supported": ["S256"],
                         // Capability, not this client's registration: both
                         // are listed whichever one `registered` names.
                         "token_endpoint_auth_methods_supported":
                             ["client_secret_basic", "client_secret_post"],
-                    })
-                    .to_string(),
-                ),
-                "/keys" => ("200 OK", jwks.to_string()),
-                "/device/code" | "/token" if !request.authenticated_with(registered) => (
-                    "401 Unauthorized",
-                    json!({ "error": "invalid_client" }).to_string(),
-                ),
+                    });
+                    if idp.setup.device_endpoint {
+                        document["device_authorization_endpoint"] =
+                            json!(format!("{issuer}/device/code"));
+                    }
+                    ("200 OK", document.to_string())
+                }
+                "/keys" => ("200 OK", idp.jwks.to_string()),
+                // The authorization endpoint, as the browser reaches it. Like
+                // any IdP that enforces PKCE for a confidential client, it
+                // refuses a request without an S256 challenge.
+                "/auth" => {
+                    let challenge = request.query_value("code_challenge").unwrap_or_default();
+                    if request.query_value("client_id") != Some(CLIENT_ID)
+                        || request.query_value("response_type") != Some("code")
+                        || request.query_value("code_challenge_method") != Some("S256")
+                        || challenge.is_empty()
+                    {
+                        return oauth_error("400 Bad Request", "invalid_request");
+                    }
+                    let mut issued = idp.codes_issued.lock().unwrap();
+                    *issued += 1;
+                    let code = format!("code-{issued}");
+                    idp.challenges
+                        .lock()
+                        .unwrap()
+                        .insert(code.clone(), challenge.to_owned());
+                    (
+                        "200 OK",
+                        json!({ "code": code, "state": request.query_value("state") }).to_string(),
+                    )
+                }
+                "/device/code" | "/token" if !request.authenticated_with(registered) => {
+                    oauth_error("401 Unauthorized", "invalid_client")
+                }
                 "/device/code" => (
                     "200 OK",
                     json!({
                         "device_code": "the-device-code",
                         "user_code": "BCDF-GHJK",
                         "verification_uri": format!("{issuer}/device"),
+                        "verification_uri_complete":
+                            format!("{issuer}/device?user_code=BCDF-GHJK"),
                         "expires_in": 600,
-                        "interval": 5,
+                        "interval": 7,
                     })
                     .to_string(),
                 ),
-                "/token" => match tokens.lock().unwrap().pop_front() {
+                // RFC 7636 section 4.6: a code is redeemed only by the
+                // verifier whose S256 transform is the challenge it was issued
+                // against -- and only once.
+                "/token" if request.form_value("grant_type") == Some("authorization_code") => {
+                    let code = request.form_value("code").unwrap_or_default();
+                    let challenge = idp.challenges.lock().unwrap().remove(code);
+                    let verifier = request.form_value("code_verifier").unwrap_or_default();
+                    match challenge {
+                        Some(challenge) if s256(verifier) == challenge => {
+                            match idp.tokens.lock().unwrap().pop_front() {
+                                Some(body) => ("200 OK", body),
+                                None => oauth_error("500 Internal Server Error", "server_error"),
+                            }
+                        }
+                        _ => oauth_error("400 Bad Request", "invalid_grant"),
+                    }
+                }
+                "/token" => match idp.tokens.lock().unwrap().pop_front() {
                     Some(body) => ("200 OK", body),
-                    None => (
-                        "400 Bad Request",
-                        json!({ "error": "authorization_pending" }).to_string(),
-                    ),
+                    None => oauth_error("400 Bad Request", "authorization_pending"),
                 },
                 _ => ("404 Not Found", "{}".to_owned()),
             }
+        }
+
+        /// The browser's half of a login with `client` at `idp`: begun, then
+        /// authorized, and the code handed back for the exchange.
+        async fn authorized(
+            idp: &FakeIdp,
+            client: &DiscoveredOidcClient,
+        ) -> (crate::utils::oidc::BeginAuth, String) {
+            let begin = client.begin_auth().expect("a discovered client begins");
+            let code = idp.authorize(&begin.auth_url).await;
+            (begin, code)
         }
 
         #[tokio::test]
@@ -1403,10 +1581,11 @@ mod discovered {
             for method in BOTH {
                 let idp = FakeIdp::start(method).await;
                 let client = idp.client(method).await;
-                idp.will_issue(idp.id_token(&idp.issuer, CLIENT_ID, Some("the-nonce")));
+                let (begin, code) = authorized(&idp, &client).await;
+                idp.will_issue(idp.id_token(&idp.issuer, CLIENT_ID, Some(&begin.nonce)));
 
                 let identity = client
-                    .exchange_code("the-code", PKCE_VERIFIER, "the-nonce")
+                    .exchange_code(&code, &begin.pkce_verifier, &begin.nonce)
                     .await;
 
                 assert!(
@@ -1421,8 +1600,11 @@ mod discovered {
                     exchange.form_value("grant_type"),
                     Some("authorization_code")
                 );
-                assert_eq!(exchange.form_value("code"), Some("the-code"));
-                assert_eq!(exchange.form_value("code_verifier"), Some(PKCE_VERIFIER));
+                assert_eq!(exchange.form_value("code"), Some(code.as_str()));
+                assert_eq!(
+                    exchange.form_value("code_verifier"),
+                    Some(begin.pkce_verifier.as_str())
+                );
                 assert!(exchange.authenticated_with(method), "{exchange:?}");
                 // Basic carries the client id in the header alone, exactly as
                 // the code exchange did before the method was configurable --
@@ -1572,6 +1754,325 @@ mod discovered {
             let poll = client.poll_device_token(&start.device_code).await;
 
             assert!(matches!(poll, Ok(DevicePoll::Pending)), "{poll:?}");
+        }
+
+        #[tokio::test]
+        async fn the_authorization_url_carries_an_s256_challenge_of_the_returned_verifier_state_nonce_and_scopes()
+         {
+            let method = ClientAuthMethod::ClientSecretBasic;
+            let idp = FakeIdp::start(method).await;
+            let client = idp.client(method).await;
+
+            let begin = client.begin_auth().unwrap();
+
+            let url = openidconnect::url::Url::parse(&begin.auth_url).unwrap();
+            assert_eq!(
+                url.as_str().split('?').next(),
+                Some(format!("{}/auth", idp.issuer).as_str()),
+                "the discovered authorization endpoint"
+            );
+            let query: HashMap<String, String> = url.query_pairs().into_owned().collect();
+            let param = |name: &str| query.get(name).map(String::as_str);
+            assert_eq!(param("response_type"), Some("code"));
+            assert_eq!(param("client_id"), Some(CLIENT_ID));
+            assert_eq!(
+                param("redirect_uri"),
+                Some("http://127.0.0.1/v1/auth/callback")
+            );
+            assert_eq!(param("state"), Some(begin.state.as_str()));
+            assert_eq!(param("nonce"), Some(begin.nonce.as_str()));
+            // The challenge commits to the verifier Beam keeps: only the
+            // holder of the verifier can redeem a code issued against it.
+            assert_eq!(param("code_challenge_method"), Some("S256"));
+            assert_eq!(
+                param("code_challenge"),
+                Some(s256(&begin.pkce_verifier).as_str())
+            );
+            let scopes: Vec<&str> = param("scope").unwrap_or_default().split(' ').collect();
+            for scope in ["openid", "email"] {
+                assert!(scopes.contains(&scope), "{scope} in {scopes:?}");
+            }
+
+            // Every login mints its own: a reused state, nonce or verifier
+            // would let one captured login replay another.
+            let again = client.begin_auth().unwrap();
+            assert_ne!(again.state, begin.state);
+            assert_ne!(again.nonce, begin.nonce);
+            assert_ne!(again.pkce_verifier, begin.pkce_verifier);
+        }
+
+        #[tokio::test]
+        async fn a_code_exchange_presenting_another_verifier_is_refused() {
+            // A code intercepted on its way back to Beam is useless without
+            // the verifier, which never left the server.
+            let method = ClientAuthMethod::ClientSecretBasic;
+            let idp = FakeIdp::start(method).await;
+            let client = idp.client(method).await;
+            let (begin, code) = authorized(&idp, &client).await;
+            idp.will_issue(idp.id_token(&idp.issuer, CLIENT_ID, Some(&begin.nonce)));
+
+            let identity = client
+                .exchange_code(&code, PKCE_VERIFIER, &begin.nonce)
+                .await;
+
+            assert!(
+                matches!(identity, Err(OidcError::Exchange(ref message)) if message.contains("invalid_grant")),
+                "{identity:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_code_exchange_whose_id_token_names_another_nonce_is_refused() {
+            // The nonce binds the ID token to this login: one minted for
+            // another (an injected token) must not sign anybody in.
+            let method = ClientAuthMethod::ClientSecretBasic;
+            let idp = FakeIdp::start(method).await;
+            let client = idp.client(method).await;
+
+            for nonce in [Some("somebody-elses-nonce"), None] {
+                let (begin, code) = authorized(&idp, &client).await;
+                idp.will_issue(idp.id_token(&idp.issuer, CLIENT_ID, nonce));
+
+                let identity = client
+                    .exchange_code(&code, &begin.pkce_verifier, &begin.nonce)
+                    .await;
+
+                assert!(
+                    matches!(identity, Err(OidcError::ClaimsVerification(_))),
+                    "nonce {nonce:?}: {identity:?}"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn a_code_exchange_whose_id_token_names_another_audience_or_issuer_is_refused() {
+            let method = ClientAuthMethod::ClientSecretBasic;
+            let idp = FakeIdp::start(method).await;
+            let client = idp.client(method).await;
+
+            for (issuer, audience) in [
+                (idp.issuer.clone(), "some-other-client".to_owned()),
+                ("https://impostor.test".to_owned(), CLIENT_ID.to_owned()),
+            ] {
+                let (begin, code) = authorized(&idp, &client).await;
+                idp.will_issue(idp.id_token(&issuer, &audience, Some(&begin.nonce)));
+
+                let identity = client
+                    .exchange_code(&code, &begin.pkce_verifier, &begin.nonce)
+                    .await;
+
+                assert!(
+                    matches!(identity, Err(OidcError::ClaimsVerification(_))),
+                    "iss {issuer}, aud {audience}: {identity:?}"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn a_token_response_without_an_id_token_is_missing_id_token() {
+            // An OAuth-only answer proves nothing about who the user is.
+            let method = ClientAuthMethod::ClientSecretBasic;
+            let idp = FakeIdp::start(method).await;
+            let client = idp.client(method).await;
+
+            let (begin, code) = authorized(&idp, &client).await;
+            idp.will_issue(token_without_id_token());
+            let identity = client
+                .exchange_code(&code, &begin.pkce_verifier, &begin.nonce)
+                .await;
+            assert!(
+                matches!(identity, Err(OidcError::MissingIdToken)),
+                "code exchange: {identity:?}"
+            );
+
+            let start = client.begin_device_auth().await.unwrap();
+            idp.will_issue(token_without_id_token());
+            let poll = client.poll_device_token(&start.device_code).await;
+            assert!(
+                matches!(poll, Err(OidcError::MissingIdToken)),
+                "device poll: {poll:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn every_identity_claim_is_mapped_from_the_verified_id_token() {
+            let method = ClientAuthMethod::ClientSecretBasic;
+            let idp = FakeIdp::start(method).await;
+            let client = idp.client(method).await;
+            let (begin, code) = authorized(&idp, &client).await;
+            idp.will_issue(
+                idp.id_token_with(
+                    &idp.issuer,
+                    CLIENT_ID,
+                    Some(&begin.nonce),
+                    StandardClaims::new(SubjectIdentifier::new("ada".to_owned()))
+                        .set_email(Some(EndUserEmail::new("ada@example.com".to_owned())))
+                        .set_email_verified(Some(true))
+                        .set_name(Some(EndUserName::new("Ada Lovelace".to_owned()).into()))
+                        .set_picture(Some(
+                            EndUserPictureUrl::new("https://idp.test/ada.png".to_owned()).into(),
+                        )),
+                    GroupsClaim {
+                        groups: Some(vec!["beam-admin".to_owned()]),
+                    },
+                ),
+            );
+
+            let identity = client
+                .exchange_code(&code, &begin.pkce_verifier, &begin.nonce)
+                .await
+                .unwrap();
+
+            assert_eq!(identity.issuer, idp.issuer);
+            assert_eq!(identity.subject, "ada");
+            assert_eq!(identity.email.as_deref(), Some("ada@example.com"));
+            assert!(identity.email_verified);
+            assert_eq!(identity.name.as_deref(), Some("Ada Lovelace"));
+            assert_eq!(
+                identity.picture.as_deref(),
+                Some("https://idp.test/ada.png")
+            );
+            // The non-standard claim admin is bound to survives, beside the
+            // standard ones.
+            assert_eq!(identity.claims["groups"], json!(["beam-admin"]));
+            assert_eq!(identity.claims["sub"], "ada");
+        }
+
+        #[tokio::test]
+        async fn an_id_token_without_profile_claims_maps_to_an_empty_profile() {
+            let method = ClientAuthMethod::ClientSecretBasic;
+            let idp = FakeIdp::start(method).await;
+            let client = idp.client(method).await;
+            let (begin, code) = authorized(&idp, &client).await;
+            idp.will_issue(idp.id_token(&idp.issuer, CLIENT_ID, Some(&begin.nonce)));
+
+            let identity = client
+                .exchange_code(&code, &begin.pkce_verifier, &begin.nonce)
+                .await
+                .unwrap();
+
+            assert_eq!(identity.email, None);
+            assert!(
+                !identity.email_verified,
+                "an unasserted email is not a verified one"
+            );
+            assert_eq!(identity.name, None);
+            assert_eq!(identity.picture, None);
+        }
+
+        #[tokio::test]
+        async fn a_device_authorization_carries_every_field_the_idp_answered() {
+            let method = ClientAuthMethod::ClientSecretBasic;
+            let idp = FakeIdp::start(method).await;
+            let client = idp.client(method).await;
+
+            let start = client.begin_device_auth().await.unwrap();
+
+            assert_eq!(
+                start,
+                DeviceAuthStart {
+                    device_code: "the-device-code".to_owned(),
+                    user_code: "BCDF-GHJK".to_owned(),
+                    verification_uri: format!("{}/device", idp.issuer),
+                    verification_uri_complete: Some(format!(
+                        "{}/device?user_code=BCDF-GHJK",
+                        idp.issuer
+                    )),
+                    expires_in_secs: 600,
+                    interval_secs: 7,
+                }
+            );
+        }
+
+        #[tokio::test]
+        async fn an_idp_without_a_device_endpoint_refuses_the_grant_and_is_never_asked() {
+            let method = ClientAuthMethod::ClientSecretBasic;
+            let idp = FakeIdp::start_with(IdpSetup {
+                device_endpoint: false,
+                ..IdpSetup::registered_for(method)
+            })
+            .await;
+            let client = idp.client(method).await;
+
+            let started = client.begin_device_auth().await;
+            assert!(
+                matches!(started, Err(OidcError::DeviceFlowUnsupported)),
+                "{started:?}"
+            );
+            let poll = client.poll_device_token("a-code-from-before").await;
+            assert!(
+                matches!(poll, Err(OidcError::DeviceFlowUnsupported)),
+                "{poll:?}"
+            );
+            assert!(idp.received().is_empty(), "{:?}", idp.received());
+
+            // The browser login does not depend on the grant.
+            let (begin, code) = authorized(&idp, &client).await;
+            idp.will_issue(idp.id_token(&idp.issuer, CLIENT_ID, Some(&begin.nonce)));
+            client
+                .exchange_code(&code, &begin.pkce_verifier, &begin.nonce)
+                .await
+                .expect("the code flow still works");
+        }
+
+        async fn discover_at(issuer: &str, redirect_url: &str) -> Result<(), OidcError> {
+            DiscoveredOidcClient::discover(
+                issuer,
+                CLIENT_ID,
+                CLIENT_SECRET,
+                ClientAuthMethod::ClientSecretBasic,
+                redirect_url,
+                vec!["openid".to_owned()],
+            )
+            .await
+            .map(drop)
+        }
+
+        const REDIRECT_URL: &str = "http://127.0.0.1/v1/auth/callback";
+
+        #[tokio::test]
+        async fn discovery_fails_for_an_issuer_that_is_not_a_url() {
+            let result = discover_at("not a url", REDIRECT_URL).await;
+            assert!(matches!(result, Err(OidcError::Discovery(_))), "{result:?}");
+        }
+
+        #[tokio::test]
+        async fn discovery_fails_for_an_unreachable_issuer() {
+            // Bound but never listening, and held for the whole test, so the
+            // port refuses and no parallel test can be handed it.
+            let reserved = tokio::net::TcpSocket::new_v4().unwrap();
+            reserved.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+            let issuer = format!("http://{}", reserved.local_addr().unwrap());
+
+            let result = discover_at(&issuer, REDIRECT_URL).await;
+            drop(reserved);
+
+            assert!(matches!(result, Err(OidcError::Discovery(_))), "{result:?}");
+        }
+
+        #[tokio::test]
+        async fn discovery_fails_when_the_document_names_another_issuer() {
+            // OIDC Discovery section 4.3: a document claiming another issuer
+            // is not this issuer's, and every token check would be against
+            // the wrong one.
+            let idp = FakeIdp::start_with(IdpSetup {
+                claimed_issuer: Some("https://impostor.test".to_owned()),
+                ..IdpSetup::registered_for(ClientAuthMethod::ClientSecretBasic)
+            })
+            .await;
+
+            let result = discover_at(&idp.issuer, REDIRECT_URL).await;
+
+            assert!(matches!(result, Err(OidcError::Discovery(_))), "{result:?}");
+        }
+
+        #[tokio::test]
+        async fn discovery_fails_for_a_redirect_url_that_is_not_a_url() {
+            let idp = FakeIdp::start(ClientAuthMethod::ClientSecretBasic).await;
+
+            let result = discover_at(&idp.issuer, "not a url").await;
+
+            assert!(matches!(result, Err(OidcError::Discovery(_))), "{result:?}");
         }
     }
 
@@ -1819,7 +2320,12 @@ pub mod fake {
         ) -> Result<OidcIdentity, OidcError> {
             if let Some(begin) = self.last_begin.lock().unwrap().as_ref() {
                 if begin.nonce != nonce {
-                    return Err(OidcError::NonceMismatch);
+                    // What `DiscoveredOidcClient` answers: openidconnect's
+                    // verifier reports a wrong nonce as a claims failure like
+                    // any other, so `NonceMismatch` never comes from it.
+                    return Err(OidcError::ClaimsVerification(
+                        "nonce does not match".to_string(),
+                    ));
                 }
                 if begin.pkce_verifier != pkce_verifier {
                     return Err(OidcError::Exchange(

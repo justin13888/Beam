@@ -72,32 +72,82 @@ macro_rules! user_repository_contract {
         use $crate::utils::contract::fixture::UserRepositoryFixture as _;
         use $crate::utils::models::CreateUser;
 
-        /// A JIT-provisioning request from one identity provider.
+        /// A JIT-provisioning request from an identity provider of its own,
+        /// so no two calls ever collide on the identity key.
         fn create_user(subject: &str, name: &str) -> CreateUser {
             CreateUser {
-                oidc_issuer: format!("https://idp.test/{}", Uuid::new_v4()),
-                oidc_subject: subject.to_string(),
-                email: None,
                 display_name: name.to_string(),
-                avatar_url: None,
-                is_admin: false,
+                ..$crate::utils::models::test_utils::create_user(
+                    &format!("https://idp.test/{}", Uuid::new_v4()),
+                    subject,
+                )
             }
         }
 
         #[tokio::test]
-        async fn a_new_user_is_enabled_and_not_an_admin() {
+        async fn create_keeps_the_admin_flag_it_is_given() {
+            // Login provisions a first-time admin with the flag already set
+            // from the IdP claim; a store that dropped it would demote them
+            // until their next login.
             let fixture = $setup().await;
-            let user = fixture
-                .repo()
-                .create(create_user("s1", "Alice"))
-                .await
-                .unwrap();
+            for is_admin in [true, false] {
+                let created = fixture
+                    .repo()
+                    .create(CreateUser {
+                        is_admin,
+                        ..create_user("s1", "Alice")
+                    })
+                    .await
+                    .unwrap();
 
-            assert!(!user.disabled, "JIT-provisioned users must start enabled");
-            assert!(
-                !user.is_admin,
-                "admin is granted from the IdP claim, never at provisioning"
-            );
+                let stored = fixture
+                    .repo()
+                    .find_by_id(created.id)
+                    .await
+                    .unwrap()
+                    .expect("the user just created resolves");
+                assert_eq!(stored.is_admin, is_admin, "read back after create");
+                assert_eq!(created.is_admin, is_admin, "returned from create");
+                assert!(!stored.disabled, "JIT-provisioned users must start enabled");
+            }
+        }
+
+        #[tokio::test]
+        async fn a_second_user_for_the_same_identity_is_refused() {
+            // `(issuer, subject)` is the login key: two rows for it would make
+            // which account a login lands in depend on the lookup's row order.
+            let fixture = $setup().await;
+            let first = create_user("s1", "Alice");
+            let issuer = first.oidc_issuer.clone();
+            let original = fixture.repo().create(first).await.unwrap();
+            let before = fixture.repo().count().await.unwrap();
+
+            let duplicate = fixture
+                .repo()
+                .create(CreateUser {
+                    oidc_issuer: issuer.clone(),
+                    ..create_user("s1", "Mallory")
+                })
+                .await;
+
+            assert!(duplicate.is_err(), "{duplicate:?}");
+            assert_eq!(fixture.repo().count().await.unwrap(), before);
+            let found = fixture
+                .repo()
+                .find_by_oidc_identity(&issuer, "s1")
+                .await
+                .unwrap()
+                .expect("the original still resolves");
+            assert_eq!(found.id, original.id);
+            assert_eq!(found.display_name, "Alice");
+
+            // Only the pair is unique: the same subject at another IdP is
+            // another person.
+            fixture
+                .repo()
+                .create(create_user("s1", "Alice elsewhere"))
+                .await
+                .expect("the same subject under another issuer is a new user");
         }
 
         #[tokio::test]
@@ -369,19 +419,61 @@ macro_rules! session_store_contract {
     ($setup:path) => {
         use ::std::time::Duration;
         use $crate::utils::contract::fixture::SessionStoreFixture as _;
-        use $crate::utils::session_store::{SESSION_TOUCH_THROTTLE_SECS, SessionData};
+        use $crate::utils::session_store::{
+            SESSION_TOUCH_THROTTLE_SECS, SessionData, SessionError,
+        };
 
         const IDLE_TTL: u64 = 14 * 24 * 3600;
         const ABSOLUTE_TTL: u64 = 60 * 24 * 3600;
 
         fn session_for(user_id: &::uuid::Uuid) -> SessionData {
-            SessionData {
-                user_id: user_id.to_string(),
-                device_hash: "device-hash".to_string(),
-                ip: "203.0.113.7".to_string(),
-                created_at: 0,
-                last_active: 0,
-            }
+            $crate::utils::session_store::test_utils::session_for(*user_id)
+        }
+
+        #[tokio::test]
+        async fn a_malformed_user_id_is_refused_as_invalid() {
+            // Every method keyed by a user id parses it before it touches the
+            // store, so a malformed one is a typed error everywhere -- never a
+            // silent miss that reads as "this user has no sessions".
+            let fixture = $setup().await;
+            let malformed = "not-a-uuid";
+
+            let created = fixture
+                .store()
+                .create(
+                    &SessionData {
+                        user_id: malformed.to_string(),
+                        ..session_for(&::uuid::Uuid::new_v4())
+                    },
+                    IDLE_TTL,
+                    ABSOLUTE_TTL,
+                )
+                .await;
+            assert!(
+                matches!(created, Err(SessionError::InvalidId(_))),
+                "create: {created:?}"
+            );
+
+            let listed = fixture.store().list_for_user(malformed).await;
+            assert!(
+                matches!(listed, Err(SessionError::InvalidId(_))),
+                "list_for_user: {listed:?}"
+            );
+
+            let revoked_all = fixture.store().delete_all_for_user(malformed).await;
+            assert!(
+                matches!(revoked_all, Err(SessionError::InvalidId(_))),
+                "delete_all_for_user: {revoked_all:?}"
+            );
+
+            let revoked = fixture
+                .store()
+                .delete_by_id(::uuid::Uuid::new_v4(), malformed)
+                .await;
+            assert!(
+                matches!(revoked, Err(SessionError::InvalidId(_))),
+                "delete_by_id: {revoked:?}"
+            );
         }
 
         #[tokio::test]
@@ -403,8 +495,8 @@ macro_rules! session_store_contract {
                 .unwrap()
                 .expect("the session just created resolves");
             assert_eq!(session.user_id, user.to_string());
-            assert_eq!(session.ip, "203.0.113.7");
-            assert_eq!(session.device_hash, "device-hash");
+            assert_eq!(session.ip, session_for(&user).ip);
+            assert_eq!(session.device_hash, session_for(&user).device_hash);
             assert_eq!(
                 session.created_at, created_at,
                 "the store stamps creation time itself; it does not echo the caller's"
@@ -779,12 +871,39 @@ macro_rules! pending_auth_store_contract {
         const TTL: u64 = 600;
 
         fn pending(state: &str) -> PendingAuth {
-            PendingAuth {
-                state: state.to_string(),
-                nonce: format!("nonce-for-{state}"),
-                pkce_verifier: format!("verifier-for-{state}"),
-                redirect_path: Some("/libraries".to_string()),
-            }
+            $crate::utils::pending_auth_store::test_utils::pending_auth(state)
+        }
+
+        #[tokio::test]
+        async fn minting_a_state_twice_is_refused_and_the_first_survives() {
+            // A state names one login attempt. Silently replacing it would let
+            // a second `begin_auth` swap the nonce and verifier out from under
+            // a browser that is already at the IdP.
+            let fixture = $setup().await;
+            let state = ::uuid::Uuid::new_v4().to_string();
+            fixture.store().create(&pending(&state), TTL).await.unwrap();
+
+            let again = fixture
+                .store()
+                .create(
+                    &PendingAuth {
+                        nonce: "a-different-nonce".to_string(),
+                        pkce_verifier: "a-different-verifier".to_string(),
+                        ..pending(&state)
+                    },
+                    TTL,
+                )
+                .await;
+            assert!(again.is_err(), "{again:?}");
+
+            let consumed = fixture
+                .store()
+                .consume(&state)
+                .await
+                .unwrap()
+                .expect("the first authorization is still pending");
+            assert_eq!(consumed.nonce, pending(&state).nonce);
+            assert_eq!(consumed.pkce_verifier, pending(&state).pkce_verifier);
         }
 
         #[tokio::test]

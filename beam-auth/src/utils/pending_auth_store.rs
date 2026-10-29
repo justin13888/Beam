@@ -151,10 +151,18 @@ pub mod in_memory {
     impl PendingAuthStore for InMemoryPendingAuthStore {
         async fn create(&self, auth: &PendingAuth, ttl_secs: u64) -> Result<()> {
             let expires_at = self.clock.now() + chrono::Duration::seconds(ttl_secs as i64);
-            self.entries
-                .lock()
-                .unwrap()
-                .insert(auth.state.clone(), (auth.clone(), expires_at));
+            let mut entries = self.entries.lock().unwrap();
+            // `state` is the SQL table's primary key, so minting one that is
+            // already held -- expired or not, since nothing sweeps the table
+            // -- fails the insert there. Overwriting here instead let a test
+            // pass that production would fail.
+            if entries.contains_key(&auth.state) {
+                return Err(PendingAuthError::Db(sea_orm::DbErr::Custom(format!(
+                    "duplicate key value violates unique constraint: state {:?} is already pending",
+                    auth.state
+                ))));
+            }
+            entries.insert(auth.state.clone(), (auth.clone(), expires_at));
             Ok(())
         }
 
@@ -165,6 +173,26 @@ pub mod in_memory {
                 Some((auth, expires_at)) if expires_at >= now => Ok(Some(auth)),
                 _ => Ok(None),
             }
+        }
+    }
+}
+
+/// Builders for tests, beside the type they build.
+#[mutants::skip]
+#[cfg(any(test, feature = "test-utils"))]
+pub mod test_utils {
+    use super::PendingAuth;
+
+    /// A pending authorization for `state` returning to `/libraries`. The
+    /// nonce and verifier are derived from the state, so two states never
+    /// share either.
+    #[must_use]
+    pub fn pending_auth(state: &str) -> PendingAuth {
+        PendingAuth {
+            state: state.to_owned(),
+            nonce: format!("nonce-for-{state}"),
+            pkce_verifier: format!("verifier-for-{state}"),
+            redirect_path: Some("/libraries".to_owned()),
         }
     }
 }

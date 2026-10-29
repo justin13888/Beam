@@ -323,6 +323,27 @@ impl SessionStore for PgSessionStore {
     }
 }
 
+/// Builders for tests, beside the type they build.
+#[mutants::skip]
+#[cfg(any(test, feature = "test-utils"))]
+pub mod test_utils {
+    use super::SessionData;
+
+    /// A session for `user_id` from one fixed device and address. The
+    /// `created_at`/`last_active` stamps are zero: every store stamps its own
+    /// and ignores the caller's.
+    #[must_use]
+    pub fn session_for(user_id: uuid::Uuid) -> SessionData {
+        SessionData {
+            user_id: user_id.to_string(),
+            device_hash: "device-hash".to_owned(),
+            ip: "203.0.113.7".to_owned(),
+            created_at: 0,
+            last_active: 0,
+        }
+    }
+}
+
 /// In-memory session store for use in tests and offline scenarios.
 #[mutants::skip]
 #[cfg(any(test, feature = "test-utils"))]
@@ -383,6 +404,9 @@ pub mod in_memory {
             idle_ttl_secs: u64,
             absolute_ttl_secs: u64,
         ) -> Result<String> {
+            // Parsed, not stored as given: the SQL store binds a `Uuid`, so a
+            // malformed id is `InvalidId` there before anything is written.
+            let _: Uuid = data.user_id.parse()?;
             let token = generate_session_token();
             let now = self.clock.now();
             // `created_at`/`last_active` belong to the store, not the caller:
@@ -433,6 +457,8 @@ pub mod in_memory {
         }
 
         async fn delete_all_for_user(&self, user_id: &str) -> Result<u64> {
+            // As in `delete_by_id`: the SQL store parses the id first.
+            let _: Uuid = user_id.parse()?;
             let mut sessions = self.lock_sessions();
             let to_remove: Vec<String> = sessions
                 .iter()
@@ -450,6 +476,7 @@ pub mod in_memory {
             // Expired sessions are filtered out here, matching the Postgres
             // store: this list is what the profile page offers for revocation,
             // and an already-dead session in it is a confusing no-op button.
+            let _: Uuid = user_id.parse()?;
             let now = self.clock.now();
             let sessions = self.lock_sessions();
             Ok(sessions
@@ -479,6 +506,96 @@ pub mod in_memory {
                 }
                 None => Ok(false),
             }
+        }
+    }
+
+    /// One [`SessionStore`] method, for [`FailingSessionStore`] to fail.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum SessionStoreOperation {
+        Create,
+        Get,
+        Touch,
+        Delete,
+        DeleteAllForUser,
+        ListForUser,
+        DeleteById,
+    }
+
+    /// An [`InMemorySessionStore`] whose one chosen method fails as an
+    /// unreachable database would, so a caller's storage-failure path can be
+    /// driven without one. Every other method behaves as the store it wraps.
+    #[derive(Debug)]
+    pub struct FailingSessionStore {
+        inner: InMemorySessionStore,
+        failing: SessionStoreOperation,
+    }
+
+    impl FailingSessionStore {
+        pub fn new(inner: InMemorySessionStore, failing: SessionStoreOperation) -> Self {
+            Self { inner, failing }
+        }
+
+        /// The wrapped store, for seeding and for asserting what was written.
+        pub fn inner(&self) -> &InMemorySessionStore {
+            &self.inner
+        }
+
+        fn check(&self, operation: SessionStoreOperation) -> Result<()> {
+            if operation == self.failing {
+                return Err(SessionError::Db(sea_orm::DbErr::Custom(format!(
+                    "injected failure in {operation:?}"
+                ))));
+            }
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl SessionStore for FailingSessionStore {
+        fn now(&self) -> chrono::DateTime<Utc> {
+            self.inner.now()
+        }
+
+        async fn create(
+            &self,
+            data: &SessionData,
+            idle_ttl_secs: u64,
+            absolute_ttl_secs: u64,
+        ) -> Result<String> {
+            self.check(SessionStoreOperation::Create)?;
+            self.inner
+                .create(data, idle_ttl_secs, absolute_ttl_secs)
+                .await
+        }
+
+        async fn get(&self, token: &str) -> Result<Option<SessionData>> {
+            self.check(SessionStoreOperation::Get)?;
+            self.inner.get(token).await
+        }
+
+        async fn touch(&self, token: &str, idle_ttl_secs: u64) -> Result<()> {
+            self.check(SessionStoreOperation::Touch)?;
+            self.inner.touch(token, idle_ttl_secs).await
+        }
+
+        async fn delete(&self, token: &str) -> Result<()> {
+            self.check(SessionStoreOperation::Delete)?;
+            self.inner.delete(token).await
+        }
+
+        async fn delete_all_for_user(&self, user_id: &str) -> Result<u64> {
+            self.check(SessionStoreOperation::DeleteAllForUser)?;
+            self.inner.delete_all_for_user(user_id).await
+        }
+
+        async fn list_for_user(&self, user_id: &str) -> Result<Vec<(Uuid, SessionData)>> {
+            self.check(SessionStoreOperation::ListForUser)?;
+            self.inner.list_for_user(user_id).await
+        }
+
+        async fn delete_by_id(&self, id: Uuid, user_id: &str) -> Result<bool> {
+            self.check(SessionStoreOperation::DeleteById)?;
+            self.inner.delete_by_id(id, user_id).await
         }
     }
 }
@@ -544,6 +661,69 @@ mod contract_over_in_memory {
     }
 
     crate::session_store_contract!(setup);
+}
+
+/// [`get_and_touch`] when the store behind it fails.
+#[cfg(test)]
+mod get_and_touch_under_a_failing_store {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use beam_domain::services::TestClock;
+
+    use super::in_memory::{FailingSessionStore, InMemorySessionStore, SessionStoreOperation};
+    use super::test_utils::session_for;
+    use super::{SESSION_TOUCH_THROTTLE_SECS, SessionError, SessionStore, get_and_touch};
+
+    const IDLE_TTL: u64 = 14 * 24 * 3600;
+
+    /// A store failing `failing`, holding one live session, with the clock
+    /// already past the touch throttle so `get_and_touch` reaches `touch`.
+    async fn store_with_a_session_due_a_touch(
+        failing: SessionStoreOperation,
+    ) -> (FailingSessionStore, String) {
+        let clock = Arc::new(TestClock::starting_at(
+            chrono::DateTime::from_timestamp(1_700_000_000, 0).expect("valid instant"),
+        ));
+        let store = FailingSessionStore::new(InMemorySessionStore::new(clock.clone()), failing);
+        let token = store
+            .inner()
+            .create(&session_for(uuid::Uuid::new_v4()), IDLE_TTL, 2 * IDLE_TTL)
+            .await
+            .unwrap();
+        clock.advance(Duration::from_secs(SESSION_TOUCH_THROTTLE_SECS as u64 + 1));
+        (store, token)
+    }
+
+    #[tokio::test]
+    async fn a_store_that_cannot_be_read_is_an_error_not_a_signed_out_request() {
+        // `Ok(None)` would answer 401 and send the user to log in again over
+        // a database outage; the caller has to be able to tell the two apart.
+        let (store, token) = store_with_a_session_due_a_touch(SessionStoreOperation::Get).await;
+
+        let resolved = get_and_touch(&store, &token, IDLE_TTL).await;
+
+        assert!(matches!(resolved, Err(SessionError::Db(_))), "{resolved:?}");
+    }
+
+    #[tokio::test]
+    async fn a_failed_touch_still_resolves_the_session() {
+        // Sliding the idle window is best-effort bookkeeping: a write that
+        // fails must not turn an otherwise valid request away.
+        let (store, token) = store_with_a_session_due_a_touch(SessionStoreOperation::Touch).await;
+
+        let resolved = get_and_touch(&store, &token, IDLE_TTL)
+            .await
+            .expect("a failed touch is swallowed");
+
+        let session = resolved.expect("the session is still valid");
+        let stored = store.inner().get(&token).await.unwrap().unwrap();
+        assert_eq!(session.user_id, stored.user_id);
+        assert_eq!(
+            stored.last_active, session.last_active,
+            "the touch failed, so nothing was rewritten"
+        );
+    }
 }
 
 #[cfg(test)]
