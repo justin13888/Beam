@@ -348,3 +348,133 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod resume_tests {
+    use super::*;
+
+    fn state(position_secs: f64, completed: bool) -> WatchState {
+        WatchState {
+            id: Uuid::from_u128(1),
+            user_id: Uuid::from_u128(2),
+            target: WatchTarget::Movie {
+                movie_id: Uuid::from_u128(3),
+            },
+            last_file_id: None,
+            position_secs,
+            duration_secs: Some(100.0),
+            completed,
+            play_count: u32::from(completed),
+            last_played_at: DateTime::UNIX_EPOCH,
+            dismissed_at: None,
+        }
+    }
+
+    /// A position resumes whether or not the title was played; only a
+    /// played title at the start is finished -- a rewound rewatch is not.
+    #[test]
+    fn a_title_resumes_from_a_position_and_is_finished_only_at_its_start() {
+        for (position, completed, resumable, finished) in [
+            (0.0, false, false, false),
+            (30.0, false, true, false),
+            (0.0, true, false, true),
+            (30.0, true, true, false),
+        ] {
+            let state = state(position, completed);
+            assert_eq!(
+                (state.is_resumable(), state.is_finished()),
+                (resumable, finished),
+                "position {position}, completed {completed}"
+            );
+        }
+    }
+}
+
+#[cfg(all(test, feature = "entity"))]
+mod entity_conversion_tests {
+    use super::*;
+
+    fn model(
+        movie_id: Option<Uuid>,
+        episode_id: Option<Uuid>,
+        show_id: Option<Uuid>,
+    ) -> beam_entity::watch_state::Model {
+        let at: chrono::DateTime<chrono::FixedOffset> = DateTime::UNIX_EPOCH.into();
+        beam_entity::watch_state::Model {
+            id: Uuid::from_u128(1),
+            user_id: Uuid::from_u128(2),
+            movie_id,
+            episode_id,
+            show_id,
+            last_file_id: None,
+            position_secs: 12.5,
+            duration_secs: Some(100.0),
+            completed: false,
+            play_count: 3,
+            last_played_at: at,
+            dismissed_at: None,
+        }
+    }
+
+    /// A row is one movie, or one episode with its show; every other shape
+    /// the columns allow is refused rather than read as a guess.
+    #[test]
+    fn a_row_converts_only_when_it_names_one_movie_or_one_episode_of_a_show() {
+        let (movie, episode, show) = (
+            Some(Uuid::from_u128(10)),
+            Some(Uuid::from_u128(11)),
+            Some(Uuid::from_u128(12)),
+        );
+        let cases = [
+            (
+                "a movie",
+                (movie, None, None),
+                Some(WatchTarget::Movie {
+                    movie_id: Uuid::from_u128(10),
+                }),
+            ),
+            (
+                "an episode of a show",
+                (None, episode, show),
+                Some(WatchTarget::Episode {
+                    episode_id: Uuid::from_u128(11),
+                    show_id: Uuid::from_u128(12),
+                }),
+            ),
+            ("nothing", (None, None, None), None),
+            ("an episode without its show", (None, episode, None), None),
+            ("a show alone", (None, None, show), None),
+            ("a movie and an episode", (movie, episode, show), None),
+            ("a movie with a show", (movie, None, show), None),
+            ("a movie with an episode", (movie, episode, None), None),
+        ];
+        for (name, (movie_id, episode_id, show_id), expected) in cases {
+            let converted = WatchState::try_from(model(movie_id, episode_id, show_id));
+            match expected {
+                Some(target) => {
+                    let state = converted.unwrap_or_else(|err| panic!("{name}: {err}"));
+                    assert_eq!(state.target, target, "{name}");
+                    assert_eq!(state.play_count, 3, "{name}");
+                    assert_eq!(state.position_secs, 12.5, "{name}");
+                }
+                None => assert!(
+                    matches!(&converted, Err(sea_orm::DbErr::Custom(message))
+                        if message.contains(&Uuid::from_u128(1).to_string())),
+                    "{name}: {converted:?}"
+                ),
+            }
+        }
+    }
+
+    /// Characterises, not endorses: a negative stored play count -- which
+    /// the column's `INTEGER` type admits -- reads as zero plays rather than
+    /// being refused.
+    #[test]
+    fn a_negative_play_count_reads_as_zero() {
+        let row = beam_entity::watch_state::Model {
+            play_count: -4,
+            ..model(Some(Uuid::from_u128(10)), None, None)
+        };
+        assert_eq!(WatchState::try_from(row).expect("a movie").play_count, 0);
+    }
+}

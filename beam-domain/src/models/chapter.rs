@@ -180,6 +180,69 @@ mod tests {
         }
     }
 
+    fn any_chapters() -> impl proptest::strategy::Strategy<Value = Vec<Chapter>> {
+        use proptest::prelude::*;
+        let title = proptest::option::of(proptest::sample::select(vec![
+            "Opening",
+            "End Credits",
+            "Recap",
+            "Preview",
+            "OP",
+            "ED",
+            "Chapter 1",
+            "",
+        ]));
+        proptest::collection::vec((0_u64..5, 0_u64..5, title), 0..10).prop_map(|spans| {
+            spans
+                .into_iter()
+                .enumerate()
+                .map(|(index, (start_ms, end_ms, title))| {
+                    chapter(u32::try_from(index).expect("few"), start_ms, end_ms, title)
+                })
+                .collect()
+        })
+    }
+
+    proptest::proptest! {
+        /// Whatever the chapters, the markers hold at most one of each kind,
+        /// run in the order they start, and each is the positive-length span
+        /// of a chapter whose title names its kind -- and a kind is missing
+        /// only when no such chapter exists.
+        #[test]
+        fn markers_are_one_per_kind_in_start_order(chapters in any_chapters()) {
+            use proptest::prelude::*;
+            let markers = markers_from_chapters(&chapters);
+
+            let kinds: std::collections::HashSet<MarkerKind> =
+                markers.iter().map(|marker| marker.kind).collect();
+            prop_assert_eq!(kinds.len(), markers.len(), "a kind repeats: {:?}", markers);
+            prop_assert!(
+                markers
+                    .windows(2)
+                    .all(|pair| (pair[0].start_ms, pair[0].end_ms) <= (pair[1].start_ms, pair[1].end_ms)),
+                "out of order: {:?}",
+                markers
+            );
+
+            let names = |chapter: &Chapter, kind: MarkerKind| {
+                chapter.end_ms > chapter.start_ms
+                    && chapter.title.as_deref().and_then(marker_kind_of_title) == Some(kind)
+            };
+            for marker in &markers {
+                prop_assert!(chapters.iter().any(|chapter| names(chapter, marker.kind)
+                    && (chapter.start_ms, chapter.end_ms) == (marker.start_ms, marker.end_ms)));
+            }
+            for kind in MarkerKind::ALL {
+                prop_assert_eq!(
+                    kinds.contains(&kind),
+                    chapters.iter().any(|chapter| names(chapter, kind)),
+                    "{:?}",
+                    kind
+                );
+            }
+        }
+    }
+
     #[test]
     fn titles_name_the_kind_of_span_they_mark_whatever_their_case_and_separators() {
         let cases: &[(&str, Option<MarkerKind>)] = &[

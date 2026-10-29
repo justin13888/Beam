@@ -135,6 +135,59 @@ mod tests {
         }
     }
 
+    /// A small domain so ties on role, name and id actually occur.
+    fn any_credit() -> impl proptest::strategy::Strategy<Value = TitleCredit> {
+        use proptest::prelude::*;
+        let name = proptest::sample::select(vec!["ann", "Ann", "bob"]);
+        let word = proptest::sample::select(vec!["Directing", "directing", "Sound"]);
+        let role = prop_oneof![
+            (0_u32..3, proptest::option::of(word.clone())).prop_map(|(order, character)| {
+                CreditRole::Cast {
+                    character: character.map(str::to_owned),
+                    billing_order: order,
+                }
+            }),
+            (word.clone(), proptest::option::of(word)).prop_map(|(job, department)| {
+                CreditRole::Crew {
+                    job: job.to_owned(),
+                    department: department.map(str::to_owned),
+                }
+            }),
+        ];
+        (0_u128..3, name, role).prop_map(|(id, name, role)| TitleCredit {
+            person: Person {
+                id: Uuid::from_u128(id),
+                external_ref: format!("tmdb:{id}"),
+                name: name.to_owned(),
+                profile_url: None,
+            },
+            role,
+        })
+    }
+
+    proptest::proptest! {
+        /// The listing order is total: swapping the operands reverses it, it
+        /// is transitive, and two different people never tie -- so every
+        /// store lists a title's credits in one order.
+        #[test]
+        fn the_credit_order_is_total(a in any_credit(), b in any_credit(), c in any_credit()) {
+            use proptest::prelude::*;
+            let ab = compare_title_credits(&a, &b);
+            prop_assert_eq!(compare_title_credits(&a, &a), Ordering::Equal);
+            prop_assert_eq!(ab, compare_title_credits(&b, &a).reverse());
+            if ab == Ordering::Equal {
+                prop_assert_eq!(a.person.id, b.person.id, "two people tie");
+            }
+            let bc = compare_title_credits(&b, &c);
+            if ab != Ordering::Greater && bc != Ordering::Greater {
+                prop_assert_ne!(compare_title_credits(&a, &c), Ordering::Greater);
+            }
+            if ab == bc {
+                prop_assert_eq!(compare_title_credits(&a, &c), ab);
+            }
+        }
+    }
+
     #[test]
     fn the_cast_comes_first_in_billing_order_then_the_crew_by_department_and_job() {
         let mut credits = [

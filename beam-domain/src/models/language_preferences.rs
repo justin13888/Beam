@@ -202,6 +202,7 @@ pub mod test_utils {
 mod tests {
     use super::test_utils::lang;
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn every_spelling_of_a_language_is_one_code() {
@@ -299,6 +300,32 @@ mod tests {
                 subtitle: false
             })
         );
+    }
+
+    proptest! {
+        /// Whatever `parse` is given it does not panic, and whatever it
+        /// accepts it stores as three lowercase letters other than `und`
+        /// that parse back to themselves -- so a stored preference reads the
+        /// same on every load, and a track tagged with a stored code matches
+        /// it.
+        #[test]
+        fn a_parsed_code_is_a_fixed_point_of_parse(
+            raw in prop_oneof![
+                ".*",
+                "[ ]?[a-zA-Z]{2,3}([-_][A-Za-z]{2})?[ ]?",
+                proptest::sample::select(vec!["German", "english", "Japanese", "French"])
+                    .prop_map(str::to_owned),
+            ],
+        ) {
+            if let Some(code) = LanguageCode::parse(&raw) {
+                let stored = code.as_str();
+                prop_assert_eq!(stored.len(), 3, "{:?} stored as {:?}", raw, stored);
+                prop_assert!(stored.bytes().all(|b| b.is_ascii_lowercase()), "{stored:?}");
+                prop_assert_ne!(stored, "und");
+                prop_assert_eq!(LanguageCode::parse(stored), Some(code.clone()));
+                prop_assert!(code.matches(Some(stored)));
+            }
+        }
     }
 
     #[test]

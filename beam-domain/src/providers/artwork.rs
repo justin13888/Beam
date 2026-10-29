@@ -326,15 +326,67 @@ mod tests {
         }
     }
 
+    /// Flips the case of each ASCII letter whose matching mask bit is set.
+    fn recase(raw: &str, mask: &[bool]) -> String {
+        raw.chars()
+            .zip(mask.iter().copied().chain(std::iter::repeat(false)))
+            .map(|(c, flip)| {
+                if flip {
+                    if c.is_ascii_lowercase() {
+                        c.to_ascii_uppercase()
+                    } else {
+                        c.to_ascii_lowercase()
+                    }
+                } else {
+                    c
+                }
+            })
+            .collect()
+    }
+
+    fn any_format() -> impl Strategy<Value = ImageFormat> {
+        proptest::sample::select(ImageFormat::ALL.to_vec())
+    }
+
     proptest! {
+        /// Whatever a provider puts after the essence -- parameters, padding,
+        /// odd casing -- the format it names is recovered.
         #[test]
-        fn content_type_parsing_never_panics(raw in ".*") {
-            let _ = ImageFormat::from_content_type(&raw);
+        fn a_served_content_type_survives_parameters_padding_and_case(
+            format in any_format(),
+            mask in proptest::collection::vec(any::<bool>(), 0..16),
+            padding in "[ \t]{0,3}",
+            parameters in proptest::option::of(";[^;]*"),
+        ) {
+            let raw = format!(
+                "{padding}{}{padding}{}",
+                recase(format.content_type(), &mask),
+                parameters.unwrap_or_default(),
+            );
+            prop_assert_eq!(ImageFormat::from_content_type(&raw), Some(format));
+        }
+
+        /// Anything accepted is an `image/*` type: no input, however odd,
+        /// lets a non-image body be cached as artwork.
+        #[test]
+        fn only_an_image_essence_is_ever_accepted(raw in ".*") {
+            if ImageFormat::from_content_type(&raw).is_some() {
+                prop_assert!(
+                    raw.trim_start().to_ascii_lowercase().starts_with("image/"),
+                    "accepted {raw:?}"
+                );
+            }
         }
 
         #[test]
-        fn extension_parsing_never_panics(raw in ".*") {
-            let _ = ImageFormat::from_extension(&raw);
+        fn an_extension_is_recognised_in_any_case(
+            format in any_format(),
+            mask in proptest::collection::vec(any::<bool>(), 0..8),
+        ) {
+            prop_assert_eq!(
+                ImageFormat::from_extension(&recase(format.extension(), &mask)),
+                Some(format),
+            );
         }
     }
 }

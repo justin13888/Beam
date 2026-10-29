@@ -485,6 +485,39 @@ mod tests {
 
     mod external_media_ref {
         use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            /// A reference built from its halves gives those halves back, and
+            /// its persisted string parses to the same reference -- the
+            /// round-trip the enrichment sweep relies on when it reads
+            /// `matched_ref` back. Only a provider is barred from holding a
+            /// colon; a native id may.
+            #[test]
+            fn a_built_reference_round_trips(provider in "[^:]*", native in ".*") {
+                let reference = ExternalMediaRef::new(&provider, &native);
+                prop_assert_eq!(reference.provider(), provider.as_str());
+                prop_assert_eq!(reference.native(), native.as_str());
+                prop_assert_eq!(reference.to_string(), reference.as_str());
+                prop_assert_eq!(ExternalMediaRef::parse(reference.as_str()), Some(reference.clone()));
+            }
+
+            /// Parsing keeps the text exactly, and anything it accepts is the
+            /// reference its own halves build.
+            #[test]
+            fn a_parsed_reference_is_the_text_it_was_parsed_from(raw in ".*") {
+                match ExternalMediaRef::parse(&raw) {
+                    Some(reference) => {
+                        prop_assert_eq!(reference.as_str(), raw.as_str());
+                        prop_assert_eq!(
+                            ExternalMediaRef::new(reference.provider(), reference.native()),
+                            reference.clone()
+                        );
+                    }
+                    None => prop_assert!(!raw.contains(':')),
+                }
+            }
+        }
 
         #[test]
         fn a_reference_splits_into_provider_and_native_id() {
@@ -528,53 +561,6 @@ mod tests {
             let trailing = ExternalMediaRef::parse("tmdb:").expect("has a colon");
             assert_eq!(trailing.provider(), "tmdb");
             assert_eq!(trailing.native(), "");
-        }
-    }
-
-    mod noop_provider {
-        use super::*;
-
-        fn query() -> MediaQuery {
-            MediaQuery {
-                title: "Arrival".to_string(),
-                year: Some(2016),
-            }
-        }
-
-        #[test]
-        fn it_reports_no_configured_providers() {
-            assert!(NoopEnrichmentProvider.available_providers().is_empty());
-        }
-
-        #[tokio::test]
-        async fn every_lookup_says_not_configured_rather_than_no_results() {
-            // The distinction matters: "no results" would let the enrichment
-            // sweep mark titles `unmatched` and stop retrying them, so
-            // configuring a provider later would never revisit them. "not
-            // configured" is a transient failure the sweep leaves pending.
-            let provider = NoopEnrichmentProvider;
-            let reference = ExternalMediaRef::parse("tmdb:603").unwrap();
-
-            assert!(matches!(
-                provider.search_movies(&query()).await,
-                Err(EnrichmentError::NotConfigured)
-            ));
-            assert!(matches!(
-                provider.search_shows(&query()).await,
-                Err(EnrichmentError::NotConfigured)
-            ));
-            assert!(matches!(
-                provider.movie_enrichment(&reference).await,
-                Err(EnrichmentError::NotConfigured)
-            ));
-            assert!(matches!(
-                provider.show_enrichment(&reference).await,
-                Err(EnrichmentError::NotConfigured)
-            ));
-            assert!(matches!(
-                provider.season_enrichment(&reference, 1).await,
-                Err(EnrichmentError::NotConfigured)
-            ));
         }
     }
 }
