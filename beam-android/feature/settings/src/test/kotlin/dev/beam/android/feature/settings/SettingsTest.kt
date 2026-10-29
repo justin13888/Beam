@@ -36,9 +36,15 @@ class SettingsTest {
 
     private fun viewModel(
         preferences: FakePreferencesRepository = FakePreferencesRepository(),
-        servers: FakeServerRepository = FakeServerRepository(),
+        servers: FakeServerRepository = signedIn(),
         sessions: FakeSessionRepository = FakeSessionRepository(),
     ) = SettingsViewModel(preferences, servers, sessions)
+
+    /**
+     * One signed-in server, already restored: settings is reached only past
+     * sign-in, by when the shell has read the registry.
+     */
+    private fun signedIn() = FakeServerRepository(listOf(Fixtures.server()), restored = true)
 
     @Test
     fun `preferences are shown and changes are written through`() =
@@ -84,7 +90,7 @@ class SettingsTest {
     @Test
     fun `trusted certificates are listed for the active server`() =
         runTest {
-            val servers = FakeServerRepository()
+            val servers = signedIn()
             val active = servers.restore().first { it.isActive }
             servers.trustCertificate(active.id, "AA:BB:CC")
 
@@ -99,7 +105,7 @@ class SettingsTest {
         runTest {
             // A trust decision made once, possibly hastily, has to be reversible
             // without reinstalling the app.
-            val servers = FakeServerRepository()
+            val servers = signedIn()
             val active = servers.restore().first { it.isActive }
             servers.trustCertificate(active.id, "AA:BB:CC")
 
@@ -199,6 +205,7 @@ class SettingsTest {
                     state = SessionState.LoggedOut,
                 ),
             ),
+            restored = true,
         )
 
     @Test
@@ -208,7 +215,7 @@ class SettingsTest {
             testScheduler.advanceUntilIdle()
 
             val listed = model.state.value.servers
-            assertEquals(listOf("home", "cabin", "office"), listed.map { it.id })
+            assertEquals("in the core's order, by name", listOf("cabin", "home", "office"), listed.map { it.id })
             assertEquals("home", listed.single { it.isActive }.id)
         }
 
@@ -245,12 +252,17 @@ class SettingsTest {
     @Test
     fun `choosing the server already in use changes nothing`() =
         runTest {
-            val model = viewModel(servers = knownServers())
+            val servers = knownServers()
+            val model = viewModel(servers = servers)
             testScheduler.advanceUntilIdle()
 
             model.switchServer("home")
             testScheduler.advanceUntilIdle()
 
+            // Selecting the active server again would be invisible in the
+            // registry, so what is asserted is that the core was not asked.
+            assertEquals("the core is not asked to select it again", emptyList<String>(), servers.selectCalls)
+            assertEquals("home", servers.activeServer()?.id)
             assertFalse(model.state.value.hasSwitchedServer)
             assertFalse(model.state.value.isSignedOut)
         }

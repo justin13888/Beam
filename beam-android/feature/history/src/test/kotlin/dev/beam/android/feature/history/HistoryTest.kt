@@ -31,12 +31,27 @@ class HistoryTest {
     @Test
     fun `history is listed`() =
         runTest {
-            val viewModel = HistoryViewModel(FakePlaybackRepository())
+            val playback =
+                FakePlaybackRepository().apply {
+                    historyPage =
+                        HistoryPage(
+                            listOf(
+                                Fixtures.historyEntry(mediaId = "newest"),
+                                Fixtures.historyEntry(mediaId = "older", completed = false),
+                            ),
+                            2uL,
+                            endCursor = "c1",
+                            hasNextPage = false,
+                        )
+                }
+            val viewModel = HistoryViewModel(playback)
             testScheduler.advanceUntilIdle()
 
-            assertTrue(
+            assertEquals(
+                "the server's rows, in the server's order",
+                listOf("newest", "older"),
                 viewModel.state.value.entries
-                    .isNotEmpty(),
+                    .map { it.mediaId },
             )
         }
 
