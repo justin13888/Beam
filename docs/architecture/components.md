@@ -314,13 +314,19 @@ which does not cross-compile to Android.
   host, and it has not expired.
 - **`transport.rs`** — attaches the `beam_session` cookie below the generated code, as a spargen
   middleware, and notices a mid-session 401 in one place rather than at every call site.
-- **`progress.rs`, `paging.rs`, `session.rs`, `servers.rs`, `catalog.rs`** — the 15-second
+- **`progress/`, `paging.rs`, `session.rs`, `servers.rs`, `catalog/`** — the 15-second
   progress throttle with a durable retry queue, Relay cursor state, the auth state machine, the
-  multi-server registry, and the mapping from generated wire types to the vocabulary a UI renders.
+  multi-server registry, and the mapping from generated wire types to the vocabulary a UI renders
+  (`catalog/{media,library,watching,admin}.rs`, one file per API resource).
   Which episode plays next is the server's `next_episode_id`, not worked out in the core, and a
   continue-watching or history row is drawn from its own display fields with no lookup per row.
 
-**Testing:** 152 tests, all pure or against an `InMemoryKeyValueStore`. Certificates in the TLS
+- **`ffi/`** — the UniFFI surface, a façade over the modules above. `BeamClient` lives in
+  `ffi/mod.rs` with the server registry, sign-in and the shared request plumbing; each resource
+  has its own exported `impl` block in `ffi/{playback,catalog,progress,telemetry,admin}.rs`. The
+  failures every request can have are documented once, on `BeamClient`.
+
+**Testing:** all pure or against an `InMemoryKeyValueStore`. Certificates in the TLS
 tests are generated with `rcgen` rather than hand-built, so they cannot disagree with reality.
 
 ## Android client (`beam-android`)

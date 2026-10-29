@@ -15,8 +15,9 @@ use spargen::{OmitMethod, OmitRule};
 /// `stream_url` and `download_url`, `ServerRecord::absolute_url` resolves them
 /// against the origin, and the absolute URL is handed to Media3, which does its
 /// own HTTP so it can range-request and seek (see `servers.rs` and
-/// `ffi.rs::playback_config`). Generating a Rust method that buffers a 40 GiB
-/// response into memory would be generating something no caller may use.
+/// `playback_config` in `ffi/playback.rs`). Generating a Rust method that
+/// buffers a 40 GiB response into memory would be generating something no
+/// caller may use.
 ///
 /// So these are omitted because they are genuinely not part of this client's
 /// surface. They once also raised a spargen diagnostic -- E009 rejected the
@@ -38,7 +39,7 @@ const MEDIA_DELIVERY: [(OmitMethod, &str); 4] = [
 /// incrementally and size to the view. This crate's part is already done by
 /// `ServerRecord::absolute_url`, which turns the relative artwork path the
 /// catalog carries into the absolute URL the loader is handed (see
-/// `catalog.rs`). A generated method returning a `Vec<u8>` of a poster would
+/// `catalog/`). A generated method returning a `Vec<u8>` of a poster would
 /// be a method with no caller, for the same reason as the four above.
 ///
 /// These too once raised E009, because spargen could not classify a media type

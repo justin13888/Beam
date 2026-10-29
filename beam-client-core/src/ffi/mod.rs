@@ -1,10 +1,15 @@
 //! The surface Kotlin and Swift actually call.
 //!
 //! Everything here is a thin shell over the modules beside it. The logic lives
-//! in those modules, where it is testable as plain Rust; this file only
+//! in those modules, where it is testable as plain Rust; this module only
 //! marshals. Keeping the split strict is what stops UniFFI's generated
 //! scaffolding from dominating the crate's coverage, and it means a Kotlin
 //! integration test and a Rust unit test are exercising the same code.
+//!
+//! [`BeamClient`] is defined here with the server registry, sign-in and the
+//! plumbing every request shares. Each API resource adds its own exported
+//! `impl` block in a submodule: `playback`, `catalog`, `progress`, `telemetry`
+//! and `admin`.
 
 mod admin;
 mod catalog;

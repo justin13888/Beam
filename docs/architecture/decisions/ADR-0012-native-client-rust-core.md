@@ -62,7 +62,7 @@ so the OIDC provider cannot redirect to a custom scheme a native app could inter
 cookie jar is not readable by the app, which would leave the credential somewhere the app can never
 see it. Lifting the cookie out of a WebView is the only flow the server supports as it stands. The
 seam a native mint replaces it behind is `BeamClient::complete_login` in `beam-client-core`
-(`ffi.rs`) and the `SessionEvent` machine in `session.rs`: everything after "a credential was
+(`ffi/mod.rs`) and the `SessionEvent` machine in `session.rs`: everything after "a credential was
 obtained" is shared, so a new way of obtaining one does not touch the screens that use it. This
 falsifies NFR-601's claim that a native client needs no server changes; a corresponding NFR is
 added.
