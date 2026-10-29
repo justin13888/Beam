@@ -28,11 +28,11 @@ impl Clock for SystemClock {
     }
 }
 
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(test)]
 pub use test_clock::TestClock;
 
 #[mutants::skip]
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(test)]
 mod test_clock {
     use super::Clock;
     use std::sync::atomic::{AtomicI64, Ordering};

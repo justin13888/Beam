@@ -36,7 +36,7 @@ pub trait ByteSource: Send + Sync + std::fmt::Debug {
 }
 
 #[mutants::skip]
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(test)]
 mod in_memory {
     use super::{ByteSource, ByteSourceError};
     use std::sync::Mutex;
@@ -126,5 +126,5 @@ mod in_memory {
     }
 }
 
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(test)]
 pub use in_memory::InMemoryByteSource;

@@ -121,6 +121,7 @@ required-features = ["uniffi-bindgen"]
 
 [features]
 uniffi-bindgen = ["uniffi/cli"]
-# Exposes the in-memory fakes to other crates, matching the convention the
-# rest of the workspace already uses.
-test-utils = []
+# The name `mise run rust:mutants*` builds every workspace crate with
+# (`BEAM_MUTANTS_FEATURES`). Empty: this crate's doubles are `cfg(test)`, which
+# cargo-mutants already leaves alone, and nothing outside the crate uses them.
+mutation-testing = []

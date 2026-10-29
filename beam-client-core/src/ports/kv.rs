@@ -38,11 +38,11 @@ pub trait KeyValueStore: Send + Sync + std::fmt::Debug {
     async fn remove_secret(&self, key: String) -> Result<(), StorageError>;
 }
 
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(test)]
 pub use in_memory::{FailureMode, InMemoryKeyValueStore};
 
 #[mutants::skip]
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(test)]
 mod in_memory {
     use super::{KeyValueStore, StorageError};
     use std::collections::BTreeMap;

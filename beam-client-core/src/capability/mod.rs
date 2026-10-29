@@ -201,9 +201,10 @@ fn best_decoder(
 }
 
 // No `#[mutants::skip]` here: an attribute proc macro on a non-inline module
-// declaration is unstable ("non-inline modules in proc macro input"), so the
-// file is excluded by path in `.cargo/mutants.toml` instead.
-#[cfg(any(test, feature = "test-utils"))]
+// declaration is unstable ("non-inline modules in proc macro input"). The
+// literal `#[cfg(test)]` is what cargo-mutants skips, and the file is also
+// excluded by path in `.cargo/mutants.toml`.
+#[cfg(test)]
 pub mod builders;
 
 #[cfg(test)]

@@ -98,10 +98,10 @@ cap_lints = true
 # --- File filters -----------------------------------------------------------
 
 exclude_globs = [
-    # Test-data builders for the capability tests. Gated on
-    # `#[cfg(any(test, feature = "test-utils"))]` like the other doubles, but
-    # declared as a non-inline module -- and an attribute proc macro is
-    # unstable on `mod foo;`, so `#[mutants::skip]` cannot be written there.
+    # Test-data builders for the capability tests. Gated on `#[cfg(test)]`
+    # like the crate's other doubles, but declared as a non-inline module --
+    # and an attribute proc macro is unstable on `mod foo;`, so
+    # `#[mutants::skip]` cannot be written there.
     # Excluded by path rather than by name: a path names exactly one file and
     # cannot silently capture production code the way a name pattern can.
     "beam-client-core/src/capability/builders.rs",
