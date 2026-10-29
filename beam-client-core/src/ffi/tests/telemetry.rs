@@ -73,6 +73,33 @@ async fn telemetry_leaves_at_most_fifty_events_to_a_request() {
     );
 }
 
+/// Only the server's own telemetry-disabled problem switches telemetry off.
+/// Any other 409 is a refused batch: dropped, and the queue keeps accepting.
+#[tokio::test]
+async fn a_409_of_another_kind_drops_the_batch_without_disabling_telemetry() {
+    let (client, _backend) = telemetry_client(vec![(
+        409,
+        "application/problem+json",
+        r#"{"type":"about:blank","status":409}"#,
+    )])
+    .await;
+    client
+        .record_playback_rebuffer(telemetry_file(1), 2_000)
+        .expect("recorded");
+
+    let flush = client.flush_playback_telemetry().await.expect("flushed");
+
+    assert!(!flush.disabled);
+    assert_eq!((flush.sent, flush.dropped, flush.pending), (0, 1, 0));
+    assert_eq!(
+        client
+            .record_playback_start(telemetry_file(2), None)
+            .expect("accepted"),
+        1,
+        "the queue still takes events"
+    );
+}
+
 #[tokio::test]
 async fn a_409_stops_telemetry_for_the_rest_of_the_session() {
     let (client, backend) = telemetry_client(vec![(

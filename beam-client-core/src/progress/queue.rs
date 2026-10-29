@@ -314,14 +314,37 @@ mod tests {
         assert!(queue.is_empty().await.expect("is_empty"));
     }
 
+    /// The retention window is thirty days: a resume point from four weeks
+    /// ago is still sent, and one thirty days old is not.
+    #[tokio::test]
+    async fn the_retention_window_is_a_month() {
+        const DAY: i64 = 24 * 60 * 60;
+        let clock = Arc::new(TestClock::new(1_000));
+        let (queue, _storage) = queue(clock.clone());
+        queue
+            .enqueue(sample("weeks-old", 120.0, 1_000))
+            .await
+            .expect("enqueue");
+
+        clock.advance_secs(28 * DAY);
+        assert_eq!(queue.len().await.expect("len"), 1, "four weeks is kept");
+
+        clock.advance_secs(2 * DAY);
+        assert!(
+            queue.is_empty().await.expect("is_empty"),
+            "thirty days is dropped"
+        );
+    }
+
     #[tokio::test]
     async fn an_entry_is_retired_once_it_exhausts_its_attempts() {
         let clock = Arc::new(TestClock::new(1_000));
-        let (queue, _storage) = queue(clock.clone());
+        let (queue, storage) = queue(clock.clone());
         queue
             .enqueue(sample("f1", 120.0, 1_000))
             .await
             .expect("enqueue");
+        assert!(!queue.is_empty().await.expect("is_empty"));
 
         for _ in 0..MAX_ATTEMPTS {
             queue
@@ -334,6 +357,10 @@ mod tests {
         assert!(
             queue.is_empty().await.expect("is_empty"),
             "a permanently failing sample must not occupy the queue forever"
+        );
+        assert!(
+            !storage.has_plain("progress_queue/server-1"),
+            "nor the disk: retiring it is what empties the stored queue"
         );
     }
 
@@ -425,6 +452,30 @@ mod tests {
             loaded[0].file_id, "f10",
             "the ten oldest entries should have been evicted"
         );
+    }
+
+    /// An entry stored with its attempts already spent -- by a build that
+    /// persisted before retiring it -- is not sent again.
+    #[tokio::test]
+    async fn an_exhausted_entry_already_on_disk_is_not_resurrected() {
+        let clock = Arc::new(TestClock::new(1_000));
+        let storage = Arc::new(InMemoryKeyValueStore::new());
+        let mut spent = sample("spent", 1.0, 1_000);
+        spent.attempts = MAX_ATTEMPTS;
+        let fresh = sample("fresh", 1.0, 1_000);
+        storage
+            .put(
+                "progress_queue/server-1".to_owned(),
+                serde_json::to_string(&vec![spent, fresh]).expect("encodes"),
+            )
+            .await
+            .expect("put");
+        let queue = ProgressQueue::new(storage, clock, "server-1");
+
+        let loaded = queue.load().await.expect("load");
+
+        let ids: Vec<&str> = loaded.iter().map(|entry| entry.file_id.as_str()).collect();
+        assert_eq!(ids, vec!["fresh"]);
     }
 
     #[tokio::test]

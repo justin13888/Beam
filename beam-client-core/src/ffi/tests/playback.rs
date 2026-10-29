@@ -481,6 +481,10 @@ fn the_rebuffer_monitor_carries_the_detectors_verdict_across_calls() {
     assert!(!monitor.stall_ended(11_000));
     assert!(monitor.stall_started(20_000), "the third stall in a minute");
     assert!(monitor.poll(20_500));
+    assert!(
+        monitor.stall_ended(21_000),
+        "the verdict stands once the stall ends"
+    );
 
     monitor.reset();
     assert!(!monitor.poll(21_000));
