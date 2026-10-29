@@ -22,7 +22,8 @@ use beam_domain::repositories::{
     MovieRepository,
 };
 use beam_domain::services::TestClock;
-use beam_domain::utils::telemetry::{CountBucket, GIB};
+use beam_domain::test_utils::create_media_file;
+use beam_domain::utils::telemetry::CountBucket;
 use chrono::{TimeZone, Utc};
 use kynos::http::StatusCode;
 use kynos::test::TestClient;
@@ -75,19 +76,9 @@ async fn seeded_store() -> InMemoryLibraryShapeRepository {
     let file = store
         .files
         .create(CreateMediaFile {
-            library_id: library.id,
-            path: PathBuf::from("/m/secret-path/SECRET-NAME (1999).mkv"),
-            hash: 0xdead_beef,
-            size_bytes: 2 * GIB,
-            mtime: None,
-            identity: None,
-            mime_type: Some("video/x-matroska".to_string()),
-            duration: None,
-            container_format: Some("matroska,webm".to_string()),
             content: Some(MediaFileContent::movie(entry.id)),
             status: FileStatus::Known,
-            classifier_version: 0,
-            container_tags: None,
+            ..create_media_file(library.id, "/m/secret-path/SECRET-NAME (1999).mkv")
         })
         .await
         .unwrap();

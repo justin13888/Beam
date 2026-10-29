@@ -162,19 +162,13 @@ impl Harness {
         std::fs::write(&path, b"not really a film").unwrap();
         self.files
             .create(CreateMediaFile {
-                library_id: self.library.id,
-                path,
                 hash,
+                // The bytes written above.
                 size_bytes: 17,
-                mtime: None,
-                identity: None,
-                mime_type: Some("video/x-matroska".into()),
                 duration: Some(Duration::from_secs(7_200)),
-                container_format: Some("matroska".into()),
                 content: Some(MediaFileContent::movie(Uuid::new_v4())),
                 status: FileStatus::Known,
-                classifier_version: 0,
-                container_tags: None,
+                ..beam_domain::test_utils::create_media_file(self.library.id, path)
             })
             .await
             .unwrap()

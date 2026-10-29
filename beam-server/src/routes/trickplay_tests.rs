@@ -16,6 +16,7 @@ use beam_domain::repositories::TrickplayRepository;
 use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
 use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
 use beam_domain::repositories::trickplay::in_memory::InMemoryTrickplayRepository;
+use beam_domain::test_utils::media_file;
 use kynos::http::StatusCode;
 use kynos::prelude::*;
 use kynos::test::TestClient;
@@ -130,23 +131,11 @@ impl Fixture {
     /// A present video file row hashed `hash`.
     fn video(&self, hash: u64) -> MediaFile {
         let file = MediaFile {
-            id: Uuid::new_v4(),
-            library_id: Uuid::new_v4(),
-            path: PathBuf::from("/videos/Movie.mkv"),
             hash,
-            size_bytes: 1,
-            mtime: None,
-            mime_type: None,
             duration: Some(std::time::Duration::from_secs(7_200)),
-            container_format: None,
             content: Some(MediaFileContent::movie(Uuid::new_v4())),
             status: FileStatus::Known,
-            scanned_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-            missing_since: None,
-            classifier_version: 0,
-            container_tags: None,
-            identity: None,
+            ..media_file(Uuid::new_v4(), "/videos/Movie.mkv")
         };
         self.files
             .files

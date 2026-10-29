@@ -69,25 +69,12 @@ mod tests {
     }
 
     fn make_media_file(library_id: Uuid, content: MediaFileContent) -> MediaFile {
-        use std::path::PathBuf;
         MediaFile {
-            id: Uuid::new_v4(),
-            library_id,
-            path: PathBuf::from("/media/test.mp4"),
-            hash: 0,
             size_bytes: 1024,
-            mtime: None,
-            identity: None,
-            mime_type: Some("video/mp4".to_string()),
             duration: Some(Duration::from_secs(7200)),
-            container_format: Some("mp4".to_string()),
             content: Some(content),
             status: beam_domain::models::FileStatus::Known,
-            classifier_version: 0,
-            container_tags: None,
-            scanned_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-            missing_since: None,
+            ..beam_domain::test_utils::media_file(library_id, "/media/test.mp4")
         }
     }
 

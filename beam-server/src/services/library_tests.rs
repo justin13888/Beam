@@ -10,6 +10,7 @@ mod tests {
     use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
     use beam_domain::repositories::library::MockLibraryRepository;
     use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
+    use beam_domain::test_utils::{library, media_file};
     use beam_index::services::index::{IndexError, MockIndexService};
     use beam_index::services::scan::{ScanCoordinator, ScanTrigger, StoppedScan};
     use sea_orm::DbErr;
@@ -64,36 +65,18 @@ mod tests {
     fn make_domain_library(id: Uuid, name: &str) -> DomainLibrary {
         DomainLibrary {
             id,
-            name: name.to_string(),
             root_path: PathBuf::from("/media/videos"),
-            description: None,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-            last_scan_started_at: None,
-            last_scan_finished_at: None,
-            last_scan_file_count: None,
+            ..library(name)
         }
     }
 
     fn make_media_file(id: Uuid, library_id: Uuid) -> MediaFile {
         MediaFile {
             id,
-            library_id,
-            path: PathBuf::from("/media/videos/test.mp4"),
-            hash: 0,
-            size_bytes: 1024,
-            mtime: None,
-            identity: None,
             mime_type: Some("video/mp4".to_string()),
-            duration: None,
             container_format: Some("mp4".to_string()),
-            content: None,
             status: FileStatus::Known,
-            classifier_version: 0,
-            container_tags: None,
-            scanned_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-            missing_since: None,
+            ..media_file(library_id, "/media/videos/test.mp4")
         }
     }
 
