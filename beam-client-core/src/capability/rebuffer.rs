@@ -104,9 +104,10 @@ impl RebufferDetector {
         self.evaluate(now_ms)
     }
 
-    /// Whether rebuffering has been judged sustained.
-    #[must_use]
-    pub const fn is_sustained(&self) -> bool {
+    /// Whether rebuffering has been judged sustained. Tests only: every
+    /// production caller reads the verdict each event returns.
+    #[cfg(test)]
+    const fn is_sustained(&self) -> bool {
         self.sustained
     }
 

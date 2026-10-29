@@ -1243,23 +1243,6 @@ async fn forgetting_certificates_keeps_the_session_on_the_rebuilt_client() {
     assert!(client.trusted_certificates(id).expect("known").is_empty());
 }
 
-/// A certificate to drive the machine into `Untrusted` with. Never
-/// verified against anything; the state is what the test is about.
-fn certificate() -> crate::trust::CertificateDetails {
-    crate::trust::CertificateDetails {
-        sha256_fingerprint: "AA:BB".to_owned(),
-        spki_sha256_base64: "c3BraQ==".to_owned(),
-        subject: "CN=beam.test".to_owned(),
-        issuer: "CN=beam.test".to_owned(),
-        not_before_unix: 0,
-        not_after_unix: i64::MAX,
-        subject_alt_names: vec!["beam.test".to_owned()],
-        serial_hex: "01".to_owned(),
-        is_self_signed: true,
-        is_expired: false,
-    }
-}
-
 /// A 401 observed outside `Authenticated` must withdraw nothing and delete
 /// nothing.
 ///
@@ -1275,7 +1258,6 @@ async fn a_401_outside_an_authenticated_session_withdraws_nothing() {
         SessionEvent::LoginStarted,
         SessionEvent::LogoutRequested,
         SessionEvent::UnauthorizedObserved,
-        SessionEvent::CertificateRejected(Box::new(certificate())),
     ] {
         let storage = Arc::new(InMemoryKeyValueStore::new());
         let (client, id, _) = signed_in_client_over(Arc::clone(&storage)).await;

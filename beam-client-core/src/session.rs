@@ -21,8 +21,6 @@
 //! [ADR-0003]: ../../../docs/architecture/decisions/ADR-0003-oidc-bff-auth.md
 //! [ADR-0017]: ../../../docs/architecture/decisions/ADR-0017-device-authorization-grant.md
 
-use crate::trust::CertificateDetails;
-
 /// Who is signed in to one server.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct UserSummary {
@@ -99,11 +97,6 @@ pub enum SessionState {
     },
     /// A credential existed and the server has since rejected it.
     Expired,
-    /// The server's certificate is not trusted and the user has not decided.
-    Untrusted {
-        /// What to show in the trust prompt.
-        details: CertificateDetails,
-    },
 }
 
 /// Something that happened to a session.
@@ -120,10 +113,6 @@ pub enum SessionEvent {
     IdentityRejected,
     /// Any request observed a 401 with a session in place.
     UnauthorizedObserved,
-    /// A handshake failed certificate verification.
-    CertificateRejected(Box<CertificateDetails>),
-    /// The user accepted a certificate.
-    CertificateTrusted,
     /// The user signed out.
     LogoutRequested,
     /// A stored cookie was found at startup, with the identity the server
@@ -166,7 +155,7 @@ pub fn transition(state: &SessionState, event: SessionEvent) -> (SessionState, V
 
     match (state, event) {
         // Starting a login is valid from anywhere: the user may be retrying
-        // after an expiry, a rejection, or a certificate refusal.
+        // after an expiry or a rejection.
         (_, Event::LoginStarted) => (State::AwaitingLogin, vec![Effect::NotifyObserver]),
 
         (State::AwaitingLogin, Event::CookieCaptured) => (
@@ -205,17 +194,6 @@ pub fn transition(state: &SessionState, event: SessionEvent) -> (SessionState, V
             ],
         ),
 
-        (_, Event::CertificateRejected(details)) => (
-            State::Untrusted { details: *details },
-            vec![Effect::NotifyObserver],
-        ),
-
-        // Accepting a certificate resumes whatever was interrupted, which is
-        // a fresh login attempt rather than an assumed-good session.
-        (State::Untrusted { .. }, Event::CertificateTrusted) => {
-            (State::LoggedOut, vec![Effect::NotifyObserver])
-        }
-
         (_, Event::LogoutRequested) => (
             State::LoggedOut,
             vec![
@@ -249,21 +227,6 @@ mod tests {
             email: Some("viewer@beam.localhost".to_owned()),
             is_admin: false,
             avatar_url: None,
-        }
-    }
-
-    fn certificate() -> CertificateDetails {
-        CertificateDetails {
-            sha256_fingerprint: "AA:BB".to_owned(),
-            spki_sha256_base64: "c3BraQ==".to_owned(),
-            subject: "CN=beam.local".to_owned(),
-            issuer: "CN=beam.local".to_owned(),
-            not_before_unix: 0,
-            not_after_unix: i64::MAX,
-            subject_alt_names: vec!["beam.local".to_owned()],
-            serial_hex: "01".to_owned(),
-            is_self_signed: true,
-            is_expired: false,
         }
     }
 
@@ -338,33 +301,6 @@ mod tests {
     }
 
     #[test]
-    fn an_untrusted_certificate_is_reachable_from_any_state() {
-        for start in [
-            SessionState::LoggedOut,
-            SessionState::AwaitingLogin,
-            SessionState::Authenticated { user: user() },
-            SessionState::Expired,
-        ] {
-            let (state, _) = transition(
-                &start,
-                SessionEvent::CertificateRejected(Box::new(certificate())),
-            );
-            assert!(matches!(state, SessionState::Untrusted { .. }));
-        }
-    }
-
-    #[test]
-    fn trusting_a_certificate_returns_to_logged_out_not_authenticated() {
-        // Accepting a certificate says nothing about who the user is; it only
-        // unblocks the connection so a login can be attempted.
-        let untrusted = SessionState::Untrusted {
-            details: certificate(),
-        };
-        let (state, _) = transition(&untrusted, SessionEvent::CertificateTrusted);
-        assert_eq!(state, SessionState::LoggedOut);
-    }
-
-    #[test]
     fn a_stored_session_is_restored_optimistically_without_a_round_trip() {
         // Avoids a blocking /me on every cold start; the first real request
         // either confirms it or drives Expired.
@@ -387,9 +323,6 @@ mod tests {
             SessionState::AwaitingLogin,
             SessionState::Authenticated { user: user() },
             SessionState::Expired,
-            SessionState::Untrusted {
-                details: certificate(),
-            },
         ] {
             let (state, _) = transition(&start, SessionEvent::LoginStarted);
             assert_eq!(state, SessionState::AwaitingLogin);
@@ -426,9 +359,6 @@ mod tests {
             SessionState::AwaitingLogin,
             SessionState::Authenticated { user: user() },
             SessionState::Expired,
-            SessionState::Untrusted {
-                details: certificate(),
-            },
         ];
         let events = [
             SessionEvent::LoginStarted,
@@ -436,8 +366,6 @@ mod tests {
             SessionEvent::IdentityConfirmed(Box::new(user())),
             SessionEvent::IdentityRejected,
             SessionEvent::UnauthorizedObserved,
-            SessionEvent::CertificateRejected(Box::new(certificate())),
-            SessionEvent::CertificateTrusted,
             SessionEvent::LogoutRequested,
             SessionEvent::StoredSessionRestored(Box::new(user())),
         ];
@@ -468,7 +396,6 @@ mod tests {
                 // left on the client.
                 if matches!(next, SessionState::Expired | SessionState::LoggedOut)
                     && !matches!(state, SessionState::Expired | SessionState::LoggedOut)
-                    && !matches!(event, SessionEvent::CertificateTrusted)
                 {
                     assert!(
                         effects.contains(&SessionEffect::InstallCookie(false)),
