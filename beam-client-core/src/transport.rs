@@ -431,12 +431,78 @@ fn retry_after_secs(headers: &reqwest::header::HeaderMap) -> Option<u64> {
 }
 
 #[cfg(test)]
-pub(crate) use canned::{CannedBackend, RecordedRequest, SilentBackend};
+pub(crate) use canned::{CannedAnswer, CannedBackend, RecordedRequest, SilentBackend};
 
 #[mutants::skip]
 #[cfg(test)]
 mod canned {
     use std::sync::Mutex;
+
+    /// One thing a [`CannedBackend`] can say to a request.
+    #[derive(Debug, Clone)]
+    pub(crate) enum CannedAnswer {
+        /// A response, with whatever headers beyond `content-type` it carries.
+        Respond {
+            status: u16,
+            content_type: &'static str,
+            body: &'static str,
+            headers: Vec<(&'static str, &'static str)>,
+        },
+        /// No response at all: the connection failed before one arrived.
+        Unreachable,
+    }
+
+    impl CannedAnswer {
+        /// A response with this status, content type and body, and no other
+        /// headers.
+        pub(crate) fn respond(status: u16, content_type: &'static str, body: &'static str) -> Self {
+            Self::Respond {
+                status,
+                content_type,
+                body,
+                headers: Vec::new(),
+            }
+        }
+
+        /// The same answer, carrying one more response header.
+        pub(crate) fn with_header(self, name: &'static str, value: &'static str) -> Self {
+            match self {
+                Self::Respond {
+                    status,
+                    content_type,
+                    body,
+                    mut headers,
+                } => {
+                    headers.push((name, value));
+                    Self::Respond {
+                        status,
+                        content_type,
+                        body,
+                        headers,
+                    }
+                }
+                Self::Unreachable => panic!("an unreachable server sends no headers"),
+            }
+        }
+    }
+
+    /// A `reqwest::Error` of the kind a refused connection produces, as far
+    /// as the generated client's `Error::from_reqwest` can tell.
+    ///
+    /// reqwest offers no constructor for a connect error, and making a real one
+    /// needs a socket. `from_reqwest` files every error that is not a timeout,
+    /// a redirect, a decode or a request-construction error under `Transport`,
+    /// which is what a refused connection is filed under too, so the status
+    /// check on a hand-built response stands in for it.
+    fn a_connection_failure() -> reqwest::Error {
+        let response = ::http::Response::builder()
+            .status(502)
+            .body(String::new())
+            .expect("a response builds");
+        reqwest::Response::from(response)
+            .error_for_status()
+            .expect_err("a 502 is an error status")
+    }
 
     /// A backend that answers every request with one canned response, and
     /// keeps what each request looked like when it arrived.
@@ -448,7 +514,7 @@ mod canned {
     #[derive(Debug)]
     pub(crate) struct CannedBackend {
         /// The answers still to give, in order. The last one repeats.
-        answers: Mutex<Vec<(u16, &'static str, &'static str)>>,
+        answers: Mutex<Vec<CannedAnswer>>,
         recorded: Mutex<Vec<RecordedRequest>>,
     }
 
@@ -475,11 +541,29 @@ mod canned {
         /// A backend answering successive requests with successive
         /// `(status, content type, body)` triples, the last repeating.
         pub(crate) fn answering_in_turn(answers: Vec<(u16, &'static str, &'static str)>) -> Self {
+            Self::saying(
+                answers
+                    .into_iter()
+                    .map(|(status, content_type, body)| {
+                        CannedAnswer::respond(status, content_type, body)
+                    })
+                    .collect(),
+            )
+        }
+
+        /// A backend giving successive requests successive answers, the last
+        /// repeating -- where an answer needs a header or is no answer at all.
+        pub(crate) fn saying(answers: Vec<CannedAnswer>) -> Self {
             assert!(!answers.is_empty(), "a backend needs something to say");
             Self {
                 answers: Mutex::new(answers),
                 recorded: Mutex::new(Vec::new()),
             }
+        }
+
+        /// A backend whose server can never be reached.
+        pub(crate) fn unreachable() -> Self {
+            Self::saying(vec![CannedAnswer::Unreachable])
         }
 
         /// Every request that reached this backend, in order.
@@ -503,17 +587,31 @@ mod canned {
                         .map(<[u8]>::to_vec)
                         .unwrap_or_default(),
                 });
-            let (status, content_type, body) = {
+            let answer = {
                 let mut answers = self.answers.lock().expect("canned answers");
                 if answers.len() > 1 {
                     answers.remove(0)
                 } else {
-                    answers[0]
+                    answers[0].clone()
                 }
             };
-            let response = ::http::Response::builder()
+            let CannedAnswer::Respond {
+                status,
+                content_type,
+                body,
+                headers,
+            } = answer
+            else {
+                let failure = crate::api::TransportError::new(a_connection_failure());
+                return Box::pin(async move { Err(failure) });
+            };
+            let mut response = ::http::Response::builder()
                 .status(status)
-                .header("content-type", content_type)
+                .header("content-type", content_type);
+            for (name, value) in headers {
+                response = response.header(name, value);
+            }
+            let response = response
                 .body(body.to_owned())
                 .expect("a canned response is well-formed");
             Box::pin(async move { Ok(reqwest::Response::from(response)) })
