@@ -30,8 +30,8 @@ pub enum ProgressOutcome {
         /// The position the server now holds.
         position_secs: f64,
     },
-    /// Held back by the throttle. The position is remembered, so the next
-    /// eligible report carries the newest value rather than this one.
+    /// Held back by the throttle. The next eligible report carries its own,
+    /// newer position rather than this one.
     Throttled {
         /// Seconds until a report for this file would be sent.
         next_eligible_in_secs: u64,
@@ -48,10 +48,13 @@ pub enum ProgressOutcome {
     },
 }
 
-/// A pending position for one file, superseded by any newer one.
+/// What a held sample for one file still contributes to the next send,
+/// superseded by any newer one.
+///
+/// Only the duration: the next send's own position is newer than any held
+/// one, so a held position is never sent.
 #[derive(Debug, Clone, Copy)]
 struct Pending {
-    position_secs: f64,
     duration_secs: Option<f64>,
 }
 
@@ -73,13 +76,14 @@ pub struct ProgressThrottle {
 pub enum ThrottleDecision {
     /// Send this position.
     Send {
-        /// The position to send, which may be newer than the one offered if a
-        /// throttled sample was coalesced in the meantime.
+        /// The position to send: always the one just offered, which is the
+        /// newest, even where a held sample was further along.
         position_secs: f64,
-        /// The duration to send alongside it.
+        /// The duration to send alongside it: the offered one, or a held
+        /// sample's where the offered one is unknown.
         duration_secs: Option<f64>,
     },
-    /// Hold back; the position has been remembered.
+    /// Hold back; the duration has been remembered for the next send.
     Hold {
         /// Seconds until this file becomes eligible.
         next_eligible_in_secs: u64,
@@ -127,15 +131,16 @@ impl ProgressThrottle {
         let elapsed_enough = last.is_none_or(|last_sent| now - last_sent >= self.interval_secs);
 
         if force || elapsed_enough {
-            // A coalesced sample may be newer than the one just offered; the
-            // throttle exists to reduce request count, not to lose progress.
+            // The sample being offered is the newest one, so its position wins
+            // over anything held back -- even a smaller one. A smaller position
+            // is a seek backward, which is the viewer's intent; preferring the
+            // larger held one sent a stale resume point after every rewind.
+            // The server's monotonic `Played` rule already protects watched
+            // state, so nothing here needs to. A held sample still contributes
+            // the duration where the newest one does not know it.
             let coalesced = self.pending.lock().expect("pending lock").remove(file_id);
-            let (position_secs, duration_secs) = match coalesced {
-                Some(held) if held.position_secs > position_secs => {
-                    (held.position_secs, held.duration_secs.or(duration_secs))
-                }
-                _ => (position_secs, duration_secs),
-            };
+            let duration_secs =
+                duration_secs.or_else(|| coalesced.and_then(|held| held.duration_secs));
             self.last_sent
                 .lock()
                 .expect("last_sent lock")
@@ -146,13 +151,10 @@ impl ProgressThrottle {
             };
         }
 
-        self.pending.lock().expect("pending lock").insert(
-            file_id.to_owned(),
-            Pending {
-                position_secs,
-                duration_secs,
-            },
-        );
+        self.pending
+            .lock()
+            .expect("pending lock")
+            .insert(file_id.to_owned(), Pending { duration_secs });
         let wait = last.map_or(0, |last_sent| self.interval_secs - (now - last_sent));
         ThrottleDecision::Hold {
             next_eligible_in_secs: u64::try_from(wait.max(0)).unwrap_or(0),
@@ -234,9 +236,10 @@ mod tests {
     }
 
     #[test]
-    fn a_held_position_is_coalesced_into_the_next_send() {
-        // The throttle exists to cut request count, not to lose progress: the
-        // newest position held back must be the one that eventually lands.
+    fn a_forced_report_after_seeking_back_sends_the_new_position() {
+        // The viewer watched to 20s, then rewound to 12s and paused. The
+        // forced report must carry 12s: sending the larger held 20s would
+        // put the resume point somewhere the viewer deliberately left.
         let clock = Arc::new(TestClock::new(1_000));
         let throttle = throttle(&clock);
         throttle.decide("f1", 10.0, Some(7200.0), false);
@@ -246,14 +249,51 @@ mod tests {
         clock.advance_secs(5);
         throttle.decide("f1", 20.0, Some(7200.0), false);
 
-        clock.advance_secs(5);
-        // The caller offers a stale position; the coalesced newer one wins.
-        match throttle.decide("f1", 12.0, None, false) {
-            ThrottleDecision::Send { position_secs, .. } => {
-                assert!((position_secs - 20.0).abs() < f64::EPSILON);
+        clock.advance_secs(1);
+        assert_eq!(
+            throttle.decide("f1", 12.0, Some(7200.0), true),
+            ThrottleDecision::Send {
+                position_secs: 12.0,
+                duration_secs: Some(7200.0),
             }
-            other => panic!("expected a send, got {other:?}"),
-        }
+        );
+    }
+
+    #[test]
+    fn a_held_duration_fills_a_send_that_does_not_know_one() {
+        // A player that has lost the duration (a track change mid-report)
+        // still reports the one an earlier, held sample carried.
+        let clock = Arc::new(TestClock::new(1_000));
+        let throttle = throttle(&clock);
+        throttle.decide("f1", 10.0, Some(7200.0), false);
+        clock.advance_secs(5);
+        throttle.decide("f1", 15.0, Some(7200.0), false);
+
+        clock.advance_secs(REPORT_INTERVAL_SECS);
+        assert_eq!(
+            throttle.decide("f1", 30.0, None, false),
+            ThrottleDecision::Send {
+                position_secs: 30.0,
+                duration_secs: Some(7200.0),
+            }
+        );
+    }
+
+    #[test]
+    fn a_send_s_own_duration_wins_over_a_held_one() {
+        let clock = Arc::new(TestClock::new(1_000));
+        let throttle = throttle(&clock);
+        throttle.decide("f1", 10.0, Some(7200.0), false);
+        clock.advance_secs(5);
+        throttle.decide("f1", 15.0, Some(7200.0), false);
+
+        assert_eq!(
+            throttle.decide("f1", 16.0, Some(3600.0), true),
+            ThrottleDecision::Send {
+                position_secs: 16.0,
+                duration_secs: Some(3600.0),
+            }
+        );
     }
 
     #[test]
@@ -276,17 +316,18 @@ mod tests {
         let throttle = throttle(&clock);
         throttle.decide("f1", 10.0, None, false);
         clock.advance_secs(1);
-        throttle.decide("f1", 11.0, None, false);
+        throttle.decide("f1", 11.0, Some(7200.0), false);
 
         throttle.reset("f1");
-        match throttle.decide("f1", 5.0, None, false) {
-            ThrottleDecision::Send { position_secs, .. } => {
-                assert!(
-                    (position_secs - 5.0).abs() < f64::EPSILON,
-                    "the held 11s sample should have been discarded"
-                );
-            }
-            other => panic!("expected a send, got {other:?}"),
-        }
+        // Sent at once although the interval has not elapsed, and without the
+        // held sample's duration: both belonged to the playback that ended.
+        assert_eq!(
+            throttle.decide("f1", 5.0, None, false),
+            ThrottleDecision::Send {
+                position_secs: 5.0,
+                duration_secs: None,
+            },
+            "the held 11s sample should have been discarded"
+        );
     }
 }
