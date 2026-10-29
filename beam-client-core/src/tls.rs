@@ -54,8 +54,8 @@ pub fn install_crypto_provider() {
 ///
 /// Shared between the verifier and the client that owns it, so trusting a
 /// certificate takes effect on the next handshake without rebuilding the
-/// `reqwest::Client` -- which would discard the connection pool that Media3's
-/// neighbouring range requests depend on.
+/// `reqwest::Client` -- which would discard the connection pool the core's
+/// API calls reuse.
 #[derive(Debug, Default)]
 pub struct TrustDecision {
     trusted: RwLock<Vec<String>>,

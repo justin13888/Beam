@@ -258,6 +258,23 @@ impl std::fmt::Debug for ServerContext {
 }
 
 /// The core, as the foreign side holds it.
+///
+/// # Request failures
+///
+/// Every operation that sends a request can fail the way any request can.
+/// Those failures are listed once, here, and each operation's own `# Errors`
+/// names only what it adds:
+///
+/// - [`BeamError::Network`] when no response arrived;
+/// - [`BeamError::UntrustedCertificate`] when the handshake met a certificate
+///   the user has not accepted;
+/// - [`BeamError::Protocol`] when the response did not match the contract the
+///   client was generated from;
+/// - [`BeamError::Unauthenticated`] when there is no session, and
+///   [`BeamError::SessionExpired`] when the server rejected the one there was;
+/// - whatever the server answered: [`BeamError::BadRequest`],
+///   [`BeamError::Forbidden`], [`BeamError::NotFound`],
+///   [`BeamError::RateLimited`] or [`BeamError::Server`].
 #[derive(Debug, uniffi::Object)]
 pub struct BeamClient {
     storage: Arc<dyn KeyValueStore>,
@@ -309,7 +326,10 @@ impl BeamClient {
     ///
     /// # Errors
     ///
-    /// Returns [`BeamError::Storage`] when the registry cannot be read.
+    /// Returns [`BeamError::Storage`] when the registry or a stored session
+    /// cannot be read, [`BeamError::InvalidServerUrl`] for a stored origin the
+    /// HTTP client refuses, and [`BeamError::Network`], not retryable, when a
+    /// server's HTTP client cannot be built.
     pub async fn restore(&self) -> Result<Vec<ServerSummary>, BeamError> {
         let ids: Vec<String> = match self.storage.get(SERVER_INDEX_KEY.to_owned()).await? {
             Some(raw) => serde_json::from_str(&raw).unwrap_or_default(),
@@ -362,8 +382,10 @@ impl BeamClient {
     ///
     /// # Errors
     ///
-    /// Returns [`BeamError::InvalidServerUrl`] for an unusable address, or
-    /// [`BeamError::Storage`] when the registry cannot be written.
+    /// Returns [`BeamError::InvalidServerUrl`] for an unusable address,
+    /// [`BeamError::Storage`] when the registry cannot be written, and
+    /// [`BeamError::Network`], not retryable, when the server's HTTP client
+    /// cannot be built.
     pub async fn add_server(
         &self,
         base_url: String,
@@ -389,11 +411,12 @@ impl BeamClient {
         self.summary(&id)
     }
 
-    /// Every known server.
+    /// Every known server, by display name.
     ///
     /// # Errors
     ///
-    /// Returns [`BeamError::Storage`] on an unreadable registry.
+    /// Never returns one: the registry is read from memory, which
+    /// [`Self::restore`] filled.
     pub fn list_servers(&self) -> Result<Vec<ServerSummary>, BeamError> {
         let servers = self.servers.read().expect("servers lock");
         let active = self.active.read().expect("active lock").clone();
@@ -415,7 +438,8 @@ impl BeamClient {
     ///
     /// # Errors
     ///
-    /// Returns [`BeamError::UnknownServer`] if it is not registered.
+    /// Returns [`BeamError::UnknownServer`] if it is not registered, and
+    /// [`BeamError::Storage`] when the choice cannot be persisted.
     pub async fn select_server(&self, server_id: String) -> Result<(), BeamError> {
         if !self
             .servers
@@ -479,12 +503,17 @@ impl BeamClient {
     ///
     /// # Errors
     ///
-    /// Returns [`BeamError::UnknownServer`] if the server is not registered.
+    /// Returns [`BeamError::UnknownServer`] if the server is not registered,
+    /// and [`BeamError::InvalidServerUrl`] when its stored origin cannot be
+    /// joined.
     pub fn login_url(&self, server_id: String) -> Result<String, BeamError> {
         let servers = self.servers.read().expect("servers lock");
         let context = servers
             .get(&server_id)
             .ok_or(BeamError::UnknownServer { server_id })?;
+        // Built by hand: the generated client cannot name an operation's URL
+        // without sending the request, and the in-app browser sends this one
+        // (getkono/spargen#1067).
         context.record.absolute_url("/v1/auth/login?redirect=/")
     }
 
@@ -492,7 +521,11 @@ impl BeamClient {
     ///
     /// # Errors
     ///
-    /// Returns [`BeamError::Unauthenticated`] when the server rejects it.
+    /// Returns [`BeamError::UnknownServer`] if the server is not registered,
+    /// [`BeamError::Unauthenticated`] when the server rejects the cookie or the
+    /// user signed out while it was being confirmed, [`BeamError::Storage`]
+    /// when the confirmed session cannot be stored, and the
+    /// [request failures](BeamClient#request-failures) of `GET /v1/me`.
     pub async fn complete_login(
         &self,
         server_id: String,
@@ -513,7 +546,9 @@ impl BeamClient {
     ///
     /// Returns [`BeamError::Server`] with status 501, not retryable, when the
     /// server's identity provider does not offer the grant -- the cue to fall
-    /// back to [`Self::login_url`] and [`Self::complete_login`].
+    /// back to [`Self::login_url`] and [`Self::complete_login`]. Otherwise
+    /// [`BeamError::UnknownServer`] if the server is not registered, and the
+    /// [request failures](BeamClient#request-failures).
     pub async fn start_device_login(
         &self,
         server_id: String,
@@ -544,7 +579,10 @@ impl BeamClient {
     /// Every error ends the flow except a retryable one: [`BeamError::Forbidden`]
     /// when the user refused (or the account is disabled),
     /// [`BeamError::Server`] with status 410 when the code expired, and
-    /// [`BeamError::BadRequest`] when the handle names no open flow.
+    /// [`BeamError::BadRequest`] when the handle names no open flow. Once
+    /// approved, it fails as [`Self::complete_login`] does. Otherwise
+    /// [`BeamError::UnknownServer`] if the server is not registered, and the
+    /// [request failures](BeamClient#request-failures).
     pub async fn poll_device_login(
         &self,
         server_id: String,
@@ -647,9 +685,10 @@ impl BeamClient {
     ///
     /// # Errors
     ///
-    /// Returns [`BeamError::Storage`] when the cookie cannot be cleared. A
-    /// failed remote revoke is deliberately not an error: a user who taps sign
-    /// out with no signal is still signed out on this device.
+    /// Returns [`BeamError::UnknownServer`] if the server is not registered,
+    /// and [`BeamError::Storage`] when the cookie cannot be cleared. A failed
+    /// remote revoke is deliberately not an error: a user who taps sign out
+    /// with no signal is still signed out on this device.
     pub async fn logout(&self, server_id: String) -> Result<(), BeamError> {
         // Read together, before the transition: `LogoutRequested` withdraws
         // the cookie, and the cookie is what names the session to revoke.
@@ -724,7 +763,10 @@ impl BeamClient {
     ///
     /// # Errors
     ///
-    /// Returns [`BeamError::UnknownServer`] when the server is not registered.
+    /// Returns [`BeamError::UnknownServer`] when the server is not registered,
+    /// [`BeamError::Storage`] when the withdrawal cannot be persisted, and
+    /// [`BeamError::Network`], not retryable, when the rebuilt HTTP client
+    /// cannot be built.
     pub async fn forget_certificates(&self, server_id: String) -> Result<(), BeamError> {
         let (record, cookie, state) = {
             let servers = self.servers.read().expect("servers lock");
@@ -761,7 +803,8 @@ impl BeamClient {
     ///
     /// # Errors
     ///
-    /// Propagates transport and server failures.
+    /// Returns [`BeamError::NoActiveServer`] when no server is selected, and
+    /// the [request failures](BeamClient#request-failures).
     pub async fn sessions(&self) -> Result<Vec<DeviceSession>, BeamError> {
         let (server_id, client, _) = self.active_context()?;
         let response = self.send(&server_id, client.list_sessions()).await?;
@@ -778,7 +821,9 @@ impl BeamClient {
     ///
     /// # Errors
     ///
-    /// Propagates transport and server failures.
+    /// Returns [`BeamError::NoActiveServer`] when no server is selected,
+    /// [`BeamError::BadRequest`] when `session_id` is not a UUID, and
+    /// the [request failures](BeamClient#request-failures).
     pub async fn revoke_session(&self, session_id: String) -> Result<(), BeamError> {
         let (server_id, client, _) = self.active_context()?;
         self.send(
@@ -797,7 +842,9 @@ impl BeamClient {
     ///
     /// # Errors
     ///
-    /// Propagates transport and server failures.
+    /// Returns [`BeamError::NoActiveServer`] when no server is selected,
+    /// [`BeamError::Storage`] when this device's cookie cannot be cleared
+    /// afterwards, and the [request failures](BeamClient#request-failures).
     pub async fn logout_everywhere(&self) -> Result<(), BeamError> {
         let (server_id, client, _) = self.active_context()?;
         self.send(&server_id, client.logout_all()).await?;
@@ -810,7 +857,8 @@ impl BeamClient {
     ///
     /// # Errors
     ///
-    /// Propagates transport failures.
+    /// Returns [`BeamError::NoActiveServer`] when no server is selected, and
+    /// the [request failures](BeamClient#request-failures).
     pub async fn health(&self) -> Result<ServerHealth, BeamError> {
         let (server_id, client, _) = self.active_context()?;
         let response = self.send(&server_id, client.get_health()).await?;
@@ -841,10 +889,12 @@ impl BeamClient {
     /// `state` is the session state the server starts in: what a cold start
     /// restored, `LoggedOut` for a newly added server, or the state carried
     /// across a rebuild of a server it already had. Deliberately only the
-    /// *state*: the queue is persisted under the server's own key and reloads
-    /// itself, and the throttle and the metadata cache are operational rather
-    /// than security-bearing, so rebuilding them costs a round trip and no
-    /// correctness.
+    /// *state*: the progress queue is persisted under the server's own key and
+    /// reloads itself, and the throttle is operational rather than
+    /// security-bearing, so rebuilding it costs at most one early report. The
+    /// playback telemetry queue is held in memory only, so a rebuild -- a
+    /// [`Self::forget_certificates`] -- drops the events not yet flushed;
+    /// telemetry is best-effort by design.
     fn install(
         &self,
         record: ServerRecord,
@@ -869,9 +919,10 @@ impl BeamClient {
                 retryable: false,
             })?;
         // The transport is handed straight to the client and kept only there:
-        // nothing rebuilds the client for a session change any more, so the
-        // connection pool and TLS session cache that Media3's neighbouring
-        // range requests benefit from outlive everything but a trust change.
+        // nothing rebuilds the client for a session change, so its connection
+        // pool and TLS session cache outlive everything but a trust change.
+        // They serve the core's own API calls; the platform player and
+        // downloads fetch media over their own HTTP stack.
         let transport: Arc<dyn crate::api::HttpBackend> = Arc::new(ReqwestBackend::new(http));
         let cookie = Arc::new(SessionCookie::new(cookie));
         let client = Self::client_over(transport, &middleware, &record.base_url, &cookie)?;
@@ -1150,19 +1201,14 @@ impl BeamClient {
             })
     }
 
-    /// Turn a generated transport error into the core taxonomy, and drive the
-    /// session machine when the server rejected our credential.
+    /// Name a failed request in the core's taxonomy.
     ///
-    /// `status` is the response's, where there was a response. Everything that
-    /// carried one is classified from it -- so a 404 is a `NotFound` a viewer
-    /// can be told about, and a 400 is not offered a retry. Only a failure that
-    /// never reached a response is a `Network`.
-    ///
-    /// This took `&error.to_string()` and returned `Network { retryable: true }`
-    /// for every one of them. `NotFound`, `Forbidden`, `BadRequest`, `Server`
-    /// and `RateLimited` were unreachable from the server, `is_retryable` said
-    /// "retry" for a 400, and the doc comments on the operations below promised
-    /// variants the code could not produce (issue #123).
+    /// A certificate the verifier turned away on this server is
+    /// [`BeamError::UntrustedCertificate`], whatever the transport said. A
+    /// failure that carried a response is classified from its status and
+    /// problem document by [`classify`] -- so a 404 is a `NotFound` a viewer
+    /// can be told about, and a 400 is not offered a retry. Only a failure
+    /// that never reached a response is a `Network`.
     ///
     /// Classification only: it drives no session and performs no effect. A 401
     /// is the session machine's business and is handled by [`Self::fail`],

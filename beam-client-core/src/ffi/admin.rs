@@ -18,7 +18,9 @@ impl BeamClient {
     ///
     /// # Errors
     ///
-    /// Returns [`BeamError::Forbidden`] for a non-administrator.
+    /// Returns [`BeamError::NoActiveServer`] when no server is selected,
+    /// [`BeamError::Forbidden`] for a non-administrator, and the
+    /// [request failures](BeamClient#request-failures).
     pub async fn admin_status(&self) -> Result<AdminStatus, BeamError> {
         let (server_id, client, _) = self.active_context()?;
         let response = self.send(&server_id, client.get_admin_status()).await?;
@@ -30,7 +32,9 @@ impl BeamClient {
     ///
     /// # Errors
     ///
-    /// Returns [`BeamError::Forbidden`] for a non-administrator.
+    /// Returns [`BeamError::NoActiveServer`] when no server is selected,
+    /// [`BeamError::Forbidden`] for a non-administrator, and the
+    /// [request failures](BeamClient#request-failures).
     pub async fn admin_users(
         &self,
         first: Option<u32>,
@@ -54,8 +58,10 @@ impl BeamClient {
     ///
     /// # Errors
     ///
-    /// Returns [`BeamError::BadRequest`] when `user_id` is not a UUID, and
-    /// [`BeamError::Forbidden`] for a non-administrator.
+    /// Returns [`BeamError::NoActiveServer`] when no server is selected,
+    /// [`BeamError::BadRequest`] when `user_id` is not a UUID,
+    /// [`BeamError::Forbidden`] for a non-administrator, and the
+    /// [request failures](BeamClient#request-failures).
     pub async fn set_user_disabled(
         &self,
         user_id: String,
@@ -75,7 +81,9 @@ impl BeamClient {
     ///
     /// # Errors
     ///
-    /// Returns [`BeamError::Forbidden`] for a non-administrator.
+    /// Returns [`BeamError::NoActiveServer`] when no server is selected,
+    /// [`BeamError::Forbidden`] for a non-administrator, and the
+    /// [request failures](BeamClient#request-failures).
     pub async fn admin_logs(
         &self,
         first: Option<u32>,
@@ -103,7 +111,9 @@ impl BeamClient {
     ///
     /// # Errors
     ///
-    /// Returns [`BeamError::Forbidden`] for a non-administrator.
+    /// Returns [`BeamError::NoActiveServer`] when no server is selected,
+    /// [`BeamError::Forbidden`] for a non-administrator, and the
+    /// [request failures](BeamClient#request-failures).
     pub async fn admin_events(&self, limit: Option<u32>) -> Result<Vec<AdminEvent>, BeamError> {
         let (server_id, client, _) = self.active_context()?;
         let params = crate::api::GetAdminEventsParams {
@@ -125,7 +135,9 @@ impl BeamClient {
     ///
     /// # Errors
     ///
-    /// Returns [`BeamError::Forbidden`] for a non-administrator.
+    /// Returns [`BeamError::NoActiveServer`] when no server is selected,
+    /// [`BeamError::Forbidden`] for a non-administrator, and the
+    /// [request failures](BeamClient#request-failures).
     pub async fn create_library(
         &self,
         name: String,
@@ -141,7 +153,10 @@ impl BeamClient {
     ///
     /// # Errors
     ///
-    /// Returns [`BeamError::Forbidden`] for a non-administrator.
+    /// Returns [`BeamError::NoActiveServer`] when no server is selected,
+    /// [`BeamError::BadRequest`] when `library_id` is not a UUID,
+    /// [`BeamError::Forbidden`] for a non-administrator, and the
+    /// [request failures](BeamClient#request-failures).
     pub async fn delete_library(&self, library_id: String) -> Result<(), BeamError> {
         let (server_id, client, _) = self.active_context()?;
         self.send(
@@ -158,10 +173,11 @@ impl BeamClient {
     ///
     /// # Errors
     ///
-    /// Returns [`BeamError::BadRequest`] when `library_id` is not a UUID,
-    /// [`BeamError::Forbidden`] for a non-administrator, and
+    /// Returns [`BeamError::NoActiveServer`] when no server is selected,
+    /// [`BeamError::BadRequest`] when `library_id` is not a UUID,
+    /// [`BeamError::Forbidden`] for a non-administrator,
     /// [`BeamError::Server`] with status 409 while a scan of the library is
-    /// already running.
+    /// already running, and the [request failures](BeamClient#request-failures).
     pub async fn scan_library(&self, library_id: String) -> Result<(), BeamError> {
         let wire_library_id = parse_uuid("library_id", &library_id)?;
         let (server_id, client, _) = self.active_context()?;
@@ -175,9 +191,11 @@ impl BeamClient {
     ///
     /// # Errors
     ///
-    /// Returns [`BeamError::BadRequest`] when `library_id` is not a UUID,
-    /// [`BeamError::Forbidden`] for a non-administrator, and
-    /// [`BeamError::NotFound`] for a library the server does not know.
+    /// Returns [`BeamError::NoActiveServer`] when no server is selected,
+    /// [`BeamError::BadRequest`] when `library_id` is not a UUID,
+    /// [`BeamError::Forbidden`] for a non-administrator,
+    /// [`BeamError::NotFound`] for a library the server does not know, and
+    /// the [request failures](BeamClient#request-failures).
     pub async fn library_scan(&self, library_id: String) -> Result<Option<ScanJob>, BeamError> {
         let wire_library_id = parse_uuid("library_id", &library_id)?;
         let (server_id, client, _) = self.active_context()?;
@@ -198,7 +216,10 @@ impl BeamClient {
     ///
     /// # Errors
     ///
-    /// Returns [`BeamError::Forbidden`] for a non-administrator.
+    /// Returns [`BeamError::NoActiveServer`] when no server is selected,
+    /// [`BeamError::BadRequest`] when `media_id` is not a UUID,
+    /// [`BeamError::Forbidden`] for a non-administrator, and the
+    /// [request failures](BeamClient#request-failures).
     pub async fn refresh_media_metadata(&self, media_id: String) -> Result<(), BeamError> {
         let wire_media_id = parse_uuid("media_id", &media_id)?;
         let (server_id, client, _) = self.active_context()?;

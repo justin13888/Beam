@@ -201,9 +201,10 @@ impl BeamClient {
     ///
     /// # Errors
     ///
-    /// Returns [`BeamError::BadRequest`] for a date that does not parse, or a
-    /// range the server refuses, and [`BeamError::Forbidden`] for a
-    /// non-administrator.
+    /// Returns [`BeamError::NoActiveServer`] when no server is selected,
+    /// [`BeamError::BadRequest`] for a date that does not parse or a range the
+    /// server refuses, [`BeamError::Forbidden`] for a non-administrator, and
+    /// the [request failures](BeamClient#request-failures).
     pub async fn admin_playback_telemetry(
         &self,
         from: Option<String>,

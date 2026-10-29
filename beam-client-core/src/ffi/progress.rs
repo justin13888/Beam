@@ -17,7 +17,8 @@ impl BeamClient {
     ///
     /// # Errors
     ///
-    /// Returns [`BeamError::BadRequest`] when `file_id` is not a UUID, and
+    /// Returns [`BeamError::NoActiveServer`] when no server is selected,
+    /// [`BeamError::BadRequest`] when `file_id` is not a UUID, and
     /// [`BeamError::Storage`] only when the retry queue itself cannot be
     /// written. A failed *send* is reported as [`ProgressOutcome::Queued`],
     /// not as an error: the position is safe, and a player should not surface
@@ -115,8 +116,9 @@ impl BeamClient {
     ///
     /// # Errors
     ///
-    /// Returns [`BeamError::Storage`] when the queue cannot be read or written,
-    /// and [`BeamError::SessionExpired`] when the server rejected the session
+    /// Returns [`BeamError::NoActiveServer`] when no server is selected,
+    /// [`BeamError::Storage`] when the queue cannot be read or written, and
+    /// [`BeamError::SessionExpired`] when the server rejected the session
     /// part-way through. That second one is not incidental bookkeeping: the
     /// rejection takes the credential off the client and deletes the stored
     /// cookie, so a flush that answered with a count alone signed the device
@@ -174,7 +176,8 @@ impl BeamClient {
     ///
     /// # Errors
     ///
-    /// Returns [`BeamError::Storage`] when the queue cannot be read.
+    /// Returns [`BeamError::NoActiveServer`] when no server is selected, and
+    /// [`BeamError::Storage`] when the queue cannot be read.
     pub async fn pending_progress_count(&self) -> Result<u32, BeamError> {
         let server_id = self.require_active()?;
         let queue = self.with_context(&server_id, |context| Arc::clone(&context.queue))?;

@@ -19,8 +19,9 @@ impl BeamClient {
     ///
     /// # Errors
     ///
-    /// Returns [`BeamError::BadRequest`] for a query the server would reject,
-    /// and propagates transport failures.
+    /// Returns [`BeamError::NoActiveServer`] when no server is selected,
+    /// [`BeamError::BadRequest`] for a query the server would reject, before
+    /// it is sent, and the [request failures](BeamClient#request-failures).
     pub async fn browse_media(&self, query: BrowseQuery) -> Result<MediaPage, BeamError> {
         let (server_id, client, record) = self.active_context()?;
         let response = self
@@ -38,7 +39,9 @@ impl BeamClient {
     ///
     /// # Errors
     ///
-    /// Propagates transport and server failures.
+    /// Returns [`BeamError::NoActiveServer`] when no server is selected,
+    /// [`BeamError::BadRequest`] when `media_id` is not a UUID, and the
+    /// [request failures](BeamClient#request-failures).
     pub async fn media_detail(&self, media_id: String) -> Result<MediaDetail, BeamError> {
         let wire_media_id = parse_uuid("media_id", &media_id)?;
         let (server_id, client, record) = self.active_context()?;
@@ -55,8 +58,10 @@ impl BeamClient {
     ///
     /// # Errors
     ///
-    /// Returns [`BeamError::BadRequest`] when `id` is not a UUID and
-    /// [`BeamError::NotFound`] for an id the server does not know.
+    /// Returns [`BeamError::NoActiveServer`] when no server is selected,
+    /// [`BeamError::BadRequest`] when `id` is not a UUID,
+    /// [`BeamError::NotFound`] for an id the server does not know, and the
+    /// [request failures](BeamClient#request-failures).
     pub async fn mark_watched(&self, id: String) -> Result<(), BeamError> {
         let wire_id = parse_uuid("id", &id)?;
         let (server_id, client, _) = self.active_context()?;
@@ -82,7 +87,8 @@ impl BeamClient {
     ///
     /// # Errors
     ///
-    /// Propagates transport and server failures.
+    /// Returns [`BeamError::NoActiveServer`] when no server is selected, and
+    /// the [request failures](BeamClient#request-failures).
     pub async fn genres(&self) -> Result<Vec<String>, BeamError> {
         let (server_id, client, _) = self.active_context()?;
         let response = self.send(&server_id, client.list_genres()).await?;
@@ -103,8 +109,9 @@ impl BeamClient {
     ///
     /// # Errors
     ///
-    /// Returns [`BeamError::BadRequest`] for an identifier that is not a UUID,
-    /// and propagates transport and server failures.
+    /// Returns [`BeamError::NoActiveServer`] when no server is selected,
+    /// [`BeamError::BadRequest`] for an identifier that is not a UUID, and the
+    /// [request failures](BeamClient#request-failures).
     pub async fn up_next_in_show(
         &self,
         show_id: String,
@@ -135,7 +142,8 @@ impl BeamClient {
     ///
     /// # Errors
     ///
-    /// Propagates transport and server failures.
+    /// Returns [`BeamError::NoActiveServer`] when no server is selected, and
+    /// the [request failures](BeamClient#request-failures).
     pub async fn libraries(&self) -> Result<Vec<LibrarySummary>, BeamError> {
         let (server_id, client, _) = self.active_context()?;
         let response = self.send(&server_id, client.list_libraries()).await?;
@@ -152,7 +160,9 @@ impl BeamClient {
     ///
     /// # Errors
     ///
-    /// Propagates transport and server failures.
+    /// Returns [`BeamError::NoActiveServer`] when no server is selected,
+    /// [`BeamError::BadRequest`] when `library_id` is not a UUID, and the
+    /// [request failures](BeamClient#request-failures).
     pub async fn library(&self, library_id: String) -> Result<LibrarySummary, BeamError> {
         let (server_id, client, _) = self.active_context()?;
         let response = self
@@ -171,7 +181,9 @@ impl BeamClient {
     ///
     /// # Errors
     ///
-    /// Propagates transport and server failures.
+    /// Returns [`BeamError::NoActiveServer`] when no server is selected,
+    /// [`BeamError::BadRequest`] when `library_id` is not a UUID, and the
+    /// [request failures](BeamClient#request-failures).
     pub async fn library_files(
         &self,
         library_id: String,
@@ -212,7 +224,8 @@ impl BeamClient {
     ///
     /// # Errors
     ///
-    /// Propagates transport and server failures.
+    /// Returns [`BeamError::NoActiveServer`] when no server is selected, and
+    /// the [request failures](BeamClient#request-failures).
     pub async fn continue_watching(
         &self,
         limit: Option<u32>,
@@ -241,7 +254,8 @@ impl BeamClient {
     ///
     /// # Errors
     ///
-    /// Propagates transport and server failures.
+    /// Returns [`BeamError::NoActiveServer`] when no server is selected, and
+    /// the [request failures](BeamClient#request-failures).
     pub async fn history(
         &self,
         first: Option<u32>,

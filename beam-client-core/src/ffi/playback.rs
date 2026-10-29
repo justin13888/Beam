@@ -161,7 +161,10 @@ impl BeamClient {
     ///
     /// # Errors
     ///
-    /// Propagates transport and server failures.
+    /// Returns [`BeamError::NoActiveServer`] when no server is selected,
+    /// [`BeamError::BadRequest`] when `media_id` is not a UUID,
+    /// [`BeamError::InvalidServerUrl`] when a source names a URL off the
+    /// server's origin, and the [request failures](BeamClient#request-failures).
     pub async fn media_sources(&self, media_id: String) -> Result<Vec<MediaSourceView>, BeamError> {
         let server_id = self.require_active()?;
         let client = self.client_for(&server_id)?;
@@ -186,8 +189,10 @@ impl BeamClient {
     ///
     /// # Errors
     ///
-    /// Returns [`BeamError::NoPlayableSource`]-shaped detail through
-    /// [`BeamError::NotFound`] when nothing can play here.
+    /// Returns [`BeamError::NotFound`] when nothing can play here, its detail
+    /// the first rejected source's reason, and [`BeamError::BadRequest`]
+    /// before the device profile has been set. Otherwise it fails as
+    /// [`Self::media_sources`] does.
     pub async fn select_playback_source(
         &self,
         media_id: String,
@@ -217,8 +222,8 @@ impl BeamClient {
     ///
     /// # Errors
     ///
-    /// Propagates transport and server failures, and refuses with
-    /// [`BeamError::BadRequest`] before the device profile has been set.
+    /// Returns [`BeamError::BadRequest`] before the device profile has been
+    /// set. Otherwise it fails as [`Self::media_sources`] does.
     pub async fn select_downgrade_source(
         &self,
         media_id: String,
@@ -237,7 +242,10 @@ impl BeamClient {
     ///
     /// # Errors
     ///
-    /// Returns [`BeamError::Unauthenticated`] when there is no session.
+    /// Returns [`BeamError::NoActiveServer`] when no server is selected,
+    /// [`BeamError::Unauthenticated`] when there is no session, and
+    /// [`BeamError::InvalidServerUrl`] when the stream URL cannot be built on
+    /// the server's origin.
     pub fn playback_config(&self, file_id: String) -> Result<PlaybackHttpConfig, BeamError> {
         let server = self.server_http_config()?;
         let ServerHttpConfig {
@@ -247,6 +255,11 @@ impl BeamClient {
             host,
         } = server;
 
+        // Built by hand, because the generated client has no way to name an
+        // operation's URL without sending it, and the platform player sends
+        // this one itself (getkono/spargen#1067). Where the title's sources
+        // are known, `playback_plan` takes each part's `stream_url` from them
+        // instead.
         let server_id = self.require_active()?;
         let url = self.with_context(&server_id, |context| {
             context
@@ -274,8 +287,8 @@ impl BeamClient {
     ///
     /// # Errors
     ///
-    /// Returns [`BeamError::Unauthenticated`] when there is no session, and
-    /// [`BeamError::NoActiveServer`] when no server is selected.
+    /// As [`Self::playback_config`]. A failed or slow source lookup is not an
+    /// error: the plan is then the file alone.
     pub async fn playback_plan(
         &self,
         title_id: Option<String>,
@@ -329,7 +342,8 @@ impl BeamClient {
     ///
     /// # Errors
     ///
-    /// Returns [`BeamError::Unauthenticated`] when there is no session.
+    /// Returns [`BeamError::NoActiveServer`] when no server is selected, and
+    /// [`BeamError::Unauthenticated`] when there is no session.
     pub fn server_http_config(&self) -> Result<ServerHttpConfig, BeamError> {
         let server_id = self.require_active()?;
         let servers = self.servers.read().expect("servers lock");
