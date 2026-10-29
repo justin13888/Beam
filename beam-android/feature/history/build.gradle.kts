@@ -1,5 +1,6 @@
 plugins {
     id("beam.android.feature")
+    id("beam.android.pitest")
 }
 
 android {

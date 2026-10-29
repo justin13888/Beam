@@ -2,6 +2,7 @@ plugins {
     id("beam.android.library")
     id("beam.android.hilt")
     alias(libs.plugins.kotlin.serialization)
+    id("beam.android.pitest")
 }
 
 android {
