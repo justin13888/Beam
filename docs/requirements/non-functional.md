@@ -91,8 +91,8 @@ requirements (referenced below as FR-xxx).
   `InMemory*`, `Fake*`, `Stub*`, `Noop*`, `Mock*` or `TestClock` verifies scaffolding, not the
   product. Where a fake and a real implementation share a trait, both MUST be verified by the same
   shared contract test.
-- **NFR-210**: Mutation testing (`cargo-mutants`) MUST be available as a project task and run in CI
-  as an advisory, non-blocking signal. A surviving mutant MUST be resolved by removing the redundant
+- **NFR-210**: Mutation testing (`cargo-mutants` for the Rust workspace, PIT for the Android client)
+  MUST be available as a project task and run in CI as an advisory, non-blocking signal. A surviving mutant MUST be resolved by removing the redundant
   branch, or by making the illegal state unrepresentable, in preference to adding a test; an
   exemption MUST be recorded with a justification of why the mutant is behaviourally equivalent.
 - **NFR-211**: Test doubles gated on `feature = "test-utils"` MUST be excluded from mutation
