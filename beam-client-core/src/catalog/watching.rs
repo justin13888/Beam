@@ -436,7 +436,12 @@ mod tests {
             Some("00000000-0000-0000-0000-0000000000e1")
         );
         assert_eq!(entry.progress_fraction, Some(0.0));
-        assert_eq!(entry.media.expect("the row's title").title, "Dark");
+        let media = entry.media.expect("the row's title");
+        assert_eq!(media.title, "Dark");
+        assert!(
+            !media.played,
+            "a played episode marks the episode, not the whole show"
+        );
         let episode = entry.episode.expect("the row's episode");
         assert_eq!(episode.title, "Secrets");
         assert!(episode.played);

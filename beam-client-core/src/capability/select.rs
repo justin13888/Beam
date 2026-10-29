@@ -1232,6 +1232,60 @@ mod tests {
     }
 
     #[test]
+    fn an_earlier_preferred_language_wins_over_a_later_one() {
+        let source = MediaSourceBuilder::new("dual")
+            .audio(&[
+                ("aac", Some("eng"), 2, false),
+                ("aac", Some("jpn"), 2, false),
+            ])
+            .build();
+        let profile = DeviceProfileBuilder::budget_h264_only()
+            .preferred_languages(&["eng", "jpn"])
+            .build();
+
+        let chosen = select_source(&[source], &profile, &QualityPolicy::Highest).expect("a source");
+        assert_eq!(chosen.audio_track_index, Some(0));
+    }
+
+    /// Tracks nothing tells apart are taken in the order the file declares
+    /// them.
+    #[test]
+    fn indistinguishable_tracks_resolve_to_the_first() {
+        let source = MediaSourceBuilder::new("triple")
+            .audio(&[
+                ("aac", Some("eng"), 2, false),
+                ("aac", Some("eng"), 2, false),
+                ("aac", Some("eng"), 2, false),
+            ])
+            .build();
+        let profile = DeviceProfileBuilder::budget_h264_only().build();
+
+        let chosen = select_source(&[source], &profile, &QualityPolicy::Highest).expect("a source");
+        assert_eq!(chosen.audio_track_index, Some(0));
+    }
+
+    /// Quality ranks by the picture's pixel count, so a scope-width frame
+    /// with fewer pixels does not outrank a taller one.
+    #[test]
+    fn the_highest_quality_is_the_most_pixels() {
+        let scope = MediaSourceBuilder::new("scope")
+            .video("h264", 3840, 800)
+            .bitrate(8_000_000)
+            .size(1_000_000_000)
+            .build();
+        let qhd = MediaSourceBuilder::new("qhd")
+            .video("h264", 2560, 1440)
+            .bitrate(8_000_000)
+            .size(1_000_000_000)
+            .build();
+        let profile = DeviceProfileBuilder::phone_h264_hevc().build();
+
+        let chosen =
+            select_source(&[scope, qhd], &profile, &QualityPolicy::Highest).expect("a source");
+        assert_eq!(chosen.source.file_id, "qhd");
+    }
+
+    #[test]
     fn the_files_default_track_wins_when_no_language_is_preferred() {
         let source = MediaSourceBuilder::new("dual")
             .audio(&[
@@ -1445,6 +1499,13 @@ mod tests {
         let sources = [hd_h264(), twin];
         let profile = DeviceProfileBuilder::phone_h264_hevc().build();
 
+        assert_eq!(select_downgrade(&sources, "hd", &profile), None);
+
+        // Nor when the twin is unprobed, so its size is what is compared.
+        let mut unprobed_twin = hd_h264();
+        unprobed_twin.file_id = "unprobed-twin".to_owned();
+        unprobed_twin.bit_rate = None;
+        let sources = [hd_h264(), unprobed_twin];
         assert_eq!(select_downgrade(&sources, "hd", &profile), None);
     }
 
