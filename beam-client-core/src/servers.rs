@@ -296,3 +296,75 @@ mod tests {
         assert_eq!(record, decoded);
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// An address as a person might type one: an optional scheme, a host in
+    /// any case, an optional port, and whatever they pasted after it.
+    fn typed_address() -> impl Strategy<Value = (String, String, Option<u16>)> {
+        (
+            proptest::option::of(prop_oneof![Just("http"), Just("https"), Just("HTTPS")]),
+            "[a-zA-Z][a-zA-Z0-9-]{0,10}(\\.[a-zA-Z][a-zA-Z0-9-]{0,10}){0,3}",
+            proptest::option::of(1_u16..),
+            "(/[a-z0-9]{0,6}){0,3}/?(\\?[a-z]=[a-z0-9]{0,4})?(#[a-z]{0,4})?",
+            "[ \t]{0,2}",
+        )
+            .prop_map(|(scheme, host, port, rest, padding)| {
+                let mut typed = padding.clone();
+                if let Some(scheme) = scheme {
+                    typed.push_str(scheme);
+                    typed.push_str("://");
+                }
+                typed.push_str(&host);
+                if let Some(port) = port {
+                    typed.push_str(&format!(":{port}"));
+                }
+                typed.push_str(&rest);
+                typed.push_str(&padding);
+                (typed, host, port)
+            })
+    }
+
+    proptest! {
+        /// Normalising an origin again changes nothing, so a stored base URL
+        /// re-added by the user maps to the same server.
+        #[test]
+        fn normalising_is_idempotent(input in ".{0,60}") {
+            if let Ok(origin) = normalize_base_url(&input) {
+                let again = normalize_base_url(origin.as_str()).expect("an origin normalises");
+                prop_assert_eq!(&again, &origin);
+                prop_assert_eq!(server_id_for(&again), server_id_for(&origin));
+            }
+        }
+
+        /// What follows the authority, the host's case and surrounding
+        /// whitespace never change which server an address names.
+        #[test]
+        fn the_identifier_depends_only_on_the_origin((typed, host, port) in typed_address()) {
+            let origin = normalize_base_url(&typed).expect("a typed address normalises");
+            let bare = match port {
+                Some(port) => format!("{}:{port}", host.to_lowercase()),
+                None => host.to_lowercase(),
+            };
+            let scheme = origin.scheme().to_owned();
+            let canonical = normalize_base_url(&format!("{scheme}://{bare}"))
+                .expect("the canonical spelling normalises");
+            prop_assert_eq!(server_id_for(&origin), server_id_for(&canonical));
+            prop_assert_eq!(origin.path(), "/");
+            prop_assert_eq!(origin.query(), None);
+            prop_assert_eq!(origin.fragment(), None);
+        }
+
+        /// An identifier is a key in the platform's store and a path segment
+        /// in the queue's key, so it never carries a separator.
+        #[test]
+        fn an_identifier_carries_no_separator((typed, _host, _port) in typed_address()) {
+            let origin = normalize_base_url(&typed).expect("a typed address normalises");
+            let id = server_id_for(&origin);
+            prop_assert!(!id.contains(['/', ':', '.']), "{}", id);
+        }
+    }
+}

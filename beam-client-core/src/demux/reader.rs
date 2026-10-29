@@ -276,3 +276,64 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use crate::ports::byte_source::InMemoryByteSource;
+    use proptest::prelude::*;
+
+    /// Bytes that differ at every offset a test could confuse with another:
+    /// no short period, so a read served from the wrong place in a window
+    /// cannot happen to match.
+    fn content(len: usize) -> Vec<u8> {
+        (0..len)
+            .map(|index| {
+                let mixed = (index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                mixed.to_be_bytes()[0]
+            })
+            .collect()
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        /// Whatever the parser asks for, in whatever order, a read returns
+        /// exactly the source's bytes at the position it was made from --
+        /// across window refills -- and never more than was asked for or than
+        /// remains.
+        #[test]
+        fn a_read_is_exactly_the_source_slice(
+            len in 0_usize..(3 * WINDOW_BYTES as usize),
+            steps in proptest::collection::vec(
+                (proptest::option::of(any::<proptest::sample::Index>()), 0_usize..70_000),
+                1..40,
+            ),
+        ) {
+            let bytes = content(len);
+            let mut reader = ByteSourceReader::new(Arc::new(InMemoryByteSource::new(bytes.clone())));
+            let mut position = 0_usize;
+
+            for (seek, wanted) in steps {
+                if let Some(target) = seek {
+                    // Including one past the end, which the parser probes.
+                    position = target.index(len + 2);
+                    prop_assert_eq!(
+                        reader.seek(SeekFrom::Start(position as u64)).expect("seekable"),
+                        position as u64
+                    );
+                }
+                let mut out = vec![0_u8; wanted];
+                let count = reader.read(&mut out).expect("in-memory reads succeed");
+                let remaining = len.saturating_sub(position);
+                prop_assert!(count <= wanted.min(remaining));
+                if wanted > 0 && remaining > 0 {
+                    prop_assert!(count > 0, "a read with bytes left made no progress");
+                }
+                prop_assert_eq!(&out[..count], &bytes[position.min(len)..position.min(len) + count]);
+                position += count;
+                prop_assert_eq!(reader.stream_position().expect("known"), position as u64);
+            }
+        }
+    }
+}

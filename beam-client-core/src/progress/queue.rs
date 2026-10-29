@@ -458,4 +458,83 @@ mod tests {
         queue.remove("f1").await.expect("remove");
         assert!(!storage.has_plain("progress_queue/server-1"));
     }
+
+    /// What can happen to a queue: a sample for one of a few hundred files,
+    /// a failed send for one, a successful one, or time passing.
+    #[derive(Debug, Clone)]
+    enum Step {
+        Enqueue { file: u16, position: f64 },
+        Fail { file: u16, retry_after: Option<u64> },
+        Remove { file: u16 },
+        Wait { secs: i64 },
+    }
+
+    fn step() -> impl proptest::strategy::Strategy<Value = Step> {
+        use proptest::prelude::*;
+        prop_oneof![
+            4 => (0_u16..300, 0.0_f64..10_000.0)
+                .prop_map(|(file, position)| Step::Enqueue { file, position }),
+            2 => (0_u16..300, proptest::option::of(0_u64..7200))
+                .prop_map(|(file, retry_after)| Step::Fail { file, retry_after }),
+            1 => (0_u16..300).prop_map(|file| Step::Remove { file }),
+            1 => (0_i64..(2 * MAX_AGE_SECS)).prop_map(|secs| Step::Wait { secs }),
+        ]
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+
+        /// Whatever happens to it, the queue holds at most one sample per
+        /// file and at most `MAX_ENTRIES` in all, oldest first, and never
+        /// offers a sample that is past its age or out of attempts.
+        #[test]
+        fn the_queue_stays_within_its_bounds(
+            steps in proptest::collection::vec(step(), 1..400)
+        ) {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .expect("a runtime");
+            let clock = Arc::new(TestClock::new(1_000));
+            let (queue, _storage) = queue(Arc::clone(&clock));
+
+            runtime.block_on(async {
+                for step in steps {
+                    match step {
+                        Step::Enqueue { file, position } => {
+                            let mut entry =
+                                sample(&format!("f{file}"), position, clock.now_unix());
+                            entry.not_before_unix = clock.now_unix();
+                            queue.enqueue(entry).await.expect("enqueue");
+                        }
+                        Step::Fail { file, retry_after } => queue
+                            .record_failure(&format!("f{file}"), retry_after)
+                            .await
+                            .expect("record_failure"),
+                        Step::Remove { file } => {
+                            queue.remove(&format!("f{file}")).await.expect("remove");
+                        }
+                        Step::Wait { secs } => clock.advance_secs(secs),
+                    }
+
+                    let loaded = queue.load().await.expect("load");
+                    proptest::prop_assert!(loaded.len() <= MAX_ENTRIES);
+                    let files: std::collections::HashSet<&str> =
+                        loaded.iter().map(|entry| entry.file_id.as_str()).collect();
+                    proptest::prop_assert_eq!(files.len(), loaded.len(), "one per file");
+                    proptest::prop_assert!(loaded
+                        .windows(2)
+                        .all(|pair| pair[0].captured_at_unix <= pair[1].captured_at_unix));
+                    let now = clock.now_unix();
+                    for entry in &loaded {
+                        proptest::prop_assert!(entry.attempts < MAX_ATTEMPTS);
+                        proptest::prop_assert!(now - entry.captured_at_unix < MAX_AGE_SECS);
+                    }
+                    for entry in queue.ready().await.expect("ready") {
+                        proptest::prop_assert!(entry.not_before_unix <= now);
+                    }
+                }
+                Ok(())
+            })?;
+        }
+    }
 }

@@ -1008,3 +1008,72 @@ mod tests {
         assert_eq!(summary.switches[1].from_height_class, "uhd");
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// What a session does to its queue: record, take a batch to send, or
+    /// put back the last batch taken because sending it failed.
+    #[derive(Debug, Clone, Copy)]
+    enum Step {
+        Record(u8),
+        Take,
+        RestoreLast,
+    }
+
+    fn step() -> impl Strategy<Value = Step> {
+        prop_oneof![
+            6 => any::<u8>().prop_map(Step::Record),
+            2 => Just(Step::Take),
+            1 => Just(Step::RestoreLast),
+        ]
+    }
+
+    proptest! {
+        /// No request carries more than the server takes, the queue never
+        /// holds more than its bound, and `record` reports what is held.
+        #[test]
+        fn the_queue_stays_within_its_batch_and_total_bounds(
+            steps in proptest::collection::vec(step(), 1..1500)
+        ) {
+            let queue = TelemetryQueue::new();
+            let mut last_batch = Vec::new();
+            for step in steps {
+                match step {
+                    Step::Record(n) => {
+                        let held = queue.record(PlaybackEvent::Start {
+                            file_id: uuid::Uuid::from_bytes([n; 16]),
+                            audio_track_index: None,
+                        });
+                        prop_assert_eq!(held, queue.len());
+                    }
+                    Step::Take => {
+                        last_batch = queue.take_batch();
+                        prop_assert!(last_batch.len() <= MAX_EVENTS_PER_REQUEST);
+                    }
+                    Step::RestoreLast => queue.restore(std::mem::take(&mut last_batch)),
+                }
+                prop_assert!(queue.len() as usize <= MAX_PENDING_EVENTS);
+            }
+        }
+
+        /// A stall of any length is either not one (zero) or held within the
+        /// range the server accepts.
+        #[test]
+        fn a_rebuffer_is_within_the_servers_range(duration_ms: u64) {
+            match PlaybackEvent::rebuffer(uuid::Uuid::nil(), duration_ms) {
+                None => prop_assert_eq!(duration_ms, 0),
+                Some(PlaybackEvent::Rebuffer { duration_ms: held, .. }) => {
+                    prop_assert!((1..=MAX_REBUFFER_MS).contains(&held));
+                    prop_assert_eq!(
+                        u64::from(held),
+                        duration_ms.min(u64::from(MAX_REBUFFER_MS))
+                    );
+                }
+                Some(other) => prop_assert!(false, "not a rebuffer: {:?}", other),
+            }
+        }
+    }
+}

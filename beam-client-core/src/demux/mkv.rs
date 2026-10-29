@@ -820,3 +820,68 @@ mod tests {
         assert!(!is_keyframe(&frame));
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use crate::ports::byte_source::InMemoryByteSource;
+    use proptest::prelude::*;
+
+    const FIXTURES: [&[u8]; 4] = [
+        include_bytes!("../../fixtures/h264.mkv"),
+        include_bytes!("../../fixtures/hevc.mkv"),
+        include_bytes!("../../fixtures/h264_aac.mkv"),
+        include_bytes!("../../fixtures/vp9_opus.webm"),
+    ];
+
+    /// Open `bytes` and read every sample there is, seeking once on the way.
+    ///
+    /// A file is untrusted input from a library the server never vetted, so
+    /// any outcome is acceptable except a panic -- which, across the FFI
+    /// boundary, takes the app down with it. Bounded, so a parser that loops
+    /// on a corrupt cluster fails the property instead of hanging it.
+    fn exercise(bytes: Vec<u8>) -> Result<(), TestCaseError> {
+        let Ok(extractor) = MatroskaExtractor::open(Arc::new(InMemoryByteSource::new(bytes)))
+        else {
+            return Ok(());
+        };
+        let _ = extractor.tracks();
+        let _ = extractor.duration_seconds();
+        for _ in 0..10_000 {
+            match extractor.next_sample() {
+                Ok(Some(_)) => {}
+                Ok(None) | Err(_) => {
+                    let _ = extractor.seek(0.5);
+                    return Ok(());
+                }
+            }
+        }
+        Err(TestCaseError::fail("the extractor never reached an end"))
+    }
+
+    proptest! {
+        #[test]
+        fn arbitrary_bytes_never_panic(bytes in proptest::collection::vec(any::<u8>(), 0..2048)) {
+            exercise(bytes)?;
+        }
+
+        #[test]
+        fn a_truncated_file_never_panics(fixture in 0_usize..4, cut in any::<proptest::sample::Index>()) {
+            let bytes = FIXTURES[fixture];
+            exercise(bytes[..cut.index(bytes.len())].to_vec())?;
+        }
+
+        #[test]
+        fn a_corrupted_file_never_panics(
+            fixture in 0_usize..4,
+            flips in proptest::collection::vec((any::<proptest::sample::Index>(), any::<u8>()), 1..16),
+        ) {
+            let mut bytes = FIXTURES[fixture].to_vec();
+            for (at, value) in flips {
+                let index = at.index(bytes.len());
+                bytes[index] = value;
+            }
+            exercise(bytes)?;
+        }
+    }
+}

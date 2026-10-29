@@ -331,3 +331,63 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use crate::clock::TestClock;
+    use proptest::prelude::*;
+
+    /// One report: how far the clock moved first, which of a few files, and
+    /// what the player said.
+    fn report() -> impl Strategy<Value = (i64, usize, f64, Option<f64>, bool)> {
+        (
+            0_i64..30,
+            0_usize..3,
+            0.0_f64..10_000.0,
+            proptest::option::of(1.0_f64..10_000.0),
+            any::<bool>(),
+        )
+    }
+
+    proptest! {
+        /// Over any run of reports: what is sent is always the position just
+        /// offered; a hold always names a wait within one interval; and an
+        /// unforced report for a file is sent exactly when it is that file's
+        /// first, or a whole interval has passed since its last send.
+        #[test]
+        fn the_throttle_stays_within_its_interval(
+            reports in proptest::collection::vec(report(), 1..60)
+        ) {
+            let clock = Arc::new(TestClock::new(1_000));
+            let throttle = ProgressThrottle::new(Arc::clone(&clock) as Arc<dyn Clock>);
+            let mut last_sent: HashMap<usize, i64> = HashMap::new();
+
+            for (advance, file, position, duration, force) in reports {
+                clock.advance_secs(advance);
+                let now = clock.now_unix();
+                let due = last_sent
+                    .get(&file)
+                    .is_none_or(|sent| now - sent >= REPORT_INTERVAL_SECS);
+
+                match throttle.decide(&format!("f{file}"), position, duration, force) {
+                    ThrottleDecision::Send { position_secs, .. } => {
+                        prop_assert!(force || due, "sent inside the interval");
+                        prop_assert_eq!(position_secs, position);
+                        last_sent.insert(file, now);
+                    }
+                    ThrottleDecision::Hold { next_eligible_in_secs } => {
+                        prop_assert!(!force && !due, "held a report that was due");
+                        let sent = last_sent[&file];
+                        prop_assert!(next_eligible_in_secs >= 1);
+                        prop_assert!(next_eligible_in_secs <= REPORT_INTERVAL_SECS.unsigned_abs());
+                        prop_assert_eq!(
+                            i64::try_from(next_eligible_in_secs).expect("small"),
+                            sent + REPORT_INTERVAL_SECS - now
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
