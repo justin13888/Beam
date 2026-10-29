@@ -13,7 +13,7 @@ use kynos::response::range::served::{Conditions, Served};
 use tracing::{error, warn};
 use uuid::Uuid;
 
-use crate::routes::api_error::{SessionAuth, TrickplayDeliveryError};
+use crate::routes::api_error::{ServerFault, SessionAuth, TrickplayDeliveryError};
 use crate::routes::delivery::{AnyMedia, MediaRanges, RuntimeDelivery};
 use crate::routes::stream::{FileByteSource, hides_file};
 use crate::routes::tags::Playback;
@@ -87,7 +87,9 @@ async fn deliver(
     path: &TrickplayPath,
     conditions: &Conditions,
 ) -> Result<RuntimeDelivery<JpegRanges>, TrickplayDeliveryError> {
-    let internal = |what: &str| TrickplayDeliveryError::Internal(format!("Failed to {what}"));
+    // Every caller logs its cause first (`hides_file` inside itself), so the
+    // fault only summarises.
+    let internal = |what: &'static str| TrickplayDeliveryError::Internal(ServerFault::logged(what));
     // The sheets of a file the caller may not see answer as those of a file
     // that does not exist (issue #263).
     match hides_file(state, auth, path.file_id).await {

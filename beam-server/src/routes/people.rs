@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::models::{PersonConnection, PersonDetail};
-use crate::routes::api_error::{PeopleSearchError, PersonLookupError, SessionAuth};
+use crate::routes::api_error::{PeopleSearchError, PersonLookupError, ServerFault, SessionAuth};
 use crate::routes::playback::caller_access;
 use crate::routes::tags::Media;
 use crate::services::people::PeopleError;
@@ -51,9 +51,7 @@ pub async fn search_people(
         first,
         after,
     } = params;
-    let (_, policy) = caller_access(&state, &auth)
-        .await
-        .map_err(|err| PeopleSearchError::Internal(err.to_string()))?;
+    let (_, policy) = caller_access(&state, &auth).await?;
     match state
         .services
         .people
@@ -68,7 +66,9 @@ pub async fn search_people(
         Err(PeopleError::InvalidSearchQuery(detail)) => {
             Err(PeopleSearchError::InvalidSearchQuery(detail))
         }
-        Err(PeopleError::Internal(detail)) => Err(PeopleSearchError::Internal(detail)),
+        Err(PeopleError::Internal(detail)) => {
+            Err(PeopleSearchError::Internal(ServerFault::new(detail)))
+        }
     }
 }
 
@@ -83,9 +83,7 @@ pub async fn get_person(
     Path(path): Path<PersonPath>,
     Inject(state): Inject<AppState>,
 ) -> Result<Json<PersonDetail>, PersonLookupError> {
-    let (_, policy) = caller_access(&state, &auth)
-        .await
-        .map_err(|err| PersonLookupError::Internal(err.to_string()))?;
+    let (_, policy) = caller_access(&state, &auth).await?;
     // A failed read is a 500: answering 404 would tell the client the person
     // is gone when the server only failed to read them.
     match state.services.people.detail(path.id, &policy).await {
@@ -94,7 +92,7 @@ pub async fn get_person(
             "person {} not found",
             path.id
         ))),
-        Err(err) => Err(PersonLookupError::Internal(err.to_string())),
+        Err(err) => Err(PersonLookupError::Internal(ServerFault::new(err))),
     }
 }
 

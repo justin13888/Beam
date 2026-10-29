@@ -10,7 +10,8 @@ use uuid::Uuid;
 use crate::models::search::{MediaConnection, MediaSortField, SortOrder, TitleKind};
 use crate::models::{EpisodeDetail, MediaMetadata, MediaSourceConnection, SeasonDetail};
 use crate::routes::api_error::{
-    MediaBrowseError, MediaLookupError, MediaRefLookupError, MediaSourcesError, SessionAuth,
+    MediaBrowseError, MediaLookupError, MediaRefLookupError, MediaSourcesError, ServerFault,
+    SessionAuth,
 };
 use crate::routes::playback::{caller_access, hides, media_not_found};
 use crate::routes::tags::Media;
@@ -96,9 +97,7 @@ pub async fn browse_media(
     Query(params): Query<BrowseQuery>,
     Inject(state): Inject<AppState>,
 ) -> Result<Json<MediaConnection>, MediaBrowseError> {
-    let (user_id, access) = caller_access(&state, &auth)
-        .await
-        .map_err(|err| MediaBrowseError::Internal(err.to_string()))?;
+    let (user_id, access) = caller_access(&state, &auth).await?;
     let BrowseQuery {
         first,
         after,
@@ -147,7 +146,7 @@ pub async fn browse_media(
                 .playback
                 .overlay_titles(user_id, &mut connection.items)
                 .await
-                .map_err(|err| MediaBrowseError::Internal(err.to_string()))?;
+                .map_err(|err| MediaBrowseError::Internal(ServerFault::new(err)))?;
             Ok(Json(connection))
         }
         Err(MetadataError::InvalidCursor(detail)) => Err(MediaBrowseError::InvalidCursor(detail)),
@@ -162,7 +161,7 @@ pub async fn browse_media(
             err @ (MetadataError::InternalError(_)
             | MetadataError::MediaNotFound
             | MetadataError::Unsupported(_)),
-        ) => Err(MediaBrowseError::Internal(err.to_string())),
+        ) => Err(MediaBrowseError::Internal(ServerFault::new(err))),
     }
 }
 
@@ -193,18 +192,18 @@ pub async fn get_media_detail(
                 .playback
                 .overlay_media(user_id, &mut metadata)
                 .await
-                .map_err(|err| MediaLookupError::Internal(err.to_string()))?;
+                .map_err(|err| MediaLookupError::Internal(ServerFault::new(err)))?;
             // After the watched state, which replaces a movie's state whole.
             state
                 .services
                 .lists
                 .overlay_media(user_id, &mut metadata)
                 .await
-                .map_err(|err| MediaLookupError::Internal(err.to_string()))?;
+                .map_err(|err| MediaLookupError::Internal(ServerFault::new(err)))?;
             Ok(Json(metadata))
         }
         Ok(None) => Err(MediaLookupError::MediaNotFound(media_not_found(path.id))),
-        Err(err) => Err(MediaLookupError::Internal(err.to_string())),
+        Err(err) => Err(MediaLookupError::Internal(ServerFault::new(err))),
     }
 }
 
@@ -235,7 +234,7 @@ pub async fn get_media_sources(
                 .language_preferences
                 .find(user_id)
                 .await
-                .map_err(|err| MediaSourcesError::Internal(err.to_string()))?;
+                .map_err(|err| MediaSourcesError::Internal(ServerFault::new(err)))?;
             apply_language_preferences(&preferences, &mut sources);
             Ok(Json(MediaSourceConnection::complete(sources)))
         }
@@ -253,7 +252,7 @@ pub async fn get_media_sources(
             | MetadataError::InvalidPagination(msg)
             | MetadataError::InvalidSearchQuery(msg)
             | MetadataError::InvalidFilter(msg),
-        ) => Err(MediaSourcesError::Internal(msg)),
+        ) => Err(MediaSourcesError::Internal(ServerFault::new(msg))),
     }
 }
 
@@ -277,7 +276,7 @@ pub async fn get_episode_detail(
         .metadata
         .get_episode_detail(path.id)
         .await
-        .map_err(|err| MediaRefLookupError::Internal(err.to_string()))?
+        .map_err(|err| MediaRefLookupError::Internal(ServerFault::new(err)))?
         .ok_or_else(|| {
             MediaRefLookupError::MediaNotFound(format!("episode {} not found", path.id))
         })?;
@@ -286,7 +285,7 @@ pub async fn get_episode_detail(
         .playback
         .overlay_episode(user_id, &mut detail)
         .await
-        .map_err(|err| MediaRefLookupError::Internal(err.to_string()))?;
+        .map_err(|err| MediaRefLookupError::Internal(ServerFault::new(err)))?;
     Ok(Json(detail))
 }
 
@@ -310,7 +309,7 @@ pub async fn get_season_detail(
         .metadata
         .get_season_detail(path.id)
         .await
-        .map_err(|err| MediaRefLookupError::Internal(err.to_string()))?
+        .map_err(|err| MediaRefLookupError::Internal(ServerFault::new(err)))?
         .ok_or_else(|| {
             MediaRefLookupError::MediaNotFound(format!("season {} not found", path.id))
         })?;
@@ -319,7 +318,7 @@ pub async fn get_season_detail(
         .playback
         .overlay_season(user_id, &mut detail)
         .await
-        .map_err(|err| MediaRefLookupError::Internal(err.to_string()))?;
+        .map_err(|err| MediaRefLookupError::Internal(ServerFault::new(err)))?;
     Ok(Json(detail))
 }
 

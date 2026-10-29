@@ -443,4 +443,140 @@ mod tests {
         }
         assert_eq!(tile_count(7_200_000, &TrickplaySpec::default()), 720);
     }
+
+    /// A content fault is one that recurs until the file changes, so it is
+    /// recorded as giving no sheets rather than retried: the file is no
+    /// media FFmpeg demuxes, or holds no stream it can decode. Every other
+    /// error -- an interrupted read, a flaky mount, Beam's own folder not
+    /// written, a build missing an encoder, a cancellation -- is worth
+    /// another try. Every variant, and every way an FFmpeg error reaches
+    /// one, is here.
+    #[cfg(unix)]
+    #[test]
+    fn only_an_error_of_the_files_content_is_a_content_fault() {
+        let eio = || ffmpeg::Error::Other {
+            errno: rustix::io::Errno::IO.raw_os_error(),
+        };
+        let cases: Vec<(TrickplayError, bool)> = vec![
+            (TrickplayError::Ffmpeg(ffmpeg::Error::InvalidData), true),
+            (TrickplayError::Ffmpeg(ffmpeg::Error::DemuxerNotFound), true),
+            (TrickplayError::Ffmpeg(ffmpeg::Error::DecoderNotFound), true),
+            (TrickplayError::Ffmpeg(ffmpeg::Error::StreamNotFound), true),
+            (
+                TrickplayError::Ffmpeg(ffmpeg::Error::EncoderNotFound),
+                false,
+            ),
+            (TrickplayError::Ffmpeg(ffmpeg::Error::Eof), false),
+            (TrickplayError::Ffmpeg(ffmpeg::Error::Exit), false),
+            (TrickplayError::Ffmpeg(eio()), false),
+            (
+                TrickplayError::Open(MetadataError::FfmpegError(ffmpeg::Error::InvalidData)),
+                true,
+            ),
+            (
+                TrickplayError::Open(MetadataError::FfmpegError(ffmpeg::Error::DemuxerNotFound)),
+                true,
+            ),
+            (
+                TrickplayError::Open(MetadataError::FfmpegError(eio())),
+                false,
+            ),
+            (
+                TrickplayError::Open(MetadataError::InvalidMetadata("no streams".into())),
+                true,
+            ),
+            (
+                TrickplayError::Open(MetadataError::UnknownError("join failed".into())),
+                false,
+            ),
+            (
+                TrickplayError::Read(std::io::Error::from_raw_os_error(
+                    rustix::io::Errno::IO.raw_os_error(),
+                )),
+                false,
+            ),
+            (
+                TrickplayError::Write(std::io::Error::from(std::io::ErrorKind::StorageFull)),
+                false,
+            ),
+            (TrickplayError::Cancelled, false),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(error.is_content_fault(), expected, "{error:?}");
+        }
+    }
+
+    /// A demuxer's `AVERROR(errno)` reads back as that errno, so a read error
+    /// is reported as the I/O error it was; any other FFmpeg error is
+    /// wrapped whole.
+    #[cfg(unix)]
+    #[test]
+    fn a_demuxer_read_error_is_the_io_error_it_was() {
+        let errno = rustix::io::Errno::IO.raw_os_error();
+        assert_eq!(
+            read_error(ffmpeg::Error::Other { errno }).raw_os_error(),
+            Some(errno)
+        );
+        let wrapped = read_error(ffmpeg::Error::InvalidData);
+        assert_eq!(wrapped.raw_os_error(), None);
+        assert_eq!(wrapped.kind(), std::io::ErrorKind::Other);
+    }
+
+    proptest::proptest! {
+        /// A tile is never odd, never shorter than 2 pixels and never taller
+        /// than ten tile widths, whatever the picture and its aspect ratio.
+        #[test]
+        fn a_tile_height_is_even_and_bounded(
+            tile_width in 2u32..4096,
+            width in 0u32..16_384,
+            height in 0u32..16_384,
+            sar in (proptest::prelude::any::<i32>(), proptest::prelude::any::<i32>()),
+        ) {
+            let got = tile_height(tile_width, width, height, sar);
+            proptest::prop_assert_eq!(got % 2, 0);
+            proptest::prop_assert!(got >= 2);
+            proptest::prop_assert!(got <= tile_width * 10, "{got} for {tile_width}");
+        }
+
+        /// A square-pixel picture's tile keeps its shape to within the
+        /// rounding to an even height.
+        #[test]
+        fn a_square_pixel_tile_keeps_the_pictures_shape(
+            tile_width in 2u32..2048,
+            width in 16u32..8192,
+            height in 16u32..8192,
+        ) {
+            let got = tile_height(tile_width, width, height, (1, 1));
+            let exact = f64::from(tile_width) * f64::from(height) / f64::from(width);
+            proptest::prop_assume!((2.0..=f64::from(tile_width) * 10.0).contains(&exact));
+            proptest::prop_assert!((f64::from(got) - exact).abs() <= 1.0, "{got} vs {exact}");
+        }
+
+        /// A file gets at least one tile and at most the cap; below the cap
+        /// its tiles cover its whole duration, one interval each, with no
+        /// interval wholly past its end; and a longer file never gets fewer.
+        #[test]
+        fn tiles_cover_the_file_one_interval_each_up_to_the_cap(
+            duration_ms in 0u64..100_000_000,
+            longer_by in 0u64..10_000_000,
+            interval_ms in 1u32..120_000,
+            max_tiles in 1u32..10_000,
+        ) {
+            let spec = TrickplaySpec {
+                interval_ms,
+                max_tiles,
+                ..TrickplaySpec::default()
+            };
+            let count = tile_count(duration_ms, &spec);
+            proptest::prop_assert!((1..=max_tiles).contains(&count));
+            if count < max_tiles {
+                let covered = u64::from(count) * u64::from(interval_ms);
+                proptest::prop_assert!(covered >= duration_ms);
+                proptest::prop_assert!(
+                    count == 1 || covered - u64::from(interval_ms) < duration_ms
+                );
+            }
+            proptest::prop_assert!(tile_count(duration_ms + longer_by, &spec) >= count);
+        }
+    }
 }

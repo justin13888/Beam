@@ -23,7 +23,7 @@ use crate::models::{
 };
 use crate::routes::api_error::{
     AdminAuth, EnrichmentListError, FieldLocksError, FixMatchError, InternalError,
-    LibraryRefreshError, MatchCandidatesError, MediaEnrichmentError,
+    LibraryRefreshError, MatchCandidatesError, MediaEnrichmentError, ServerFault,
 };
 use crate::routes::tags::Admin;
 use crate::services::enrichment_cursor;
@@ -121,7 +121,7 @@ pub async fn list_enrichment(
             size,
         )
         .await
-        .map_err(|err| EnrichmentListError::Internal(err.to_string()))?;
+        .map_err(|err| EnrichmentListError::Internal(ServerFault::new(err)))?;
     let cursor_of = |item: &beam_index::services::enrichment::control::TitleEnrichment| {
         item.position.as_ref().map(enrichment_cursor::encode)
     };
@@ -156,7 +156,7 @@ pub async fn get_media_enrichment(
         .await
         .map_err(|err| match err {
             ControlError::MediaNotFound(_) => MediaEnrichmentError::MediaNotFound(err.to_string()),
-            _ => MediaEnrichmentError::Internal(err.to_string()),
+            _ => MediaEnrichmentError::Internal(ServerFault::new(err)),
         })?;
     Ok(Json(MediaEnrichment::from(detail)))
 }
@@ -186,8 +186,8 @@ pub async fn search_match_candidates(
             ControlError::ProviderNotConfigured(detail) => {
                 MatchCandidatesError::ProviderNotConfigured(detail)
             }
-            ControlError::Provider(_) => MatchCandidatesError::ProviderError(err.to_string()),
-            _ => MatchCandidatesError::Internal(err.to_string()),
+            ControlError::Provider(_) => MatchCandidatesError::ProviderError(ServerFault::new(err)),
+            _ => MatchCandidatesError::Internal(ServerFault::new(err)),
         })?;
     Ok(Json(MatchCandidateConnection {
         items: candidates.into_iter().map(MatchCandidate::from).collect(),
@@ -236,7 +236,7 @@ pub async fn fix_media_match(
                     detail,
                 }],
             },
-            _ => FixMatchError::Internal(err.to_string()),
+            _ => FixMatchError::Internal(ServerFault::new(err)),
         })?;
     Ok(Accepted::new(Json(MediaEnrichment::from(detail))))
 }
@@ -267,7 +267,7 @@ pub async fn clear_media_match(
         .await
         .map_err(|err| match err {
             ControlError::MediaNotFound(_) => MediaEnrichmentError::MediaNotFound(err.to_string()),
-            _ => MediaEnrichmentError::Internal(err.to_string()),
+            _ => MediaEnrichmentError::Internal(ServerFault::new(err)),
         })?;
     Ok(NoContent)
 }
@@ -304,7 +304,7 @@ pub async fn set_media_field_locks(
                     })
                     .collect(),
             },
-            _ => FieldLocksError::Internal(err.to_string()),
+            _ => FieldLocksError::Internal(ServerFault::new(err)),
         })?;
     Ok(Json(MediaEnrichment::from(detail)))
 }
@@ -328,7 +328,7 @@ pub async fn refresh_all_media_metadata(
         .enrichment_control
         .refresh(RefreshScope::All, rematch.unwrap_or(false), &auth.0.user_id)
         .await
-        .map_err(|err| InternalError::Internal(err.to_string()))?;
+        .map_err(|err| InternalError::Internal(ServerFault::new(err)))?;
     Ok(Accepted::new(Json(RefreshQueued { queued_count })))
 }
 
@@ -359,7 +359,7 @@ pub async fn refresh_library_metadata(
             ControlError::LibraryNotFound(_) => {
                 LibraryRefreshError::LibraryNotFound(err.to_string())
             }
-            _ => LibraryRefreshError::Internal(err.to_string()),
+            _ => LibraryRefreshError::Internal(ServerFault::new(err)),
         })?;
     Ok(Accepted::new(Json(RefreshQueued { queued_count })))
 }

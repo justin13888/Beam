@@ -1209,4 +1209,105 @@ mod tests {
         let err = list_folder(&root, &root.join("Gone")).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
+
+    /// Every handle on a library file is opened `O_RDONLY` (FR-202),
+    /// whichever way its path is resolved: the kernel reports a read-only
+    /// access mode on it, a write or a truncate through it fails, and the
+    /// file is left byte for byte as it was. A second handle cloned from an
+    /// opened [`LibraryFile`] is the same open file, read-only too.
+    #[cfg(unix)]
+    #[test]
+    fn every_handle_on_a_library_file_is_read_only() {
+        use std::io::Write;
+
+        use rustix::fs::OFlags;
+
+        let assert_read_only = |what: &str, mut file: File| {
+            let access = rustix::fs::fcntl_getfl(&file).unwrap() & OFlags::ACCMODE;
+            assert_eq!(access, OFlags::RDONLY, "{what}: the access mode");
+            assert!(file.write_all(b"written").is_err(), "{what}: a write");
+            assert!(file.set_len(0).is_err(), "{what}: a truncate");
+        };
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("Show/Season 01")).unwrap();
+        let path = dir.path().join("Show/Season 01/E01.mkv");
+        std::fs::write(&path, b"episode bytes").unwrap();
+
+        for (resolver, open) in resolvers() {
+            let file = open(dir.path(), Path::new("Show/Season 01/E01.mkv"))
+                .unwrap_or_else(|err| panic!("{resolver}: {err}"));
+            assert_read_only(resolver, file);
+        }
+        let opened = LibraryFile::open(dir.path(), &path).unwrap();
+        assert_read_only("a clone", opened.try_clone_file().unwrap());
+        assert_read_only("a library file", opened.into_parts().0);
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"episode bytes");
+    }
+
+    /// The suite's permission tests stand on a process the kernel refuses
+    /// by file permissions; as root -- or with `CAP_DAC_OVERRIDE` -- every one
+    /// of them skips, and the no-write guarantees they pin (FR-202) would
+    /// pass having checked nothing. So a run where permissions do not bind
+    /// fails here, saying why, rather than passing vacuously.
+    #[cfg(unix)]
+    #[test]
+    fn the_permission_tests_run_where_permissions_bind() {
+        assert!(
+            test_support::permissions_bind(),
+            "this process is not refused by file permissions (running as root?): every \
+             permission test would skip, so run the suite as an unprivileged user"
+        );
+    }
+}
+
+/// What the suites that hold the indexer to never writing into a library
+/// (FR-202) share.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::path::{Path, PathBuf};
+    use std::time::SystemTime;
+
+    /// One entry of a [`snapshot`]: its path, its bytes when it is a regular
+    /// file, its modification time and whether it is read-only.
+    pub(crate) type Entry = (PathBuf, Option<Vec<u8>>, SystemTime, bool);
+
+    /// Every entry under `root`, `root` itself included, sorted by path:
+    /// each regular file with its bytes, and each with its modification time
+    /// and permissions. Two snapshots are equal only when nothing under
+    /// `root` was created, removed, written, touched or chmodded between
+    /// them.
+    pub(crate) fn snapshot(root: &Path) -> Vec<Entry> {
+        let mut entries: Vec<Entry> = walkdir::WalkDir::new(root)
+            .into_iter()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                let meta = std::fs::symlink_metadata(entry.path()).unwrap();
+                let bytes = meta.is_file().then(|| std::fs::read(entry.path()).unwrap());
+                (
+                    entry.path().to_path_buf(),
+                    bytes,
+                    meta.modified().unwrap(),
+                    meta.permissions().readonly(),
+                )
+            })
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        entries
+    }
+
+    /// Whether this process is refused by file permissions: `false` as root,
+    /// which may write a folder whose mode forbids it.
+    #[cfg(unix)]
+    pub(crate) fn permissions_bind() -> bool {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let locked = dir.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let refused = std::fs::File::create(locked.join("probe")).is_err();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        refused
+    }
 }

@@ -9,7 +9,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::models::{CollectionConnection, CollectionDetail};
-use crate::routes::api_error::{CollectionListError, CollectionLookupError, SessionAuth};
+use crate::routes::api_error::{
+    CollectionListError, CollectionLookupError, ServerFault, SessionAuth,
+};
 use crate::routes::playback::caller_access;
 use crate::routes::tags::Media;
 use crate::services::collections::CollectionError;
@@ -46,9 +48,7 @@ pub async fn list_collections(
     Inject(state): Inject<AppState>,
 ) -> Result<Json<CollectionConnection>, CollectionListError> {
     let CollectionQuery { first, after } = params;
-    let (_, policy) = caller_access(&state, &auth)
-        .await
-        .map_err(|err| CollectionListError::Internal(err.to_string()))?;
+    let (_, policy) = caller_access(&state, &auth).await?;
     match state.services.collections.list(&policy, first, after).await {
         Ok(connection) => Ok(Json(connection)),
         Err(CollectionError::InvalidCursor(detail)) => {
@@ -57,7 +57,9 @@ pub async fn list_collections(
         Err(CollectionError::InvalidPagination(detail)) => {
             Err(CollectionListError::InvalidPagination(detail))
         }
-        Err(CollectionError::Internal(detail)) => Err(CollectionListError::Internal(detail)),
+        Err(CollectionError::Internal(detail)) => {
+            Err(CollectionListError::Internal(ServerFault::new(detail)))
+        }
     }
 }
 
@@ -72,9 +74,7 @@ pub async fn get_collection(
     Path(path): Path<CollectionPath>,
     Inject(state): Inject<AppState>,
 ) -> Result<Json<CollectionDetail>, CollectionLookupError> {
-    let (user_id, policy) = caller_access(&state, &auth)
-        .await
-        .map_err(|err| CollectionLookupError::Internal(err.to_string()))?;
+    let (user_id, policy) = caller_access(&state, &auth).await?;
     // A failed read is a 500: answering 404 would tell the client the
     // collection is gone when the server only failed to read it.
     match state
@@ -88,7 +88,7 @@ pub async fn get_collection(
             "collection {} not found",
             path.id
         ))),
-        Err(err) => Err(CollectionLookupError::Internal(err.to_string())),
+        Err(err) => Err(CollectionLookupError::Internal(ServerFault::new(err))),
     }
 }
 

@@ -1220,11 +1220,37 @@ mod tests {
             assert_eq!(stream.frame_rate(), None);
         }
 
+        /// A stream's bit depth is its pixel format's, as FFmpeg's own
+        /// descriptor gives it -- 8-bit SDR, and the 10-, 12- and 16-bit
+        /// formats HDR and mastering files use, in either byte order -- and
+        /// its resolution is its probed width and height.
         #[test]
         fn video_bit_depth_and_resolution_come_from_the_probed_format() {
-            let video = video_metadata(0);
-            assert_eq!(video.resolution(), Resolution::new(1920, 1080));
-            assert_eq!(video.bit_depth(), PixelFormat::YUV420P.bit_depth());
+            use ffmpeg::format::Pixel;
+            for pixel in [
+                Pixel::YUV420P,
+                Pixel::YUV420P10LE,
+                Pixel::YUV422P10BE,
+                Pixel::GBRP10LE,
+                Pixel::YUV420P12LE,
+                Pixel::YUV444P12BE,
+                Pixel::YUV420P16LE,
+                Pixel::YUV444P16BE,
+            ] {
+                let mut video = video_metadata(0);
+                video.format = PixelFormat::from(pixel);
+                let descriptor = pixel.descriptor().expect("FFmpeg describes the format");
+                // SAFETY: a descriptor points into FFmpeg's static table.
+                let depth = unsafe { (*descriptor.as_ptr()).comp[0].depth };
+                assert_eq!(
+                    video.bit_depth(),
+                    Some(u8::try_from(depth).unwrap()),
+                    "{pixel:?}"
+                );
+            }
+            let mut video = video_metadata(0);
+            (video.width, video.height) = (3840, 1606);
+            assert_eq!(video.resolution(), Resolution::new(3840, 1606));
         }
     }
 
@@ -1309,6 +1335,41 @@ mod tests {
                 chapter_metadata(5_000, -1, (1, 1_000), None).map(|c| (c.start_ms, c.end_ms)),
                 Some((5_000, 5_000))
             );
+        }
+
+        proptest::proptest! {
+            /// Whatever a container records, a chapter read never ends
+            /// before it starts and never panics; one starting before zero,
+            /// or in a time base that does not count forward, is not read.
+            #[test]
+            fn a_chapter_never_ends_before_it_starts(
+                start in proptest::prelude::any::<i64>(),
+                end in proptest::prelude::any::<i64>(),
+                num in proptest::prelude::any::<i32>(),
+                den in proptest::prelude::any::<i32>(),
+            ) {
+                let chapter = chapter_metadata(start, end, (num, den), None);
+                if let Some(chapter) = &chapter {
+                    proptest::prop_assert!(chapter.end_ms >= chapter.start_ms, "{chapter:?}");
+                }
+                if start < 0 || num < 0 || den <= 0 {
+                    proptest::prop_assert!(chapter.is_none());
+                }
+            }
+
+            /// In a millisecond time base a chapter is read as recorded.
+            #[test]
+            fn a_millisecond_chapter_is_read_as_recorded(
+                start in 0i64..1_000_000_000,
+                length in 0i64..1_000_000_000,
+            ) {
+                let chapter = chapter_metadata(start, start + length, (1, 1_000), None)
+                    .expect("a chapter from zero on");
+                proptest::prop_assert_eq!(
+                    (chapter.start_ms, chapter.end_ms),
+                    (start as u64, (start + length) as u64)
+                );
+            }
         }
     }
 }
