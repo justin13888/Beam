@@ -174,6 +174,123 @@ mod tests {
         );
     }
 
+    /// The served document, as JSON.
+    fn exported_document() -> serde_json::Value {
+        let exported = create_router(&AllowedOrigins::none())
+            .openapi_as(SpecVersion::V3_2)
+            .expect("the contract exports");
+        serde_json::to_value(&exported).expect("the document serializes")
+    }
+
+    /// Every `(path, method)` the document lists under `/v1/admin`.
+    fn admin_operations(document: &serde_json::Value) -> Vec<(String, String)> {
+        operations(document)
+            .into_iter()
+            .filter(|(path, _)| path.starts_with("/v1/admin/") || path == "/v1/admin")
+            .collect()
+    }
+
+    /// Every `/v1/admin` operation the document describes demands the session
+    /// cookie with the `admin` scope, and nothing weaker -- read from the
+    /// document, so an admin operation mounted with `SessionAuth` by mistake
+    /// fails here however it was added.
+    #[test]
+    fn every_admin_path_demands_the_admin_scope() {
+        let document = exported_document();
+        let admin = admin_operations(&document);
+        assert!(!admin.is_empty(), "the document lists admin operations");
+
+        let weaker: Vec<_> = admin
+            .iter()
+            .filter(|(path, method)| {
+                document["paths"][path][method]["security"]
+                    != serde_json::json!([{ "BeamSession": ["admin"] }])
+            })
+            .collect();
+        assert!(
+            weaker.is_empty(),
+            "admin operations that do not demand the admin scope: {weaker:#?}"
+        );
+    }
+
+    /// The runtime half: every `/v1/admin` operation the document lists, sent
+    /// by a signed-in user who is not an administrator through the router
+    /// the process serves, is refused with the named 403 -- before any
+    /// parameter or body is looked at.
+    #[tokio::test]
+    async fn every_admin_operation_refuses_a_signed_in_non_administrator() {
+        use beam_auth::utils::models::CreateUser;
+        use beam_auth::utils::session_store::SessionData;
+        use kynos::http::Method as HttpMethod;
+        use kynos::http::StatusCode;
+        use kynos::test::TestClient;
+
+        let state = crate::routes::test_support::make_app_state();
+        let user = state
+            .services
+            .user_repo
+            .create(CreateUser {
+                oidc_issuer: "https://idp.test".to_owned(),
+                oidc_subject: "regular".to_owned(),
+                email: None,
+                display_name: "Regular".to_owned(),
+                avatar_url: None,
+                is_admin: false,
+            })
+            .await
+            .expect("the in-memory user store creates the user");
+        let token = state
+            .services
+            .session_store
+            .create(
+                &SessionData {
+                    user_id: user.id.to_string(),
+                    device_hash: "test-device".to_owned(),
+                    ip: "127.0.0.1".to_owned(),
+                    created_at: chrono::Utc::now().timestamp(),
+                    last_active: chrono::Utc::now().timestamp(),
+                },
+                86_400,
+                86_400,
+            )
+            .await
+            .expect("the in-memory session store issues a session");
+        let client = TestClient::new(
+            create_router(&AllowedOrigins::none())
+                .build(state)
+                .expect("the router describes itself"),
+        );
+
+        let document = exported_document();
+        let admin = admin_operations(&document);
+        assert!(!admin.is_empty(), "the document lists admin operations");
+        for (template, method) in admin {
+            // Every path parameter Beam declares is an id.
+            let path = template
+                .split('/')
+                .map(|segment| {
+                    if segment.starts_with('{') {
+                        uuid::Uuid::nil().to_string()
+                    } else {
+                        segment.to_owned()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("/");
+            let method: HttpMethod = method
+                .to_ascii_uppercase()
+                .parse()
+                .unwrap_or_else(|_| panic!("{method} is an HTTP method"));
+            client
+                .method(method, &path)
+                .cookie("beam_session", &token)
+                .send()
+                .await
+                .assert_status(StatusCode::FORBIDDEN)
+                .assert_problem_type(crate::routes::api_error::ADMIN_REQUIRED);
+        }
+    }
+
     /// The exported operation set is the one the committed contract carries.
     ///
     /// Compared against `beam-web/openapi.json`, which is committed and is what

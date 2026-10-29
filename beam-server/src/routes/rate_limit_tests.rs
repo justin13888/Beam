@@ -464,3 +464,200 @@ async fn disabling_the_limiter_allows_past_the_ceiling_and_reports_a_full_quota(
         );
     }
 }
+
+/// The router the process serves, over a configuration the caller writes --
+/// so the groups and the limiters on them are the ones `rest_routes`
+/// mounts, not a probe's.
+fn served(adjust: impl FnOnce(&mut ServerConfig)) -> TestClient<AppState> {
+    let state = make_app_state_with_clock(adjust, Arc::new(TestClock::new()));
+    TestClient::new(
+        crate::routes::create_router(&crate::bootstrap::AllowedOrigins::none())
+            .build(state)
+            .expect("the served router describes itself"),
+    )
+}
+
+/// One request through the served router, from `peer`.
+async fn send_from(
+    client: &TestClient<AppState>,
+    method: kynos::http::Method,
+    path: &str,
+    peer: &str,
+) -> StatusCode {
+    client
+        .method(method, path)
+        .peer(peer.parse().expect("a socket address a test wrote"))
+        .send()
+        .await
+        .status()
+}
+
+/// Starting a browser login, finishing one and starting a device login spend
+/// one budget between them, as `rest_routes` groups them: spending it on
+/// two of them leaves none for the third, whichever it is.
+#[tokio::test]
+async fn login_callback_and_device_start_share_one_budget_through_the_served_router() {
+    use kynos::http::Method;
+
+    let operations = [
+        (Method::GET, "/v1/auth/login"),
+        (Method::GET, "/v1/auth/callback?state=s&code=c"),
+        (Method::POST, "/v1/auth/device"),
+    ];
+    for refused in 0..operations.len() {
+        let client = served(|config| {
+            config.rate_limit_auth_per_minute = 2;
+            config.rate_limit_search_per_minute = 1_000;
+            config.rate_limit_device_poll_per_minute = 1_000;
+        });
+        let spent = operations
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != refused);
+        for (_, (method, path)) in spent {
+            assert_ne!(
+                send_from(&client, method.clone(), path, CLIENT).await,
+                StatusCode::TOO_MANY_REQUESTS,
+                "{path} is within the shared budget"
+            );
+        }
+        let (method, path) = &operations[refused];
+        assert_eq!(
+            send_from(&client, method.clone(), path, CLIENT).await,
+            StatusCode::TOO_MANY_REQUESTS,
+            "{path} finds the budget the other two spent"
+        );
+        assert_ne!(
+            send_from(&client, method.clone(), path, OTHER_CLIENT).await,
+            StatusCode::TOO_MANY_REQUESTS,
+            "another client's budget is its own"
+        );
+    }
+}
+
+/// Browsing and people search are both searches and spend one budget, and
+/// neither spends the auth budget.
+#[tokio::test]
+async fn browse_and_people_search_share_one_budget_through_the_served_router() {
+    use kynos::http::Method;
+
+    let client = served(|config| {
+        config.rate_limit_auth_per_minute = 1_000;
+        config.rate_limit_search_per_minute = 2;
+    });
+
+    assert_ne!(
+        send_from(&client, Method::GET, "/v1/media", CLIENT).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_ne!(
+        send_from(&client, Method::GET, "/v1/people?query=a", CLIENT).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(
+        send_from(&client, Method::GET, "/v1/media", CLIENT).await,
+        StatusCode::TOO_MANY_REQUESTS,
+        "people search spent browse's budget"
+    );
+    assert_eq!(
+        send_from(&client, Method::GET, "/v1/people?query=a", CLIENT).await,
+        StatusCode::TOO_MANY_REQUESTS,
+        "browse spent people search's budget"
+    );
+    assert_ne!(
+        send_from(&client, Method::GET, "/v1/auth/login", CLIENT).await,
+        StatusCode::TOO_MANY_REQUESTS,
+        "the search budget is not the auth one"
+    );
+}
+
+/// A request no client address can be resolved for is not a way past the
+/// limit: Kynos's `ByClientAddress` keys every such request to one shared
+/// bucket, so they are limited together -- and apart from any addressed
+/// client's.
+#[tokio::test]
+async fn requests_with_no_client_address_share_one_budget() {
+    let Harness { client, .. } = auth(1);
+
+    // No `peer`: the request carries no connection, so no address.
+    client
+        .get("/probe")
+        .send()
+        .await
+        .assert_status(StatusCode::OK);
+    client
+        .get("/probe")
+        .send()
+        .await
+        .assert_status(StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        get(&client, CLIENT).await.status(),
+        StatusCode::OK,
+        "an addressed client does not share the anonymous bucket"
+    );
+}
+
+/// With the bucket map full of clients still spending, a new client is let
+/// through without a bucket rather than evicting an active one -- the
+/// documented fail-open -- and an active client is still limited.
+#[test]
+fn a_full_map_of_active_clients_fails_open_for_a_new_one() {
+    let limiter = BeamRateLimit::new(Class::Auth);
+    let now = std::time::Instant::now();
+    let (capacity, refill) = (2.0, 2.0 / 60.0);
+
+    for client in 0..BeamRateLimit::MAX_ENTRIES {
+        let outcome = limiter.spend(&format!("client-{client}"), now, capacity, refill);
+        assert_eq!(outcome.retry_after, None);
+    }
+
+    let newcomer = limiter.spend("newcomer", now, capacity, refill);
+    assert_eq!(newcomer.retry_after, None, "a new client is let through");
+    assert_eq!(newcomer.remaining, 2, "and charged nothing");
+    let again = limiter.spend("newcomer", now, capacity, refill);
+    assert_eq!(again.remaining, 2, "it was given no bucket to spend from");
+
+    // An active client keeps its bucket and its limit.
+    assert_eq!(
+        limiter.spend("client-0", now, capacity, refill).retry_after,
+        None
+    );
+    assert!(
+        limiter
+            .spend("client-0", now, capacity, refill)
+            .retry_after
+            .is_some(),
+        "an active client is still limited"
+    );
+}
+
+/// A full map whose clients have gone quiet is emptied of them, so a new
+/// client gets a bucket of its own and is limited like any other.
+#[test]
+fn a_full_map_of_idle_clients_evicts_them_for_a_new_one() {
+    let limiter = BeamRateLimit::new(Class::Auth);
+    let start = std::time::Instant::now();
+    let (capacity, refill) = (2.0, 2.0 / 60.0);
+
+    for client in 0..BeamRateLimit::MAX_ENTRIES {
+        limiter.spend(&format!("client-{client}"), start, capacity, refill);
+    }
+    // Long enough for every bucket to have refilled.
+    let later = start + Duration::from_secs(120);
+
+    assert_eq!(
+        limiter.spend("newcomer", later, capacity, refill).remaining,
+        1
+    );
+    assert_eq!(
+        limiter.spend("newcomer", later, capacity, refill).remaining,
+        0
+    );
+    assert!(
+        limiter
+            .spend("newcomer", later, capacity, refill)
+            .retry_after
+            .is_some(),
+        "the newcomer has a bucket, and spends it"
+    );
+}
