@@ -44,6 +44,62 @@ struct RecordingIndexer {
     triggers: std::sync::Mutex<Vec<ScanTrigger>>,
     /// Paths whose next reconcile is deferred by the given delay -- once.
     defer_once: std::sync::Mutex<HashMap<PathBuf, Duration>>,
+    /// Paths whose next reconcile fails -- once.
+    fail_once: std::sync::Mutex<HashSet<PathBuf>>,
+    /// How many of the next library listings fail.
+    failing_listings: Arc<AtomicU32>,
+}
+
+/// The library store, whose next `failing` listings fail (NFR-205).
+#[derive(Debug)]
+struct FlakyListings {
+    inner: Arc<InMemoryLibraryRepository>,
+    failing: Arc<AtomicU32>,
+}
+
+#[async_trait::async_trait]
+impl LibraryRepository for FlakyListings {
+    async fn find_all(&self) -> Result<Vec<Library>, sea_orm::DbErr> {
+        let failed = self
+            .failing
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                left.checked_sub(1)
+            })
+            .is_ok();
+        if failed {
+            return Err(sea_orm::DbErr::Custom("the database is down".to_string()));
+        }
+        self.inner.find_all().await
+    }
+    async fn find_by_id(&self, id: Uuid) -> Result<Option<Library>, sea_orm::DbErr> {
+        self.inner.find_by_id(id).await
+    }
+    async fn create(
+        &self,
+        create: beam_domain::models::CreateLibrary,
+    ) -> Result<Library, sea_orm::DbErr> {
+        self.inner.create(create).await
+    }
+    async fn count_files(&self, library_id: Uuid) -> Result<u64, sea_orm::DbErr> {
+        self.inner.count_files(library_id).await
+    }
+    async fn update_scan_progress(
+        &self,
+        library_id: Uuid,
+        started_at: Option<chrono::DateTime<chrono::Utc>>,
+        finished_at: Option<chrono::DateTime<chrono::Utc>>,
+        file_count: Option<i32>,
+    ) -> Result<(), sea_orm::DbErr> {
+        self.inner
+            .update_scan_progress(library_id, started_at, finished_at, file_count)
+            .await
+    }
+    async fn delete(&self, id: Uuid) -> Result<(), sea_orm::DbErr> {
+        self.inner.delete(id).await
+    }
+    async fn count(&self) -> Result<u64, sea_orm::DbErr> {
+        self.inner.count().await
+    }
 }
 
 impl RecordingIndexer {
@@ -69,6 +125,11 @@ impl RecordingIndexer {
 
     fn triggers(&self) -> Vec<ScanTrigger> {
         self.triggers.lock().unwrap().clone()
+    }
+
+    /// Fail the next reconcile of `path`.
+    fn fail_next(&self, path: &str) {
+        self.fail_once.lock().unwrap().insert(PathBuf::from(path));
     }
 
     /// Defer the next reconcile of `path` by `delay`.
@@ -137,10 +198,14 @@ impl BackgroundIndexer for RecordingIndexer {
         kind: FsEventKind,
     ) -> Result<ReconcileOutcome, IndexError> {
         let deferred = self.defer_once.lock().unwrap().remove(&path);
+        let fails = self.fail_once.lock().unwrap().remove(&path);
         self.reconciled
             .lock()
             .unwrap()
             .push((library_id, path, kind));
+        if fails {
+            return Err(IndexError::LibraryNotFound);
+        }
         Ok(match deferred {
             Some(retry_after) => ReconcileOutcome::Deferred { retry_after },
             None => ReconcileOutcome::Done,
@@ -148,7 +213,10 @@ impl BackgroundIndexer for RecordingIndexer {
     }
 
     fn library_repo(&self) -> Arc<dyn LibraryRepository> {
-        self.library_repo.clone()
+        Arc::new(FlakyListings {
+            inner: self.library_repo.clone(),
+            failing: self.failing_listings.clone(),
+        })
     }
 }
 
@@ -377,6 +445,100 @@ async fn a_burst_of_events_for_one_path_reconciles_once_after_the_debounce() {
         reconciled[0].2,
         FsEventKind::Modified,
         "the last kind in the burst wins"
+    );
+
+    tasks.abort();
+}
+
+/// The debounce window is the configured one exactly: a millisecond short of
+/// it nothing is reconciled, and at it the burst is.
+#[tokio::test]
+async fn a_burst_is_held_for_exactly_the_debounce_window() {
+    let indexer = Arc::new(RecordingIndexer::default());
+    let clock = Arc::new(TestClock::new());
+    let watcher = Arc::new(InMemoryFsWatcher::new());
+    let tasks = spawn_background_indexing_with(
+        indexer.clone(),
+        Some(watcher.clone()),
+        clock.clone(),
+        config(3600, 2000),
+    );
+    watcher.emit(FsEvent {
+        library_id: Uuid::new_v4(),
+        path: PathBuf::from("/videos/a.mkv"),
+        kind: FsEventKind::Created,
+    });
+    until("the debounce window to open", || clock.waiter_count() >= 3).await;
+
+    clock.advance(Duration::from_millis(1999));
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        indexer.reconciled().is_empty(),
+        "a millisecond short of the window, the burst is still held"
+    );
+
+    clock.advance(Duration::from_millis(1));
+    until("the reconcile at the window's end", || {
+        indexer.reconciled().len() == 1
+    })
+    .await;
+
+    tasks.abort();
+}
+
+/// A reconcile that fails is reported and dropped -- the periodic rescan is
+/// its backstop -- and the consumer goes on to the next event.
+#[tokio::test]
+async fn a_failed_reconcile_does_not_stop_the_consumer() {
+    let indexer = Arc::new(RecordingIndexer::default());
+    let clock = Arc::new(TestClock::new());
+    let watcher = Arc::new(InMemoryFsWatcher::new());
+    let library_id = Uuid::new_v4();
+    indexer.fail_next("/videos/broken.mkv");
+    let tasks = spawn_background_indexing_with(
+        indexer.clone(),
+        Some(watcher.clone()),
+        clock.clone(),
+        config(3600, 2000),
+    );
+
+    watcher.emit(FsEvent {
+        library_id,
+        path: PathBuf::from("/videos/broken.mkv"),
+        kind: FsEventKind::Created,
+    });
+    until("the debounce window to open", || clock.waiter_count() >= 3).await;
+    clock.advance(Duration::from_millis(2000));
+    until("the failing reconcile", || indexer.reconciled().len() == 1).await;
+    until("the consumer to wait again", || clock.waiter_count() == 2).await;
+
+    watcher.emit(FsEvent {
+        library_id,
+        path: PathBuf::from("/videos/next.mkv"),
+        kind: FsEventKind::Created,
+    });
+    until("the next debounce window to open", || {
+        clock.waiter_count() >= 3
+    })
+    .await;
+    clock.advance(Duration::from_millis(2000));
+    until("the next event's reconcile", || {
+        indexer.reconciled().len() == 2
+    })
+    .await;
+    assert_eq!(
+        indexer
+            .reconciled()
+            .into_iter()
+            .map(|(_, path, _)| path)
+            .collect::<Vec<_>>(),
+        [
+            PathBuf::from("/videos/broken.mkv"),
+            PathBuf::from("/videos/next.mkv")
+        ],
+        "the failed event is not retried"
     );
 
     tasks.abort();
@@ -825,6 +987,89 @@ async fn a_library_whose_demotion_failed_is_watched_again_next_cycle() {
         watcher.watched_libraries() == vec![lost.id]
     })
     .await;
+
+    tasks.abort();
+}
+
+/// A watch refresh that cannot list the libraries changes nothing -- no
+/// watch is dropped for a library it could not see -- and the next cycle
+/// registers what it missed.
+#[tokio::test]
+async fn a_refresh_that_cannot_list_the_libraries_is_retried_next_cycle() {
+    let indexer = Arc::new(RecordingIndexer::default());
+    let clock = Arc::new(TestClock::new());
+    let watcher = Arc::new(InMemoryFsWatcher::new());
+    let first = library("first", "/videos/first");
+    indexer.store(&first);
+    indexer.failing_listings.store(1, Ordering::SeqCst);
+
+    let tasks = spawn_background_indexing_with(
+        indexer.clone(),
+        Some(watcher.clone()),
+        clock.clone(),
+        config(600, 2000),
+    );
+    until("the startup scan", || indexer.scan_count() == 1).await;
+    until("both loops to sleep", || clock.waiter_count() == 2).await;
+    assert!(
+        watcher.watched_libraries().is_empty(),
+        "the failed listing registered nothing"
+    );
+
+    clock.advance(Duration::from_secs(600));
+    until("the next cycle to watch it", || {
+        watcher.watched_libraries() == vec![first.id]
+    })
+    .await;
+
+    // A listing failing while the library is watched does not unwatch it.
+    until("both loops to sleep", || clock.waiter_count() == 2).await;
+    indexer.failing_listings.store(1, Ordering::SeqCst);
+    clock.advance(Duration::from_secs(600));
+    until("the failing refresh to run", || {
+        indexer.failing_listings.load(Ordering::SeqCst) == 0
+    })
+    .await;
+    until("both loops to sleep", || clock.waiter_count() == 2).await;
+    assert_eq!(watcher.watched_libraries(), vec![first.id]);
+
+    tasks.abort();
+}
+
+/// A library whose watch could not be registered is left unregistered, and
+/// the next cycle tries it again; the libraries beside it are watched.
+#[tokio::test]
+async fn a_library_that_could_not_be_watched_is_tried_again_next_cycle() {
+    let indexer = Arc::new(RecordingIndexer::default());
+    let clock = Arc::new(TestClock::new());
+    let watcher = Arc::new(InMemoryFsWatcher::new());
+    let refused = library("refused", "/videos/refused");
+    let fine = library("fine", "/videos/fine");
+    indexer.store(&refused);
+    indexer.store(&fine);
+    watcher.fail_next_watch(refused.id);
+
+    let tasks = spawn_background_indexing_with(
+        indexer.clone(),
+        Some(watcher.clone()),
+        clock.clone(),
+        config(600, 2000),
+    );
+    until("both loops to sleep", || clock.waiter_count() == 2).await;
+    assert_eq!(watcher.watched_libraries(), vec![fine.id]);
+    assert_eq!(watcher.watch_attempts(refused.id), 1);
+
+    clock.advance(Duration::from_secs(600));
+    until("the next cycle to watch it", || {
+        watcher.watched_libraries().contains(&refused.id)
+    })
+    .await;
+    assert_eq!(watcher.watch_attempts(refused.id), 2);
+    assert_eq!(
+        watcher.watch_attempts(fine.id),
+        1,
+        "a library already watched is not registered again"
+    );
 
     tasks.abort();
 }

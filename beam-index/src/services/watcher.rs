@@ -564,6 +564,11 @@ pub mod in_memory {
         /// What the next `poll_once` deregisters without reporting, as a
         /// demotion that fails does.
         failed_demotions: std::sync::Mutex<Vec<Uuid>>,
+        /// Libraries whose next `watch_library` fails, leaving them
+        /// unregistered.
+        failed_watches: std::sync::Mutex<Vec<Uuid>>,
+        /// Every library `watch_library` was asked for, in order.
+        attempts: std::sync::Mutex<Vec<Uuid>>,
         /// Bumped whenever the registrations change, so a test can wait for
         /// one made on another task.
         changes: tokio::sync::watch::Sender<u64>,
@@ -580,6 +585,8 @@ pub mod in_memory {
                 modes: std::sync::Mutex::new(std::collections::HashMap::new()),
                 demotions: std::sync::Mutex::new(Vec::new()),
                 failed_demotions: std::sync::Mutex::new(Vec::new()),
+                failed_watches: std::sync::Mutex::new(Vec::new()),
+                attempts: std::sync::Mutex::new(Vec::new()),
                 changes: tokio::sync::watch::channel(0).0,
             }
         }
@@ -609,6 +616,22 @@ pub mod in_memory {
             self.failed_demotions.lock().unwrap().push(library_id);
         }
 
+        /// Make the next `watch_library` of `library_id` fail.
+        pub fn fail_next_watch(&self, library_id: Uuid) {
+            self.failed_watches.lock().unwrap().push(library_id);
+        }
+
+        /// How many times `watch_library` has been asked for `library_id`,
+        /// failed or not.
+        pub fn watch_attempts(&self, library_id: Uuid) -> usize {
+            self.attempts
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|id| **id == library_id)
+                .count()
+        }
+
         /// Push a synthetic event to the consumer.
         pub fn emit(&self, event: FsEvent) {
             let _ = self.sender.send(event);
@@ -633,7 +656,19 @@ pub mod in_memory {
 
     #[async_trait::async_trait]
     impl FsWatcher for InMemoryFsWatcher {
-        fn watch_library(&self, library_id: Uuid, _root: &Path) -> Result<WatchMode, WatchError> {
+        fn watch_library(&self, library_id: Uuid, root: &Path) -> Result<WatchMode, WatchError> {
+            self.attempts.lock().unwrap().push(library_id);
+            {
+                let mut failed = self.failed_watches.lock().unwrap();
+                if let Some(at) = failed.iter().position(|id| *id == library_id) {
+                    failed.remove(at);
+                    self.changes.send_modify(|generation| *generation += 1);
+                    return Err(WatchError::Watch(
+                        root.to_path_buf(),
+                        "refused by the test".to_string(),
+                    ));
+                }
+            }
             self.watched.lock().unwrap().push(library_id);
             self.changes.send_modify(|generation| *generation += 1);
             Ok(self
