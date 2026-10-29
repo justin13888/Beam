@@ -770,15 +770,14 @@ pub async fn oidc_callback(
         .code
         .ok_or_else(|| LoginCallbackError::AttemptInvalid("Missing code parameter".into()))?;
 
+    // Every exchange failure is the same failed login. A wrong nonce among
+    // them: openidconnect's verifier reports it as a claims failure like any
+    // other, so no client this server runs answers `OidcError::NonceMismatch`
+    // and it needs no answer of its own.
     let identity = oidc_client
         .exchange_code(&code, &pending.pkce_verifier, &pending.nonce)
         .await
-        .map_err(|e| match e {
-            OidcError::NonceMismatch => {
-                LoginCallbackError::LoginFailed("Nonce mismatch".to_owned())
-            }
-            other => LoginCallbackError::LoginFailed(format!("Login failed: {other}")),
-        })?;
+        .map_err(|e| LoginCallbackError::LoginFailed(format!("Login failed: {e}")))?;
 
     let MintedSession {
         token,
