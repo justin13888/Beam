@@ -1,9 +1,9 @@
 //! Test-data builders for device profiles and media sources.
 //!
 //! The repository's testing guidance asks for builders so a test states only
-//! the property under test and inherits a valid remainder. These are shared
-//! with the Android side through the `test-utils` feature, so a Kotlin-side
-//! integration test can assert against the same fixtures.
+//! the property under test and inherits a valid remainder. They are this
+//! crate's own: compiled only under `cfg(test)`, and reachable from no other
+//! crate and from no foreign binding.
 
 use super::{DecoderCapability, DeviceProfile};
 use crate::capability::select::{AudioTrackView, DiscStructure, MediaSourceView, SourcePartView};

@@ -312,6 +312,14 @@ mod proptests {
             "(/[a-z0-9]{0,6}){0,3}/?(\\?[a-z]=[a-z0-9]{0,4})?(#[a-z]{0,4})?",
             "[ \t]{0,2}",
         )
+            // `xn--` opens an IDNA A-label, whose remainder must be valid
+            // punycode; the label pattern above knows nothing of that, so a
+            // label like `xn--` is a malformed name, not a typed address.
+            .prop_filter("an A-label is not a typed address", |(_, host, ..)| {
+                !host
+                    .split('.')
+                    .any(|label| label.to_ascii_lowercase().starts_with("xn--"))
+            })
             .prop_map(|(scheme, host, port, rest, padding)| {
                 let mut typed = padding.clone();
                 if let Some(scheme) = scheme {

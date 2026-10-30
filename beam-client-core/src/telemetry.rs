@@ -797,6 +797,7 @@ mod tests {
         for n in 0..120_u8 {
             queue.record(start(n));
         }
+        assert!(!queue.is_empty());
 
         let first = queue.take_batch();
         assert_eq!(first.len(), MAX_EVENTS_PER_REQUEST);
@@ -834,6 +835,43 @@ mod tests {
             start(1),
             "the oldest event is the one let go"
         );
+    }
+
+    /// Rows rank by attempts -- starts and failures together -- so a label
+    /// that mostly fails is not ranked below one that mostly starts, and one
+    /// with more of both ranks above one with fewer.
+    #[test]
+    fn failure_rows_rank_by_every_attempt() {
+        let mut tally = Tally::default();
+        tally.started("failing", 1);
+        tally.failed("failing", 11);
+        tally.started("steady", 10);
+        tally.failed("steady", 1);
+        tally.started("flaky", 2);
+        tally.failed("flaky", 7);
+
+        let labels: Vec<String> = tally.rows().into_iter().map(|row| row.label).collect();
+
+        assert_eq!(labels, vec!["failing", "steady", "flaky"]);
+    }
+
+    /// Putting a batch back into a queue that refilled meanwhile trims it to
+    /// exactly its bound: no fuller, and not one event short.
+    #[test]
+    fn a_batch_restored_into_a_full_queue_keeps_it_at_its_bound() {
+        let queue = TelemetryQueue::new();
+        for _ in 0..MAX_PENDING_EVENTS {
+            queue.record(start(1));
+        }
+        let batch = queue.take_batch();
+        for _ in 0..MAX_EVENTS_PER_REQUEST {
+            queue.record(start(2));
+        }
+        assert_eq!(queue.len() as usize, MAX_PENDING_EVENTS);
+
+        queue.restore(batch);
+
+        assert_eq!(queue.len() as usize, MAX_PENDING_EVENTS);
     }
 
     #[test]

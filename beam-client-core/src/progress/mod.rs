@@ -66,7 +66,6 @@ struct Pending {
 #[derive(Debug)]
 pub struct ProgressThrottle {
     clock: Arc<dyn Clock>,
-    interval_secs: i64,
     last_sent: Mutex<HashMap<String, i64>>,
     pending: Mutex<HashMap<String, Pending>>,
 }
@@ -94,15 +93,8 @@ impl ProgressThrottle {
     /// A throttle using [`REPORT_INTERVAL_SECS`].
     #[must_use]
     pub fn new(clock: Arc<dyn Clock>) -> Self {
-        Self::with_interval(clock, REPORT_INTERVAL_SECS)
-    }
-
-    /// A throttle with a custom interval.
-    #[must_use]
-    pub fn with_interval(clock: Arc<dyn Clock>, interval_secs: i64) -> Self {
         Self {
             clock,
-            interval_secs,
             last_sent: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
         }
@@ -128,7 +120,7 @@ impl ProgressThrottle {
             .get(file_id)
             .copied();
 
-        let elapsed_enough = last.is_none_or(|last_sent| now - last_sent >= self.interval_secs);
+        let elapsed_enough = last.is_none_or(|last_sent| now - last_sent >= REPORT_INTERVAL_SECS);
 
         if force || elapsed_enough {
             // The sample being offered is the newest one, so its position wins
@@ -155,7 +147,7 @@ impl ProgressThrottle {
             .lock()
             .expect("pending lock")
             .insert(file_id.to_owned(), Pending { duration_secs });
-        let wait = last.map_or(0, |last_sent| self.interval_secs - (now - last_sent));
+        let wait = last.map_or(0, |last_sent| REPORT_INTERVAL_SECS - (now - last_sent));
         ThrottleDecision::Hold {
             next_eligible_in_secs: u64::try_from(wait.max(0)).unwrap_or(0),
         }

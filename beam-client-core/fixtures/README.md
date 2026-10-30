@@ -24,6 +24,8 @@ derived from one recipe rather than maintained as two.
 | `hevc.mkv`       | HEVC  | --    | Matroska  | a second `CodecID` and a different `CodecPrivate` shape |
 | `h264_aac.mkv`   | H.264 | AAC   | Matroska  | two tracks, track selection, audio track metadata |
 | `vp9_opus.webm`  | VP9   | Opus  | WebM      | WebM read through the same path; a codec Apple cannot render |
+| `h264_gop3.mkv`  | H.264 | --    | Matroska  | a keyframe every third frame (0.0s, 0.2s, 0.4s), so a seek has keyframes to choose between |
+| `h264_srt.mkv`   | H.264 | --    | Matroska  | a SubRip subtitle track beside the video |
 
 `vp9_opus.webm` earns its place twice: it proves the extractor opens WebM
 through the same code, and its Opus track is one the Apple sample-buffer engine
@@ -34,7 +36,8 @@ rather than as an unknown codec.
 
 All inputs are synthetic (`testsrc2` video, `sine` audio), so no third-party
 media is embedded. `h264.mkv`, `hevc.mkv` and `vp9_opus.webm` are copies of the
-`beam-index` fixtures of the same name; `h264_aac.mkv` is generated here.
+`beam-index` fixtures of the same name; `h264_aac.mkv`, `h264_gop3.mkv` and
+`h264_srt.mkv` are generated here.
 
 ```sh
 V="testsrc2=size=64x64:rate=15:duration=0.6"
@@ -43,6 +46,11 @@ FF="ffmpeg -hide_banner -loglevel error -y"
 
 $FF -f lavfi -i "$V" -f lavfi -i "$A" -c:v libx264 -preset ultrafast -crf 40 \
     -pix_fmt yuv420p -c:a aac -b:a 24k h264_aac.mkv
+$FF -f lavfi -i "$V" -c:v libx264 -preset ultrafast -crf 40 -pix_fmt yuv420p \
+    -g 3 -keyint_min 3 -sc_threshold 0 -bf 0 h264_gop3.mkv
+printf '1\n00:00:00,000 --> 00:00:00,500\nHello\n' > hello.srt
+$FF -f lavfi -i "$V" -i hello.srt -c:v libx264 -preset ultrafast -crf 40 \
+    -pix_fmt yuv420p -c:s srt h264_srt.mkv
 ```
 
 This needs a system FFmpeg built with libx264; the vendored LGPL build

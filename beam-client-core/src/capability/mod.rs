@@ -201,9 +201,10 @@ fn best_decoder(
 }
 
 // No `#[mutants::skip]` here: an attribute proc macro on a non-inline module
-// declaration is unstable ("non-inline modules in proc macro input"), so the
-// file is excluded by path in `.cargo/mutants.toml` instead.
-#[cfg(any(test, feature = "test-utils"))]
+// declaration is unstable ("non-inline modules in proc macro input"). The
+// literal `#[cfg(test)]` is what cargo-mutants skips, and the file is also
+// excluded by path in `.cargo/mutants.toml`.
+#[cfg(test)]
 pub mod builders;
 
 #[cfg(test)]
@@ -241,6 +242,9 @@ mod tests {
         };
         assert!(decoder.accepts_size(1920, 1080));
         assert!(!decoder.accepts_size(3840, 2160));
+        // Each axis on its own: an ultrawide too wide, a portrait too tall.
+        assert!(!decoder.accepts_size(3840, 1080));
+        assert!(!decoder.accepts_size(1920, 2160));
         assert!(decoder.accepts_bitrate(20_000_000));
         assert!(!decoder.accepts_bitrate(80_000_000));
     }

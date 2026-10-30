@@ -151,7 +151,7 @@ ignored).
 **Feature selection matters more than it looks.** cargo-mutants builds each package on its own, so
 the feature name it is given has to be unqualified and valid for every mutated package -- a
 workspace-qualified `beam-index/vendored-ffmpeg` fails the baseline build for a package that does
-not depend on beam-index. Each of the four mutated crates therefore declares a `mutation-testing`
+not depend on beam-index. Every mutated crate therefore declares a `mutation-testing`
 feature naming the set that compiles *all* of its `cfg`-gated production paths, and
 `BEAM_MUTANTS_FEATURES` passes that one name. Without it, mutants in (for example)
 `cfg(feature = "entity")` code come back MISSED because the build never compiled them -- a result
@@ -203,8 +203,9 @@ hook.
 
 ### The recorded baseline
 
-Measured on the tree that introduced this loop. The first number is what the suite scored before
-any hardening; the second is after one pass per crate.
+Measured on the tree that introduced this loop, except `beam-client-core`, which joined it later
+(#360). The first number is what the suite scored before any hardening; the second is after one pass
+per crate.
 
 | Crate | Mutants | Survivors before | Survivors after |
 |---|---|---|---|
@@ -212,6 +213,13 @@ any hardening; the second is after one pass per crate.
 | `beam-auth` | 149 | 52 | 0 |
 | `beam-server` | 392 | 17 | 0 |
 | `beam-index` | 704 | 13 | 0 |
+| `beam-client-core` | 722 | 92 | 2 |
+
+`beam-client-core`'s survivors after its pass are defects whose fix changes behaviour, so they are
+filed rather than tested around: #398 (a server reached by IP address cannot be pinned) and #400
+(`tls::describe` reads the wall clock itself). A crate whose doubles are `cfg(test)` alone, as
+`beam-client-core`'s are, still defines an empty `mutation-testing` feature, because the
+`rust:mutants*` tasks build every crate with that name.
 
 Roughly a fifth of all mutants are `unviable` (the mutated program does not compile), which is
 normal and not a signal about the tests.

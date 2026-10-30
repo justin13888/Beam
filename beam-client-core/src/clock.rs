@@ -28,11 +28,11 @@ impl Clock for SystemClock {
     }
 }
 
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(test)]
 pub use test_clock::TestClock;
 
 #[mutants::skip]
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(test)]
 mod test_clock {
     use super::Clock;
     use std::sync::atomic::{AtomicI64, Ordering};
@@ -68,5 +68,26 @@ mod test_clock {
         fn now_unix(&self) -> i64 {
             self.now.load(Ordering::SeqCst)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Clock, SystemClock};
+
+    /// The real clock reads the present, in seconds: after the day this test
+    /// was written, and within a few seconds of the standard library's own
+    /// reading. A clock stuck at the epoch would park every queued progress
+    /// sample's back-off decades in the past.
+    #[test]
+    fn the_system_clock_reads_the_present_in_seconds() {
+        let now = SystemClock.now_unix();
+        assert!(now > 1_793_232_000, "{now} is before 2026-10-29");
+        let reference = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("after the epoch")
+            .as_secs();
+        let reference = i64::try_from(reference).expect("fits");
+        assert!((reference - now).abs() <= 5, "{now} vs {reference}");
     }
 }

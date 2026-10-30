@@ -295,11 +295,10 @@ impl MatroskaExtractor {
 
     fn ticks_for(&self, seconds: f64) -> u64 {
         let ticks = seconds * NANOS_PER_SECOND / self.timestamp_scale as f64;
-        if ticks.is_finite() && ticks > 0.0 {
-            ticks as u64
-        } else {
-            0
-        }
+        // A float-to-integer `as` saturates, so a negative count is already
+        // zero; only an infinite one has to be refused, or it would saturate
+        // to the end of the file.
+        if ticks.is_finite() { ticks as u64 } else { 0 }
     }
 
     fn seconds_for(&self, ticks: u64) -> f64 {
@@ -308,6 +307,11 @@ impl MatroskaExtractor {
 }
 
 impl Inner {
+    // Equivalent under mutation: with no selected video track the keyframe
+    // scan in `seek` finds no keyframe and falls back to the requested
+    // position, which is exactly what this short-circuit returns. Answering
+    // `true` changes how many frames a seek reads, never where it lands.
+    #[mutants::skip]
     fn has_selected_video(&self, tracks: &[ExtractorTrack]) -> bool {
         tracks
             .iter()
@@ -482,6 +486,10 @@ mod tests {
     const HEVC: &[u8] = include_bytes!("../../fixtures/hevc.mkv");
     const H264_AAC: &[u8] = include_bytes!("../../fixtures/h264_aac.mkv");
     const VP9_OPUS: &[u8] = include_bytes!("../../fixtures/vp9_opus.webm");
+    /// H.264 with a keyframe every third frame: at 0.0s, 0.2s and 0.4s.
+    const H264_GOP3: &[u8] = include_bytes!("../../fixtures/h264_gop3.mkv");
+    /// H.264 with a SubRip subtitle track beside it.
+    const H264_SRT: &[u8] = include_bytes!("../../fixtures/h264_srt.mkv");
 
     fn extractor(bytes: &[u8]) -> Arc<MatroskaExtractor> {
         MatroskaExtractor::open(Arc::new(InMemoryByteSource::new(bytes.to_vec())))
@@ -496,6 +504,21 @@ mod tests {
         samples
     }
 
+    /// The reader fetches in windows a cluster's worth wide, so opening a
+    /// small file and reading every sample of it is one request, not one per
+    /// element. Over a network that is the difference between opening a file
+    /// and waiting on it.
+    #[test]
+    fn opening_and_reading_a_small_file_is_one_fetch() {
+        let source = Arc::new(InMemoryByteSource::new(H264_AAC.to_vec()));
+        let extractor =
+            MatroskaExtractor::open(source.clone() as Arc<dyn ByteSource>).expect("opens");
+
+        drain(&extractor);
+
+        assert_eq!(source.read_count(), 1);
+    }
+
     #[test]
     fn a_single_video_track_is_described_from_the_container() {
         let extractor = extractor(H264);
@@ -507,6 +530,21 @@ mod tests {
         assert_eq!(video.video_codec, Some(VideoCodec::H264));
         assert_eq!(video.audio_codec, None);
         assert_eq!((video.width, video.height), (64, 64));
+    }
+
+    /// A subtitle track is described as one, with its format, so a player
+    /// can offer it or say why it cannot.
+    #[test]
+    fn a_subtitle_track_is_described_with_its_format() {
+        let tracks = extractor(H264_SRT).tracks();
+
+        let subtitle = tracks
+            .iter()
+            .find(|track| track.kind == TrackKind::Subtitle)
+            .expect("the fixture's SubRip track");
+        assert_eq!(subtitle.subtitle_format, Some(SubtitleFormat::SubRip));
+        assert_eq!(subtitle.video_codec, None);
+        assert_eq!(subtitle.audio_codec, None);
     }
 
     #[test]
@@ -602,7 +640,7 @@ mod tests {
             .expect("fixture declares a duration");
 
         assert!(
-            (0.5..2.0).contains(&duration),
+            (0.55..0.7).contains(&duration),
             "duration {duration}s is not the fixture's ~0.6s"
         );
         for sample in drain(&extractor) {
@@ -677,6 +715,49 @@ mod tests {
             .expect("no sample after seek");
         assert!(next.is_keyframe, "the sample after a seek is not decodable");
         assert!((next.pts_seconds - landed).abs() < 0.05);
+    }
+
+    /// Between keyframes, a seek lands on the one before the target -- not
+    /// the first, and not the one after.
+    #[test]
+    fn a_seek_between_keyframes_lands_on_the_keyframe_before_it() {
+        let extractor = extractor(H264_GOP3);
+
+        let landed = extractor.seek(0.3).expect("seek should succeed");
+
+        assert!((landed - 0.2).abs() < 0.01, "landed at {landed}s");
+        let next = extractor
+            .next_sample()
+            .expect("read should succeed")
+            .expect("a sample after the seek");
+        assert!(next.is_keyframe);
+        assert!((next.pts_seconds - landed).abs() < 0.01);
+    }
+
+    /// A block that states its duration has it converted from ticks to
+    /// seconds with the same scale as its timestamp: the WebM fixture's final
+    /// Opus block is a few milliseconds, not thousands of seconds.
+    #[test]
+    fn a_stated_block_duration_is_in_seconds() {
+        let durations: Vec<f64> = drain(&extractor(VP9_OPUS))
+            .iter()
+            .filter_map(|sample| sample.duration_seconds)
+            .collect();
+
+        assert!(!durations.is_empty(), "the fixture states a block duration");
+        for duration in durations {
+            assert!((0.001..0.1).contains(&duration), "{duration}s");
+        }
+    }
+
+    /// A seek onto a keyframe's own timestamp lands on that keyframe.
+    #[test]
+    fn a_seek_onto_a_keyframe_lands_exactly_on_it() {
+        let extractor = extractor(H264_GOP3);
+
+        let landed = extractor.seek(0.4).expect("seek should succeed");
+
+        assert!((landed - 0.4).abs() < 0.01, "landed at {landed}s");
     }
 
     #[test]
@@ -845,11 +926,13 @@ mod proptests {
     use crate::ports::byte_source::InMemoryByteSource;
     use proptest::prelude::*;
 
-    const FIXTURES: [&[u8]; 4] = [
+    const FIXTURES: [&[u8]; 6] = [
         include_bytes!("../../fixtures/h264.mkv"),
         include_bytes!("../../fixtures/hevc.mkv"),
         include_bytes!("../../fixtures/h264_aac.mkv"),
         include_bytes!("../../fixtures/vp9_opus.webm"),
+        include_bytes!("../../fixtures/h264_gop3.mkv"),
+        include_bytes!("../../fixtures/h264_srt.mkv"),
     ];
 
     /// Open `bytes` and read every sample there is, seeking once on the way.

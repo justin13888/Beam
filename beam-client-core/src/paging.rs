@@ -157,6 +157,7 @@ mod tests {
         pager.complete_request(&ids(&["a", "b"]), Some("cursor-1".to_owned()), true);
         assert_eq!(pager.cursor(), Some("cursor-1"));
         assert_eq!(pager.len(), 2);
+        assert!(!pager.is_empty());
     }
 
     #[test]
@@ -176,6 +177,7 @@ mod tests {
         let mut pager = CursorPager::new();
         pager.begin_request();
         pager.complete_request(&ids(&["a"]), Some("c1".to_owned()), false);
+        assert!(!pager.has_next_page());
         assert!(!pager.begin_request(), "the list is exhausted");
     }
 

@@ -253,6 +253,52 @@ mod tests {
         assert_eq!(source.read_count(), 1);
     }
 
+    /// A window is the whole fetch size: reading every byte of one costs one
+    /// request, and the byte after it the next.
+    #[test]
+    fn one_fetch_serves_a_whole_window_and_no_more() {
+        let window = WINDOW_BYTES as usize;
+        let source = Arc::new(InMemoryByteSource::new(vec![7_u8; 2 * window]));
+        let mut reader = ByteSourceReader::new(source.clone());
+
+        let mut chunk = vec![0_u8; window];
+        reader.read_exact(&mut chunk).expect("read failed");
+        assert_eq!(source.read_count(), 1);
+
+        reader.read_exact(&mut [0_u8; 1]).expect("read failed");
+        assert_eq!(source.read_count(), 2);
+    }
+
+    /// Asking for no bytes fetches none, wherever the reader stands.
+    #[test]
+    fn an_empty_read_fetches_nothing() {
+        let source = Arc::new(InMemoryByteSource::new(vec![7_u8; 4096]));
+        let mut reader = ByteSourceReader::new(source.clone());
+
+        assert_eq!(reader.read(&mut []).expect("read failed"), 0);
+        assert_eq!(source.read_count(), 0);
+    }
+
+    /// The start itself is a position a seek may land on, from any origin.
+    #[test]
+    fn seeking_to_the_start_is_allowed_from_every_origin() {
+        let mut reader = reader_over((0..10).collect());
+
+        assert_eq!(reader.seek(SeekFrom::Start(0)).expect("seek failed"), 0);
+        reader.seek(SeekFrom::Start(4)).expect("seek failed");
+        assert_eq!(reader.seek(SeekFrom::Current(-4)).expect("seek failed"), 0);
+        assert_eq!(reader.seek(SeekFrom::End(-10)).expect("seek failed"), 0);
+    }
+
+    /// The reader reports the source's size.
+    #[test]
+    fn the_reader_reports_the_sources_size() {
+        let reader = reader_over(vec![0_u8; 4096]);
+
+        assert_eq!(reader.len(), 4096);
+        assert!(!reader.is_empty());
+    }
+
     #[test]
     fn an_empty_source_reads_as_eof_immediately() {
         let mut reader = reader_over(Vec::new());

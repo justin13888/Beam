@@ -98,10 +98,10 @@ cap_lints = true
 # --- File filters -----------------------------------------------------------
 
 exclude_globs = [
-    # Test-data builders for the capability tests. Gated on
-    # `#[cfg(any(test, feature = "test-utils"))]` like the other doubles, but
-    # declared as a non-inline module -- and an attribute proc macro is
-    # unstable on `mod foo;`, so `#[mutants::skip]` cannot be written there.
+    # Test-data builders for the capability tests. Gated on `#[cfg(test)]`
+    # like the crate's other doubles, but declared as a non-inline module --
+    # and an attribute proc macro is unstable on `mod foo;`, so
+    # `#[mutants::skip]` cannot be written there.
     # Excluded by path rather than by name: a path names exactly one file and
     # cannot silently capture production code the way a name pattern can.
     "beam-client-core/src/capability/builders.rs",
@@ -126,6 +126,13 @@ exclude_globs = [
     # reason the `test-utils` doubles carry `#[mutants::skip]`.
     "beam-test-support/**/*.rs",
 
+    # The bindings generator's entry point: one call into
+    # `uniffi::uniffi_bindgen_main`, run by `mise run core:bindgen` and never by
+    # a test. It decides nothing, so its only mutant (`main` -> `()`) could
+    # never be caught, and the bindings it writes are exercised by the Android
+    # build instead.
+    "beam-client-core/src/bin/uniffi-bindgen.rs",
+
     # The process entry point. `main` composes already-tested pieces, and
     # `wait_for_shutdown_signal` waits on real SIGTERM/ctrl-c -- which cannot
     # be delivered in-process without killing the test runner. Everything here
@@ -142,6 +149,13 @@ exclude_re = [
     # Debug and Display formatting is not behaviour this project asserts on.
     "impl Debug",
     "impl Display for .*Error>?::fmt",
+    # Equivalent under the contract: `POST /v1/telemetry/playback` declares its
+    # 409 with the telemetry-disabled problem type as a `const`, so the
+    # generated client decodes no other 409 -- any other body arrives as
+    # `BeamError::Protocol`, not as a 409 -- and the guard can never be false
+    # for a `Server { status: 409 }`. Named in full, so it exempts this one
+    # mutant and nothing near it. ADR-0011's decision log records it.
+    "replace match guard code == TELEMETRY_DISABLED with true in BeamClient::flush_playback_telemetry",
 ]
 
 # --- Deliberately not set yet -----------------------------------------------
