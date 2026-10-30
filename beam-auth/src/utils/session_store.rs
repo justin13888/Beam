@@ -72,10 +72,13 @@ pub async fn get_and_touch(
 ///
 /// This trait abstracts the underlying storage mechanism (Postgres, or an
 /// in-memory map for tests) used to persist session data across requests.
-/// Shared by the legacy password-JWT-refresh flow and the OIDC BFF cookie
-/// flow -- both mint sessions through the same store, they just differ in
-/// how the resulting opaque token reaches the client (JWT claim vs. cookie
-/// value) and in what idle/absolute TTLs they pass.
+/// Every session is minted by an OIDC login (ADR-0003), through one of two
+/// flows that share this store: the browser's authorization-code flow, whose
+/// token reaches the client as the session cookie, and the device-
+/// authorization grant (RFC 8628) a TV or phone client completes, whose
+/// token it receives in the response body and then presents as that same
+/// cookie (ADR-0017). Both pass the deployment's configured idle and
+/// absolute TTLs.
 ///
 /// The token returned by `create` and accepted by `get`/`touch`/`delete` is
 /// always the plaintext opaque credential; only its SHA-256 hash is ever
@@ -83,7 +86,10 @@ pub async fn get_and_touch(
 #[async_trait]
 pub trait SessionStore: Send + Sync + std::fmt::Debug {
     /// Persists new session data and returns the plaintext opaque token the
-    /// caller should hand to the client (as a cookie value, JWT claim, etc).
+    /// caller should hand to the client (as the session cookie, or in the
+    /// device grant's response). `created_at` and `last_active` are stamped
+    /// from the store's clock, whatever `data` carries. A `user_id` that is
+    /// not a UUID is refused before anything is written.
     ///
     /// # Parameters
     /// - `data`: The session state to be stored.

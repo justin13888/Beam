@@ -7,11 +7,23 @@ use crate::models::library::{CreateLibrary, Library};
 
 #[cfg_attr(any(test, feature = "test-utils"), mockall::automock)]
 #[async_trait]
+///
+/// Every method returns the store's own failure as `Err(DbErr)`; an id that
+/// names no library is never an error.
 pub trait LibraryRepository: Send + Sync + std::fmt::Debug {
+    /// Every library, in no particular order; empty when there are none.
     async fn find_all(&self) -> Result<Vec<Library>, DbErr>;
+    /// The library `id` names, or `None` when none does.
     async fn find_by_id(&self, id: Uuid) -> Result<Option<Library>, DbErr>;
+    /// Stores a new library and returns it as stored: a fresh id, its
+    /// creation and update stamps set, and no scan recorded yet.
     async fn create(&self, create: CreateLibrary) -> Result<Library, DbErr>;
+    /// How many of the library's files are present -- a missing file (issue
+    /// #179) is not counted. Zero for a library with none, or no library.
     async fn count_files(&self, library_id: Uuid) -> Result<u64, DbErr>;
+    /// Records a scan's progress, writing only the fields given: `None`
+    /// leaves the stored value as it was. A library that does not exist --
+    /// deleted while its scan ran -- is a no-op, not an error (issue #349).
     async fn update_scan_progress(
         &self,
         library_id: Uuid,
@@ -19,6 +31,7 @@ pub trait LibraryRepository: Send + Sync + std::fmt::Debug {
         finished_at: Option<DateTime<Utc>>,
         file_count: Option<i32>,
     ) -> Result<(), DbErr>;
+    /// Deletes the library `id` names; an unknown id changes nothing.
     async fn delete(&self, id: Uuid) -> Result<(), DbErr>;
     /// Total number of libraries, for the admin status endpoint (issue #85).
     async fn count(&self) -> Result<u64, DbErr>;

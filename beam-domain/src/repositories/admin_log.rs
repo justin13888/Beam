@@ -3,9 +3,16 @@ use sea_orm::DbErr;
 
 use crate::models::admin_log::{AdminLog, AdminLogCategory, CreateAdminLog};
 
+/// The administrator-facing event log: append-only, read newest first.
+///
+/// Every method returns the store's own failure as `Err(DbErr)`.
 #[async_trait]
 pub trait AdminLogRepository: Send + Sync + std::fmt::Debug {
+    /// Appends `entry` and returns it as stored: a fresh id, stamped from
+    /// the store's clock.
     async fn create(&self, entry: CreateAdminLog) -> Result<AdminLog, DbErr>;
+    /// At most `limit` entries, newest first, after skipping the `offset`
+    /// newest; empty once `offset` passes the end.
     async fn list(&self, limit: u64, offset: u64) -> Result<Vec<AdminLog>, DbErr>;
     /// Like [`list`](Self::list) (newest first) but restricted to a single
     /// category -- e.g. `LibraryScan` for the admin status endpoint's recent
@@ -16,6 +23,7 @@ pub trait AdminLogRepository: Send + Sync + std::fmt::Debug {
         limit: u64,
         offset: u64,
     ) -> Result<Vec<AdminLog>, DbErr>;
+    /// How many entries the log holds, of every category.
     async fn count(&self) -> Result<u64, DbErr>;
 }
 

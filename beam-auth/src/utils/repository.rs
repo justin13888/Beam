@@ -23,12 +23,16 @@ pub trait UserRepository: Send + Sync + std::fmt::Debug {
         subject: &str,
     ) -> Result<Option<User>, DbErr>;
 
-    /// Creates a new user in the database.
+    /// Creates a new user and returns it as stored: a fresh id, enabled, and
+    /// stamped from the repository's clock. An `(oidc_issuer, oidc_subject)`
+    /// identity that already has a user is refused with `Err` and leaves that
+    /// user as it was -- one identity is one account.
     async fn create(&self, user: CreateUser) -> Result<User, DbErr>;
 
     /// Updates a user's admin flag. OIDC login recomputes this from the
     /// IdP-asserted admin claim on every login (granting and revoking) rather
-    /// than trusting a stored value indefinitely (see issue #85).
+    /// than trusting a stored value indefinitely (see issue #85). A no-op if
+    /// the user does not exist.
     async fn set_admin(&self, id: Uuid, is_admin: bool) -> Result<(), DbErr>;
 
     /// Returns a page of users ordered by `created_at` ascending (stable
@@ -49,7 +53,10 @@ pub trait UserRepository: Send + Sync + std::fmt::Debug {
     /// Refreshes the OIDC-sourced profile fields (`display_name`,
     /// `avatar_url`) on an existing user. Called on every OIDC login so a
     /// name/picture change at the IdP shows up in beam without requiring
-    /// re-provisioning.
+    /// re-provisioning. Both fields are replaced as given: an `avatar_url`
+    /// of `None` clears a stored one, as an IdP that stopped releasing a
+    /// picture means. Nothing else about the user changes. A no-op if the
+    /// user does not exist.
     async fn update_oidc_profile(
         &self,
         id: Uuid,
