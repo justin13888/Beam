@@ -256,6 +256,56 @@ async fn a_429_retry_after_reaches_the_queue() {
     assert_eq!(client.pending_progress_count().await.expect("countable"), 0);
 }
 
+/// The report path's half of the same contract: a sample that
+/// `report_progress` queues because the server rate-limited it waits out the
+/// server's `Retry-After`, rather than being due to the very next flush.
+#[tokio::test]
+async fn a_rate_limited_report_is_queued_behind_its_retry_after() {
+    let (client, id, storage, clock) = clocked_client().await;
+    let backend = answer_with(
+        &client,
+        &id,
+        vec![
+            crate::transport::CannedAnswer::respond(429, PROBLEM, r#"{"type":"about:blank"}"#)
+                .with_header("retry-after", "90"),
+            crate::transport::CannedAnswer::respond(200, JSON, PROGRESS_ACK),
+        ],
+    );
+    let now = clock.now_unix();
+
+    assert_eq!(
+        client
+            .report_progress(FILE_A.to_owned(), 30.0, Some(7200.0), true)
+            .await
+            .expect("a rate-limited send is an outcome, not an error"),
+        ProgressOutcome::Queued { pending: 1 }
+    );
+    let queue = queued(&storage, &id).await;
+    assert_eq!(
+        queue[0].not_before_unix,
+        now + 90,
+        "the server's interval, not due at once"
+    );
+    assert_eq!(queue[0].attempts, 0);
+
+    assert_eq!(client.flush_progress().await.expect("flushed"), 0);
+    clock.advance_secs(89);
+    assert_eq!(client.flush_progress().await.expect("flushed"), 0);
+    assert_eq!(
+        backend.recorded().len(),
+        1,
+        "nothing is sent inside the server's interval"
+    );
+
+    clock.advance_secs(1);
+    assert_eq!(client.flush_progress().await.expect("flushed"), 1);
+    let sent = backend.recorded();
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[1].url.path(), format!("/v1/files/{FILE_A}/progress"));
+    assert_eq!(json_body(&sent[1])["position_secs"], 30.0);
+    assert_eq!(client.pending_progress_count().await.expect("countable"), 0);
+}
+
 /// A queued id that is not a UUID was written by an older build and can
 /// never be accepted: it is failed without a request, and stops the flush
 /// like any other failure. Backed off, it no longer blocks the next one.
