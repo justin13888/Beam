@@ -353,20 +353,56 @@ async fn browsing_requires_a_session() {
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
+/// `sort_by` and `sort_order` reach the browse order over the real metadata
+/// service: the same three titles come back in title order, in reverse title
+/// order, and in release order -- three different orders, so a parameter
+/// dropped on the way would show as one of the others.
 #[tokio::test]
-async fn browsing_yields_a_connection_and_accepts_the_sort_parameters() {
-    let (client, token) = signed_in(StubMetadataService::default()).await;
+async fn sort_parameters_reach_the_browse_order() {
+    let library = Library::new();
+    let blade = indexed_movie_of(&library.movies, &library.files, "Blade", Some(1998))
+        .await
+        .0;
+    let arrival = indexed_movie_of(&library.movies, &library.files, "Arrival", Some(2016))
+        .await
+        .0;
+    let contact = indexed_movie_of(&library.movies, &library.files, "Contact", Some(1997))
+        .await
+        .0;
+    let (client, token) = signed_in_to(real_service(library)).await;
 
-    let response = client
-        .get("/v1/media?sort_by=year&sort_order=desc")
-        .cookie("beam_session", &token)
-        .send()
-        .await;
+    let order = |query: &'static str| {
+        let client = &client;
+        let token = token.clone();
+        async move {
+            let response = client
+                .get(&format!("/v1/media{query}"))
+                .cookie("beam_session", &token)
+                .send()
+                .await;
+            assert_eq!(response.status(), StatusCode::OK, "{query}");
+            response
+                .json::<MediaConnection>()
+                .items
+                .iter()
+                .map(item_id)
+                .collect::<Vec<_>>()
+        }
+    };
 
-    assert_eq!(response.status(), StatusCode::OK);
-    let body: MediaConnection = response.json();
-    assert!(body.items.is_empty());
-    assert!(!body.page_info.has_next_page);
+    assert_eq!(order("").await, [arrival, blade, contact], "the default");
+    assert_eq!(
+        order("?sort_by=title&sort_order=desc").await,
+        [contact, blade, arrival]
+    );
+    assert_eq!(
+        order("?sort_by=year&sort_order=asc").await,
+        [contact, blade, arrival]
+    );
+    assert_eq!(
+        order("?sort_by=year&sort_order=desc").await,
+        [arrival, blade, contact]
+    );
 }
 
 /// A movie titled `title` with one file behind it, through the same
@@ -376,6 +412,16 @@ async fn indexed_movie(
     files: &beam_domain::repositories::file::in_memory::InMemoryFileRepository,
     title: &str,
 ) -> (uuid::Uuid, uuid::Uuid) {
+    indexed_movie_of(movies, files, title, None).await
+}
+
+/// [`indexed_movie`], released in `year`.
+async fn indexed_movie_of(
+    movies: &beam_domain::repositories::movie::in_memory::InMemoryMovieRepository,
+    files: &beam_domain::repositories::file::in_memory::InMemoryFileRepository,
+    title: &str,
+    year: Option<u32>,
+) -> (uuid::Uuid, uuid::Uuid) {
     use beam_domain::models::{
         CreateMediaFile, CreateMovie, CreateMovieEntry, FileStatus, MediaFileContent,
     };
@@ -384,7 +430,7 @@ async fn indexed_movie(
 
     let library_id = uuid::Uuid::new_v4();
     let movie = movies
-        .find_or_create_by_identity(CreateMovie::new(title, None, None))
+        .find_or_create_by_identity(CreateMovie::new(title, year, None))
         .await
         .unwrap();
     let entry = movies

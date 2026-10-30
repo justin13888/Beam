@@ -1876,5 +1876,97 @@ mod tests {
 
             config.validate_paths().expect("an existing parent is fine");
         }
+
+        /// A data directory whose parent cannot be made -- here because a
+        /// regular file stands where a folder on its path must go -- is a
+        /// `DirCreationError` naming `BEAM_DATA_DIR`, not a panic and not a
+        /// server that starts and fails on its first write.
+        #[test]
+        fn a_data_dir_whose_parent_cannot_be_created_is_a_dir_creation_error() {
+            let temp = tempfile::tempdir().unwrap();
+            std::fs::create_dir(temp.path().join("videos")).unwrap();
+            std::fs::write(temp.path().join("blocker"), b"a file, not a folder").unwrap();
+            let config = ServerConfig {
+                video_dir: temp.path().join("videos"),
+                data_dir: temp.path().join("blocker").join("state").join("beam"),
+                ..Default::default()
+            };
+
+            let err = config
+                .validate_paths()
+                .expect_err("a parent beneath a regular file cannot be created");
+            assert!(
+                matches!(&err, ConfigError::DirCreationError(key, path, _)
+                    if key == "BEAM_DATA_DIR" && path.ends_with("beam")),
+                "unexpected error: {err}"
+            );
+            assert!(
+                temp.path().join("blocker").is_file(),
+                "the file in the way is left as it was"
+            );
+        }
+    }
+
+    /// The child half of [`an_unparseable_variable_fails_to_load`]: loads the
+    /// configuration from the environment that test hands it. Ignored because
+    /// it means nothing outside that environment, and refuses to pass there.
+    #[test]
+    #[ignore = "run by an_unparseable_variable_fails_to_load in a child process"]
+    fn config_loaded_from_an_unparseable_variable() {
+        assert_eq!(
+            std::env::var("BEAM_SHUTDOWN_TIMEOUT_SECS").as_deref(),
+            Ok("soon"),
+            "run through an_unparseable_variable_fails_to_load"
+        );
+        let err = ServerConfig::builder()
+            .env()
+            .load()
+            .map_err(ConfigError::from)
+            .expect_err("`soon` is not a number of seconds");
+        assert!(
+            matches!(err, ConfigError::LoadError(_)),
+            "unexpected error: {err}"
+        );
+        assert!(
+            format!("{err:#}").contains("BEAM_SHUTDOWN_TIMEOUT_SECS")
+                || format!("{err:?}").contains("BEAM_SHUTDOWN_TIMEOUT_SECS"),
+            "the error names the variable an operator has to fix: {err:?}"
+        );
+    }
+
+    /// A set variable that does not parse as its type stops the load with a
+    /// `LoadError` naming the variable, rather than falling back to the
+    /// default as an empty value does: an operator who wrote a value meant
+    /// it. Proven through the real env source in a child process, for the
+    /// reason `an_empty_client_auth_method_resolves_to_the_default` gives.
+    #[test]
+    fn an_unparseable_variable_fails_to_load() {
+        let mut child = std::process::Command::new(
+            std::env::current_exe().expect("the test binary's own path"),
+        );
+        for (key, _) in std::env::vars_os() {
+            if key.to_string_lossy().starts_with("BEAM_") {
+                child.env_remove(key);
+            }
+        }
+        let output = child
+            .env("BEAM_SHUTDOWN_TIMEOUT_SECS", "soon")
+            .args([
+                "--exact",
+                "config::tests::config_loaded_from_an_unparseable_variable",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .output()
+            .expect("the test binary re-executes");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "stdout: {stdout}\nstderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // An exact filter that matched nothing would also exit 0.
+        assert!(stdout.contains("1 passed"), "stdout: {stdout}");
     }
 }

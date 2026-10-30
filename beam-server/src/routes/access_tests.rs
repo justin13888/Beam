@@ -74,7 +74,9 @@ use crate::routes::playback::{
     get_title_progress, mark_unwatched, mark_watched, report_playback_progress,
 };
 use crate::routes::stream::{download_file, head_download_file, head_stream_file, stream_file};
-use crate::routes::subtitle::{get_subtitle, get_subtitle_webvtt};
+use crate::routes::subtitle::{
+    get_subtitle, get_subtitle_webvtt, head_subtitle, head_subtitle_webvtt,
+};
 use crate::routes::test_support::{access_over, make_app_state};
 use crate::services::artwork::{ArtworkCache, ArtworkCacheConfig};
 use crate::services::collections::CollectionService;
@@ -331,7 +333,9 @@ fn client(fixture: &Fixture) -> TestClient<AppState> {
                     download_file,
                     head_download_file,
                     get_subtitle,
+                    head_subtitle,
                     get_subtitle_webvtt,
+                    head_subtitle_webvtt,
                 ])
                 .mount(kynos::routes![
                     crate::routes::trickplay::get_trickplay_sheet,
@@ -719,6 +723,205 @@ async fn a_hidden_title_has_no_artwork_and_art_is_never_shared_between_viewers()
     assert_eq!(seen.header("cache-control"), Some("private, max-age=86400"));
 }
 
+/// A season's poster and an episode's still are art of their show: hidden
+/// with it from a viewer who may not see the show, served to one who may.
+#[tokio::test]
+async fn a_hidden_shows_season_and_episode_artwork_is_not_found() {
+    use beam_domain::providers::enrichment::{EpisodeEnrichment, SeasonEnrichment};
+
+    let fixture = fixture();
+    let (kids, titles) = fixture.catalogue().await;
+    fixture
+        .shows
+        .apply_season_enrichment(
+            titles.show,
+            &SeasonEnrichment {
+                season_number: 1,
+                poster_url: Some(POSTER_URL.to_string()),
+                episodes: vec![EpisodeEnrichment {
+                    episode_number: 1,
+                    thumbnail_url: Some(POSTER_URL.to_string()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("the season's art is stored");
+    let client = client(&fixture);
+    let (restricted, _) = fixture.kids_viewer(kids).await;
+    let (open, _) = fixture.viewer().await;
+
+    for path in [
+        format!("/v1/artwork/season/{}/poster", titles.season),
+        format!("/v1/artwork/episode/{}/thumbnail", titles.episode),
+    ] {
+        client
+            .get(&path)
+            .cookie("beam_session", &restricted)
+            .send()
+            .await
+            .assert_status(StatusCode::NOT_FOUND);
+        client
+            .head(&path)
+            .cookie("beam_session", &restricted)
+            .send()
+            .await
+            .assert_status(StatusCode::NOT_FOUND);
+        let seen = client.get(&path).cookie("beam_session", &open).send().await;
+        seen.assert_status(StatusCode::OK);
+        assert_eq!(seen.bytes().as_ref(), POSTER_BYTES, "{path}");
+    }
+}
+
+/// An administrator is held to their own access as any user is (the
+/// `/v1/admin` operations aside): restricted to the kids' library, an
+/// administrator does not see the grown-ups' titles or files.
+#[tokio::test]
+async fn a_restricted_administrator_is_held_to_their_access() {
+    use beam_auth::utils::models::CreateUser;
+
+    let fixture = fixture();
+    let (kids, titles) = fixture.catalogue().await;
+    let client = client(&fixture);
+    let admin = fixture
+        .state
+        .services
+        .user_repo
+        .create(CreateUser {
+            oidc_issuer: "https://idp.test".to_owned(),
+            oidc_subject: "restricted-admin".to_owned(),
+            email: None,
+            display_name: "Restricted Admin".to_owned(),
+            avatar_url: None,
+            is_admin: true,
+        })
+        .await
+        .expect("an administrator");
+    let token = fixture
+        .state
+        .services
+        .session_store
+        .create(
+            &SessionData {
+                user_id: admin.id.to_string(),
+                device_hash: "test-device".to_owned(),
+                ip: "127.0.0.1".to_owned(),
+                created_at: chrono::Utc::now().timestamp(),
+                last_active: chrono::Utc::now().timestamp(),
+            },
+            86_400,
+            86_400,
+        )
+        .await
+        .expect("a session");
+    fixture.restrict(admin.id, kids).await;
+
+    for path in [
+        format!("/v1/media/{}", titles.grown_movie),
+        format!("/v1/media/{}", titles.show),
+        format!("/v1/files/{}/stream", titles.grown_file),
+    ] {
+        assert_eq!(
+            status(&client, &token, &path).await,
+            StatusCode::NOT_FOUND,
+            "{path}"
+        );
+    }
+    assert_eq!(
+        status(&client, &token, &format!("/v1/media/{}", titles.kids_movie)).await,
+        StatusCode::OK
+    );
+    let browsed: MediaConnection = client
+        .get("/v1/media")
+        .cookie("beam_session", &token)
+        .send()
+        .await
+        .assert_status(StatusCode::OK)
+        .json();
+    assert_eq!(
+        browsed
+            .items
+            .iter()
+            .map(|item| match item {
+                MediaMetadata::Movie(movie) => movie.id,
+                MediaMetadata::Show(show) => show.id,
+            })
+            .collect::<Vec<_>>(),
+        vec![titles.kids_movie]
+    );
+}
+
+/// An access-policy store that fails every call: what a database outage
+/// looks like from the access service.
+#[derive(Debug)]
+struct FailingPolicies;
+
+#[async_trait::async_trait]
+impl beam_domain::repositories::AccessPolicyRepository for FailingPolicies {
+    async fn find(&self, _: Uuid) -> Result<AccessPolicy, sea_orm::DbErr> {
+        Err(crate::routes::test_support::outage())
+    }
+    async fn replace(&self, _: Uuid, _: &AccessPolicy) -> Result<(), sea_orm::DbErr> {
+        Err(crate::routes::test_support::outage())
+    }
+}
+
+/// NFR-205: a policy that cannot be read is a 500, never the title -- which
+/// would show a restricted viewer what they may not see -- and never a 404,
+/// which would tell them a title they may see is gone.
+#[tokio::test]
+async fn an_access_store_failure_is_a_500_never_the_title_or_not_found() {
+    let fixture = fixture();
+    let (_, titles) = fixture.catalogue().await;
+    let state = {
+        let base = &fixture.state;
+        crate::routes::test_support::state_with(|services| {
+            services.access = Arc::new(crate::services::access::AccessService::new(
+                crate::services::access::AccessRepositories {
+                    policies: Arc::new(FailingPolicies),
+                    movies: fixture.movies.clone(),
+                    shows: fixture.shows.clone(),
+                    files: fixture.files.clone(),
+                },
+            ));
+            services.metadata = base.services.metadata.clone();
+            services.movie_repo = fixture.movies.clone();
+            services.show_repo = fixture.shows.clone();
+            services.file_repo = fixture.files.clone();
+            services.library = base.services.library.clone();
+        })
+    };
+    let token = crate::routes::test_support::signed_in(&state).await;
+    let client = TestClient::new(
+        Router::new()
+            .nest(
+                "/v1",
+                Router::new()
+                    .mount(kynos::routes![browse_media, get_media_detail])
+                    .mount(kynos::routes![stream_file]),
+            )
+            .build(state)
+            .expect("the router describes itself"),
+    );
+
+    for path in [
+        "/v1/media".to_owned(),
+        format!("/v1/media/{}", titles.kids_movie),
+        format!("/v1/files/{}/stream", titles.kids_file),
+    ] {
+        let response = client
+            .get(&path)
+            .cookie("beam_session", &token)
+            .send()
+            .await;
+        response
+            .assert_status(StatusCode::INTERNAL_SERVER_ERROR)
+            .assert_problem_type("https://beam.justinchung.net/reference/errors/#internal");
+        assert!(!response.text().contains("Paddington"), "{path}");
+    }
+}
+
 #[tokio::test]
 async fn a_hidden_titles_files_are_not_found_to_stream_download_or_subtitle() {
     let fixture = fixture();
@@ -742,12 +945,28 @@ async fn a_hidden_titles_files_are_not_found_to_stream_download_or_subtitle() {
                 .assert_status(StatusCode::NOT_FOUND)
                 .assert_problem_type(FILE_NOT_FOUND);
         }
-        client
-            .head(&format!("/v1/files/{file}/stream"))
-            .cookie("beam_session", &restricted)
-            .send()
-            .await
-            .assert_status(StatusCode::NOT_FOUND);
+        // A HEAD answers what its GET would, and so must not tell a hidden
+        // file's size or validator either.
+        for path in [
+            format!("/v1/files/{file}/stream"),
+            format!("/v1/files/{file}/download"),
+            format!("/v1/files/{file}/subtitles/{}", Uuid::new_v4()),
+            format!("/v1/files/{file}/subtitles/{}/webvtt", Uuid::new_v4()),
+            format!("/v1/files/{file}/trickplay/0"),
+        ] {
+            let response = client
+                .head(&path)
+                .cookie("beam_session", &restricted)
+                .send()
+                .await;
+            response.assert_status(StatusCode::NOT_FOUND);
+            assert_eq!(response.header("etag"), None, "HEAD {path}");
+            assert_ne!(
+                response.header("content-length"),
+                Some(FILE_BYTES.len().to_string().as_str()),
+                "HEAD {path} tells the hidden file's length"
+            );
+        }
     }
 
     let stream_path = format!("/v1/files/{}/stream", titles.kids_file);
@@ -790,7 +1009,7 @@ async fn a_hidden_title_cannot_be_played_marked_or_dismissed() {
     let fixture = fixture();
     let (kids, titles) = fixture.catalogue().await;
     let client = client(&fixture);
-    let (restricted, _) = fixture.kids_viewer(kids).await;
+    let (restricted, restricted_id) = fixture.kids_viewer(kids).await;
 
     let report = |file: Uuid| {
         let client = &client;
@@ -843,6 +1062,44 @@ async fn a_hidden_title_cannot_be_played_marked_or_dismissed() {
         .send()
         .await
         .assert_status(StatusCode::NO_CONTENT);
+
+    // The refusals wrote nothing: once the restriction is lifted, the
+    // viewer's history holds only the title they were allowed to play.
+    fixture
+        .state
+        .services
+        .access
+        .replace(restricted_id, &AccessPolicy::unrestricted())
+        .await
+        .expect("lift the restriction");
+    let history: HistoryConnection = client
+        .get("/v1/history")
+        .cookie("beam_session", &restricted)
+        .send()
+        .await
+        .assert_status(StatusCode::OK)
+        .json();
+    assert_eq!(
+        history
+            .items
+            .iter()
+            .map(|item| item.media_id)
+            .collect::<Vec<_>>(),
+        vec![titles.kids_movie],
+        "no refused report or mark reached the viewer's history"
+    );
+    assert_eq!(history.total, 1);
+    let shelf: ContinueWatchingConnection = client
+        .get("/v1/continue-watching")
+        .cookie("beam_session", &restricted)
+        .send()
+        .await
+        .assert_status(StatusCode::OK)
+        .json();
+    assert!(
+        shelf.items.is_empty(),
+        "nothing refused is on the shelf, and the one title played was finished"
+    );
 }
 
 /// What a viewer watched before an administrator restricted them leaves
