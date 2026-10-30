@@ -209,7 +209,10 @@ impl ServerCertVerifier for TofuVerifier {
 
         let host = match server_name {
             ServerName::DnsName(name) => name.as_ref().to_owned(),
-            ServerName::IpAddress(address) => format!("{address:?}"),
+            // Spelled the way the URL and `render_ip`'s SANs spell it -- dotted
+            // quad, or IPv6 without brackets -- so `covers_host` can match it
+            // and the trust prompt names the host the user typed.
+            ServerName::IpAddress(address) => std::net::IpAddr::from(*address).to_string(),
             _ => String::new(),
         };
 
@@ -510,6 +513,49 @@ mod tests {
 
         assert!(outcome.is_ok(), "the user pinned this exact certificate");
         assert!(decision.take_rejection().is_none());
+    }
+
+    /// A server added by IP address names that address in the trust prompt,
+    /// spelled as the URL and the SAN spell it, and is admitted once pinned.
+    #[test]
+    fn a_pinned_certificate_is_accepted_for_the_address_it_covers() {
+        install_crypto_provider();
+        for address_text in ["192.168.1.10", "fd00::10"] {
+            let der = certificate(&[address_text]);
+            let details = describe(&der).expect("parses");
+            let address = ServerName::try_from(address_text).expect("an address");
+
+            let unpinned = Arc::new(TrustDecision::new(Vec::new()));
+            let refused = verifier(Arc::clone(&unpinned)).verify_server_cert(
+                &der,
+                &[],
+                &address,
+                &[],
+                UnixTime::now(),
+            );
+            assert!(
+                refused.is_err(),
+                "{address_text}: an unpinned self-signed cert must fail"
+            );
+            let (host, _) = unpinned
+                .take_rejection()
+                .expect("the rejection is recorded");
+            assert_eq!(host, address_text);
+
+            let pinned = Arc::new(TrustDecision::new(vec![details.sha256_fingerprint]));
+            let outcome = verifier(Arc::clone(&pinned)).verify_server_cert(
+                &der,
+                &[],
+                &address,
+                &[],
+                UnixTime::now(),
+            );
+            assert!(
+                outcome.is_ok(),
+                "{address_text}: the user pinned this exact certificate"
+            );
+            assert!(pinned.take_rejection().is_none());
+        }
     }
 
     #[test]
