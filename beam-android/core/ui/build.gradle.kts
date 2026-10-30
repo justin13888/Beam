@@ -14,8 +14,5 @@ dependencies {
     // are part of this module's API rather than an implementation detail.
     api(projects.core.ffi)
 
-    implementation(libs.androidx.paging.compose)
-    implementation(libs.coil.compose)
-
     testImplementation(libs.junit)
 }

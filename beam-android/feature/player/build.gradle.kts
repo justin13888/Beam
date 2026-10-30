@@ -14,5 +14,4 @@ dependencies {
     implementation(projects.core.media)
     // The video surface itself. Only the player screen renders one.
     implementation(libs.androidx.media3.ui)
-    implementation(libs.androidx.media3.exoplayer)
 }

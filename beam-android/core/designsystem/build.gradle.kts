@@ -10,11 +10,7 @@ android {
 
 dependencies {
     api(libs.androidx.compose.material3)
-    api(libs.androidx.compose.material3.adaptive)
-    api(libs.androidx.compose.material3.adaptive.layout)
-    api(libs.androidx.compose.material3.adaptive.navigation)
     api(libs.androidx.compose.material3.adaptive.navigation.suite)
-    api(libs.androidx.compose.material3.window.size)
 
     implementation(libs.coil.compose)
     implementation(libs.coil.network.okhttp)
