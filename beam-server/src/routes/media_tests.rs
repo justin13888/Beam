@@ -355,12 +355,13 @@ async fn browsing_requires_a_session() {
 
 /// `sort_by` and `sort_order` reach the browse order over the real metadata
 /// service: the same three titles come back in title order, in reverse title
-/// order, and in release order -- three different orders, so a parameter
-/// dropped on the way would show as one of the others.
+/// order, and in release order both ways -- four different orders, because
+/// the years (Blade 1990, Contact 1997, Arrival 2016) follow neither title
+/// order, so a parameter dropped on the way would show as one of the others.
 #[tokio::test]
 async fn sort_parameters_reach_the_browse_order() {
     let library = Library::new();
-    let blade = indexed_movie_of(&library.movies, &library.files, "Blade", Some(1998))
+    let blade = indexed_movie_of(&library.movies, &library.files, "Blade", Some(1990))
         .await
         .0;
     let arrival = indexed_movie_of(&library.movies, &library.files, "Arrival", Some(2016))
@@ -397,11 +398,11 @@ async fn sort_parameters_reach_the_browse_order() {
     );
     assert_eq!(
         order("?sort_by=year&sort_order=asc").await,
-        [contact, blade, arrival]
+        [blade, contact, arrival]
     );
     assert_eq!(
         order("?sort_by=year&sort_order=desc").await,
-        [arrival, blade, contact]
+        [arrival, contact, blade]
     );
 }
 
