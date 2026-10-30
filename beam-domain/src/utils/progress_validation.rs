@@ -35,7 +35,7 @@ pub struct ReportFault {
 
 /// How far past `end` a position may be and still be the end.
 #[must_use]
-pub fn end_tolerance(end: f64) -> f64 {
+pub(crate) fn end_tolerance(end: f64) -> f64 {
     END_TOLERANCE_SECS.max(end * END_TOLERANCE_FRACTION)
 }
 

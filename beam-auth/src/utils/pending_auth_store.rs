@@ -10,6 +10,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, DatabaseConnection, EntityTrait};
 
+use crate::utils::opaque_token::seconds;
 use beam_domain::services::{Clock, RealClock};
 use thiserror::Error;
 
@@ -75,7 +76,7 @@ fn to_pending_auth(model: beam_entity::pending_auth::Model) -> PendingAuth {
 impl PendingAuthStore for SqlPendingAuthStore {
     async fn create(&self, auth: &PendingAuth, ttl_secs: u64) -> Result<()> {
         let now = self.clock.now();
-        let expires_at = now + chrono::Duration::seconds(ttl_secs as i64);
+        let expires_at = now + seconds(ttl_secs);
 
         let active_model = PendingAuthActiveModel {
             state: Set(auth.state.clone()),
@@ -150,7 +151,7 @@ pub mod in_memory {
     #[async_trait]
     impl PendingAuthStore for InMemoryPendingAuthStore {
         async fn create(&self, auth: &PendingAuth, ttl_secs: u64) -> Result<()> {
-            let expires_at = self.clock.now() + chrono::Duration::seconds(ttl_secs as i64);
+            let expires_at = self.clock.now() + seconds(ttl_secs);
             let mut entries = self.entries.lock().unwrap();
             // `state` is the SQL table's primary key, so minting one that is
             // already held -- expired or not, since nothing sweeps the table

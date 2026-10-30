@@ -1,7 +1,7 @@
 pub mod classification;
-pub mod file;
 pub mod filename;
 pub mod hash;
+pub mod hex;
 pub mod identity;
 pub mod media_path;
 pub mod next_up;

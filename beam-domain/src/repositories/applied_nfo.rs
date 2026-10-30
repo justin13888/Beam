@@ -12,7 +12,6 @@ use crate::models::applied_nfo::{AppliedNfo, RecordAppliedNfo};
 ///
 /// A row is keyed by its path. Nothing references one, so the record of an
 /// NFO that is gone is deleted outright; a row goes with its library.
-#[cfg_attr(any(test, feature = "test-utils"), mockall::automock)]
 #[async_trait]
 pub trait AppliedNfoRepository: Send + Sync + std::fmt::Debug {
     /// Record `record` under its path: a new row, or the row already at that

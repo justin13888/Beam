@@ -16,9 +16,13 @@ use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter,
     sea_query::Expr,
 };
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use crate::utils::opaque_token::seconds;
+/// A fresh opaque device handle, and the hash it is stored and looked up by:
+/// the handle itself is never persisted -- the same rule, and the same
+/// helpers, as a session token.
+pub use crate::utils::opaque_token::{generate as generate_handle, hash as hash_handle};
 use beam_domain::services::{Clock, RealClock};
 use beam_entity::device_auth::{
     ActiveModel as DeviceAuthActiveModel, Column, Entity as DeviceAuthEntity,
@@ -97,29 +101,6 @@ pub trait DeviceAuthStore: Send + Sync + std::fmt::Debug {
 
     /// Removes the flow and returns it: a flow ends at most once.
     async fn consume(&self, handle_hash: &str) -> Result<Option<DeviceAuth>>;
-}
-
-/// Hashes a device handle for storage and lookup. The handle itself is never
-/// persisted -- the same rule as a session token.
-#[must_use]
-pub fn hash_handle(handle: &str) -> String {
-    crate::utils::hex::encode_lower(&Sha256::digest(handle.as_bytes()))
-}
-
-/// A fresh opaque device handle: 32 random bytes, URL-safe base64.
-#[must_use]
-pub fn generate_handle() -> String {
-    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-    use rand::Rng;
-
-    let mut bytes = [0u8; 32];
-    rand::rng().fill_bytes(&mut bytes);
-    URL_SAFE_NO_PAD.encode(bytes)
-}
-
-/// `secs` as a chrono duration. The interval is bounded well inside `i64`.
-fn seconds(secs: u64) -> chrono::Duration {
-    chrono::Duration::seconds(i64::try_from(secs).unwrap_or(i64::MAX))
 }
 
 /// Postgres-backed device-login store.

@@ -8849,7 +8849,7 @@ macro_rules! genre_repository_contract {
                 &vec![sci_fi.clone()],
                 "a name with the same slug is the genre already stored"
             );
-            let slug = $crate::repositories::genre::slugify(&sci_fi);
+            let slug = $crate::models::genre::slugify(&sci_fi);
             assert_eq!(
                 repo.find_all()
                     .await
