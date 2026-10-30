@@ -60,8 +60,13 @@ pub struct Stack {
     db: DatabaseConnection,
     server: ServerProcess,
     browser: Browser,
+    /// What [`Self::restart`] starts again: the binary, its port and its
+    /// whole environment.
+    binary: PathBuf,
+    port: u16,
+    settings: Vec<(String, String)>,
     /// Holds the server's `BEAM_DATA_DIR` and its log.
-    _work: TempDir,
+    work: TempDir,
 }
 
 impl Stack {
@@ -90,8 +95,35 @@ impl Stack {
             db,
             server,
             browser: Browser::new(),
-            _work: work,
+            binary: binary.to_path_buf(),
+            port,
+            settings,
+            work,
         }
+    }
+
+    /// Stop the server and start it again over the same database, library
+    /// and data directory, on the same port and with the same environment:
+    /// what an operator's restart does. Sessions survive it, because they are
+    /// rows in the database.
+    ///
+    /// For what only happens as the process starts -- the background workers'
+    /// first pass, the artwork cache's index rebuilt from its files. The new
+    /// process writes a fresh log over the old one's.
+    pub async fn restart(&mut self) {
+        self.server.stop();
+        self.server =
+            ServerProcess::start(&self.binary, self.port, &self.settings, self.work.path()).await;
+    }
+
+    /// The server's `BEAM_DATA_DIR`, as it was started with it.
+    pub fn data_dir(&self) -> PathBuf {
+        self.settings
+            .iter()
+            .rev()
+            .find(|(name, _)| name == "BEAM_DATA_DIR")
+            .map(|(_, value)| PathBuf::from(value))
+            .expect("the suite always sets BEAM_DATA_DIR")
     }
 
     /// Where the server is reached.
@@ -175,12 +207,16 @@ impl Stack {
             db,
             server,
             browser: _,
-            _work,
+            binary: _,
+            port: _,
+            settings: _,
+            work,
         } = self;
         library.assert_untouched();
         drop(server);
         drop(db);
         database.drop_database().await;
+        drop(work);
     }
 }
 
