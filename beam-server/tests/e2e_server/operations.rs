@@ -176,7 +176,8 @@ async fn the_admin_event_stream_reports_a_scan_as_it_runs() {
     assert_refused(
         "a viewer opening the admin event stream",
         403,
-        viewer.stream_admin_events().await,
+        // The stream itself is not `Debug`; only whether it opened matters.
+        viewer.stream_admin_events().await.map(drop),
     );
 
     // Subscribed before the scan starts, so nothing it reports is missed.
