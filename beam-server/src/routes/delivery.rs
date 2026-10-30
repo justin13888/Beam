@@ -8,15 +8,18 @@
 //! only that header, then describes the media-type ranges the operation
 //! actually answers with.
 //!
-//! Nothing here is an escape hatch. `IntoResponse` and `Responses` are the
-//! public traits every response type implements, and the description starts
-//! from `Delivery`'s own -- the description stays accurate rather than being
-//! waived, and the `unchecked` feature stays off.
+//! `IntoResponse` and `Responses` are the public traits every response type
+//! implements, and the description starts from `Delivery`'s own, so the
+//! `unchecked` feature stays off. It is still a local edit of the description
+//! Kynos emits -- `RuntimeDelivery`'s `Responses::responses` adds `content`
+//! keys to `Delivery`'s 200 and 206 -- which CLAUDE.md rule 3 allows only with
+//! the upstream issue named, and only until a release carries the fix.
 //!
-//! It is still a gap worth closing upstream: a ranged delivery whose media type
-//! is chosen at request time is a normal thing for a file server to want, and
-//! Kynos has no way to say it. Recorded in
-//! `docs/architecture/kynos-migration-readiness.md`.
+//! Upstream gap: getkono/kynos#1115. A ranged delivery whose media type is
+//! chosen at request time is a normal thing for a file server to want, and
+//! kynos 0.4.0 has no way to say it: `Served` and `Delivery` read the type from
+//! `MediaType::MEDIA_TYPE`, a `const`. When a release carries it, this module
+//! is replaced by that API, not extended.
 //!
 //! Shared rather than per-route because the rule about *which* statuses may be
 //! relabelled is subtle enough that a second copy would drift from this one:

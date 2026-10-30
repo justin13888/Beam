@@ -26,7 +26,8 @@ color-eyre = "0.6.5"
 confique = { workspace = true }
 dotenvy = "0.15.7"
 eyre = "0.6.14"
-# `Sse` is generic over `futures_core::Stream`, which kynos does not re-export.
+# `Sse` is generic over `futures_core::Stream`, which kynos 0.4.0 does not
+# re-export: getkono/kynos#1116. Drop this once a release re-exports it.
 futures-core = { workspace = true }
 # Artwork size variants (issue #266): decode, downscale and re-encode a cached
 # poster once per size. Pure-Rust codecs only -- no system libraries -- and

@@ -14,7 +14,7 @@ and the outcomes section listing what shipped differently from the plan.
 | Contract and OpenAPI 3.2 | Met |
 | HTTP runtime | Met |
 | Server-Sent Events | Met |
-| Ranged media delivery | Met |
+| Ranged media delivery | Met, with one open gap: a media type chosen at request time ([getkono/kynos#1115](https://github.com/getkono/kynos/issues/1115)) |
 | Cookies, rate limiting, and testing | Met, differently: Beam supplies the token bucket through Kynos's policy seam, and the route/document conformance test is obsolete by construction |
 | Browser toolchain | Met for the document, not for SSE: `openapi-typescript` reads 3.2 once `@redocly/openapi-core` is at 1.34.22, with no fork; it does not model `itemSchema`, so there is no typed subscription |
 | `spargen` | Met at 0.4.0 |
@@ -123,7 +123,8 @@ Beam's: a `RecvError::Lagged` is logged and skipped, because a dashboard that di
 blinked is worse than one that missed a row.
 
 One rough edge: Kynos does not re-export the stream trait its `Sse` response is generic over, so
-`beam-server` depends on `futures-core` directly. Filed upstream.
+`beam-server` depends on `futures-core` directly. Filed upstream as
+[getkono/kynos#1116](https://github.com/getkono/kynos/issues/1116).
 
 ### Ranged media delivery
 
@@ -138,13 +139,22 @@ One rough edge: Kynos does not re-export the stream trait its `Sse` response is 
 - Safe filename encoding. Beam continues to own authorization, domain lookup, library-root
   validation, and byte-source implementations.
 
-**Status: met.** `routes/stream.rs` serves both endpoints through a Kynos `ByteSource`, which is
-what let roughly a thousand lines of hand-rolled range parsing, conditional-request evaluation and
-header assembly go. `HEAD /v1/files/{file_id}/stream` and `HEAD /v1/files/{file_id}/download` are
+**Status: met, with one open gap.** `routes/stream.rs` serves both endpoints through a Kynos
+`ByteSource`, which is what let roughly a thousand lines of hand-rolled range parsing,
+conditional-request evaluation and header assembly go. `HEAD /v1/files/{file_id}/stream` and `HEAD /v1/files/{file_id}/download` are
 now declared operations rather than an undocumented side effect of a GET handler. Authorization,
 domain lookup and library-root containment stay in Beam, and one status was corrected on the way
 through: a file resolving outside its library root is a `403`, not the `401` the Salvo
 implementation collapsed it into (#123).
+
+One gap is open. Kynos's `Served` and `Delivery` take the media type from a `const`, and Beam's
+content type is only known per request: the container the indexer detected for a source file, or
+the format a provider returned for a poster. `routes/delivery.rs` (`RuntimeDelivery`) delivers as a
+placeholder type, relabels `Content-Type` on the 200 and 206, and adds the media-type ranges the
+operation answers with (`video/*`, `image/*`) to the description `Delivery` emits. That last step
+edits the emitted description, which is what CLAUDE.md rule 3 forbids keeping once upstream can say
+it. It is filed as [getkono/kynos#1115](https://github.com/getkono/kynos/issues/1115), and the
+wrapper goes when a release carries the fix.
 
 ### Cookies, rate limiting, and testing
 

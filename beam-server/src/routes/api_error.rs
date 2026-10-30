@@ -38,10 +38,11 @@ pub const SESSION_COOKIE: &str = "beam_session";
 /// pointed at `/reference/errors/<code>`, a path that has never existed, so
 /// every identifier Beam published resolved to a 404.
 ///
-/// It cannot appear in the attributes below: kynos parses `#[problem(type =
-/// ...)]` and `#[problem(base = ...)]` as string literals, not paths. The
-/// prefix is therefore written out per variant, and `taxonomy_tests` asserts
+/// The prefix is written out per variant below, and `taxonomy_tests` asserts
 /// that every `type` the exported document declares starts with this constant.
+/// That is no longer forced: kynos 0.4.0's `#[problem(base = ERROR_BASE)]`
+/// takes a `const` and joins it with the variant's kebab-cased name. Adopting
+/// it is #405.
 pub const ERROR_BASE: &str = "https://beam.justinchung.net/reference/errors/#";
 
 // ── Server faults ────────────────────────────────────────────────────────────
@@ -1616,8 +1617,11 @@ impl Authenticator<SessionCookie, AppState> for SessionAuthenticator {
     /// failure* used to surface as 500 and now surfaces as 401.
     /// `AuthRejection` has only `Unauthenticated` and `Forbidden`, so a
     /// verifier has no way to say "I could not tell". The error is logged at
-    /// `error` level so an outage is still visible in operations; see the
-    /// upstream note in `docs/architecture/kynos-migration-readiness.md`.
+    /// `error` level so an outage is still visible in operations.
+    ///
+    /// Upstream gap: getkono/kynos#993, which adds a 503 an authenticator can
+    /// answer when its store is unavailable. It is fixed on kynos's master and
+    /// not yet in a release; take it from the first release that carries it.
     async fn authenticate(
         &self,
         presented: kynos::security::carrier::ApiKey,

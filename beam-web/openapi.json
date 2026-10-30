@@ -14478,9 +14478,12 @@
             "description": "the request succeeded and there is no content to send",
             "headers": {
               "Set-Cookie": {
-                "required": true,
+                "required": false,
                 "schema": {
-                  "type": "string"
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 }
               }
             }
