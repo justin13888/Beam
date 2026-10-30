@@ -23,7 +23,9 @@ services:
       # BEAM_DATABASE_URL (default postgres://beam:password@postgres:5432/beam;
       # the default below points at this compose file's `postgres` service)
       - BEAM_DATABASE_URL=${BEAM_DATABASE_URL:-postgres://beam:password@postgres:5432/beam}
-      - RUST_LOG=${RUST_LOG:-beam_server=info,tower_http=debug,axum=debug}
+      # RUST_LOG (default: every Beam crate at info; beam-server's
+      # DEFAULT_LOG_FILTER, which a test holds this to)
+      - RUST_LOG=${RUST_LOG:-beam_server=info,beam_auth=info,beam_domain=info,beam_entity=info,beam_index=info,beam_migration=info,kynos=info}
 
       # Media directories: BEAM_VIDEO_DIR is read-only (your media library);
       # BEAM_DATA_DIR is server-writable state.
