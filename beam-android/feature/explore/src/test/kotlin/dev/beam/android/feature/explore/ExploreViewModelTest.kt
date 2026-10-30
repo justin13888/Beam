@@ -54,10 +54,16 @@ class ExploreViewModelTest {
             testScheduler.advanceUntilIdle()
             val before = catalog.browseCalls.size
 
-            viewModel.onQueryChange("a")
-            viewModel.onQueryChange("ar")
-            viewModel.onQueryChange("arr")
-            viewModel.onQueryChange("arri")
+            // Each keystroke lands just inside the debounce window of the one
+            // before. Typed back to back with no time between them, the state
+            // flow would conflate them into one query with no debounce at
+            // all, and this test could not tell the difference.
+            for (query in listOf("a", "ar", "arr", "arri")) {
+                viewModel.onQueryChange(query)
+                testScheduler.advanceTimeBy(KEYSTROKE_GAP_MS)
+                testScheduler.runCurrent()
+            }
+            assertEquals("nothing is sent while the viewer is still typing", before, catalog.browseCalls.size)
             testScheduler.advanceUntilIdle()
 
             assertEquals(
@@ -224,4 +230,9 @@ class ExploreViewModelTest {
                     .isNotEmpty(),
             )
         }
+
+    private companion object {
+        /** One millisecond inside the view model's 300 ms search debounce. */
+        const val KEYSTROKE_GAP_MS = 299L
+    }
 }

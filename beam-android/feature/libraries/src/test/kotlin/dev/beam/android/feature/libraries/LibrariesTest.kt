@@ -34,12 +34,22 @@ class LibrariesTest {
     @Test
     fun `libraries are listed`() =
         runTest {
-            val viewModel = LibrariesViewModel(FakeCatalogRepository())
+            val catalog =
+                FakeCatalogRepository().apply {
+                    libraryList =
+                        listOf(
+                            Fixtures.library(id = "films", name = "Films"),
+                            Fixtures.library(id = "series", name = "Series"),
+                        )
+                }
+            val viewModel = LibrariesViewModel(catalog)
             testScheduler.advanceUntilIdle()
 
-            assertTrue(
+            assertEquals(
+                "the server's libraries, in its order",
+                listOf("films", "series"),
                 viewModel.state.value.valueOrNull!!
-                    .isNotEmpty(),
+                    .map { it.id },
             )
         }
 

@@ -9,7 +9,12 @@ import kotlinx.serialization.Serializable
  * Navigation 3 keys rather than string routes: the destination *is* the data,
  * so an argument cannot be spelled wrong, forgotten, or lost to URL encoding,
  * and the compiler checks that a navigation call carries what the screen needs.
+ *
+ * Serializable itself, so the compiler refuses a destination that cannot be
+ * written into saved state, and the sealed serializer's descriptor lists
+ * every destination for the test that round-trips them.
  */
+@Serializable
 public sealed interface Destination : NavKey
 
 /** The top-level tabs, which the navigation bar and rail render. */

@@ -39,13 +39,44 @@ class AuthViewModelTest {
     @Test
     fun `known servers are offered once they have been restored`() =
         runTest {
-            val servers = FakeServerRepository()
+            val servers =
+                FakeServerRepository(
+                    stored =
+                        listOf(
+                            Fixtures.server(id = "cabin", displayName = "Cabin", isActive = false),
+                            Fixtures.server(id = "home", displayName = "Home", isActive = true),
+                        ),
+                )
             val viewModel = AuthViewModel(servers, PHONE)
 
             viewModel.state.test {
-                skipItems(1)
-                assertTrue(awaitItem().knownServers.isNotEmpty())
+                val beforeRestore = awaitItem().knownServers.map { it.id }
+                assertEquals("nothing is offered before the registry is read", emptyList<String>(), beforeRestore)
+                assertEquals(listOf("cabin", "home"), awaitItem().knownServers.map { it.id })
             }
+        }
+
+    @Test
+    fun `adding the same address twice lists one server`() =
+        runTest {
+            // The core names a server by its origin, so the same server typed
+            // twice -- once with its scheme and a trailing slash -- is one
+            // entry the second connect selects, not a second shortcut.
+            val servers = FakeServerRepository()
+            val viewModel = AuthViewModel(servers, PHONE)
+            testScheduler.advanceUntilIdle()
+
+            viewModel.onAddressChange("beam.example.com")
+            viewModel.connect()
+            testScheduler.advanceUntilIdle()
+            val first = viewModel.state.value.serverId
+            viewModel.onSignInCancelled()
+            viewModel.onAddressChange("https://beam.example.com/")
+            viewModel.connect()
+            testScheduler.advanceUntilIdle()
+
+            assertEquals(first, viewModel.state.value.serverId)
+            assertEquals(listOf(first), servers.restore().map { it.id })
         }
 
     @Test
@@ -80,11 +111,12 @@ class AuthViewModelTest {
             // The distinction matters: an error is something the app failed at,
             // and a question is something only the viewer can answer. Rendering
             // this as an error would leave them with no way to proceed.
-            val servers =
-                FakeServerRepository().apply {
-                    failOnce = BeamException.UntrustedCertificate("beam.local", certificate())
-                }
-            val viewModel = AuthViewModel(servers, PHONE)
+            //
+            // Raised by starting a device login, the first call of a connect
+            // that reaches the server: adding a server and building its
+            // sign-in address are answered by the core without a handshake.
+            val servers = FakeServerRepository().apply { failOnce = untrustedCertificate() }
+            val viewModel = AuthViewModel(servers, TV)
             testScheduler.advanceUntilIdle()
 
             viewModel.onAddressChange("beam.local")
@@ -100,11 +132,8 @@ class AuthViewModelTest {
     @Test
     fun `accepting a certificate records it and retries the connection`() =
         runTest {
-            val servers =
-                FakeServerRepository().apply {
-                    failOnce = BeamException.UntrustedCertificate("beam.local", certificate())
-                }
-            val viewModel = AuthViewModel(servers, PHONE)
+            val servers = FakeServerRepository().apply { failOnce = untrustedCertificate() }
+            val viewModel = AuthViewModel(servers, TV)
             testScheduler.advanceUntilIdle()
 
             viewModel.onAddressChange("beam.local")
@@ -130,11 +159,8 @@ class AuthViewModelTest {
     @Test
     fun `declining a certificate explains why nothing happened`() =
         runTest {
-            val servers =
-                FakeServerRepository().apply {
-                    failOnce = BeamException.UntrustedCertificate("beam.local", certificate())
-                }
-            val viewModel = AuthViewModel(servers, PHONE)
+            val servers = FakeServerRepository().apply { failOnce = untrustedCertificate() }
+            val viewModel = AuthViewModel(servers, TV)
             testScheduler.advanceUntilIdle()
 
             viewModel.onAddressChange("beam.local")
@@ -151,11 +177,14 @@ class AuthViewModelTest {
     @Test
     fun `a network failure is reported as an error the viewer can read`() =
         runTest {
+            // Through the first call that reaches the server. The core adds a
+            // server without contacting it, so an unreachable one is found out
+            // only once something is asked of it.
             val servers =
                 FakeServerRepository().apply {
-                    failWith = BeamException.Network("could not reach the server", retryable = true)
+                    failOnce = BeamException.Network("could not reach the server", retryable = true)
                 }
-            val viewModel = AuthViewModel(servers, PHONE)
+            val viewModel = AuthViewModel(servers, TV)
             testScheduler.advanceUntilIdle()
 
             viewModel.onAddressChange("nowhere.invalid")
@@ -164,6 +193,29 @@ class AuthViewModelTest {
 
             assertNotNull(viewModel.state.value.error)
             assertNull(viewModel.state.value.pendingTrust)
+            assertNull("no code was issued", viewModel.state.value.devicePrompt)
+        }
+
+    @Test
+    fun `a cookie the server refuses is reported and closes the browser`() =
+        runTest {
+            val servers =
+                FakeServerRepository().apply {
+                    failOnce = BeamException.Unauthenticated()
+                }
+            val viewModel = AuthViewModel(servers, PHONE)
+            testScheduler.advanceUntilIdle()
+
+            viewModel.onAddressChange("beam.example.com")
+            viewModel.connect()
+            testScheduler.advanceUntilIdle()
+            viewModel.onSessionCookie("refused-session-value")
+            testScheduler.advanceUntilIdle()
+
+            val state = viewModel.state.value
+            assertNotNull(state.error)
+            assertTrue(!state.isSignedIn)
+            assertNull("the browser closes on the refusal too", state.loginUrl)
         }
 
     @Test
@@ -222,14 +274,15 @@ class AuthViewModelTest {
         runTest {
             val servers =
                 FakeServerRepository().apply {
-                    failWith = BeamException.Network("unreachable", retryable = true)
+                    failOnce = BeamException.Network("unreachable", retryable = true)
                 }
-            val viewModel = AuthViewModel(servers, PHONE)
+            val viewModel = AuthViewModel(servers, TV)
             testScheduler.advanceUntilIdle()
 
             viewModel.onAddressChange("nowhere.invalid")
             viewModel.connect()
             testScheduler.advanceUntilIdle()
+            assertNotNull("the connect failed", viewModel.state.value.error)
             viewModel.onAddressChange("beam.example.com")
 
             assertNull(viewModel.state.value.error)
@@ -516,6 +569,8 @@ class AuthViewModelTest {
         testScheduler.runCurrent()
         return viewModel
     }
+
+    private fun untrustedCertificate() = BeamException.UntrustedCertificate("beam.local", certificate())
 
     private fun certificate() =
         CertificateDetails(

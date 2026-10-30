@@ -90,6 +90,46 @@ val uniffiBindgen =
     }
 
 /**
+ * The core built for this machine, which the JVM unit tests load through the
+ * generated bindings over JNA (issue #355).
+ *
+ * Its own task and output directory rather than a path into `target/`: the
+ * output is what Gradle caches, so a test run restored from the build cache
+ * still has a library to load.
+ */
+val hostCoreLibrary =
+    tasks.register<MiseTask>("hostCoreLibrary") {
+        group = "beam"
+        description = "Build beam-client-core for this machine, for the JVM unit tests"
+        workingDirectory.set(repoRoot)
+        miseTask.set("core:host")
+        coreSources.set(File(repoRoot, "beam-client-core/src"))
+        manifest.set(File(repoRoot, "beam-client-core/Cargo.toml"))
+        val out = layout.buildDirectory.dir("hostLib")
+        environment.set(mapOf("BEAM_HOST_LIB_DIR" to out.get().asFile.absolutePath))
+        outputDirectory.set(out)
+    }
+
+// Every unit test can reach the native core: JNA searches `jna.library.path`
+// before the system's, so the bindings find the host library the task above
+// built, and only that one.
+tasks.withType<Test>().configureEach {
+    val library = hostCoreLibrary.flatMap { it.outputDirectory }
+    inputs.dir(library).withPropertyName("hostCoreLibrary").withPathSensitivity(PathSensitivity.NONE)
+    systemProperty("jna.library.path", library.get().asFile.absolutePath)
+}
+
+// PIT runs the same tests in JVMs of its own, which see none of the Test
+// task's system properties: without this its baseline run fails on the
+// native tests and the advisory mutation run reports nothing for the module.
+extensions.configure<pl.droidsonroids.gradle.pitest.PitestPluginExtension> {
+    jvmArgs.add(
+        hostCoreLibrary.map { "-Djna.library.path=${it.outputDirectory.get().asFile.absolutePath}" },
+    )
+}
+tasks.matching { it.name.startsWith("pitest") }.configureEach { dependsOn(hostCoreLibrary) }
+
+/**
  * Cross-compile the core, at the profile the variant needs.
  *
  * Registered per variant rather than once, which is load-bearing: a single
@@ -155,4 +195,19 @@ dependencies {
 
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
+    // The DataStore-backed stores and the device profile run under
+    // Robolectric: `android.util.Base64` and `MediaCodecList` are platform.
+    testImplementation(libs.robolectric)
+    // The plain jar, beside the AAR above, for the desktop `jnidispatch` it
+    // carries: the AAR packages JNA's dispatcher for Android ABIs only, and
+    // the JVM tests that load the host core run on this machine.
+    testImplementation(libs.jna)
+}
+
+// The API level Robolectric can run is pinned once for every module, in this
+// shared file. Configured through the typed DSL, as in core/media.
+configure<com.android.build.api.dsl.LibraryExtension> {
+    sourceSets.getByName("test").resources.srcDir(
+        rootProject.layout.projectDirectory.dir("gradle/robolectric"),
+    )
 }

@@ -4,6 +4,7 @@ import dev.beam.android.core.model.LoadState
 import dev.beam.android.core.model.valueOrNull
 import dev.beam.android.core.testing.FakeCatalogRepository
 import dev.beam.android.core.testing.FakePlaybackRepository
+import dev.beam.android.core.testing.Fixtures
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -37,14 +38,35 @@ class HomeViewModelTest {
     @Test
     fun `every row is loaded`() =
         runTest {
-            val viewModel = HomeViewModel(FakeCatalogRepository(), FakePlaybackRepository())
+            // Two distinct pages, so a row filled from the other row's query
+            // -- or the same page shown twice -- reads differently from the
+            // right answer. Each row is matched to the page its own query got.
+            val catalog =
+                FakeCatalogRepository().apply {
+                    pages =
+                        listOf(
+                            Fixtures.page(items = listOf(Fixtures.movie(id = "a"), Fixtures.show(id = "b"))),
+                            Fixtures.page(items = listOf(Fixtures.show(id = "c"), Fixtures.movie(id = "d"))),
+                        )
+                }
+            val playback =
+                FakePlaybackRepository().apply {
+                    continueWatchingRows =
+                        listOf(
+                            Fixtures.continueWatching(mediaId = "resume-1"),
+                            Fixtures.continueWatching(mediaId = "resume-2"),
+                        )
+                }
+            val viewModel = HomeViewModel(catalog, playback)
             testScheduler.advanceUntilIdle()
 
             val state = viewModel.state.value.valueOrNull
             assertNotNull(state)
-            assertTrue(state!!.continueWatching.isNotEmpty())
-            assertTrue(state.recentlyAdded.isNotEmpty())
-            assertTrue(state.topRated.isNotEmpty())
+            assertEquals(listOf("resume-1", "resume-2"), state!!.continueWatching.map { it.mediaId })
+            val recentCall = catalog.browseCalls.indexOfFirst { it.sortBy == MediaSortField.DATE_ADDED }
+            val topCall = catalog.browseCalls.indexOfFirst { it.sortBy == MediaSortField.RATING }
+            assertEquals(catalog.pages[recentCall].items, state.recentlyAdded)
+            assertEquals(catalog.pages[topCall].items, state.topRated)
         }
 
     @Test

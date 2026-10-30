@@ -20,6 +20,7 @@ import uniffi.beam_client_core.StorageException
  */
 internal class DataStoreKeyValueStore(
     private val dataStore: DataStore<Preferences>,
+    private val cipher: SecretCipher = SecretCipher.Keystore,
 ) : KeyValueStore {
     override suspend fun `get`(key: String): String? = read(plainKey(key))
 
@@ -46,13 +47,13 @@ internal class DataStoreKeyValueStore(
                 .filter { it.startsWith(prefix) }
         }
 
-    override suspend fun getSecret(key: String): String? = read(secretKey(key))?.let(SecretCipher::decrypt)
+    override suspend fun getSecret(key: String): String? = read(secretKey(key))?.let(cipher::decrypt)
 
     override suspend fun putSecret(
         key: String,
         value: String,
     ) {
-        write(secretKey(key), SecretCipher.encrypt(value))
+        write(secretKey(key), cipher.encrypt(value))
     }
 
     override suspend fun removeSecret(key: String) {
