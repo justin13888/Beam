@@ -20,6 +20,8 @@ use beam_domain::models::file::{CreateMediaFile, FileStatus, MediaFileContent};
 use beam_domain::models::library::CreateLibrary;
 use beam_domain::models::movie::{CreateMovie, CreateMovieEntry};
 use beam_domain::models::show::{CreateEpisode, CreateShow};
+use beam_domain::models::sidecar::{SidecarInfo, SubtitleFormat, UpsertSidecarSubtitle};
+use beam_domain::models::trickplay::{TrickplayLayout, TrickplayRecord};
 use beam_domain::models::user_list::UserList;
 use beam_domain::models::watch_state::TitleRef;
 use beam_domain::providers::artwork::ImageFormat;
@@ -37,11 +39,14 @@ use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
 use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
 use beam_domain::repositories::person::in_memory::InMemoryPersonRepository;
 use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
+use beam_domain::repositories::sidecar_subtitle::in_memory::InMemorySidecarSubtitleRepository;
 use beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository;
+use beam_domain::repositories::trickplay::in_memory::InMemoryTrickplayRepository;
 use beam_domain::repositories::user_list::InMemoryUserListRepository;
 use beam_domain::repositories::{
     CollectionRepository, FileRepository, GenreRepository, LibraryRepository, MovieRepository,
-    PersonRepository, ShowRepository, UserListRepository,
+    PersonRepository, ShowRepository, SidecarSubtitleRepository, TrickplayRepository,
+    UserListRepository,
 };
 use beam_domain::services::{RealClock, TestClock};
 use beam_domain::test_utils::create_media_file;
@@ -86,6 +91,7 @@ use crate::services::metadata::{DbMetadataService, MetadataRepositories};
 use crate::services::people::PeopleService;
 use crate::services::playback::{DbPlaybackService, PlaybackRepositories};
 use crate::services::sources::SourceCatalog;
+use crate::services::trickplay::{TrickplayDependencies, TrickplayService};
 use crate::state::{AppServices, AppState};
 
 const POSTER_URL: &str = "https://image.tmdb.org/t/p/w500/poster.jpg";
@@ -182,6 +188,9 @@ struct Fixture {
     collections: Arc<InMemoryCollectionRepository>,
     lists: Arc<InMemoryUserListRepository>,
     clock: Arc<TestClock>,
+    sidecars: Arc<InMemorySidecarSubtitleRepository>,
+    trickplay_records: Arc<InMemoryTrickplayRepository>,
+    trickplay_root: PathBuf,
     root: TempDir,
 }
 
@@ -203,9 +212,7 @@ fn fixture() -> Fixture {
         clock.clone(),
         titles,
     ));
-    let sidecars = Arc::new(
-        beam_domain::repositories::sidecar_subtitle::in_memory::InMemorySidecarSubtitleRepository::default(),
-    );
+    let sidecars = Arc::new(InMemorySidecarSubtitleRepository::default());
     let sources = Arc::new(SourceCatalog::new(crate::services::sources::SourceRepositories {movies: movies.clone(), files: files.clone(), streams: Arc::new(InMemoryMediaStreamRepository::default()), sidecars: sidecars.clone(), chapters: Arc::new(beam_domain::repositories::chapter::in_memory::InMemoryChapterRepository::default()), trickplay: Arc::new(beam_domain::repositories::trickplay::in_memory::InMemoryTrickplayRepository::default()),}));
     let playback = Arc::new(DbPlaybackService::new(PlaybackRepositories {
         watch_state: Arc::new(
@@ -231,6 +238,20 @@ fn fixture() -> Fixture {
         people: people.clone(),
         collections: collections.clone(),
     }));
+    // A real trickplay service over a data directory in the temp dir, so a
+    // hidden file can be given a sheet the route would otherwise serve.
+    let trickplay_records = Arc::new(InMemoryTrickplayRepository::default());
+    let trickplay_root = root.path().join("trickplay");
+    let trickplay = Arc::new(TrickplayService::new(
+        trickplay_root.clone(),
+        TrickplayDependencies {
+            libraries: libraries.clone(),
+            files: files.clone(),
+            records: trickplay_records.clone(),
+            generator: Arc::new(beam_index::services::trickplay::MockTrickplayGenerator::new()),
+            clock: Arc::new(RealClock),
+        },
+    ));
     let artwork = Arc::new(ArtworkCache::new(
         ArtworkCacheConfig {
             root: root.path().join("artwork"),
@@ -256,7 +277,7 @@ fn fixture() -> Fixture {
         subtitles: Arc::new(crate::services::subtitle::DbSubtitleService::new(
             libraries.clone(),
             files.clone(),
-            sidecars,
+            sidecars.clone(),
         )),
         notification: base.services.notification.clone(),
         admin_log: base.services.admin_log.clone(),
@@ -296,7 +317,7 @@ fn fixture() -> Fixture {
         watch_status: Arc::new(beam_index::services::watch_status::WatchStatus::new()),
         telemetry: crate::routes::test_support::idle_library_report(),
         playback_telemetry: crate::routes::test_support::idle_playback_telemetry(),
-        trickplay: crate::routes::test_support::idle_trickplay(),
+        trickplay,
     };
 
     Fixture {
@@ -310,6 +331,9 @@ fn fixture() -> Fixture {
         collections,
         lists,
         clock,
+        sidecars,
+        trickplay_records,
+        trickplay_root,
         root,
     }
 }
@@ -555,6 +579,71 @@ impl Fixture {
             )
             .await
             .expect("store the policy");
+    }
+
+    /// A real SubRip subtitle beside `file_id`, indexed as the scanner would.
+    async fn subtitle(&self, file_id: Uuid) -> Uuid {
+        let file = self
+            .files
+            .find_by_id(file_id)
+            .await
+            .expect("the file store answers")
+            .expect("the file exists");
+        let path = file.path.with_extension("en.srt");
+        let bytes = b"1\n00:00:01,000 --> 00:00:02,000\nHello\n";
+        std::fs::write(&path, bytes).expect("write the subtitle");
+        self.sidecars
+            .upsert_by_path(UpsertSidecarSubtitle {
+                file_id,
+                library_id: file.library_id,
+                path,
+                info: SidecarInfo {
+                    format: SubtitleFormat::Srt,
+                    language: Some("eng".to_owned()),
+                    title: None,
+                    is_forced: false,
+                    is_sdh: false,
+                    is_default: false,
+                },
+                size_bytes: bytes.len() as u64,
+                mtime: None,
+            })
+            .await
+            .expect("index the subtitle")
+            .id
+    }
+
+    /// Trickplay sheet 0 of `file_id`, recorded and written where the worker
+    /// would have put it.
+    async fn trickplay_sheet(&self, file_id: Uuid) {
+        let file = self
+            .files
+            .find_by_id(file_id)
+            .await
+            .expect("the file store answers")
+            .expect("the file exists");
+        let dir = self
+            .trickplay_root
+            .join(file_id.to_string())
+            .join(format!("{:016x}", file.hash));
+        std::fs::create_dir_all(&dir).expect("a sheet folder");
+        std::fs::write(dir.join("0.jpg"), POSTER_BYTES).expect("write the sheet");
+        self.trickplay_records
+            .upsert(TrickplayRecord {
+                file_id,
+                file_hash: file.hash,
+                layout: Some(TrickplayLayout {
+                    interval_ms: 10_000,
+                    tile_width: 320,
+                    tile_height: 180,
+                    columns: 10,
+                    rows: 10,
+                    tile_count: 100,
+                }),
+                generated_at: chrono::Utc::now(),
+            })
+            .await
+            .expect("record the sheet");
     }
 }
 
@@ -928,17 +1017,43 @@ async fn a_hidden_titles_files_are_not_found_to_stream_download_or_subtitle() {
     let (kids, titles) = fixture.catalogue().await;
     let client = client(&fixture);
     let (restricted, _) = fixture.kids_viewer(kids).await;
+    let (unrestricted, _) = fixture.viewer().await;
 
     for file in [titles.grown_file, titles.episode_file] {
-        for path in [
+        // Every path names something that exists: a real subtitle and a real
+        // trickplay sheet, so only the access check can make it a 404.
+        let subtitle = fixture.subtitle(file).await;
+        fixture.trickplay_sheet(file).await;
+        let paths = [
             format!("/v1/files/{file}/stream"),
             format!("/v1/files/{file}/download"),
-            format!("/v1/files/{file}/subtitles/{}", Uuid::new_v4()),
-            format!("/v1/files/{file}/subtitles/{}/webvtt", Uuid::new_v4()),
+            format!("/v1/files/{file}/subtitles/{subtitle}"),
+            format!("/v1/files/{file}/subtitles/{subtitle}/webvtt"),
             format!("/v1/files/{file}/trickplay/0"),
-        ] {
+        ];
+        let mut visible_lengths = Vec::new();
+        for path in &paths {
+            assert_eq!(
+                status(&client, &unrestricted, path).await,
+                StatusCode::OK,
+                "GET {path} for a viewer who may see it"
+            );
+            let head = client
+                .head(path)
+                .cookie("beam_session", &unrestricted)
+                .send()
+                .await;
+            assert_eq!(head.status(), StatusCode::OK, "HEAD {path}");
+            assert!(head.header("etag").is_some(), "HEAD {path} has a validator");
+            visible_lengths.push(
+                head.header("content-length")
+                    .expect("HEAD tells a visible length")
+                    .to_owned(),
+            );
+        }
+        for path in &paths {
             client
-                .get(&path)
+                .get(path)
                 .cookie("beam_session", &restricted)
                 .send()
                 .await
@@ -947,15 +1062,9 @@ async fn a_hidden_titles_files_are_not_found_to_stream_download_or_subtitle() {
         }
         // A HEAD answers what its GET would, and so must not tell a hidden
         // file's size or validator either.
-        for path in [
-            format!("/v1/files/{file}/stream"),
-            format!("/v1/files/{file}/download"),
-            format!("/v1/files/{file}/subtitles/{}", Uuid::new_v4()),
-            format!("/v1/files/{file}/subtitles/{}/webvtt", Uuid::new_v4()),
-            format!("/v1/files/{file}/trickplay/0"),
-        ] {
+        for (path, visible_length) in paths.iter().zip(&visible_lengths) {
             let response = client
-                .head(&path)
+                .head(path)
                 .cookie("beam_session", &restricted)
                 .send()
                 .await;
@@ -963,8 +1072,8 @@ async fn a_hidden_titles_files_are_not_found_to_stream_download_or_subtitle() {
             assert_eq!(response.header("etag"), None, "HEAD {path}");
             assert_ne!(
                 response.header("content-length"),
-                Some(FILE_BYTES.len().to_string().as_str()),
-                "HEAD {path} tells the hidden file's length"
+                Some(visible_length.as_str()),
+                "HEAD {path} tells the hidden length"
             );
         }
     }
