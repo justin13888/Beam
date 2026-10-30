@@ -2047,20 +2047,71 @@ mod tests {
     impl CapturedLogs {
         /// Captures every event on this thread until the guard drops.
         fn install(&self) -> tracing::subscriber::DefaultGuard {
+            Self::keep_every_callsite_live();
             let logs = self.clone();
-            let guard = tracing::subscriber::set_default(
+            tracing::subscriber::set_default(
                 tracing_subscriber::fmt()
                     .with_ansi(false)
                     .with_max_level(tracing::Level::INFO)
                     .with_writer(move || logs.clone())
                     .finish(),
-            );
-            // A callsite another test thread registered while this
-            // subscriber was being installed can keep the interest it worked
-            // out without it, and its events would then never reach this
-            // one. Recomputing every callsite's interest now closes that.
-            tracing::callsite::rebuild_interest_cache();
-            guard
+            )
+        }
+    }
+
+    /// A process-wide subscriber that takes no event but never lets a
+    /// callsite be switched off.
+    ///
+    /// `tracing` caches each callsite's interest across every thread. A
+    /// callsite another test thread registers while no capturing subscriber is
+    /// live is cached as "never", and its events then skip this thread's
+    /// subscriber too, so a capture loses events at random under the parallel
+    /// test runner. With this as the global default every callsite is at
+    /// least "sometimes", which asks the current thread's subscriber each
+    /// time.
+    struct EveryCallsite;
+
+    impl tracing::Subscriber for EveryCallsite {
+        fn register_callsite(
+            &self,
+            _metadata: &'static tracing::Metadata<'static>,
+        ) -> tracing::subscriber::Interest {
+            tracing::subscriber::Interest::sometimes()
+        }
+
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            false
+        }
+
+        /// What the captures here read, so `debug` and `trace` callsites stay
+        /// off unless another subscriber asks for them.
+        fn max_level_hint(&self) -> Option<tracing::level_filters::LevelFilter> {
+            Some(tracing::level_filters::LevelFilter::INFO)
+        }
+
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+        fn event(&self, _event: &tracing::Event<'_>) {}
+
+        fn enter(&self, _span: &tracing::span::Id) {}
+
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    impl CapturedLogs {
+        fn keep_every_callsite_live() {
+            static INSTALLED: std::sync::Once = std::sync::Once::new();
+            INSTALLED.call_once(|| {
+                // Another test may have set one first; either way callsites
+                // are then decided per thread.
+                let _ = tracing::subscriber::set_global_default(EveryCallsite);
+            });
         }
 
         fn text(&self) -> String {
