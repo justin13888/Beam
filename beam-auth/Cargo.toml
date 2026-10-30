@@ -47,10 +47,7 @@ mutation-testing = ["oidc", "test-utils"]
 pg-integration = ["beam-test-support/pg-integration"]
 
 [dependencies]
-# Non-optional: always compiled (needed by server/oidc_routes.rs and #[tokio::test]s)
-http = { workspace = true }
 mutants = { workspace = true }
-tokio = { workspace = true }
 
 # Optional: feature-gated
 async-trait = { workspace = true, optional = true }
@@ -86,4 +83,6 @@ chrono = { workspace = true }
 # holds an `Arc<DatabaseConnection>`.
 beam-entity = { path = "../beam-entity" }
 sea-orm = { workspace = true, features = ["mock"] }
+# The `#[tokio::test]` runtime and the wire tests' loopback servers.
+tokio = { workspace = true }
 uuid = { workspace = true }
