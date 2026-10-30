@@ -38,11 +38,12 @@ pub const SESSION_COOKIE: &str = "beam_session";
 /// pointed at `/reference/errors/<code>`, a path that has never existed, so
 /// every identifier Beam published resolved to a 404.
 ///
-/// The prefix is written out per variant below, and `taxonomy_tests` asserts
-/// that every `type` the exported document declares starts with this constant.
-/// That is no longer forced: kynos 0.4.0's `#[problem(base = ERROR_BASE)]`
-/// takes a `const` and joins it with the variant's kebab-cased name. Adopting
-/// it is #405.
+/// Every error enum names it in `#[problem(base = ERROR_BASE)]`, which Kynos
+/// accepts as the path to a `const` and joins with each variant's kebab-cased
+/// name, so `MediaNotFound` publishes `...#media-not-found`. A variant whose
+/// code is not its name declares its own `type`, which wins over the base; that
+/// literal still has to start with this constant, and `taxonomy_tests` asserts
+/// that every `type` the exported document declares does.
 pub const ERROR_BASE: &str = "https://beam.justinchung.net/reference/errors/#";
 
 // ── Server faults ────────────────────────────────────────────────────────────
@@ -121,12 +122,18 @@ impl ServerFault {
 // `deleteLibrary` can answer "Media not found". One enum per operation shape is
 // what keeps each description true.
 //
-// The `type` URI is written out per variant rather than derived from the
-// variant name. Kynos can compose one from `#[problem(base = ...)]` plus the
-// variant's name, but then a rename silently changes the published contract
-// with no string to diff and nothing for a reviewer to catch -- and the same
-// code is deliberately emitted by several enums (`internal` by nearly every
-// one of them), which an implicit convention would hide.
+// The `type` URI is derived, not written out: every enum carries
+// `#[problem(base = ERROR_BASE)]`, so a variant's code is its kebab-cased name,
+// and the same name in several enums (`Internal` in nearly every one of them)
+// is the same code by construction. Renaming a variant therefore renames a
+// published identifier, and two guards make that a visible act rather than a
+// silent one: the committed `openapi.json` changes, which
+// `mise run codegen:openapi:check` refuses until the diff is committed, and
+// `taxonomy_tests` fails until the new code has a section on the error
+// reference. A variant whose code carries a qualifier its enum already
+// supplies -- `LibraryCreateError::PathNotFound` is `library-path-not-found`,
+// because codes share one page while variant names are scoped by their enum
+// -- keeps an explicit `type`, which wins over the base.
 //
 // 401 and 403 are almost always absent here: they arrive from `SessionAuth`
 // and `AdminAuth`, which is what makes taking the extractor and documenting the
@@ -139,34 +146,24 @@ impl ServerFault {
 /// `GET /v1/genres`, `GET /v1/libraries`, the admin read endpoints, and the
 /// three session operations that only ever fail on the store.
 #[derive(Debug, thiserror::Error, ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum InternalError {
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 
 /// `GET /v1/media/{id}`. A malformed id is the `Path` extractor's 400: every
 /// path id is a `Uuid`, so no route owes a typed problem for one.
 #[derive(Debug, thiserror::Error, ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum MediaLookupError {
     #[error("{0}")]
-    #[problem(
-        status = 404,
-        type = "https://beam.justinchung.net/reference/errors/#media-not-found",
-        title = "Media not found"
-    )]
+    #[problem(status = 404, title = "Media not found")]
     MediaNotFound(String),
 
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 
@@ -175,36 +172,25 @@ pub enum MediaLookupError {
 /// A database failure is a 500, never an empty page: an empty page says the
 /// library has nothing matching, which a failed read does not know.
 #[derive(Debug, thiserror::Error, ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum MediaBrowseError {
     /// `after` or `before` is not a cursor this server issued for the
     /// requested sort.
     #[error("{0}")]
-    #[problem(
-        status = 400,
-        type = "https://beam.justinchung.net/reference/errors/#invalid-cursor",
-        title = "Invalid cursor"
-    )]
+    #[problem(status = 400, title = "Invalid cursor")]
     InvalidCursor(String),
 
     /// The page parameters mix directions: `first` or `after` with `last` or
     /// `before`. A page size outside 1-100 never reaches this: the query's
     /// schema bounds are refused first, as a `400` with `about:blank`.
     #[error("{0}")]
-    #[problem(
-        status = 400,
-        type = "https://beam.justinchung.net/reference/errors/#invalid-pagination",
-        title = "Invalid pagination"
-    )]
+    #[problem(status = 400, title = "Invalid pagination")]
     InvalidPagination(String),
 
     /// `query` holds a NUL character, which no title can contain, or
     /// `sort_by=relevance` was asked for with no `query` to rank by.
     #[error("{0}")]
-    #[problem(
-        status = 400,
-        type = "https://beam.justinchung.net/reference/errors/#invalid-search-query",
-        title = "Invalid search query"
-    )]
+    #[problem(status = 400, title = "Invalid search query")]
     InvalidSearchQuery(String),
 
     /// A numeric filter outside the range it can take: a year beyond what the
@@ -212,19 +198,11 @@ pub enum MediaBrowseError {
     /// narrowed, so an out-of-range bound can never wrap into one that matches
     /// everything.
     #[error("{0}")]
-    #[problem(
-        status = 400,
-        type = "https://beam.justinchung.net/reference/errors/#invalid-filter",
-        title = "Invalid filter"
-    )]
+    #[problem(status = 400, title = "Invalid filter")]
     InvalidFilter(String),
 
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 
@@ -233,126 +211,83 @@ pub enum MediaBrowseError {
 /// The 400 below shares one declared response with the `Path` extractor's
 /// own, which answers a malformed id.
 #[derive(Debug, thiserror::Error, ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum MediaSourcesError {
     /// A show has no files of its own; the caller wants an episode id.
     #[error("{0}")]
-    #[problem(
-        status = 400,
-        type = "https://beam.justinchung.net/reference/errors/#sources-not-available-for-show",
-        title = "Sources are not available at the show level"
-    )]
+    #[problem(status = 400, title = "Sources are not available at the show level")]
     SourcesNotAvailableForShow(String),
 
     #[error("{0}")]
-    #[problem(
-        status = 404,
-        type = "https://beam.justinchung.net/reference/errors/#media-not-found",
-        title = "Media not found"
-    )]
+    #[problem(status = 404, title = "Media not found")]
     MediaNotFound(String),
 
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 
 /// `POST /v1/admin/media/{id}/refresh`. A malformed id is the `Path`
 /// extractor's 400.
 #[derive(Debug, thiserror::Error, ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum MediaRefreshError {
     #[error("{0}")]
-    #[problem(
-        status = 404,
-        type = "https://beam.justinchung.net/reference/errors/#media-not-found",
-        title = "Media not found"
-    )]
+    #[problem(status = 404, title = "Media not found")]
     MediaNotFound(String),
 
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 
 /// `GET /v1/admin/enrichment`: the titles by enrichment status (issue #185).
 #[derive(Debug, thiserror::Error, ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum EnrichmentListError {
     /// `after` is not a cursor this list issued.
     #[error("{0}")]
-    #[problem(
-        status = 400,
-        type = "https://beam.justinchung.net/reference/errors/#invalid-cursor",
-        title = "Invalid cursor"
-    )]
+    #[problem(status = 400, title = "Invalid cursor")]
     InvalidCursor(String),
 
     /// `first` is outside 1-100. Kynos refuses that from the query's schema
     /// bounds first, as a `400` with `about:blank`, so this is the handler's
     /// second guard and no request answers it.
     #[error("{0}")]
-    #[problem(
-        status = 400,
-        type = "https://beam.justinchung.net/reference/errors/#invalid-pagination",
-        title = "Invalid pagination"
-    )]
+    #[problem(status = 400, title = "Invalid pagination")]
     InvalidPagination(String),
 
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 
 /// `GET /v1/admin/media/{id}/enrichment` and `DELETE /v1/admin/media/{id}/match`.
 /// A malformed id is the `Path` extractor's 400.
 #[derive(Debug, thiserror::Error, ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum MediaEnrichmentError {
     #[error("{0}")]
-    #[problem(
-        status = 404,
-        type = "https://beam.justinchung.net/reference/errors/#media-not-found",
-        title = "Media not found"
-    )]
+    #[problem(status = 404, title = "Media not found")]
     MediaNotFound(String),
 
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 
 /// `GET /v1/admin/media/{id}/match-candidates`: a live search of the
 /// configured providers.
 #[derive(Debug, thiserror::Error, ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum MatchCandidatesError {
     #[error("{0}")]
-    #[problem(
-        status = 404,
-        type = "https://beam.justinchung.net/reference/errors/#media-not-found",
-        title = "Media not found"
-    )]
+    #[problem(status = 404, title = "Media not found")]
     MediaNotFound(String),
 
     /// No metadata provider is configured to search.
     #[error("{0}")]
-    #[problem(
-        status = 409,
-        type = "https://beam.justinchung.net/reference/errors/#provider-not-configured",
-        title = "Metadata provider not configured"
-    )]
+    #[problem(status = 409, title = "Metadata provider not configured")]
     ProviderNotConfigured(String),
 
     /// The provider failed to answer: down, rate-limited, or erroring.
@@ -365,51 +300,32 @@ pub enum MatchCandidatesError {
     ProviderError(ServerFault),
 
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 
 /// `POST /v1/admin/media/{id}/match`.
 #[derive(Debug, thiserror::Error, ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum FixMatchError {
     #[error("{0}")]
-    #[problem(
-        status = 404,
-        type = "https://beam.justinchung.net/reference/errors/#media-not-found",
-        title = "Media not found"
-    )]
+    #[problem(status = 404, title = "Media not found")]
     MediaNotFound(String),
 
     /// The id is from a provider that is not configured, so no pass could
     /// fetch the title by it.
     #[error("{0}")]
-    #[problem(
-        status = 409,
-        type = "https://beam.justinchung.net/reference/errors/#provider-not-configured",
-        title = "Metadata provider not configured"
-    )]
+    #[problem(status = 409, title = "Metadata provider not configured")]
     ProviderNotConfigured(String),
 
     /// Another title is already pinned to the id.
     #[error("{0}")]
-    #[problem(
-        status = 409,
-        type = "https://beam.justinchung.net/reference/errors/#external-ref-taken",
-        title = "External id already pinned"
-    )]
+    #[problem(status = 409, title = "External id already pinned")]
     ExternalRefTaken(String),
 
     /// `external_ref` is not a `"provider:id"` any provider issues.
     #[error("the request body breaks {} rule(s)", errors.len())]
-    #[problem(
-        status = 422,
-        type = "https://beam.justinchung.net/reference/errors/#validation-failed",
-        title = "Validation failed"
-    )]
+    #[problem(status = 422, title = "Validation failed")]
     ValidationFailed {
         // kynos gap: the `errors` extension is not described (see
         // `PlaybackTelemetryError::ValidationFailed`); getkono/kynos#991.
@@ -418,33 +334,22 @@ pub enum FixMatchError {
     },
 
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 
 /// `PUT /v1/admin/media/{id}/enrichment/locks`.
 #[derive(Debug, thiserror::Error, ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum FieldLocksError {
     #[error("{0}")]
-    #[problem(
-        status = 404,
-        type = "https://beam.justinchung.net/reference/errors/#media-not-found",
-        title = "Media not found"
-    )]
+    #[problem(status = 404, title = "Media not found")]
     MediaNotFound(String),
 
     /// A listed field is one enrichment never writes on this kind of title
     /// (a show's release date or runtime).
     #[error("the request body breaks {} rule(s)", errors.len())]
-    #[problem(
-        status = 422,
-        type = "https://beam.justinchung.net/reference/errors/#validation-failed",
-        title = "Validation failed"
-    )]
+    #[problem(status = 422, title = "Validation failed")]
     ValidationFailed {
         // kynos gap: as for `FixMatchError::ValidationFailed`; getkono/kynos#991.
         #[problem(extension)]
@@ -452,32 +357,21 @@ pub enum FieldLocksError {
     },
 
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 
 /// `POST /v1/admin/libraries/{id}/refresh`. A malformed id is the `Path`
 /// extractor's 400.
 #[derive(Debug, thiserror::Error, ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum LibraryRefreshError {
     #[error("{0}")]
-    #[problem(
-        status = 404,
-        type = "https://beam.justinchung.net/reference/errors/#library-not-found",
-        title = "Library not found"
-    )]
+    #[problem(status = 404, title = "Library not found")]
     LibraryNotFound(String),
 
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 
@@ -485,26 +379,20 @@ pub enum LibraryRefreshError {
 /// `/files` subresource, and `DELETE /v1/admin/libraries/{id}`. A malformed id
 /// is the `Path` extractor's 400.
 #[derive(Debug, thiserror::Error, ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum LibraryRefError {
     #[error("{0}")]
-    #[problem(
-        status = 404,
-        type = "https://beam.justinchung.net/reference/errors/#library-not-found",
-        title = "Library not found"
-    )]
+    #[problem(status = 404, title = "Library not found")]
     LibraryNotFound(String),
 
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 
 /// `POST /v1/admin/libraries`. No 404: nothing is looked up by id.
 #[derive(Debug, thiserror::Error, ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum LibraryCreateError {
     #[error("{0}")]
     #[problem(
@@ -545,11 +433,7 @@ pub enum LibraryCreateError {
     /// The name is blank or longer than 200 characters, or the root path is
     /// blank: one entry per broken rule, each naming its field.
     #[error("the request body breaks {} rule(s)", errors.len())]
-    #[problem(
-        status = 422,
-        type = "https://beam.justinchung.net/reference/errors/#validation-failed",
-        title = "Validation failed"
-    )]
+    #[problem(status = 422, title = "Validation failed")]
     ValidationFailed {
         // kynos gap: as for `PlaybackTelemetryError::ValidationFailed`;
         // getkono/kynos#991.
@@ -558,11 +442,7 @@ pub enum LibraryCreateError {
     },
 
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 
@@ -571,6 +451,7 @@ pub enum LibraryCreateError {
 /// The path captures a `Uuid`, so a malformed id is the `Path` extractor's
 /// own 400 and never reaches the handler.
 #[derive(Debug, thiserror::Error, ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum LibraryScanError {
     /// A library is scanned by one job at a time; the running one can be
     /// followed at `GET /v1/admin/libraries/{id}/scan`.
@@ -591,32 +472,21 @@ pub enum LibraryScanError {
     PathNotFound(String),
 
     #[error("{0}")]
-    #[problem(
-        status = 404,
-        type = "https://beam.justinchung.net/reference/errors/#library-not-found",
-        title = "Library not found"
-    )]
+    #[problem(status = 404, title = "Library not found")]
     LibraryNotFound(String),
 
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 
 /// `GET /v1/admin/libraries/{id}/scan`. A malformed id is the `Path`
 /// extractor's 400, as for `scanLibrary`.
 #[derive(Debug, thiserror::Error, ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum LibraryScanReadError {
     #[error("{0}")]
-    #[problem(
-        status = 404,
-        type = "https://beam.justinchung.net/reference/errors/#library-not-found",
-        title = "Library not found"
-    )]
+    #[problem(status = 404, title = "Library not found")]
     LibraryNotFound(String),
 
     /// The library exists but has not been scanned since the server started:
@@ -624,60 +494,44 @@ pub enum LibraryScanReadError {
     #[error("{0}")]
     #[problem(
         status = 404,
-        type = "https://beam.justinchung.net/reference/errors/#scan-not-found",
         title = "No scan of this library since the server started"
     )]
     ScanNotFound(String),
 
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 
 /// `PATCH /v1/admin/users/{id}`.
 #[derive(Debug, thiserror::Error, ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum AdminUserError {
     /// An administrator cannot lock themselves out.
     #[error("{0}")]
     #[problem(
         status = 400,
-        type = "https://beam.justinchung.net/reference/errors/#cannot-disable-self",
         title = "An administrator cannot disable their own account"
     )]
     CannotDisableSelf(String),
 
     #[error("{0}")]
-    #[problem(
-        status = 404,
-        type = "https://beam.justinchung.net/reference/errors/#user-not-found",
-        title = "User not found"
-    )]
+    #[problem(status = 404, title = "User not found")]
     UserNotFound(String),
 
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 
 /// `PUT /v1/me/language-preferences` (issue #264).
 #[derive(Debug, thiserror::Error, ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum LanguagePreferencesUpdateError {
     /// A language names no language Beam can match a track against: one
     /// entry per such language, each naming its place in its list.
     #[error("the request body breaks {} rule(s)", errors.len())]
-    #[problem(
-        status = 422,
-        type = "https://beam.justinchung.net/reference/errors/#validation-failed",
-        title = "Validation failed"
-    )]
+    #[problem(status = 422, title = "Validation failed")]
     ValidationFailed {
         // kynos gap: as for `FixMatchError::ValidationFailed`; getkono/kynos#991.
         #[problem(extension)]
@@ -685,11 +539,7 @@ pub enum LanguagePreferencesUpdateError {
     },
 
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 
@@ -702,44 +552,30 @@ impl From<InternalError> for LanguagePreferencesUpdateError {
 
 /// `GET /v1/admin/users/{id}/access`.
 #[derive(Debug, thiserror::Error, ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum UserAccessReadError {
     #[error("{0}")]
-    #[problem(
-        status = 404,
-        type = "https://beam.justinchung.net/reference/errors/#user-not-found",
-        title = "User not found"
-    )]
+    #[problem(status = 404, title = "User not found")]
     UserNotFound(String),
 
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 
 /// `PUT /v1/admin/users/{id}/access`.
 #[derive(Debug, thiserror::Error, ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum UserAccessUpdateError {
     #[error("{0}")]
-    #[problem(
-        status = 404,
-        type = "https://beam.justinchung.net/reference/errors/#user-not-found",
-        title = "User not found"
-    )]
+    #[problem(status = 404, title = "User not found")]
     UserNotFound(String),
 
     /// `library_ids` names a library that does not exist, or is not empty
     /// while `all_libraries` is `true`: one entry per broken rule, each
     /// naming its field.
     #[error("the request body breaks {} rule(s)", errors.len())]
-    #[problem(
-        status = 422,
-        type = "https://beam.justinchung.net/reference/errors/#validation-failed",
-        title = "Validation failed"
-    )]
+    #[problem(status = 422, title = "Validation failed")]
     ValidationFailed {
         // kynos gap: as for `FixMatchError::ValidationFailed`; getkono/kynos#991.
         #[problem(extension)]
@@ -747,11 +583,7 @@ pub enum UserAccessUpdateError {
     },
 
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 
@@ -764,22 +596,15 @@ pub enum UserAccessUpdateError {
 /// does not exist: there is no title to keep the progress for, and the detail
 /// says which.
 #[derive(Debug, thiserror::Error, ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum ProgressError {
     #[error("{0}")]
-    #[problem(
-        status = 404,
-        type = "https://beam.justinchung.net/reference/errors/#file-not-found",
-        title = "File not found"
-    )]
+    #[problem(status = 404, title = "File not found")]
     FileNotFound(String),
     /// The position is negative or past the end, or the duration is not
     /// positive (issue #188): each broken rule is one entry of `errors`.
     #[error("the request body breaks {} rule(s)", errors.len())]
-    #[problem(
-        status = 422,
-        type = "https://beam.justinchung.net/reference/errors/#validation-failed",
-        title = "Validation failed"
-    )]
+    #[problem(status = 422, title = "Validation failed")]
     ValidationFailed {
         // kynos gap: as for `PlaybackTelemetryError::ValidationFailed`;
         // getkono/kynos#991.
@@ -788,39 +613,24 @@ pub enum ProgressError {
     },
 
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 
 /// `GET` and `DELETE /v1/media/{id}/progress` (issue #188).
 #[derive(Debug, thiserror::Error, ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum TitleProgressError {
     /// A show or a season has no resume position of its own; the caller
     /// wants an episode id.
     #[error("{0}")]
-    #[problem(
-        status = 400,
-        type = "https://beam.justinchung.net/reference/errors/#progress-not-available-for-show",
-        title = "Progress is not available at the show level"
-    )]
+    #[problem(status = 400, title = "Progress is not available at the show level")]
     ProgressNotAvailableForShow(String),
     #[error("{0}")]
-    #[problem(
-        status = 404,
-        type = "https://beam.justinchung.net/reference/errors/#media-not-found",
-        title = "Media not found"
-    )]
+    #[problem(status = 404, title = "Media not found")]
     MediaNotFound(String),
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 
@@ -829,131 +639,84 @@ pub enum TitleProgressError {
 /// /v1/seasons/{id}` (issue #188): an id that names nothing, or a store
 /// that failed.
 #[derive(Debug, thiserror::Error, ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum MediaRefLookupError {
     #[error("{0}")]
-    #[problem(
-        status = 404,
-        type = "https://beam.justinchung.net/reference/errors/#media-not-found",
-        title = "Media not found"
-    )]
+    #[problem(status = 404, title = "Media not found")]
     MediaNotFound(String),
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 
 /// `GET /v1/people` (issue #261). A store failure is a 500, never an empty
 /// page, as on `GET /v1/media`.
 #[derive(Debug, thiserror::Error, ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum PeopleSearchError {
     /// `after` is not a cursor people search issued.
     #[error("{0}")]
-    #[problem(
-        status = 400,
-        type = "https://beam.justinchung.net/reference/errors/#invalid-cursor",
-        title = "Invalid cursor"
-    )]
+    #[problem(status = 400, title = "Invalid cursor")]
     InvalidCursor(String),
     /// `first` is outside 1-100. Kynos refuses that from the query's schema
     /// bounds first, as a `400` with `about:blank`, so this is the handler's
     /// second guard and no request answers it.
     #[error("{0}")]
-    #[problem(
-        status = 400,
-        type = "https://beam.justinchung.net/reference/errors/#invalid-pagination",
-        title = "Invalid pagination"
-    )]
+    #[problem(status = 400, title = "Invalid pagination")]
     InvalidPagination(String),
     /// `query` holds a NUL character, which no name can contain.
     #[error("{0}")]
-    #[problem(
-        status = 400,
-        type = "https://beam.justinchung.net/reference/errors/#invalid-search-query",
-        title = "Invalid search query"
-    )]
+    #[problem(status = 400, title = "Invalid search query")]
     InvalidSearchQuery(String),
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 
 /// `GET /v1/people/{id}` (issue #261): an id that names no person, or a store
 /// that failed.
 #[derive(Debug, thiserror::Error, ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum PersonLookupError {
     #[error("{0}")]
-    #[problem(
-        status = 404,
-        type = "https://beam.justinchung.net/reference/errors/#person-not-found",
-        title = "Person not found"
-    )]
+    #[problem(status = 404, title = "Person not found")]
     PersonNotFound(String),
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 
 /// `GET /v1/continue-watching`.
 #[derive(Debug, thiserror::Error, ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum ContinueWatchingError {
     /// `first` is outside 1-50. Kynos refuses that from the query's schema
     /// bounds first, as a `400` with `about:blank`, so this is the handler's
     /// second guard and no request answers it.
     #[error("{0}")]
-    #[problem(
-        status = 400,
-        type = "https://beam.justinchung.net/reference/errors/#invalid-pagination",
-        title = "Invalid pagination"
-    )]
+    #[problem(status = 400, title = "Invalid pagination")]
     InvalidPagination(String),
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 
 /// `GET /v1/history`.
 #[derive(Debug, thiserror::Error, ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum HistoryError {
     /// `after` is not a cursor the history list issued.
     #[error("{0}")]
-    #[problem(
-        status = 400,
-        type = "https://beam.justinchung.net/reference/errors/#invalid-cursor",
-        title = "Invalid cursor"
-    )]
+    #[problem(status = 400, title = "Invalid cursor")]
     InvalidCursor(String),
     /// `first` is outside 1-100. Kynos refuses that from the query's schema
     /// bounds first, as a `400` with `about:blank`, so this is the handler's
     /// second guard and no request answers it.
     #[error("{0}")]
-    #[problem(
-        status = 400,
-        type = "https://beam.justinchung.net/reference/errors/#invalid-pagination",
-        title = "Invalid pagination"
-    )]
+    #[problem(status = 400, title = "Invalid pagination")]
     InvalidPagination(String),
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 
@@ -961,178 +724,112 @@ pub enum HistoryError {
 /// (issue #262): an id that names nothing, a season or an episode, or a store
 /// that failed.
 #[derive(Debug, thiserror::Error, ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum ListMembershipError {
     /// The id names a season or an episode: only a movie or a show is put on
     /// a list.
     #[error("{0}")]
-    #[problem(
-        status = 400,
-        type = "https://beam.justinchung.net/reference/errors/#not-a-title",
-        title = "Not a movie or a show"
-    )]
+    #[problem(status = 400, title = "Not a movie or a show")]
     NotATitle(String),
     #[error("{0}")]
-    #[problem(
-        status = 404,
-        type = "https://beam.justinchung.net/reference/errors/#media-not-found",
-        title = "Media not found"
-    )]
+    #[problem(status = 404, title = "Media not found")]
     MediaNotFound(String),
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 
 /// `GET /v1/watchlist` and `GET /v1/favourites` (issue #262).
 #[derive(Debug, thiserror::Error, ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum ListPageError {
     /// `after` is not a cursor this list issued -- the other list's included.
     #[error("{0}")]
-    #[problem(
-        status = 400,
-        type = "https://beam.justinchung.net/reference/errors/#invalid-cursor",
-        title = "Invalid cursor"
-    )]
+    #[problem(status = 400, title = "Invalid cursor")]
     InvalidCursor(String),
     /// `first` is outside 1-100. Kynos refuses that from the query's schema
     /// bounds first, as a `400` with `about:blank`, so this is the handler's
     /// second guard and no request answers it.
     #[error("{0}")]
-    #[problem(
-        status = 400,
-        type = "https://beam.justinchung.net/reference/errors/#invalid-pagination",
-        title = "Invalid pagination"
-    )]
+    #[problem(status = 400, title = "Invalid pagination")]
     InvalidPagination(String),
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 
 /// `GET /v1/collections` (issue #262). A store failure is a 500, never an
 /// empty page.
 #[derive(Debug, thiserror::Error, ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum CollectionListError {
     /// `after` is not a cursor the collection listing issued.
     #[error("{0}")]
-    #[problem(
-        status = 400,
-        type = "https://beam.justinchung.net/reference/errors/#invalid-cursor",
-        title = "Invalid cursor"
-    )]
+    #[problem(status = 400, title = "Invalid cursor")]
     InvalidCursor(String),
     /// `first` is outside 1-100: as on `ListPageError`, Kynos's query check
     /// answers first.
     #[error("{0}")]
-    #[problem(
-        status = 400,
-        type = "https://beam.justinchung.net/reference/errors/#invalid-pagination",
-        title = "Invalid pagination"
-    )]
+    #[problem(status = 400, title = "Invalid pagination")]
     InvalidPagination(String),
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 
 /// `GET /v1/collections/{id}` (issue #262): an id that names no collection
 /// any movie is in, or a store that failed.
 #[derive(Debug, thiserror::Error, ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum CollectionLookupError {
     #[error("{0}")]
-    #[problem(
-        status = 404,
-        type = "https://beam.justinchung.net/reference/errors/#collection-not-found",
-        title = "Collection not found"
-    )]
+    #[problem(status = 404, title = "Collection not found")]
     CollectionNotFound(String),
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 
 /// `GET /v1/admin/users` and `GET /v1/admin/logs`: the lists paged by an
 /// offset inside an opaque cursor (issue #190).
 #[derive(Debug, thiserror::Error, ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum AdminListError {
     /// `after` is not a cursor this list issued -- another list's included.
     #[error("{0}")]
-    #[problem(
-        status = 400,
-        type = "https://beam.justinchung.net/reference/errors/#invalid-cursor",
-        title = "Invalid cursor"
-    )]
+    #[problem(status = 400, title = "Invalid cursor")]
     InvalidCursor(String),
     /// `first` is outside the list's bounds. Kynos refuses that from the
     /// query's schema bounds first, as a `400` with `about:blank`, so this is
     /// the handler's second guard and no request answers it.
     #[error("{0}")]
-    #[problem(
-        status = 400,
-        type = "https://beam.justinchung.net/reference/errors/#invalid-pagination",
-        title = "Invalid pagination"
-    )]
+    #[problem(status = 400, title = "Invalid pagination")]
     InvalidPagination(String),
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 
 /// `GET /v1/libraries/{id}/files` (issue #190). A malformed id is the `Path`
 /// extractor's 400.
 #[derive(Debug, thiserror::Error, ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum LibraryFilesError {
     /// `after` is not a cursor this library's file list issued.
     #[error("{0}")]
-    #[problem(
-        status = 400,
-        type = "https://beam.justinchung.net/reference/errors/#invalid-cursor",
-        title = "Invalid cursor"
-    )]
+    #[problem(status = 400, title = "Invalid cursor")]
     InvalidCursor(String),
     /// `first` is outside 1-500. Kynos refuses that from the query's schema
     /// bounds first, as a `400` with `about:blank`, so this is the handler's
     /// second guard and no request answers it.
     #[error("{0}")]
-    #[problem(
-        status = 400,
-        type = "https://beam.justinchung.net/reference/errors/#invalid-pagination",
-        title = "Invalid pagination"
-    )]
+    #[problem(status = 400, title = "Invalid pagination")]
     InvalidPagination(String),
     #[error("{0}")]
-    #[problem(
-        status = 404,
-        type = "https://beam.justinchung.net/reference/errors/#library-not-found",
-        title = "Library not found"
-    )]
+    #[problem(status = 404, title = "Library not found")]
     LibraryNotFound(String),
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 
@@ -1142,6 +839,7 @@ pub enum LibraryFilesError {
 /// retrying will not turn it on. It is not a 5xx precisely so that a client's
 /// transport does not retry it.
 #[derive(Debug, thiserror::Error, ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum PlaybackTelemetryError {
     #[error("{0}")]
     #[problem(
@@ -1156,11 +854,7 @@ pub enum PlaybackTelemetryError {
     /// it -- the shape of RFC 9457's own validation example, and of the 422
     /// Kynos answers when a body does not fit its type.
     #[error("the request body breaks {} rule(s)", errors.len())]
-    #[problem(
-        status = 422,
-        type = "https://beam.justinchung.net/reference/errors/#validation-failed",
-        title = "Validation failed"
-    )]
+    #[problem(status = 422, title = "Validation failed")]
     ValidationFailed {
         // kynos gap: the derived responses describe a problem's `type` and
         // `title` only, never its `#[problem(extension)]` members, so the
@@ -1172,33 +866,22 @@ pub enum PlaybackTelemetryError {
     },
 
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 
 /// `GET /v1/admin/telemetry/playback` (issue #143).
 #[derive(Debug, thiserror::Error, ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum PlaybackTelemetryReportError {
     /// `from` is after `to`, or the range spans more days than one report
     /// covers.
     #[error("{0}")]
-    #[problem(
-        status = 400,
-        type = "https://beam.justinchung.net/reference/errors/#invalid-date-range",
-        title = "Invalid date range"
-    )]
+    #[problem(status = 400, title = "Invalid date range")]
     InvalidDateRange(String),
 
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 
@@ -1225,13 +908,10 @@ pub enum PlaybackTelemetryReportError {
 /// differs: one means the catalogue never had the file, the other that the
 /// catalogue and the disk have diverged.
 #[derive(Debug, thiserror::Error, ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum DeliveryError {
     #[error("{0}")]
-    #[problem(
-        status = 404,
-        type = "https://beam.justinchung.net/reference/errors/#file-not-found",
-        title = "File not found"
-    )]
+    #[problem(status = 404, title = "File not found")]
     FileNotFound(String),
 
     /// The catalogue has the file; the path it names is not on disk.
@@ -1240,19 +920,11 @@ pub enum DeliveryError {
     /// bind mount is missing, the library moved, or the file was deleted
     /// outside Beam.
     #[error("{0}")]
-    #[problem(
-        status = 404,
-        type = "https://beam.justinchung.net/reference/errors/#source-file-missing",
-        title = "Source file missing from disk"
-    )]
+    #[problem(status = 404, title = "Source file missing from disk")]
     SourceFileMissing(String),
 
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 
@@ -1271,32 +943,21 @@ pub enum DeliveryError {
 /// fault is in the subtitle id; `subtitle-rendition-unavailable` because the
 /// subtitle exists and a client should fetch it as stored instead.
 #[derive(Debug, thiserror::Error, ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum SubtitleDeliveryError {
     #[error("{0}")]
-    #[problem(
-        status = 404,
-        type = "https://beam.justinchung.net/reference/errors/#file-not-found",
-        title = "File not found"
-    )]
+    #[problem(status = 404, title = "File not found")]
     FileNotFound(String),
 
     /// The video file has no subtitle with this id -- including a subtitle
     /// that belongs to another file.
     #[error("{0}")]
-    #[problem(
-        status = 404,
-        type = "https://beam.justinchung.net/reference/errors/#subtitle-not-found",
-        title = "Subtitle not found"
-    )]
+    #[problem(status = 404, title = "Subtitle not found")]
     SubtitleNotFound(String),
 
     /// The catalogue has the subtitle; the path it names is not on disk.
     #[error("{0}")]
-    #[problem(
-        status = 404,
-        type = "https://beam.justinchung.net/reference/errors/#source-file-missing",
-        title = "Source file missing from disk"
-    )]
+    #[problem(status = 404, title = "Source file missing from disk")]
     SourceFileMissing(String),
 
     /// The subtitle is not offered as WebVTT: an ASS or SSA file, whose
@@ -1310,11 +971,7 @@ pub enum SubtitleDeliveryError {
     RenditionUnavailable(String),
 
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 
@@ -1326,29 +983,18 @@ pub enum SubtitleDeliveryError {
 /// is now, never made because the file gives none, or past its last sheet --
 /// which a client renders as a scrub bar with no previews.
 #[derive(Debug, thiserror::Error, ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum TrickplayDeliveryError {
     #[error("{0}")]
-    #[problem(
-        status = 404,
-        type = "https://beam.justinchung.net/reference/errors/#file-not-found",
-        title = "File not found"
-    )]
+    #[problem(status = 404, title = "File not found")]
     FileNotFound(String),
 
     #[error("{0}")]
-    #[problem(
-        status = 404,
-        type = "https://beam.justinchung.net/reference/errors/#trickplay-not-found",
-        title = "Trickplay sheet not found"
-    )]
+    #[problem(status = 404, title = "Trickplay sheet not found")]
     TrickplayNotFound(String),
 
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 
@@ -1362,6 +1008,7 @@ pub enum TrickplayDeliveryError {
 /// would tell a viewer to ask an administrator to rescan the library because a
 /// show has no backdrop.
 #[derive(Debug, thiserror::Error, ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum ArtworkError {
     /// No image for this title: the row carries no stored URL, the variant does
     /// not apply to that kind, or the provider no longer serves it.
@@ -1398,11 +1045,7 @@ pub enum ArtworkError {
     /// `https`, or unparseable) -- bad data Beam wrote, not a provider that
     /// misbehaved.
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 

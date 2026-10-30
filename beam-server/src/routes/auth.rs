@@ -48,8 +48,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::routes::api_error::{
-    INTERNAL_DETAIL, InternalError, OIDC_UNAVAILABLE_DETAIL, SESSION_COOKIE, ServerFault,
-    SessionAuth,
+    ERROR_BASE, INTERNAL_DETAIL, InternalError, OIDC_UNAVAILABLE_DETAIL, SESSION_COOKIE,
+    ServerFault, SessionAuth,
 };
 use crate::routes::middleware::optional_header;
 use crate::routes::tags::Auth;
@@ -323,23 +323,16 @@ impl SetCookie {
 /// No 400 and no 403: the only input is a redirect path, which is sanitised
 /// rather than rejected, and nothing here is authorised.
 #[derive(Debug, thiserror::Error, kynos::ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum LoginStartError {
     /// OIDC is not configured, or discovery failed. Distinct from a 500: the
     /// server is working, the identity provider is not reachable.
     #[error("{}", OIDC_UNAVAILABLE_DETAIL)]
-    #[problem(
-        status = 503,
-        type = "https://beam.justinchung.net/reference/errors/#oidc-unavailable",
-        title = "Login unavailable"
-    )]
+    #[problem(status = 503, title = "Login unavailable")]
     OidcUnavailable(ServerFault),
 
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 
@@ -349,6 +342,7 @@ pub enum LoginStartError {
 /// first, because it is the one a caller hits by reloading the callback URL --
 /// which is the single most common way to reach this endpoint in error.
 #[derive(Debug, thiserror::Error, kynos::ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum LoginCallbackError {
     /// The round-trip cannot be matched to one this server started: the state
     /// cookie or parameter is missing, the two disagree, the pending record
@@ -367,33 +361,22 @@ pub enum LoginCallbackError {
 
     /// The identity provider refused, or the token exchange did not verify.
     #[error("{0}")]
-    #[problem(
-        status = 400,
-        type = "https://beam.justinchung.net/reference/errors/#login-failed",
-        title = "Login failed"
-    )]
+    #[problem(status = 400, title = "Login failed")]
     LoginFailed(String),
 
     /// The identity verified; the local account is disabled (issue #85).
     #[error("{0}")]
-    #[problem(
-        status = 403,
-        type = "https://beam.justinchung.net/reference/errors/#account-disabled",
-        title = "Account is disabled"
-    )]
+    #[problem(status = 403, title = "Account is disabled")]
     AccountDisabled(String),
 
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 
 /// `POST /v1/auth/device`.
 #[derive(Debug, thiserror::Error, kynos::ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum DeviceLoginStartError {
     /// The IdP's discovery document names no device authorization endpoint,
     /// so this deployment offers only the browser login. A client falls back
@@ -407,19 +390,11 @@ pub enum DeviceLoginStartError {
     Unsupported(String),
 
     #[error("{}", OIDC_UNAVAILABLE_DETAIL)]
-    #[problem(
-        status = 503,
-        type = "https://beam.justinchung.net/reference/errors/#oidc-unavailable",
-        title = "Login unavailable"
-    )]
+    #[problem(status = 503, title = "Login unavailable")]
     OidcUnavailable(ServerFault),
 
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 
@@ -428,6 +403,7 @@ pub enum DeviceLoginStartError {
 /// `Invalid` is written first so it titles the 400: it is what a client
 /// meets by polling a flow that already ended, the common mistake.
 #[derive(Debug, thiserror::Error, kynos::ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum DeviceLoginPollError {
     /// No open device login has this handle: it was never issued, or the
     /// flow already ended (signed in, denied, or expired and collected).
@@ -441,11 +417,7 @@ pub enum DeviceLoginPollError {
 
     /// The IdP's answer did not verify.
     #[error("{0}")]
-    #[problem(
-        status = 400,
-        type = "https://beam.justinchung.net/reference/errors/#login-failed",
-        title = "Login failed"
-    )]
+    #[problem(status = 400, title = "Login failed")]
     LoginFailed(String),
 
     /// The user refused the sign-in at the IdP.
@@ -459,11 +431,7 @@ pub enum DeviceLoginPollError {
 
     /// The identity verified; the local account is disabled (issue #85).
     #[error("{0}")]
-    #[problem(
-        status = 403,
-        type = "https://beam.justinchung.net/reference/errors/#account-disabled",
-        title = "Account is disabled"
-    )]
+    #[problem(status = 403, title = "Account is disabled")]
     AccountDisabled(String),
 
     /// The user did not approve in time. Start a new device login.
@@ -478,19 +446,11 @@ pub enum DeviceLoginPollError {
     /// The IdP could not be reached or refused Beam itself. The flow is kept:
     /// polling again may succeed.
     #[error("{}", OIDC_UNAVAILABLE_DETAIL)]
-    #[problem(
-        status = 503,
-        type = "https://beam.justinchung.net/reference/errors/#oidc-unavailable",
-        title = "Login unavailable"
-    )]
+    #[problem(status = 503, title = "Login unavailable")]
     OidcUnavailable(ServerFault),
 
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 
@@ -500,21 +460,14 @@ pub enum DeviceLoginPollError {
 /// means something the extractor's does not: the session verified, and the
 /// account behind it has since been deleted.
 #[derive(Debug, thiserror::Error, kynos::ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum CurrentUserError {
     #[error("{0}")]
-    #[problem(
-        status = 401,
-        type = "https://beam.justinchung.net/reference/errors/#account-removed",
-        title = "Account no longer exists"
-    )]
+    #[problem(status = 401, title = "Account no longer exists")]
     AccountRemoved(String),
 
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 
@@ -527,21 +480,14 @@ pub enum CurrentUserError {
 /// failed and sent it to sign in again. A malformed id is the `Path`
 /// extractor's 400.
 #[derive(Debug, thiserror::Error, kynos::ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum SessionRevokeError {
     #[error("{0}")]
-    #[problem(
-        status = 404,
-        type = "https://beam.justinchung.net/reference/errors/#session-not-found",
-        title = "Session not found"
-    )]
+    #[problem(status = 404, title = "Session not found")]
     SessionNotFound(String),
 
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 
