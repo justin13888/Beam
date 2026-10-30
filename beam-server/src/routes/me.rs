@@ -60,29 +60,25 @@ pub async fn set_language_preferences(
     let mut errors = Vec::new();
     let audio = codes("audio_languages", &audio_languages, &mut errors);
     let subtitle = codes("subtitle_languages", &subtitle_languages, &mut errors);
+    if !errors.is_empty() {
+        return Err(LanguagePreferencesUpdateError::ValidationFailed { errors });
+    }
     // The schema's `maxItems` refuses a list longer than
     // `MAX_PREFERRED_LANGUAGES` as Kynos's own 422 before the handler runs,
     // and a list within it never names more distinct languages than it
-    // holds; the domain's bound is the second check.
-    match LanguagePreferences::new(audio, subtitle, subtitle_mode.into()) {
-        Ok(preferences) if errors.is_empty() => {
-            state
-                .services
-                .language_preferences
-                .replace(user_id, &preferences)
-                .await
-                .map_err(|err| LanguagePreferencesUpdateError::Internal(ServerFault::new(err)))?;
-            Ok(Json(LanguagePreferenceSettings::from(&preferences)))
-        }
-        Ok(_) => Err(LanguagePreferencesUpdateError::ValidationFailed { errors }),
-        Err(too_many) => {
-            errors.push(FieldError {
-                pointer: String::new(),
-                detail: too_many.to_string(),
-            });
-            Err(LanguagePreferencesUpdateError::ValidationFailed { errors })
-        }
-    }
+    // holds, so the domain's bound cannot refuse a request that reached
+    // here. Were the two bounds ever to disagree it is the server's fault,
+    // not the caller's; `the_documented_list_bound_is_the_domain_bound`
+    // keeps them one number.
+    let preferences = LanguagePreferences::new(audio, subtitle, subtitle_mode.into())
+        .map_err(|too_many| LanguagePreferencesUpdateError::Internal(ServerFault::new(too_many)))?;
+    state
+        .services
+        .language_preferences
+        .replace(user_id, &preferences)
+        .await
+        .map_err(|err| LanguagePreferencesUpdateError::Internal(ServerFault::new(err)))?;
+    Ok(Json(LanguagePreferenceSettings::from(&preferences)))
 }
 
 /// The languages `raw` names, in order, with a field error for each entry

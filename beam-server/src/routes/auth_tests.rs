@@ -24,11 +24,14 @@ mod tests {
     use beam_auth::utils::pending_auth_store::PendingAuthStore;
     use beam_auth::utils::pending_auth_store::in_memory::InMemoryPendingAuthStore;
     use beam_auth::utils::repository::UserRepository;
-    use beam_auth::utils::repository::in_memory::InMemoryUserRepository;
+    use beam_auth::utils::repository::in_memory::{
+        FailingUserRepository, InMemoryUserRepository, UserRepositoryOperation,
+    };
     use beam_auth::utils::session_store::SessionStore;
     use beam_auth::utils::session_store::in_memory::{
         FailingSessionStore, InMemorySessionStore, SessionStoreOperation,
     };
+    use beam_domain::services::TestClock;
     use kynos::http::StatusCode;
     use kynos::prelude::*;
     use kynos::test::{TestClient, TestResponse};
@@ -107,6 +110,10 @@ mod tests {
         // A trait object, so a test can put a `FailingSessionStore` under the
         // same router and drive a handler's storage-failure path.
         session_store: Arc<dyn SessionStore>,
+        /// The pending-login store's clock: it moves only when a test
+        /// advances it, so a login attempt's expiry is reached without
+        /// waiting for it.
+        pending_clock: Arc<TestClock>,
     }
 
     fn make_harness(oidc_client: FakeOidcClient) -> Harness {
@@ -175,12 +182,49 @@ mod tests {
         config: OidcRuntimeConfig,
         adjust: impl FnOnce(&mut crate::config::ServerConfig),
     ) -> Harness {
+        let user_repo_dyn: Arc<dyn UserRepository> = user_repo.clone();
+        build_harness(
+            oidc_client,
+            user_repo,
+            user_repo_dyn,
+            session_store,
+            config,
+            adjust,
+        )
+    }
+
+    /// A harness whose handlers reach `users` for every account lookup --
+    /// a [`FailingUserRepository`], to drive a handler's storage-failure
+    /// path. The harness's own `user_repo` is a separate empty store that
+    /// nothing reads.
+    fn make_harness_over_users(
+        oidc_client: FakeOidcClient,
+        users: Arc<dyn UserRepository>,
+    ) -> Harness {
+        build_harness(
+            oidc_client,
+            Arc::new(InMemoryUserRepository::default()),
+            users,
+            Arc::new(InMemorySessionStore::default()),
+            test_config(),
+            |_server_config| {},
+        )
+    }
+
+    fn build_harness(
+        oidc_client: FakeOidcClient,
+        user_repo: Arc<InMemoryUserRepository>,
+        user_repo_dyn: Arc<dyn UserRepository>,
+        session_store: Arc<dyn SessionStore>,
+        config: OidcRuntimeConfig,
+        adjust: impl FnOnce(&mut crate::config::ServerConfig),
+    ) -> Harness {
         let oidc_client = Arc::new(oidc_client);
         let oidc_dyn: Arc<dyn OidcClient> = oidc_client.clone();
+        let pending_clock = Arc::new(TestClock::new());
         let pending_auth_store: Arc<dyn PendingAuthStore> =
-            Arc::new(InMemoryPendingAuthStore::default());
+            Arc::new(InMemoryPendingAuthStore::new(pending_clock.clone()));
         let session_dyn: Arc<dyn SessionStore> = session_store.clone();
-        let user_repo_dyn: Arc<dyn UserRepository> = user_repo.clone();
 
         let base = make_app_state();
 
@@ -260,6 +304,7 @@ mod tests {
             oidc_client,
             user_repo,
             session_store,
+            pending_clock,
         }
     }
 
@@ -738,6 +783,25 @@ mod tests {
         assert!(user.is_admin, "a boolean-true claim grants admin");
     }
 
+    const LOGIN_ATTEMPT_INVALID: &str =
+        "https://beam.justinchung.net/reference/errors/#login-attempt-invalid";
+    const LOGIN_FAILED: &str = "https://beam.justinchung.net/reference/errors/#login-failed";
+
+    /// A refused callback signed nobody in: the response sets no session
+    /// cookie, and no account was provisioned -- so no session can exist
+    /// either, a session being minted only for an account.
+    async fn assert_signed_nobody_in(harness: &Harness, response: &TestResponse) {
+        assert!(
+            live_cookie(response, SESSION_COOKIE).is_none(),
+            "a refused callback must not set a session cookie"
+        );
+        assert_eq!(
+            harness.user_repo.count().await.unwrap(),
+            0,
+            "a refused callback must not provision an account"
+        );
+    }
+
     #[tokio::test]
     async fn callback_state_mismatch_returns_400() {
         let harness = make_harness(FakeOidcClient::with_identity(identity(
@@ -752,9 +816,128 @@ mod tests {
         // the stable half of it -- the message never was contractual.
         response
             .assert_status(StatusCode::BAD_REQUEST)
-            .assert_problem_type(
-                "https://beam.justinchung.net/reference/errors/#login-attempt-invalid",
-            );
+            .assert_problem_type(LOGIN_ATTEMPT_INVALID);
+        assert_signed_nobody_in(&harness, &response).await;
+    }
+
+    /// A login attempt outlives its `STATE_TTL_SECS` only as a refusal: the
+    /// callback that comes back after it is an invalid attempt, not a login.
+    #[tokio::test]
+    async fn a_callback_after_the_login_attempt_expired_is_400_and_signs_nobody_in() {
+        let harness = make_harness(FakeOidcClient::with_identity(identity(
+            "late@example.com",
+            true,
+        )));
+        let (state_cookie, _) = do_login(&harness, None).await;
+        let begin = harness.oidc_client.last_begin().unwrap();
+
+        harness
+            .pending_clock
+            .advance(std::time::Duration::from_secs(
+                crate::routes::auth::STATE_TTL_SECS + 1,
+            ));
+        let response = do_callback(&harness, &state_cookie, &begin.state).await;
+
+        response
+            .assert_status(StatusCode::BAD_REQUEST)
+            .assert_problem_type(LOGIN_ATTEMPT_INVALID);
+        assert_signed_nobody_in(&harness, &response).await;
+    }
+
+    /// Just inside its lifetime the same attempt still signs in: the expiry
+    /// above is the TTL's, not any delay at all.
+    #[tokio::test]
+    async fn a_callback_at_the_end_of_the_login_attempts_lifetime_signs_in() {
+        let harness = make_harness(FakeOidcClient::with_identity(identity(
+            "prompt@example.com",
+            true,
+        )));
+        let (state_cookie, _) = do_login(&harness, None).await;
+        let begin = harness.oidc_client.last_begin().unwrap();
+
+        harness
+            .pending_clock
+            .advance(std::time::Duration::from_secs(
+                crate::routes::auth::STATE_TTL_SECS,
+            ));
+        let response = do_callback(&harness, &state_cookie, &begin.state).await;
+
+        response.assert_status(StatusCode::FOUND);
+        assert!(live_cookie(&response, SESSION_COOKIE).is_some());
+    }
+
+    #[tokio::test]
+    async fn a_callback_without_a_state_parameter_is_400_and_signs_nobody_in() {
+        let harness = make_harness(FakeOidcClient::with_identity(identity(
+            "user@example.com",
+            true,
+        )));
+        let (state_cookie, _) = do_login(&harness, None).await;
+
+        let response = harness
+            .client
+            .get("/v1/auth/callback?code=fake-code")
+            .cookie(STATE_COOKIE, &state_cookie)
+            .send()
+            .await;
+
+        response
+            .assert_status(StatusCode::BAD_REQUEST)
+            .assert_problem_type(LOGIN_ATTEMPT_INVALID);
+        assert_signed_nobody_in(&harness, &response).await;
+    }
+
+    /// A callback naming the right attempt but carrying no `code` has nothing
+    /// to exchange. It also spends the attempt: the state is single-use, so
+    /// presenting it again with a code is refused as well.
+    #[tokio::test]
+    async fn a_callback_without_a_code_is_400_signs_nobody_in_and_spends_the_attempt() {
+        let harness = make_harness(FakeOidcClient::with_identity(identity(
+            "user@example.com",
+            true,
+        )));
+        let (state_cookie, _) = do_login(&harness, None).await;
+        let begin = harness.oidc_client.last_begin().unwrap();
+
+        let response = harness
+            .client
+            .get(&format!("/v1/auth/callback?state={}", begin.state))
+            .cookie(STATE_COOKIE, &state_cookie)
+            .send()
+            .await;
+
+        response
+            .assert_status(StatusCode::BAD_REQUEST)
+            .assert_problem_type(LOGIN_ATTEMPT_INVALID);
+        assert_signed_nobody_in(&harness, &response).await;
+
+        let retried = do_callback(&harness, &state_cookie, &begin.state).await;
+        retried.assert_status(StatusCode::BAD_REQUEST);
+        assert_signed_nobody_in(&harness, &retried).await;
+    }
+
+    /// An ID token minted for a different login attempt -- its nonce is not
+    /// the one this attempt bound -- is refused as a failed login, never as a
+    /// sign-in. The real client reports a wrong nonce as a claims failure, as
+    /// the fake does here: an older attempt's state is presented after a newer
+    /// attempt replaced the nonce the IdP signs.
+    #[tokio::test]
+    async fn a_callback_whose_id_token_nonce_differs_is_400_and_signs_nobody_in() {
+        let harness = make_harness(FakeOidcClient::with_identity(identity(
+            "user@example.com",
+            true,
+        )));
+        let (first_cookie, _) = do_login(&harness, None).await;
+        let first = harness.oidc_client.last_begin().unwrap();
+        // A second attempt: the IdP now answers with the second nonce.
+        do_login(&harness, None).await;
+
+        let response = do_callback(&harness, &first_cookie, &first.state).await;
+
+        response
+            .assert_status(StatusCode::BAD_REQUEST)
+            .assert_problem_type(LOGIN_FAILED);
+        assert_signed_nobody_in(&harness, &response).await;
     }
 
     #[tokio::test]
@@ -772,7 +955,29 @@ mod tests {
 
         // Same state/cookie presented again -- already consumed.
         let second = do_callback(&harness, &state_cookie, &begin.state).await;
-        assert_eq!(second.status(), StatusCode::BAD_REQUEST);
+        second
+            .assert_status(StatusCode::BAD_REQUEST)
+            .assert_problem_type(LOGIN_ATTEMPT_INVALID);
+        assert!(
+            live_cookie(&second, SESSION_COOKIE).is_none(),
+            "a replayed callback must not set a session cookie"
+        );
+        let user = harness
+            .user_repo
+            .find_by_oidc_identity("https://dex.test", "subj-1")
+            .await
+            .unwrap()
+            .expect("the first callback provisioned the account");
+        assert_eq!(
+            harness
+                .session_store
+                .list_for_user(&user.id.to_string())
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "only the first callback minted a session"
+        );
     }
 
     #[tokio::test]
@@ -787,7 +992,10 @@ mod tests {
             .get("/v1/auth/callback?state=whatever&code=fake-code")
             .send()
             .await;
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        response
+            .assert_status(StatusCode::BAD_REQUEST)
+            .assert_problem_type(LOGIN_ATTEMPT_INVALID);
+        assert_signed_nobody_in(&harness, &response).await;
     }
 
     #[tokio::test]
@@ -806,7 +1014,10 @@ mod tests {
             .cookie(STATE_COOKIE, &state_cookie)
             .send()
             .await;
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        response
+            .assert_status(StatusCode::BAD_REQUEST)
+            .assert_problem_type(LOGIN_FAILED);
+        assert_signed_nobody_in(&harness, &response).await;
     }
 
     #[tokio::test]
@@ -816,7 +1027,35 @@ mod tests {
         let (state_cookie, _) = do_login(&harness, None).await;
         let begin = harness.oidc_client.last_begin().unwrap();
         let response = do_callback(&harness, &state_cookie, &begin.state).await;
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        response
+            .assert_status(StatusCode::BAD_REQUEST)
+            .assert_problem_type(LOGIN_FAILED);
+        assert_signed_nobody_in(&harness, &response).await;
+    }
+
+    /// NFR-205: an account store that cannot look the identity up is a 500,
+    /// not a login and not a 400 blaming the browser.
+    #[tokio::test]
+    async fn a_user_store_failure_at_the_callback_is_a_500_and_signs_nobody_in() {
+        let harness = make_harness_over_users(
+            FakeOidcClient::with_identity(identity("user@example.com", true)),
+            Arc::new(FailingUserRepository::new(
+                InMemoryUserRepository::default(),
+                UserRepositoryOperation::FindByOidcIdentity,
+            )),
+        );
+        let (state_cookie, _) = do_login(&harness, None).await;
+        let begin = harness.oidc_client.last_begin().unwrap();
+
+        let response = do_callback(&harness, &state_cookie, &begin.state).await;
+
+        response
+            .assert_status(StatusCode::INTERNAL_SERVER_ERROR)
+            .assert_problem_type("https://beam.justinchung.net/reference/errors/#internal");
+        assert!(
+            live_cookie(&response, SESSION_COOKIE).is_none(),
+            "a failed lookup must not set a session cookie"
+        );
     }
 
     #[tokio::test]
@@ -966,6 +1205,76 @@ mod tests {
 
         let response = harness.client.get("/v1/me").send().await;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// A session whose account has since been removed names that, rather
+    /// than answering as a user that no longer exists or as a bad cookie.
+    #[tokio::test]
+    async fn me_for_a_removed_account_is_its_problem_type() {
+        let harness = make_harness(FakeOidcClient::with_identity(identity(
+            "gone@example.com",
+            true,
+        )));
+        let session_cookie = harness
+            .session_store
+            .create(
+                &beam_auth::utils::session_store::SessionData {
+                    user_id: uuid::Uuid::from_u128(0xdead).to_string(),
+                    device_hash: "test-device".to_owned(),
+                    ip: "127.0.0.1".to_owned(),
+                    created_at: chrono::Utc::now().timestamp(),
+                    last_active: chrono::Utc::now().timestamp(),
+                },
+                86_400,
+                86_400,
+            )
+            .await
+            .unwrap();
+
+        let response = get_me(&harness, &session_cookie).await;
+        response
+            .assert_status(StatusCode::UNAUTHORIZED)
+            .assert_problem_type("https://beam.justinchung.net/reference/errors/#account-removed");
+        assert!(!response.text().contains("gone@example.com"));
+    }
+
+    /// The authenticator cannot say "I could not tell" (see
+    /// `SessionAuthenticator::authenticate`), so a session store that fails
+    /// the lookup is a 401 -- never a 500 that reads as the endpoint being
+    /// broken, and never the user the cookie named.
+    #[tokio::test]
+    async fn a_session_store_outage_is_401_not_500() {
+        let harness = harness_failing("outage@example.com", SessionStoreOperation::Get);
+        let session_cookie = login_and_get_session_cookie(&harness, "outage@example.com").await;
+
+        let response = get_me(&harness, &session_cookie).await;
+
+        response.assert_status(StatusCode::UNAUTHORIZED);
+        assert!(
+            !response.text().contains("outage@example.com"),
+            "no account is answered for a cookie that could not be checked"
+        );
+    }
+
+    /// NFR-205: an account store that cannot read is a 500 on `/v1/me`, never
+    /// the account-removed answer that would tell a client to discard its
+    /// session.
+    #[tokio::test]
+    async fn an_account_store_failure_on_me_is_a_500_never_account_removed() {
+        let users = Arc::new(FailingUserRepository::new(
+            InMemoryUserRepository::default(),
+            UserRepositoryOperation::FindById,
+        ));
+        let harness = make_harness_over_users(
+            FakeOidcClient::with_identity(identity("me@example.com", true)),
+            users,
+        );
+        let session_cookie = login_and_get_session_cookie(&harness, "me@example.com").await;
+
+        get_me(&harness, &session_cookie)
+            .await
+            .assert_status(StatusCode::INTERNAL_SERVER_ERROR)
+            .assert_problem_type("https://beam.justinchung.net/reference/errors/#internal");
     }
 
     #[tokio::test]

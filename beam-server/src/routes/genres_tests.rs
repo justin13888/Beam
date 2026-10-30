@@ -55,6 +55,32 @@ async fn listing_genres_requires_a_session() {
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
+/// NFR-205: a genre store that cannot read is a 500, never an empty catalogue
+/// that tells a client the library has no genres.
+#[tokio::test]
+async fn a_genre_store_failure_is_a_500_never_an_empty_catalogue() {
+    use crate::routes::test_support::{outage, signed_in, state_with};
+    use beam_domain::repositories::genre::MockGenreRepository;
+
+    let mut genres = MockGenreRepository::new();
+    genres.expect_find_carried().returning(|_| Err(outage()));
+    let state = state_with(|services| services.genre_repo = std::sync::Arc::new(genres));
+    let token = signed_in(&state).await;
+
+    let response = client(state)
+        .get("/v1/genres")
+        .cookie("beam_session", &token)
+        .send()
+        .await;
+    response
+        .assert_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .assert_problem_type("https://beam.justinchung.net/reference/errors/#internal");
+    assert!(
+        !response.text().contains("items"),
+        "no catalogue is answered"
+    );
+}
+
 #[tokio::test]
 async fn the_catalog_is_deduplicated_and_sorted_case_insensitively() {
     let state = make_app_state();

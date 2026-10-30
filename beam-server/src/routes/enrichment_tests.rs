@@ -203,6 +203,140 @@ async fn every_enrichment_route_is_for_administrators_only() {
     );
 }
 
+/// An enrichment-state store that fails every call: what a database outage
+/// looks like from the enrichment control.
+#[derive(Debug)]
+struct FailingStates;
+
+#[async_trait::async_trait]
+impl beam_domain::repositories::EnrichmentStateRepository for FailingStates {
+    async fn ensure_pending(&self, _: EnrichmentTargetId) -> Result<(), sea_orm::DbErr> {
+        Err(crate::routes::test_support::outage())
+    }
+    async fn fetch_due(
+        &self,
+        _: chrono::DateTime<Utc>,
+        _: u32,
+    ) -> Result<Vec<beam_domain::models::EnrichmentState>, sea_orm::DbErr> {
+        Err(crate::routes::test_support::outage())
+    }
+    async fn find_by_target(
+        &self,
+        _: EnrichmentTargetId,
+    ) -> Result<Option<beam_domain::models::EnrichmentState>, sea_orm::DbErr> {
+        Err(crate::routes::test_support::outage())
+    }
+    async fn mark_enriched(
+        &self,
+        _: Uuid,
+        _: &str,
+        _: f32,
+        _: chrono::DateTime<Utc>,
+    ) -> Result<(), sea_orm::DbErr> {
+        Err(crate::routes::test_support::outage())
+    }
+    async fn mark_unmatched(
+        &self,
+        _: Uuid,
+        _: &str,
+        _: chrono::DateTime<Utc>,
+    ) -> Result<(), sea_orm::DbErr> {
+        Err(crate::routes::test_support::outage())
+    }
+    async fn mark_retrying(
+        &self,
+        _: Uuid,
+        _: &str,
+        _: u32,
+        _: chrono::DateTime<Utc>,
+        _: chrono::DateTime<Utc>,
+    ) -> Result<(), sea_orm::DbErr> {
+        Err(crate::routes::test_support::outage())
+    }
+    async fn mark_failed(
+        &self,
+        _: Uuid,
+        _: &str,
+        _: chrono::DateTime<Utc>,
+    ) -> Result<(), sea_orm::DbErr> {
+        Err(crate::routes::test_support::outage())
+    }
+    async fn request_refresh(
+        &self,
+        _: EnrichmentTargetId,
+        _: bool,
+    ) -> Result<bool, sea_orm::DbErr> {
+        Err(crate::routes::test_support::outage())
+    }
+    async fn request_refresh_library(&self, _: Uuid, _: bool) -> Result<u64, sea_orm::DbErr> {
+        Err(crate::routes::test_support::outage())
+    }
+    async fn request_refresh_all(&self, _: bool) -> Result<u64, sea_orm::DbErr> {
+        Err(crate::routes::test_support::outage())
+    }
+    async fn set_locked_fields(
+        &self,
+        _: EnrichmentTargetId,
+        _: &beam_domain::models::enrichment::FieldLocks,
+    ) -> Result<beam_domain::models::EnrichmentState, sea_orm::DbErr> {
+        Err(crate::routes::test_support::outage())
+    }
+    async fn list(
+        &self,
+        _: &beam_domain::models::enrichment::EnrichmentListQuery,
+    ) -> Result<Vec<beam_domain::models::EnrichmentState>, sea_orm::DbErr> {
+        Err(crate::routes::test_support::outage())
+    }
+    async fn count(
+        &self,
+        _: &beam_domain::models::enrichment::EnrichmentListFilter,
+    ) -> Result<u64, sea_orm::DbErr> {
+        Err(crate::routes::test_support::outage())
+    }
+    async fn count_by_status(
+        &self,
+    ) -> Result<beam_domain::models::enrichment::EnrichmentStatusCounts, sea_orm::DbErr> {
+        Err(crate::routes::test_support::outage())
+    }
+}
+
+/// NFR-205: an enrichment queue that cannot be read is a 500 on the list,
+/// never an empty page that tells an administrator nothing needs fixing, and
+/// one that cannot be written is a 500 on a refresh, never the 204 that says
+/// the title was queued.
+#[tokio::test]
+async fn an_enrichment_store_failure_is_a_500_never_an_empty_queue_or_a_queued_refresh() {
+    let state = crate::routes::test_support::state_with(|services| {
+        services.enrichment_control = crate::routes::test_support::enrichment_control(
+            services.movie_repo.clone(),
+            services.show_repo.clone(),
+            Arc::new(FailingStates),
+            services.library_repo.clone(),
+            Arc::new(InMemoryEnrichmentProvider::new(&["tmdb"])),
+            services.admin_log.clone(),
+        );
+    });
+    let admin = session(&state, true).await;
+    let client = crate::routes::test_support::served_client(state);
+
+    let list = client
+        .get("/v1/admin/enrichment")
+        .cookie("beam_session", &admin)
+        .send()
+        .await;
+    list.assert_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .assert_problem_type("https://beam.justinchung.net/reference/errors/#internal");
+    assert!(!list.text().contains("items"), "no page is answered");
+
+    client
+        .post("/v1/admin/media/refresh")
+        .cookie("beam_session", &admin)
+        .send()
+        .await
+        .assert_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .assert_problem_type("https://beam.justinchung.net/reference/errors/#internal");
+}
+
 #[tokio::test]
 async fn the_list_pages_unmatched_titles_newest_first_with_their_errors() {
     let f = fixture(InMemoryEnrichmentProvider::new(&["tmdb"])).await;

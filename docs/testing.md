@@ -357,8 +357,11 @@ What it covers, file by file under `beam-server/tests/e2e_server/`:
 - **`sign_in.rs`** -- the RFC 8628 device grant a native client uses and the browser's
   Authorization Code + PKCE flow, both through Dex; admin rights from the IdP's claim alone.
 - **`catalog.rs`** -- add a library, scan it, browse, search, detail and sources, and stream by
-  range, byte for byte; library roots outside the video directory or overlapping another refused.
-- **`scan.rs`** -- a scan is a `202` job polled to its end, and a concurrent one is a `409`.
+  range, byte for byte; library roots outside the video directory or overlapping another refused;
+  a viewer restricted to one library through the SQL access filter; and the watchlist,
+  favourites and a collection round-tripped through their SQL stores.
+- **`scan.rs`** -- a scan is a `202` job polled to its end, a concurrent one is a `409`, and a user
+  outside Dex's admin group is refused one.
 - **`reconciliation.rs`** -- the filesystem changes under the server and both the API and the
   database follow: add, delete (soft-deleted for a grace period, then purged), rename, move and a
   same-size swap that keep each file's id and progress, an emptied root, a root that disappears and

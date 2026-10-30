@@ -267,3 +267,85 @@ async fn a_failed_write_is_a_500() {
         .assert_status(StatusCode::INTERNAL_SERVER_ERROR)
         .assert_problem_type("https://beam.justinchung.net/reference/errors/#internal");
 }
+
+/// A preference store that fails every call: what a database outage looks
+/// like from the handlers.
+#[derive(Debug)]
+struct FailingPreferences;
+
+#[async_trait::async_trait]
+impl LanguagePreferenceRepository for FailingPreferences {
+    async fn find(&self, _: Uuid) -> Result<LanguagePreferences, sea_orm::DbErr> {
+        Err(sea_orm::DbErr::Custom(
+            "preference store unavailable".into(),
+        ))
+    }
+    async fn replace(&self, _: Uuid, _: &LanguagePreferences) -> Result<(), sea_orm::DbErr> {
+        Err(sea_orm::DbErr::Custom(
+            "preference store unavailable".into(),
+        ))
+    }
+}
+
+/// NFR-205: a store that cannot read is a 500, never the defaults -- which a
+/// client would apply as though the user had chosen nothing.
+#[tokio::test]
+async fn a_preference_store_failure_is_a_500_never_the_defaults() {
+    let state = state_with_language_preferences(Arc::new(FailingPreferences));
+    let service = Router::new()
+        .nest(
+            "/v1",
+            Router::new().mount(kynos::routes![get_language_preferences]),
+        )
+        .build(state.clone())
+        .expect("the preferences router describes itself");
+    let client = TestClient::new(service);
+    let token = state
+        .services
+        .session_store
+        .create(
+            &SessionData {
+                user_id: Uuid::new_v4().to_string(),
+                device_hash: "test-device".to_owned(),
+                ip: "127.0.0.1".to_owned(),
+                created_at: chrono::Utc::now().timestamp(),
+                last_active: chrono::Utc::now().timestamp(),
+            },
+            86_400,
+            86_400,
+        )
+        .await
+        .expect("the in-memory session store issues a session");
+
+    let response = client.get(PATH).cookie("beam_session", &token).send().await;
+    response
+        .assert_status(StatusCode::INTERNAL_SERVER_ERROR)
+        .assert_problem_type("https://beam.justinchung.net/reference/errors/#internal");
+    assert!(
+        !response.text().contains("subtitle_mode"),
+        "no preferences body accompanies the failure"
+    );
+}
+
+/// The schema's `maxItems` on each list is the domain's
+/// `MAX_PREFERRED_LANGUAGES`. The handler relies on it: Kynos refuses a longer
+/// list before the handler runs, so the domain's own bound can never refuse a
+/// request that reached it, and the handler treats that as a server fault.
+/// Read from the served document, so the two cannot drift apart unnoticed.
+#[test]
+fn the_documented_list_bound_is_the_domain_bound() {
+    use kynos::openapi::SpecVersion;
+
+    let document = crate::routes::create_router(&crate::bootstrap::AllowedOrigins::none())
+        .openapi_as(SpecVersion::V3_2)
+        .expect("the contract exports");
+    let document = serde_json::to_value(&document).expect("the document serializes");
+    let properties = &document["components"]["schemas"]["LanguagePreferenceSettings"]["properties"];
+    for list in ["audio_languages", "subtitle_languages"] {
+        assert_eq!(
+            properties[list]["maxItems"].as_u64(),
+            Some(language_preferences::MAX_PREFERRED_LANGUAGES as u64),
+            "{list}'s documented bound is the domain's"
+        );
+    }
+}

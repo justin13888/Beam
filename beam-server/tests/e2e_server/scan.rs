@@ -4,7 +4,6 @@
 //! queued behind it.
 
 use beam_test_support::e2e::client::api;
-use uuid::Uuid;
 
 use crate::common::{Admin, VIEWER, Video, assert_refused};
 
@@ -81,9 +80,12 @@ async fn a_scan_is_a_polled_job_and_a_concurrent_one_is_refused() {
     admin.finish().await;
 }
 
-/// Only an administrator scans, and only a library that exists.
+/// Only an administrator scans: a user Dex signs in outside the admin group
+/// is refused. The 404s for an unknown or never-scanned library are the
+/// handler's alone and are proven without a stack (`admin_tests`); what only
+/// this tier shows is admin rights decided by the IdP's claim.
 #[tokio::test]
-async fn a_scan_needs_an_administrator_and_a_library() {
+async fn a_scan_is_refused_to_a_user_outside_the_admin_group() {
     let mut admin = Admin::start().await;
     admin.stack.library.create_dir("films");
     let library = admin.add_library("Films", "films").await;
@@ -95,14 +97,9 @@ async fn a_scan_needs_an_administrator_and_a_library() {
         viewer.scan_library(library).await,
     );
     assert_refused(
-        "a scan of no library",
-        404,
-        admin.api.scan_library(Uuid::new_v4()).await,
-    );
-    assert_refused(
-        "the scan of a library never scanned",
-        404,
-        admin.api.get_library_scan(library).await,
+        "a viewer reading a scan",
+        403,
+        viewer.get_library_scan(library).await,
     );
 
     admin.finish().await;
