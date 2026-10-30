@@ -18,15 +18,16 @@ use sea_orm::{
 };
 use thiserror::Error;
 
+use beam_domain::services::{Clock, RealClock};
+use beam_entity::device_auth::{
+    ActiveModel as DeviceAuthActiveModel, Column, Entity as DeviceAuthEntity,
+};
+
 use crate::utils::opaque_token::seconds;
 /// A fresh opaque device handle, and the hash it is stored and looked up by:
 /// the handle itself is never persisted -- the same rule, and the same
 /// helpers, as a session token.
 pub use crate::utils::opaque_token::{generate as generate_handle, hash as hash_handle};
-use beam_domain::services::{Clock, RealClock};
-use beam_entity::device_auth::{
-    ActiveModel as DeviceAuthActiveModel, Column, Entity as DeviceAuthEntity,
-};
 
 /// How much a `slow_down` grows a flow's interval by (RFC 8628 section 3.5).
 pub const SLOW_DOWN_STEP_SECS: u32 = 5;

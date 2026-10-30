@@ -10,13 +10,14 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, DatabaseConnection, EntityTrait};
 
-use crate::utils::opaque_token::seconds;
 use beam_domain::services::{Clock, RealClock};
 use thiserror::Error;
 
 use beam_entity::pending_auth::{
     ActiveModel as PendingAuthActiveModel, Entity as PendingAuthEntity,
 };
+
+use crate::utils::opaque_token::seconds;
 
 #[derive(Debug, Clone)]
 pub struct PendingAuth {

@@ -12,10 +12,11 @@ use tracing::debug;
 use uuid::Uuid;
 
 use beam_domain::services::{Clock, RealClock};
+use beam_entity::session::{ActiveModel as SessionActiveModel, Column, Entity as SessionEntity};
+
 // A session token is an opaque credential: minted fresh, and persisted only
 // as its hash.
 use crate::utils::opaque_token::{generate as generate_session_token, hash as hash_token, seconds};
-use beam_entity::session::{ActiveModel as SessionActiveModel, Column, Entity as SessionEntity};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SessionData {
