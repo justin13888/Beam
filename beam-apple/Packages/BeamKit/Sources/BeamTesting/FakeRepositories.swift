@@ -9,7 +9,8 @@ import os
 /// Stateful rather than mocked, deliberately: a screen that adds a server and
 /// then lists servers should see it, and only a fake that actually holds state
 /// can prove that. A canned-expectation mock would let a screen "pass" while
-/// never reading back what it wrote. Mirrors `core/testing/FakeRepositories.kt`.
+/// never reading back what it wrote. Mirrors the Android fakes in
+/// `core/testing`, which keep one `Fake*Repository.kt` file per seam.
 ///
 /// These are scaffolding and never the subject of a test. A test that asserts
 /// `FakeCatalogRepository` returns what it was configured with proves nothing
