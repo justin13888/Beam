@@ -168,24 +168,19 @@ public object DeviceProfiles {
     /**
      * Whether the display renders any HDR format.
      *
-     * From API 34 the HDR types are a property of the display mode, and
-     * `Display.hdrCapabilities` is deprecated in its favour; below that the
-     * capabilities object is the only source.
+     * `Display.isHdr` answers from `Display.hdrCapabilities`, which drops the
+     * HDR types the user disabled and reports none while the display is forced
+     * to SDR. `Display.Mode.supportedHdrTypes` is the panel's raw list and
+     * applies neither, so it would report HDR on a device whose user turned it
+     * off. Only `HdrCapabilities.getSupportedHdrTypes` is deprecated (API 34),
+     * and `isHdr` reads the filtered types without it on every level from 26.
      */
     private fun supportsHdr(context: Context): Boolean {
         val display: Display =
             context
                 .getSystemService(WindowManager::class.java)
                 ?.defaultDisplay ?: return false
-
-        val types =
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                display.mode.supportedHdrTypes
-            } else {
-                @Suppress("DEPRECATION")
-                display.hdrCapabilities?.supportedHdrTypes ?: return false
-            }
-        return types.isNotEmpty()
+        return display.isHdr
     }
 
     /**
