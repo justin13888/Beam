@@ -19,7 +19,6 @@ import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
-import dev.beam.android.core.ffi.BeamFailure
 import dev.beam.android.core.ffi.repository.PlaybackRepository
 import dev.beam.android.core.ffi.repository.TelemetryRepository
 import dev.beam.android.core.ffi.toFailure
@@ -579,84 +578,3 @@ internal class ExoBeamPlayer(
 /** Where this plan's parts sit end to end. */
 internal fun PlaybackPlan.timeline(): PartTimeline =
     PartTimeline(parts.map { part -> part.durationSecs?.let { (it * ProgressReporter.MILLIS_PER_SECOND).toLong() } })
-
-/** Stable identity for one track within a group. */
-internal fun trackId(
-    group: Tracks.Group,
-    index: Int,
-): String {
-    val format = group.getTrackFormat(index)
-    // `Format.id` is absent often enough that it cannot be the identity on its
-    // own; the group and index disambiguate the rest.
-    return format.id ?: "${group.type}:$index"
-}
-
-private fun Tracks.optionsOfType(trackType: Int): List<TrackOption> =
-    groups.filter { it.type == trackType }.flatMap { group ->
-        (0 until group.length).map { index ->
-            val format = group.getTrackFormat(index)
-            TrackOption(
-                id = trackId(group, index),
-                label =
-                    format.label
-                        ?: format.language?.let(::languageName)
-                        ?: "Track ${index + 1}",
-                language = format.language,
-                isSelected = group.isTrackSelected(index),
-                isSupported = group.isTrackSupported(index),
-            )
-        }
-    }
-
-private fun BeamFailure.asPlaybackFailure(): PlaybackFailure =
-    PlaybackFailure(message = message, isRetryable = retryable)
-
-private fun PlaybackException.asPlaybackFailure(): PlaybackFailure {
-    // Direct play means there is no server-side fallback for a file this
-    // device cannot decode (ADR-0004), so a decoder failure is offered as
-    // "try another source" rather than as "retry", which would fail the same
-    // way every time.
-    val decoderProblem = errorCode in DECODER_ERRORS
-    return PlaybackFailure(
-        message =
-            when {
-                decoderProblem -> {
-                    "This device cannot decode this file."
-                }
-
-                errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED -> {
-                    "Lost the connection to the server."
-                }
-
-                errorCode == PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS -> {
-                    "The server refused to send this file."
-                }
-
-                else -> {
-                    localizedMessage ?: "Playback stopped unexpectedly."
-                }
-            },
-        isRetryable = !decoderProblem,
-        suggestsAnotherSource = decoderProblem,
-    )
-}
-
-/**
- * The failures that are the connection rather than the file or the server: a
- * start failure under one of these is counted as `network`, anything else as
- * `other`. A bad HTTP status is the server answering, so it is not here.
- */
-private val NETWORK_ERRORS =
-    setOf(
-        PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
-        PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT,
-    )
-
-private val DECODER_ERRORS =
-    setOf(
-        PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
-        PlaybackException.ERROR_CODE_DECODER_QUERY_FAILED,
-        PlaybackException.ERROR_CODE_DECODING_FAILED,
-        PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES,
-        PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED,
-    )
