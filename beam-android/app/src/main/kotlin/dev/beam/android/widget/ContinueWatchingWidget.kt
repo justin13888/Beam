@@ -70,8 +70,9 @@ internal class ContinueWatchingWidget : GlanceAppWidget() {
         }
     }
 
+    /** Internal rather than private only so `ContinueWatchingWidgetTest` can render it. */
     @Composable
-    private fun WidgetContent(entries: List<ContinueWatchingEntry>) {
+    internal fun WidgetContent(entries: List<ContinueWatchingEntry>) {
         Column(
             modifier =
                 GlanceModifier

@@ -160,6 +160,12 @@ turbine = { group = "app.cash.turbine", name = "turbine", version.ref = "turbine
 okhttp-mockwebserver = { group = "com.squareup.okhttp3", name = "mockwebserver3", version.ref = "okhttp" }
 okhttp-tls = { group = "com.squareup.okhttp3", name = "okhttp-tls", version.ref = "okhttp" }
 androidx-test-ext-junit = { group = "androidx.test.ext", name = "junit", version.ref = "androidxTestExt" }
+# Media3's own test players, on the media3 pin so they always match the
+# library under test: `TestExoPlayerBuilder` and the Robolectric runner helpers.
+androidx-media3-test-utils = { group = "androidx.media3", name = "media3-test-utils", version.ref = "media3" }
+androidx-media3-test-utils-robolectric = { group = "androidx.media3", name = "media3-test-utils-robolectric", version.ref = "media3" }
+# Glance's unit-test host, on the glance pin for the same reason.
+androidx-glance-appwidget-testing = { group = "androidx.glance", name = "glance-appwidget-testing", version.ref = "glance" }
 
 # Referenced by the convention plugins, which need the plugin artifacts on
 # their own compile classpath in order to apply them by type.

@@ -36,6 +36,7 @@ class ProgressFlusherTest {
                         Fixtures.server(id = "home", isActive = true),
                         Fixtures.server(id = "cabin", isActive = false),
                     ),
+                    restored = true,
                 )
             val playback = FakePlaybackRepository().apply { pending = 2u }
             val network = Network(initial = true)
@@ -63,7 +64,7 @@ class ProgressFlusherTest {
     @Test
     fun a_refused_session_holds_the_queue_until_sign_in_and_a_failed_drain_is_retried() =
         runTest {
-            val servers = FakeServerRepository(listOf(Fixtures.server(id = "home", isActive = true)))
+            val servers = FakeServerRepository(listOf(Fixtures.server(id = "home", isActive = true)), restored = true)
             val playback =
                 FakePlaybackRepository().apply {
                     pending = 1u
@@ -93,7 +94,7 @@ class ProgressFlusherTest {
     @Test
     fun a_drain_that_throws_is_retried_on_the_backoff_with_no_trigger() =
         runTest {
-            val servers = FakeServerRepository(listOf(Fixtures.server(id = "home", isActive = true)))
+            val servers = FakeServerRepository(listOf(Fixtures.server(id = "home", isActive = true)), restored = true)
             val playback =
                 FakePlaybackRepository().apply {
                     pending = 1u
@@ -123,7 +124,7 @@ class ProgressFlusherTest {
     @Test
     fun a_server_that_recovers_while_the_device_stays_online_gets_the_queue_on_the_backoff() =
         runTest {
-            val servers = FakeServerRepository(listOf(Fixtures.server(id = "home", isActive = true)))
+            val servers = FakeServerRepository(listOf(Fixtures.server(id = "home", isActive = true)), restored = true)
             val playback =
                 FakePlaybackRepository().apply {
                     pending = 2u
@@ -158,7 +159,7 @@ class ProgressFlusherTest {
     @Test
     fun retries_stop_at_a_refused_session_and_a_new_trigger_starts_the_schedule_over() =
         runTest {
-            val servers = FakeServerRepository(listOf(Fixtures.server(id = "home", isActive = true)))
+            val servers = FakeServerRepository(listOf(Fixtures.server(id = "home", isActive = true)), restored = true)
             val playback =
                 FakePlaybackRepository().apply {
                     pending = 1u

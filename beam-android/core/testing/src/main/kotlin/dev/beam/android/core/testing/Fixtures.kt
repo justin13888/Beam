@@ -188,6 +188,10 @@ public object Fixtures {
         fileId: String = "file-1",
         positionSecs: Double = 1_800.0,
         durationSecs: Double? = 6_300.0,
+        // A literal, because the core computes it and a client is only handed
+        // it: re-deriving it here from the position diverged from the core at
+        // a zero duration. 1 800 s of 6 300 s by default.
+        progressFraction: Double? = 0.2857,
         media: MediaSummary? = movie(),
         episode: EpisodeSummary? = null,
     ): ContinueWatchingEntry =
@@ -198,7 +202,7 @@ public object Fixtures {
             kind = if (episode == null) MediaKind.MOVIE else MediaKind.SHOW,
             positionSecs = positionSecs,
             durationSecs = durationSecs,
-            progressFraction = durationSecs?.let { (positionSecs / it).coerceIn(0.0, 1.0) },
+            progressFraction = progressFraction,
             updatedAtUnix = 1_767_225_600L,
             media = media,
             episode = episode,

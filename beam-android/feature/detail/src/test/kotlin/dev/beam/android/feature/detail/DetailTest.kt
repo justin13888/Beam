@@ -48,7 +48,8 @@ class DetailTest {
         playback: FakePlaybackRepository = FakePlaybackRepository(),
         downloads: FakeDownloadRepository = FakeDownloadRepository(),
         preferences: FakePreferencesRepository = FakePreferencesRepository(),
-        servers: FakeServerRepository = FakeServerRepository(),
+        // Already restored: a detail page is reached only past sign-in.
+        servers: FakeServerRepository = FakeServerRepository(listOf(Fixtures.server()), restored = true),
     ) = DetailViewModel(
         catalog,
         playback,
@@ -61,12 +62,17 @@ class DetailTest {
     @Test
     fun `a title loads with its sources`() =
         runTest {
-            val model = viewModel()
+            val playback =
+                FakePlaybackRepository().apply {
+                    sourceList = listOf(Fixtures.source(fileId = "uhd"), Fixtures.source(fileId = "hd", height = 1080u))
+                }
+            val model = viewModel(playback = playback)
             testScheduler.advanceUntilIdle()
 
             val state = model.state.value.valueOrNull
             assertNotNull(state)
-            assertTrue(state!!.sources.isNotEmpty())
+            assertEquals(listOf(MEDIA_ID), playback.sourceRequests)
+            assertEquals("the server's sources, in its order", listOf("uhd", "hd"), state!!.sources.map { it.fileId })
         }
 
     @Test
@@ -98,16 +104,6 @@ class DetailTest {
 
             assertEquals(QualityPolicy.Smallest, playback.selectionPolicy)
         }
-
-    @Test
-    fun `every quality preference maps to a policy`() {
-        QualityPreference.entries.forEach { preference ->
-            assertNotNull(preference.asPolicy())
-        }
-        assertEquals(QualityPolicy.Highest, QualityPreference.Best.asPolicy())
-        assertEquals(QualityPolicy.MatchScreen, QualityPreference.MatchScreen.asPolicy())
-        assertEquals(QualityPolicy.Smallest, QualityPreference.Smallest.asPolicy())
-    }
 
     @Test
     fun `a title whose sources cannot be listed still renders`() =

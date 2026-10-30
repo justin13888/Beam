@@ -61,4 +61,6 @@ dependencies {
     implementation(libs.androidx.glance.material3)
 
     testImplementation(projects.core.testing)
+    // Renders the widget's Glance composition in a unit test, without a host.
+    testImplementation(libs.androidx.glance.appwidget.testing)
 }

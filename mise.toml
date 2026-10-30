@@ -1042,6 +1042,30 @@ cargo run -p beam-client-core --features uniffi-bindgen --bin uniffi-bindgen -- 
     --no-format
 '''
 
+[tasks."core:host"]
+description = "Build the host cdylib of beam-client-core for the Android JVM unit tests"
+run = '''
+set -eu
+# The Android module's JVM tests load the real core through the same UniFFI
+# bindings the app uses, over JNA, so they need the library built for the
+# machine running them rather than for a phone. It is the same cdylib
+# `core:bindgen` builds to read its metadata; this task copies it out of
+# `target/` into a directory of its own, so Gradle can treat it as an output it
+# caches and restores -- `core:bindgen` restored from the build cache leaves no
+# `target/` behind to load from.
+out="${BEAM_HOST_LIB_DIR:-beam-android/core/ffi/build/hostLib}"
+
+# See `core:bindgen` for why this is resolved rather than hardcoded.
+case "$(uname -s)" in
+    Darwin) libext="dylib" ;;
+    *) libext="so" ;;
+esac
+
+cargo build -p beam-client-core --lib
+mkdir -p "$out"
+cp "target/debug/libbeam_client_core.$libext" "$out/"
+'''
+
 [tasks."core:bindgen:swift"]
 description = "Generate the Swift bindings and C header for beam-client-core"
 run = '''

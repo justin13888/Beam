@@ -17,14 +17,14 @@ import javax.crypto.spec.GCMParameterSpec
  * hand-rolled rather than using `androidx.security:security-crypto` because
  * that library is deprecated and unmaintained; AES-GCM through the platform
  * keystore is the mechanism it wrapped anyway.
+ *
+ * The key is a parameter only so a JVM test can run the real cipher over a
+ * software key: the platform keystore does not exist there. Production uses
+ * [Keystore] and nothing else.
  */
-internal object SecretCipher {
-    private const val PROVIDER = "AndroidKeyStore"
-    private const val ALIAS = "dev.beam.android.session"
-    private const val TRANSFORMATION = "AES/GCM/NoPadding"
-    private const val TAG_LENGTH_BITS = 128
-    private const val IV_LENGTH_BYTES = 12
-
+internal class SecretCipher(
+    private val key: () -> SecretKey,
+) {
     /** Encrypt to `base64(iv || ciphertext)`. */
     fun encrypt(plaintext: String): String {
         val cipher = Cipher.getInstance(TRANSFORMATION)
@@ -54,24 +54,35 @@ internal object SecretCipher {
             cipher.doFinal(body).toString(Charsets.UTF_8)
         }.getOrNull()
 
-    private fun key(): SecretKey {
-        val store = KeyStore.getInstance(PROVIDER).apply { load(null) }
-        (store.getEntry(ALIAS, null) as? KeyStore.SecretKeyEntry)?.let { return it.secretKey }
+    companion object {
+        private const val PROVIDER = "AndroidKeyStore"
+        private const val ALIAS = "dev.beam.android.session"
+        private const val TRANSFORMATION = "AES/GCM/NoPadding"
+        private const val TAG_LENGTH_BITS = 128
+        private const val IV_LENGTH_BYTES = 12
 
-        val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, PROVIDER)
-        generator.init(
-            KeyGenParameterSpec
-                .Builder(
-                    ALIAS,
-                    KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
-                ).setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                // Deliberately not requiring user authentication: playback has
-                // to survive a locked screen, and the threat this defends
-                // against is offline extraction of the stored file.
-                .setUserAuthenticationRequired(false)
-                .build(),
-        )
-        return generator.generateKey()
+        /** The cipher over the session key in the Android keystore. */
+        val Keystore: SecretCipher = SecretCipher(::keystoreKey)
+
+        private fun keystoreKey(): SecretKey {
+            val store = KeyStore.getInstance(PROVIDER).apply { load(null) }
+            (store.getEntry(ALIAS, null) as? KeyStore.SecretKeyEntry)?.let { return it.secretKey }
+
+            val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, PROVIDER)
+            generator.init(
+                KeyGenParameterSpec
+                    .Builder(
+                        ALIAS,
+                        KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
+                    ).setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                    .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                    // Deliberately not requiring user authentication: playback has
+                    // to survive a locked screen, and the threat this defends
+                    // against is offline extraction of the stored file.
+                    .setUserAuthenticationRequired(false)
+                    .build(),
+            )
+            return generator.generateKey()
+        }
     }
 }

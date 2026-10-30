@@ -37,12 +37,23 @@ class AdminTest {
     @Test
     fun `the dashboard loads`() =
         runTest {
-            val viewModel = AdminViewModel(FakeAdminRepository(), FakeCatalogRepository())
+            val admin = FakeAdminRepository()
+            val catalog =
+                FakeCatalogRepository().apply {
+                    libraryList =
+                        listOf(
+                            Fixtures.library(id = "films", name = "Films"),
+                            Fixtures.library(id = "series", name = "Series"),
+                        )
+                }
+            val viewModel = AdminViewModel(admin, catalog)
             testScheduler.advanceUntilIdle()
 
             val state = viewModel.state.value.valueOrNull
             assertNotNull(state)
-            assertTrue(state!!.libraries.isNotEmpty())
+            assertEquals(admin.statusValue, state!!.status)
+            assertEquals(listOf("films", "series"), state.libraries.map { it.id })
+            assertEquals(admin.userList.map { it.id }, state.users.map { it.id })
         }
 
     @Test
