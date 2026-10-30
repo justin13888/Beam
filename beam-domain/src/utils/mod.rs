@@ -1,4 +1,5 @@
 pub mod classification;
+pub mod disc;
 pub mod filename;
 pub mod hash;
 pub mod hex;
@@ -7,6 +8,7 @@ pub mod media_path;
 pub mod next_up;
 pub mod nfo;
 pub mod path_policy;
+pub mod playback_classes;
 pub mod progress_validation;
 pub mod sidecar;
 pub mod source_rank;

@@ -343,7 +343,9 @@ impl PlaybackTelemetrySummary {
                     let (events, total_ms, histogram) = rebuffers.entry(key).or_default();
                     *events += 1;
                     *total_ms += u64::from(*duration_ms);
-                    histogram.record(crate::utils::telemetry::rebuffer_bucket(*duration_ms));
+                    histogram.record(crate::utils::playback_classes::rebuffer_bucket(
+                        *duration_ms,
+                    ));
                 }
                 PlaybackTelemetryEvent::Switch(key) => *switches.entry(*key).or_insert(0) += 1,
             }
