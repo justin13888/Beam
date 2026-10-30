@@ -30,14 +30,14 @@ class DeviceProfilesTest {
                 hardware = true,
             ),
         )
-        // Baseline rather than High: the profile sets are not keyed by codec,
-        // so AVC Main and High collide with HEVC Main10 and VP9 Profile 3 and
-        // read as 10-bit today (#395). Baseline's number collides with none.
+        // Main and High share their numbers with HEVC Main10 and VP9 Profile
+        // 3, so this AVC decoder only stays 8-bit if the lookup is keyed by
+        // its own MIME type (#395).
         ShadowMediaCodecList.addCodec(
             codec(
                 name = "c2.android.avc.decoder",
                 mime = MediaFormat.MIMETYPE_VIDEO_AVC,
-                profiles = intArrayOf(CodecProfileLevel.AVCProfileBaseline),
+                profiles = intArrayOf(CodecProfileLevel.AVCProfileMain, CodecProfileLevel.AVCProfileHigh),
                 hardware = false,
             ),
         )
@@ -76,6 +76,104 @@ class DeviceProfilesTest {
         assertTrue(hevc.supportsHdr10)
         assertTrue(hevc.supports10Bit)
         assertFalse(hevc.supportsDolbyVision)
+    }
+
+    @Test
+    fun `an avc high decoder alone does not report 10 bit`() {
+        ShadowMediaCodecList.addCodec(
+            codec(
+                name = "c2.vendor.avc.decoder",
+                mime = MediaFormat.MIMETYPE_VIDEO_AVC,
+                profiles = intArrayOf(CodecProfileLevel.AVCProfileHigh),
+                hardware = true,
+            ),
+        )
+
+        val avc =
+            DeviceProfiles
+                .build(RuntimeEnvironment.getApplication(), allowSoftwareDecode = false)
+                .videoDecoders
+                .single()
+
+        assertFalse("AVC High is 8-bit, whatever VP9 Profile 3 is numbered", avc.supports10Bit)
+        assertFalse(avc.supportsHdr10)
+        assertFalse(avc.supportsDolbyVision)
+    }
+
+    @Test
+    fun `an avc high10 decoder reports 10 bit and not dolby vision`() {
+        ShadowMediaCodecList.addCodec(
+            codec(
+                name = "c2.vendor.avc.decoder",
+                mime = MediaFormat.MIMETYPE_VIDEO_AVC,
+                profiles = intArrayOf(CodecProfileLevel.AVCProfileHigh10),
+                hardware = true,
+            ),
+        )
+
+        val avc =
+            DeviceProfiles
+                .build(RuntimeEnvironment.getApplication(), allowSoftwareDecode = false)
+                .videoDecoders
+                .single()
+
+        assertTrue("High10 is a 10-bit AVC profile", avc.supports10Bit)
+        assertFalse("AVC High10 shares its number with DvheDtr, not its meaning", avc.supportsDolbyVision)
+        assertFalse(avc.supportsHdr10)
+    }
+
+    @Test
+    fun `vp9 profile 1 is 8 bit and av1 main10 hdr10 is hdr10`() {
+        ShadowMediaCodecList.addCodec(
+            codec(
+                name = "c2.vendor.vp9.decoder",
+                mime = MediaFormat.MIMETYPE_VIDEO_VP9,
+                profiles = intArrayOf(CodecProfileLevel.VP9Profile0, CodecProfileLevel.VP9Profile1),
+                hardware = true,
+            ),
+        )
+        ShadowMediaCodecList.addCodec(
+            codec(
+                name = "c2.vendor.av1.decoder",
+                mime = MediaFormat.MIMETYPE_VIDEO_AV1,
+                profiles = intArrayOf(CodecProfileLevel.AV1ProfileMain10HDR10),
+                hardware = true,
+            ),
+        )
+
+        val byMime =
+            DeviceProfiles
+                .build(RuntimeEnvironment.getApplication(), allowSoftwareDecode = false)
+                .videoDecoders
+                .associateBy { it.mimeType }
+
+        val vp9 = byMime.getValue(MediaFormat.MIMETYPE_VIDEO_VP9)
+        assertFalse("VP9 Profile 1 shares its number with HEVC Main10", vp9.supports10Bit)
+        assertFalse(vp9.supportsHdr10)
+        val av1 = byMime.getValue(MediaFormat.MIMETYPE_VIDEO_AV1)
+        assertTrue(av1.supportsHdr10)
+        assertTrue("an HDR10 profile is a 10-bit one", av1.supports10Bit)
+    }
+
+    @Test
+    fun `a dolby vision decoder reports dolby vision`() {
+        ShadowMediaCodecList.addCodec(
+            codec(
+                name = "c2.vendor.dolby-vision.decoder",
+                mime = MediaFormat.MIMETYPE_VIDEO_DOLBY_VISION,
+                profiles = intArrayOf(CodecProfileLevel.DolbyVisionProfileDvheSt),
+                hardware = true,
+            ),
+        )
+
+        val dv =
+            DeviceProfiles
+                .build(RuntimeEnvironment.getApplication(), allowSoftwareDecode = false)
+                .videoDecoders
+                .single()
+
+        assertTrue(dv.supportsDolbyVision)
+        assertFalse("Dolby Vision is not HDR10", dv.supportsHdr10)
     }
 
     @Test

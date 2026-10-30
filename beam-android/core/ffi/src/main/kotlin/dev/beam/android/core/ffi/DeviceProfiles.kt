@@ -98,21 +98,24 @@ public object DeviceProfiles {
     ): DecoderCapability {
         val video = capabilities.videoCapabilities
         val profiles = capabilities.profileLevels.map { it.profile }.toSet()
+        // Profile numbers only mean something under the MIME type that
+        // reported them, so each set is looked up under the decoder's own.
+        val key = mime.lowercase()
         return DecoderCapability(
             mimeType = mime,
             isHardwareAccelerated = hardware,
             maxWidth = video?.supportedWidths?.upper?.toUInt(),
             maxHeight = video?.supportedHeights?.upper?.toUInt(),
             maxBitrateBps = video?.bitrateRange?.upper?.toULong(),
-            supportsHdr10 = profiles.any { it in Hdr10Profiles },
-            supportsDolbyVision =
-                mime.equals(MediaFormat.MIMETYPE_VIDEO_DOLBY_VISION, true) ||
-                    profiles.any { it in DolbyVisionProfiles },
+            supportsHdr10 = profiles.any { it in Hdr10Profiles[key].orEmpty() },
+            // Dolby Vision profile constants are only ever reported under the
+            // Dolby Vision MIME type, so the MIME type alone decides this.
+            supportsDolbyVision = key == MediaFormat.MIMETYPE_VIDEO_DOLBY_VISION,
             // A decoder that only advertises 8-bit profiles cannot play a
             // 10-bit stream even at a resolution it otherwise accepts, which
             // is the failure that looks like a green or black picture rather
             // than an error.
-            supports10Bit = profiles.any { it in TenBitProfiles },
+            supports10Bit = profiles.any { it in TenBitProfiles[key].orEmpty() },
         )
     }
 
@@ -189,10 +192,12 @@ public object DeviceProfiles {
             }.distinct()
     }
 
-    // The SDK groups profile constants by codec, not by capability, so the
-    // sets a player actually cares about have to be assembled by hand. Each
-    // one spans every codec that can carry the feature, because the question
-    // being asked is "can this device show HDR10", not "which codec is it".
+    // Android numbers profiles per codec, not globally: AVCProfileMain and
+    // HEVCProfileMain10 are both 0x02, and AVCProfileHigh10 is the same 0x10
+    // as DolbyVisionProfileDvheDtr. So every set is keyed by the MIME type
+    // whose constants it holds, and a decoder's profiles are only ever looked
+    // up under its own MIME type -- a flat set would make every H.264 Main or
+    // High decoder read as 10-bit (#395).
     //
     // InlinedApi is suppressed deliberately, and it is safe here in a way it
     // is not generally. These are `static final int` constants, so javac bakes
@@ -203,38 +208,56 @@ public object DeviceProfiles {
     // value and the comparison simply never matches. That is the correct
     // answer: such a device genuinely cannot decode that profile.
 
-    /** Profiles that carry an HDR10 or HDR10+ signal. */
+    /** Profiles that carry an HDR10 or HDR10+ signal, by MIME type. */
     @SuppressLint("InlinedApi")
-    private val Hdr10Profiles =
-        setOf(
-            MediaCodecInfo.CodecProfileLevel.HEVCProfileMain10HDR10,
-            MediaCodecInfo.CodecProfileLevel.HEVCProfileMain10HDR10Plus,
-            MediaCodecInfo.CodecProfileLevel.VP9Profile2HDR,
-            MediaCodecInfo.CodecProfileLevel.VP9Profile3HDR,
-            MediaCodecInfo.CodecProfileLevel.VP9Profile2HDR10Plus,
-            MediaCodecInfo.CodecProfileLevel.VP9Profile3HDR10Plus,
-            MediaCodecInfo.CodecProfileLevel.AV1ProfileMain10HDR10,
-            MediaCodecInfo.CodecProfileLevel.AV1ProfileMain10HDR10Plus,
+    private val Hdr10Profiles: Map<String, Set<Int>> =
+        mapOf(
+            MediaFormat.MIMETYPE_VIDEO_HEVC to
+                setOf(
+                    MediaCodecInfo.CodecProfileLevel.HEVCProfileMain10HDR10,
+                    MediaCodecInfo.CodecProfileLevel.HEVCProfileMain10HDR10Plus,
+                ),
+            MediaFormat.MIMETYPE_VIDEO_VP9 to
+                setOf(
+                    MediaCodecInfo.CodecProfileLevel.VP9Profile2HDR,
+                    MediaCodecInfo.CodecProfileLevel.VP9Profile3HDR,
+                    MediaCodecInfo.CodecProfileLevel.VP9Profile2HDR10Plus,
+                    MediaCodecInfo.CodecProfileLevel.VP9Profile3HDR10Plus,
+                ),
+            MediaFormat.MIMETYPE_VIDEO_AV1 to
+                setOf(
+                    MediaCodecInfo.CodecProfileLevel.AV1ProfileMain10HDR10,
+                    MediaCodecInfo.CodecProfileLevel.AV1ProfileMain10HDR10Plus,
+                ),
         )
 
-    /** Dolby Vision profile constants, which have no named group in the SDK. */
+    /**
+     * Profiles with a bit depth above 8, by MIME type, HDR ones included.
+     *
+     * AVC High 4:2:2 and High 4:4:4 Predictive both allow more than 8 bits
+     * per sample, so a decoder advertising either can take a 10-bit stream.
+     */
     @SuppressLint("InlinedApi")
-    private val DolbyVisionProfiles =
-        setOf(
-            MediaCodecInfo.CodecProfileLevel.DolbyVisionProfileDvheDtr,
-            MediaCodecInfo.CodecProfileLevel.DolbyVisionProfileDvheSt,
-            MediaCodecInfo.CodecProfileLevel.DolbyVisionProfileDvavSe,
-        )
-
-    /** Profiles with a bit depth above 8, HDR ones included. */
-    @SuppressLint("InlinedApi")
-    private val TenBitProfiles =
-        Hdr10Profiles +
-            setOf(
-                MediaCodecInfo.CodecProfileLevel.AVCProfileHigh10,
-                MediaCodecInfo.CodecProfileLevel.HEVCProfileMain10,
-                MediaCodecInfo.CodecProfileLevel.VP9Profile2,
-                MediaCodecInfo.CodecProfileLevel.VP9Profile3,
-                MediaCodecInfo.CodecProfileLevel.AV1ProfileMain10,
-            )
+    private val TenBitProfiles: Map<String, Set<Int>> =
+        mapOf(
+            MediaFormat.MIMETYPE_VIDEO_AVC to
+                setOf(
+                    MediaCodecInfo.CodecProfileLevel.AVCProfileHigh10,
+                    MediaCodecInfo.CodecProfileLevel.AVCProfileHigh422,
+                    MediaCodecInfo.CodecProfileLevel.AVCProfileHigh444,
+                ),
+            MediaFormat.MIMETYPE_VIDEO_HEVC to
+                setOf(MediaCodecInfo.CodecProfileLevel.HEVCProfileMain10),
+            MediaFormat.MIMETYPE_VIDEO_VP9 to
+                setOf(
+                    MediaCodecInfo.CodecProfileLevel.VP9Profile2,
+                    MediaCodecInfo.CodecProfileLevel.VP9Profile3,
+                ),
+            MediaFormat.MIMETYPE_VIDEO_AV1 to
+                setOf(MediaCodecInfo.CodecProfileLevel.AV1ProfileMain10),
+        ).let { tenBit ->
+            (tenBit.keys + Hdr10Profiles.keys).associateWith { mime ->
+                tenBit[mime].orEmpty() + Hdr10Profiles[mime].orEmpty()
+            }
+        }
 }
