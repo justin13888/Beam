@@ -3,9 +3,8 @@
 //! only.
 
 use sea_orm::entity::prelude::*;
-use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "user_language_preferences")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]

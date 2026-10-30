@@ -1,12 +1,11 @@
 use sea_orm::entity::prelude::*;
-use serde::{Deserialize, Serialize};
 
 /// A single-use OIDC authorization round-trip record. Created when the login
 /// redirect is issued (holding the `state`/`nonce`/PKCE verifier the
 /// callback needs to complete the exchange), and consumed atomically -- a
 /// `state` value can be exchanged for its row at most once -- when the
 /// callback arrives.
-#[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "pending_auths")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]

@@ -1,9 +1,8 @@
 //! Sidecar subtitle entity: a text subtitle file beside a video (issue #184).
 
 use sea_orm::entity::prelude::*;
-use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
 #[sea_orm(table_name = "sidecar_subtitles")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]

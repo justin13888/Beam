@@ -1,9 +1,8 @@
 //! Media stream entity (renamed from stream to media_stream)
 
 use sea_orm::entity::prelude::*;
-use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
 #[sea_orm(table_name = "media_streams")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
@@ -37,7 +36,7 @@ pub struct Model {
     pub channel_layout: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "stream_type")]
 pub enum StreamType {
     #[sea_orm(string_value = "video")]
