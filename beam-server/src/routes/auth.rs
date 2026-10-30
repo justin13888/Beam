@@ -878,25 +878,14 @@ pub async fn start_device_login(
 /// value returned in the body, to be presented as the `beam_session` cookie
 /// on every later request.
 //
-// Cookie, not `Authorization: Bearer`: Kynos 0.3's `Auth<S>` binds one scheme
-// per operation and has no way to declare "cookie or bearer" (an OpenAPI
-// security requirement list of alternatives), so accepting a bearer token
-// would mean either a second, undescribed authenticator or re-declaring every
-// secured operation.
-//
-// Upstream gap in kynos, NOT YET FILED -- to be filed on getkono/kynos by the
-// maintainer (the run that wrote this could not file there), with this title
-// and ask, also recorded in ADR-0017 (D151-3):
-//
-//   "Auth<S> cannot declare alternative security schemes (OpenAPI any-of
-//   security requirements)": an operation that accepts a cookie session *or*
-//   an `Authorization: Bearer` token cannot be described; `Auth<S>` binds one
-//   scheme and emits a single security requirement. Asked for: an any-of
-//   form of `Auth` that emits `security: [{cookie: []}, {bearer: []}]` and
-//   authenticates with whichever credential the request carries.
-//
-// Replace this block with the issue link once filed. Until a release closes
-// it, the one described scheme is the one every client uses.
+// Cookie, not `Authorization: Bearer`, because ADR-0017 (D151-3) makes the
+// `beam_session` cookie the one credential every client presents. That is a
+// choice, not a Kynos gap: kynos 0.4.0's `Auth<AnyOf<(A, B)>>` declares
+// alternative schemes (`security: [{A: []}, {B: []}]`) and authenticates with
+// whichever the request carries. The decision was first taken when Kynos 0.3's
+// `Auth<S>` could bind only one scheme. Accepting a bearer token now means
+// changing that decision and declaring the alternative on every secured
+// operation, not working around the framework.
 //
 // Eight parameters, for the reason `oidc_callback` gives: each is a declared
 // extractor or injection, and nothing calls this function.
@@ -1161,7 +1150,7 @@ pub async fn oidc_delete_session(
     Path(path): Path<SessionPath>,
     Cookies(cookies): Cookies<AuthCookies>,
     Inject(session_store): Inject<Arc<dyn SessionStore>>,
-) -> Result<SessionRevoked, SessionRevokeError> {
+) -> Result<WithHeaders<NoContent, SessionRevoked>, SessionRevokeError> {
     let deleted = session_store
         .delete_by_id(path.id, &auth.0.user_id)
         .await
@@ -1189,43 +1178,32 @@ pub async fn oidc_delete_session(
         None => false,
     };
 
-    if still_valid {
-        Ok(SessionRevoked::Kept(NoContent))
+    let set_cookie = if still_valid {
+        None
     } else {
-        let cleared = SetCookie::new(&clearing_cookie(SESSION_COOKIE, "/"))?;
-        Ok(SessionRevoked::SignedOut(WithHeaders::new(
-            NoContent, cleared,
-        )))
-    }
+        let SetCookie { set_cookie } = SetCookie::new(&clearing_cookie(SESSION_COOKIE, "/"))?;
+        Some(set_cookie)
+    };
+
+    Ok(WithHeaders::new(NoContent, SessionRevoked { set_cookie }))
 }
 
 /// Whether revoking a session also signed the caller out of this device.
 ///
-/// Both arms are 204, which `Reply` forbids -- it keys variants by status --
-/// so this is a hand-written `IntoResponse`/`Responses` pair. The two differ
-/// only in whether `Set-Cookie` is present, which is a header, not a status.
-pub enum SessionRevoked {
-    /// The caller's own session survived; nothing to clear.
-    Kept(NoContent),
-    /// The caller revoked the session they were holding.
-    SignedOut(WithHeaders<NoContent, SetCookie>),
-}
-
-impl kynos::response::IntoResponse for SessionRevoked {
-    fn into_response(self) -> kynos::http::Response {
-        match self {
-            Self::Kept(inner) => inner.into_response(),
-            Self::SignedOut(inner) => inner.into_response(),
-        }
-    }
-}
-
-impl kynos::response::Responses for SessionRevoked {
-    /// The optional-header shape: 204 either way, with `Set-Cookie` marked as
-    /// present only sometimes.
-    fn responses(registry: &mut kynos::schema::registry::Registry) -> kynos::openapi::Responses {
-        <WithHeaders<NoContent, SetCookie> as kynos::response::Responses>::responses(registry)
-    }
+/// 204 either way: the two outcomes differ only in whether `Set-Cookie` is
+/// present, which is a header, not a status. An `Option` field is how a header
+/// group says "sometimes": it is written only when `Some`, and declared with
+/// `required: false`, so the description states that a client cannot count on
+/// it. This replaced a hand-written `IntoResponse`/`Responses` pair that
+/// declared the header required on a response that usually omits it.
+///
+/// Kynos 0.4.0 describes an optional header's schema as nullable, which a
+/// header value cannot be; getkono/kynos#992 fixes that on its master, and the
+/// description corrects itself when a release carries it.
+#[derive(Schema, HeaderParams)]
+pub struct SessionRevoked {
+    #[header(rename = "Set-Cookie")]
+    set_cookie: Option<String>,
 }
 
 #[cfg(test)]
