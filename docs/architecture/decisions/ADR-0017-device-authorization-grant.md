@@ -87,15 +87,12 @@ behalf, and mints an ordinary session when the user approves.**
   operation and cannot declare an OpenAPI security requirement list of alternatives ("cookie *or*
   bearer"). Adding a bearer scheme would mean a second, undescribed authenticator -- a document
   that no longer describes the server, which ADR-0010 exists to prevent -- or re-declaring every
-  secured operation twice. **This is an upstream gap in kynos, not yet filed: it is to be filed on
-  getkono/kynos by the maintainer** (the unattended run that wrote this could not file there), as:
-  *"`Auth<S>` cannot declare alternative security schemes (OpenAPI any-of security
-  requirements)" -- an operation that accepts a cookie session or an `Authorization: Bearer` token
-  cannot be described, because `Auth<S>` binds one scheme and emits a single security requirement;
-  asked for: an any-of form of `Auth` that emits `security: [{cookie: []}, {bearer: []}]` and
-  authenticates with whichever credential the request carries.* The same text sits on
-  `poll_device_login` in `beam-server/src/routes/auth.rs`, to be replaced by the issue link once
-  filed. Until a release closes it, the one described scheme is the one every client uses. The poll does not also `Set-Cookie`: a native
+  secured operation twice. That was an upstream gap when this was decided. **Kynos 0.4.0 closed
+  it:** `Auth<AnyOf<(A, B)>>` emits `security: [{A: []}, {B: []}]` and authenticates with
+  whichever credential the request carries. Cookie-only is therefore this decision's own choice now,
+  not a framework limit. The comment on `poll_device_login` in `beam-server/src/routes/auth.rs`
+  says so (#352). The one described scheme stays the one every client uses until this decision is
+  revisited. The poll does not also `Set-Cookie`: a native
   client has no cookie jar the response could usefully land in, and a browser never calls it.
 - **D151-4 -- NFR-104 is stated as the check actually works.** `EnforceSameOrigin` has always let a
   mutating request with *neither* `Origin` nor `Referer` through, and a native client sends
@@ -179,6 +176,6 @@ Poll pacing is enforced by the server, so a misbehaving client cannot hammer the
 at most one IdP request per interval per flow, and at most the device-poll budget of flows per
 client.
 
-The Kynos any-of gap stays open until an upstream release closes it; when it does, a bearer
-alternative can be added by declaration rather than by a second authenticator, and this decision's
-cookie-only rule revisited.
+Kynos 0.4.0 closed the any-of gap. A bearer alternative can now be added by declaration rather
+than by a second authenticator, so revisiting the cookie-only rule is a product decision, not
+something waiting on upstream.
