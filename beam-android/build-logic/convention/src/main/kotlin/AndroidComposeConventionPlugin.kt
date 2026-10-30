@@ -37,7 +37,6 @@ class AndroidComposeConventionPlugin : Plugin<Project> {
                     "androidx.compose.material3",
                     "androidx.compose.material.icons.extended",
                     "androidx.lifecycle.runtime.compose",
-                    "kotlinx.collections.immutable",
                 )
                 // Tooling is debug-only: it drags the layout inspector and preview
                 // infrastructure in, none of which belongs in a release APK.

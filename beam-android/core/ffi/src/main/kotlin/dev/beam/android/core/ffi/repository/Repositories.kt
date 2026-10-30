@@ -177,7 +177,11 @@ public interface PlaybackRepository {
     /** Mark a movie, an episode, a season or a whole show unwatched. */
     public suspend fun markUnwatched(id: String)
 
-    /** Partially-watched titles, ready to resume. */
+    /**
+     * Partially-watched titles to resume, and the next episode to start of
+     * each show the viewer finished an episode of
+     * ([ContinueWatchingEntry.isNextUp]), newest first.
+     */
     public suspend fun continueWatching(limit: UInt?): List<ContinueWatchingEntry>
 
     /** One page of watch history: [first] rows after the page whose end cursor is [after]. */
