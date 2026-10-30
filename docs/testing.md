@@ -151,7 +151,7 @@ ignored).
 **Feature selection matters more than it looks.** cargo-mutants builds each package on its own, so
 the feature name it is given has to be unqualified and valid for every mutated package -- a
 workspace-qualified `beam-index/vendored-ffmpeg` fails the baseline build for a package that does
-not depend on beam-index. Each of the four mutated crates therefore declares a `mutation-testing`
+not depend on beam-index. Every mutated crate therefore declares a `mutation-testing`
 feature naming the set that compiles *all* of its `cfg`-gated production paths, and
 `BEAM_MUTANTS_FEATURES` passes that one name. Without it, mutants in (for example)
 `cfg(feature = "entity")` code come back MISSED because the build never compiled them -- a result

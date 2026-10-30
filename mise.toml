@@ -158,7 +158,7 @@ GIT_CONFIG_COUNT = "{% if env.BEAM_FFMPEG_SOURCE_MIRROR ~ '/shallow' is file %}1
 GIT_CONFIG_KEY_0 = "{% if env.BEAM_FFMPEG_SOURCE_MIRROR ~ '/shallow' is file %}url.file://{{ env.BEAM_FFMPEG_SOURCE_MIRROR }}.insteadOf{% else %}{{ env.GIT_CONFIG_KEY_0 | default(value='') }}{% endif %}"
 GIT_CONFIG_VALUE_0 = "{% if env.BEAM_FFMPEG_SOURCE_MIRROR ~ '/shallow' is file %}https://github.com/FFmpeg/FFmpeg{% else %}{{ env.GIT_CONFIG_VALUE_0 | default(value='') }}{% endif %}"
 # cargo-mutants builds each package separately, so it needs one *unqualified*
-# feature name that every mutated package accepts. Each of the four declares
+# feature name that every mutated package accepts. Every mutated crate declares
 # `mutation-testing` as the set that compiles all of its `cfg`-gated production
 # paths -- otherwise mutants in code the build never compiled come back MISSED
 # for a reason that has nothing to do with the tests. Override on a host with
