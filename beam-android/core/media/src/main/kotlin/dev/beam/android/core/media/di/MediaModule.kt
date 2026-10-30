@@ -140,9 +140,19 @@ internal object MediaModule {
     ): DownloadArtwork = DownloadArtwork(context) { SingletonImageLoader.get(context) }
 }
 
+/**
+ * The download bindings.
+ *
+ * Public so a test in another module can replace it by name: the manager
+ * behind it is built over the native core, which a Robolectric test cannot
+ * load. An abstract class with internal members, as `FfiBindsModule` is, so
+ * [MediaDownloadRepository] stays internal to this module. Nothing in
+ * [MediaModule] needs replacing -- each binding there is built only when
+ * something asks for it -- so it stays internal.
+ */
 @Module
 @InstallIn(SingletonComponent::class)
-internal interface MediaBindsModule {
+public abstract class MediaBindsModule {
     /**
      * One instance serving both roles. The downloads screen and the foreground
      * service must drive the same manager, or the screen would report progress
@@ -150,9 +160,9 @@ internal interface MediaBindsModule {
      */
     @Binds
     @Singleton
-    fun downloadRepository(impl: MediaDownloadRepository): DownloadRepository
+    internal abstract fun downloadRepository(impl: MediaDownloadRepository): DownloadRepository
 
     @Binds
     @Singleton
-    fun downloadManagerHolder(impl: MediaDownloadRepository): DownloadManagerHolder
+    internal abstract fun downloadManagerHolder(impl: MediaDownloadRepository): DownloadManagerHolder
 }

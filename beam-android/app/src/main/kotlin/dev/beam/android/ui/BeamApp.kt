@@ -12,13 +12,22 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.material3.adaptive.navigationsuite.NavigationSuiteScaffold
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.lifecycle.DEFAULT_ARGS_KEY
+import androidx.lifecycle.HasDefaultViewModelProviderFactory
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.ViewModelStoreOwner
+import androidx.lifecycle.viewmodel.CreationExtras
+import androidx.lifecycle.viewmodel.MutableCreationExtras
+import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
 import androidx.lifecycle.viewmodel.navigation3.rememberViewModelStoreNavEntryDecorator
 import androidx.navigation3.runtime.NavBackStack
 import androidx.navigation3.runtime.NavKey
@@ -26,6 +35,7 @@ import androidx.navigation3.runtime.entryProvider
 import androidx.navigation3.runtime.rememberNavBackStack
 import androidx.navigation3.runtime.rememberSaveableStateHolderNavEntryDecorator
 import androidx.navigation3.ui.NavDisplay
+import androidx.savedstate.serialization.encodeToSavedState
 import dev.beam.android.core.model.PlaybackRequest
 import dev.beam.android.feature.admin.AdminRoute
 import dev.beam.android.feature.auth.AuthRoute
@@ -46,6 +56,7 @@ import dev.beam.android.navigation.MediaDetail
 import dev.beam.android.navigation.Player
 import dev.beam.android.navigation.SignIn
 import dev.beam.android.navigation.TopLevel
+import kotlinx.serialization.KSerializer
 
 /**
  * The whole app: one back stack, rendered by [NavDisplay].
@@ -206,19 +217,21 @@ private fun BeamNavDisplay(
                 }
 
                 entry<MediaDetail> {
-                    DetailRoute(
-                        onPlay = { fileId, episodeId, title, isSourcePicked ->
-                            backStack.add(
-                                Player(
-                                    fileId = fileId,
-                                    mediaId = it.mediaId,
-                                    episodeId = episodeId,
-                                    title = title,
-                                    isSourcePicked = isSourcePicked,
-                                ),
-                            )
-                        },
-                    )
+                    ProvideArguments(it, MediaDetail.serializer()) {
+                        DetailRoute(
+                            onPlay = { fileId, episodeId, title, isSourcePicked ->
+                                backStack.add(
+                                    Player(
+                                        fileId = fileId,
+                                        mediaId = it.mediaId,
+                                        episodeId = episodeId,
+                                        title = title,
+                                        isSourcePicked = isSourcePicked,
+                                    ),
+                                )
+                            },
+                        )
+                    }
                 }
 
                 entry<LibraryDetail> {
@@ -237,18 +250,20 @@ private fun BeamNavDisplay(
                 }
 
                 entry<Player> { destination ->
-                    PlayerRoute(
-                        request =
-                            PlaybackRequest(
-                                mediaId = destination.mediaId.orEmpty(),
-                                episodeId = destination.episodeId,
-                                fileId = destination.fileId,
-                                title = destination.title,
-                                startPositionSecs = destination.startPositionSecs,
-                                isSourcePicked = destination.isSourcePicked,
-                            ),
-                        onClose = { backStack.removeLastOrNull() },
-                    )
+                    ProvideArguments(destination, Player.serializer()) {
+                        PlayerRoute(
+                            request =
+                                PlaybackRequest(
+                                    mediaId = destination.mediaId.orEmpty(),
+                                    episodeId = destination.episodeId,
+                                    fileId = destination.fileId,
+                                    title = destination.title,
+                                    startPositionSecs = destination.startPositionSecs,
+                                    isSourcePicked = destination.isSourcePicked,
+                                ),
+                            onClose = { backStack.removeLastOrNull() },
+                        )
+                    }
                 }
 
                 entry<SignIn> {
@@ -262,6 +277,46 @@ private fun BeamNavDisplay(
                 }
             },
     )
+}
+
+/**
+ * Hands [destination]'s fields to the view models created under [content], as
+ * the defaults of their `SavedStateHandle`.
+ *
+ * The detail and player view models read their arguments -- `mediaId`,
+ * `fileId` -- from the handle, and Navigation 3 puts nothing there: its
+ * per-entry store owner has no idea what the key holds. Without this, opening
+ * either screen throws in the view model's constructor. The key is encoded by
+ * its own serializer, so each field lands under its property name and a field
+ * added to a destination reaches its view model with no second list to keep.
+ */
+@Composable
+private fun <T : Any> ProvideArguments(
+    destination: T,
+    serializer: KSerializer<T>,
+    content: @Composable () -> Unit,
+) {
+    val owner = checkNotNull(LocalViewModelStoreOwner.current) { "an entry always has a store owner" }
+    val withArguments =
+        remember(owner, destination) {
+            // The entry decorator's owner always carries the saved-state
+            // extras a handle is built from; only the arguments are missing.
+            val defaults =
+                checkNotNull(owner as? HasDefaultViewModelProviderFactory) {
+                    "an entry's store owner supplies the default factory"
+                }
+            val arguments = encodeToSavedState(serializer, destination)
+            object : ViewModelStoreOwner by owner, HasDefaultViewModelProviderFactory {
+                override val defaultViewModelProviderFactory: ViewModelProvider.Factory =
+                    defaults.defaultViewModelProviderFactory
+
+                override val defaultViewModelCreationExtras: CreationExtras =
+                    MutableCreationExtras(defaults.defaultViewModelCreationExtras).apply {
+                        set(DEFAULT_ARGS_KEY, arguments)
+                    }
+            }
+        }
+    CompositionLocalProvider(LocalViewModelStoreOwner provides withArguments, content = content)
 }
 
 internal fun TopLevel.label(): String =

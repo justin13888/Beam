@@ -30,13 +30,19 @@ import uniffi.beam_client_core.BeamClient
 import uniffi.beam_client_core.KeyValueStore
 import javax.inject.Singleton
 
-/** Everything the core needs to exist, and the repositories over it. */
+/**
+ * Everything the core needs to exist, and the repositories over it.
+ *
+ * Public, with [FfiBindsModule], so a test in another module can name both in
+ * `@TestInstallIn(replaces = ...)`: the app's Hilt tests swap the native core
+ * for the `:core:testing` fakes, which Robolectric can load where JNA cannot.
+ */
 @Module
 @InstallIn(SingletonComponent::class)
-internal object FfiProvidesModule {
+public object FfiProvidesModule {
     @Provides
     @Singleton
-    fun dataStore(
+    public fun dataStore(
         @ApplicationContext context: Context,
     ): DataStore<Preferences> =
         PreferenceDataStoreFactory.create {
@@ -45,7 +51,7 @@ internal object FfiProvidesModule {
 
     @Provides
     @Singleton
-    fun keyValueStore(dataStore: DataStore<Preferences>): KeyValueStore = DataStoreKeyValueStore(dataStore)
+    public fun keyValueStore(dataStore: DataStore<Preferences>): KeyValueStore = DataStoreKeyValueStore(dataStore)
 
     /**
      * The core itself.
@@ -57,31 +63,38 @@ internal object FfiProvidesModule {
      */
     @Provides
     @Singleton
-    fun beamClient(storage: KeyValueStore): BeamClient = BeamClient(storage)
+    public fun beamClient(storage: KeyValueStore): BeamClient = BeamClient(storage)
 }
 
-/** Binds each repository interface to the implementation over the core. */
+/**
+ * Binds each repository interface to the implementation over the core.
+ *
+ * Public for the same reason as [FfiProvidesModule]. An abstract class rather
+ * than an interface because the implementations are internal to this module:
+ * each binding is an internal member of a public type, so the module can be
+ * replaced by name without the implementations leaving `:core:ffi`.
+ */
 @Module
 @InstallIn(SingletonComponent::class)
-internal interface FfiBindsModule {
+public abstract class FfiBindsModule {
     @Binds
-    fun serverRepository(impl: BeamServerRepository): ServerRepository
+    internal abstract fun serverRepository(impl: BeamServerRepository): ServerRepository
 
     @Binds
-    fun catalogRepository(impl: BeamCatalogRepository): CatalogRepository
+    internal abstract fun catalogRepository(impl: BeamCatalogRepository): CatalogRepository
 
     @Binds
-    fun playbackRepository(impl: BeamPlaybackRepository): PlaybackRepository
+    internal abstract fun playbackRepository(impl: BeamPlaybackRepository): PlaybackRepository
 
     @Binds
-    fun sessionRepository(impl: BeamSessionRepository): SessionRepository
+    internal abstract fun sessionRepository(impl: BeamSessionRepository): SessionRepository
 
     @Binds
-    fun adminRepository(impl: BeamAdminRepository): AdminRepository
+    internal abstract fun adminRepository(impl: BeamAdminRepository): AdminRepository
 
     @Binds
-    fun telemetryRepository(impl: BeamTelemetryRepository): TelemetryRepository
+    internal abstract fun telemetryRepository(impl: BeamTelemetryRepository): TelemetryRepository
 
     @Binds
-    fun preferencesRepository(impl: DataStorePreferencesRepository): PreferencesRepository
+    internal abstract fun preferencesRepository(impl: DataStorePreferencesRepository): PreferencesRepository
 }
