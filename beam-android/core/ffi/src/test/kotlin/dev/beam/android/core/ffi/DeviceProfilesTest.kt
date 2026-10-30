@@ -3,6 +3,8 @@ package dev.beam.android.core.ffi
 import android.media.MediaCodecInfo
 import android.media.MediaCodecInfo.CodecProfileLevel
 import android.media.MediaFormat
+import android.view.Display
+import android.view.WindowManager
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -10,6 +12,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.shadows.MediaCodecInfoBuilder
 import org.robolectric.shadows.ShadowMediaCodecList
 
@@ -222,6 +225,26 @@ class DeviceProfilesTest {
         assertEquals(null, aac.maxBitrateBps)
         assertTrue("an audio decoder is not a video one", profile.videoDecoders.isEmpty())
         assertTrue(profile.allowSoftwareDecode)
+    }
+
+    @Test
+    fun `a display that renders an hdr format reports hdr`() {
+        val context = RuntimeEnvironment.getApplication()
+        assertFalse(
+            "a display with no HDR types renders none",
+            DeviceProfiles.build(context, allowSoftwareDecode = false).displaySupportsHdr,
+        )
+
+        val display = context.getSystemService(WindowManager::class.java).defaultDisplay
+        shadowOf(display).setDisplayHdrCapabilities(
+            display.displayId,
+            1_000f,
+            500f,
+            0.5f,
+            Display.HdrCapabilities.HDR_TYPE_HDR10,
+        )
+
+        assertTrue(DeviceProfiles.build(context, allowSoftwareDecode = false).displaySupportsHdr)
     }
 
     private fun codec(
