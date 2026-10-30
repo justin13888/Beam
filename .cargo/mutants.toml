@@ -149,6 +149,13 @@ exclude_re = [
     # Debug and Display formatting is not behaviour this project asserts on.
     "impl Debug",
     "impl Display for .*Error>?::fmt",
+    # Equivalent under the contract: `POST /v1/telemetry/playback` declares its
+    # 409 with the telemetry-disabled problem type as a `const`, so the
+    # generated client decodes no other 409 -- any other body arrives as
+    # `BeamError::Protocol`, not as a 409 -- and the guard can never be false
+    # for a `Server { status: 409 }`. Named in full, so it exempts this one
+    # mutant and nothing near it. ADR-0011's decision log records it.
+    "replace match guard code == TELEMETRY_DISABLED with true in BeamClient::flush_playback_telemetry",
 ]
 
 # --- Deliberately not set yet -----------------------------------------------

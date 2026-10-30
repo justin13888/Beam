@@ -504,6 +504,21 @@ mod tests {
         samples
     }
 
+    /// The reader fetches in windows a cluster's worth wide, so opening a
+    /// small file and reading every sample of it is one request, not one per
+    /// element. Over a network that is the difference between opening a file
+    /// and waiting on it.
+    #[test]
+    fn opening_and_reading_a_small_file_is_one_fetch() {
+        let source = Arc::new(InMemoryByteSource::new(H264_AAC.to_vec()));
+        let extractor =
+            MatroskaExtractor::open(source.clone() as Arc<dyn ByteSource>).expect("opens");
+
+        drain(&extractor);
+
+        assert_eq!(source.read_count(), 1);
+    }
+
     #[test]
     fn a_single_video_track_is_described_from_the_container() {
         let extractor = extractor(H264);
