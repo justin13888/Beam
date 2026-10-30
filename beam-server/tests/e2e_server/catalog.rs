@@ -4,7 +4,9 @@
 
 use beam_test_support::e2e::client::api;
 
-use crate::common::{self, Admin, Video, assert_refused, file_rows, library_root, movie_of};
+use crate::common::{
+    self, Admin, VIEWER, Video, assert_refused, file_rows, library_root, movie_of,
+};
 
 /// From an empty server to a playable title: the library's files are found,
 /// probed and named from their paths; browse and search list them; and the
@@ -254,11 +256,9 @@ async fn a_library_root_outside_the_video_directory_or_overlapping_another_is_re
             .create_library(&create("Escape", "films/../../outside"))
             .await,
     );
-    assert_refused(
-        "a blank name",
-        422,
-        admin.api.create_library(&create("  ", "films")).await,
-    );
+    // A blank name's 422 is the handler's alone and is proven without a
+    // stack (`admin_tests`); what only this tier shows is the root resolved
+    // against a real BEAM_VIDEO_DIR.
 
     admin.add_library("Films", "films").await;
     assert_refused(
@@ -337,6 +337,210 @@ async fn the_committed_probe_fixtures_index_with_their_codecs() {
         );
         assert_eq!(codecs, (Some(video), audio), "{fixture}");
     }
+
+    admin.finish().await;
+}
+
+/// What a viewer may see, set by an administrator and read back through the
+/// SQL access filter: restricted to one library, a viewer browses only its
+/// titles and finds the other library's not found, while the administrator
+/// who restricted them still sees everything.
+#[tokio::test]
+async fn a_restricted_viewer_sees_only_their_libraries_over_postgres() {
+    let mut admin = Admin::start().await;
+    admin.stack.library.add_video(
+        "kids/Paddington (2014)/Paddington (2014).mp4",
+        &Video::new(330),
+    );
+    admin
+        .stack
+        .library
+        .add_video("grown/Heat (1995)/Heat (1995).mp4", &Video::new(550));
+    let kids = admin.add_library("Kids", "kids").await;
+    let grown = admin.add_library("Grown-ups", "grown").await;
+    admin.scan_ok(kids).await;
+    admin.scan_ok(grown).await;
+    let paddington = admin.title("Paddington").await.id;
+    let heat = admin.title("Heat").await.id;
+
+    let viewer = admin.stack.client(&admin.stack.sign_in(VIEWER).await);
+    let viewer_id = viewer
+        .get_current_user()
+        .await
+        .expect("the viewer reads who they are")
+        .into_inner()
+        .id;
+    let set = admin
+        .api
+        .set_admin_user_access(
+            viewer_id,
+            &api::types::UserAccess {
+                all_libraries: false,
+                library_ids: vec![kids],
+                max_content_rating: None,
+            },
+        )
+        .await
+        .expect("restrict the viewer")
+        .into_inner();
+    assert_eq!((set.all_libraries, set.library_ids), (false, vec![kids]));
+
+    let seen: Vec<_> = common::browse(&viewer, None)
+        .await
+        .into_iter()
+        .map(|title| title.id)
+        .collect();
+    assert_eq!(seen, vec![paddington], "the viewer browses one library");
+    assert_refused(
+        "a title of a library the viewer may not see",
+        404,
+        viewer.get_media_detail(heat).await,
+    );
+    viewer
+        .get_media_detail(paddington)
+        .await
+        .expect("a title of the viewer's own library");
+
+    let everything: Vec<_> = admin.titles().await.into_iter().map(|t| t.id).collect();
+    assert_eq!(
+        everything.len(),
+        2,
+        "the administrator who restricted the viewer is not restricted"
+    );
+
+    admin.finish().await;
+}
+
+/// The watchlist, the favourites and a collection, each written and read
+/// back through its SQL store. Collections arrive from a metadata provider,
+/// which this tier never reaches, so the one here is written straight into
+/// the database the way enrichment would write it.
+#[tokio::test]
+async fn lists_and_collections_round_trip_over_postgres() {
+    use sea_orm::{ActiveModelTrait, Set};
+
+    let mut admin = Admin::start().await;
+    admin
+        .stack
+        .library
+        .add_video("films/Arrival (2016)/Arrival (2016).mp4", &Video::new(440));
+    admin
+        .stack
+        .library
+        .add_video("films/Heat (1995)/Heat (1995).mp4", &Video::new(550));
+    let library = admin.add_library("Films", "films").await;
+    admin.scan_ok(library).await;
+    let arrival = admin.title("Arrival").await.id;
+    let heat = admin.title("Heat").await.id;
+
+    let viewer = admin.stack.client(&admin.stack.sign_in(VIEWER).await);
+    viewer
+        .add_to_watchlist(arrival)
+        .await
+        .expect("put Arrival on the watchlist");
+    viewer
+        .add_to_favourites(heat)
+        .await
+        .expect("make Heat a favourite");
+    let ids = |page: api::types::UserListConnection| {
+        page.items
+            .iter()
+            .map(|item| common::title_of(&item.media).id)
+            .collect::<Vec<_>>()
+    };
+    let watchlist = viewer
+        .get_watchlist(api::GetWatchlistParams {
+            first: None,
+            after: None,
+        })
+        .await
+        .expect("read the watchlist")
+        .into_inner();
+    assert_eq!(watchlist.total, 1);
+    assert_eq!(ids(watchlist), vec![arrival]);
+    let favourites = viewer
+        .get_favourites(api::GetFavouritesParams {
+            first: None,
+            after: None,
+        })
+        .await
+        .expect("read the favourites")
+        .into_inner();
+    assert_eq!(ids(favourites), vec![heat]);
+    let admins_own = admin
+        .api
+        .get_watchlist(api::GetWatchlistParams {
+            first: None,
+            after: None,
+        })
+        .await
+        .expect("read the administrator's watchlist")
+        .into_inner();
+    assert_eq!(admins_own.total, 0, "a list is its owner's alone");
+
+    viewer
+        .remove_from_watchlist(arrival)
+        .await
+        .expect("take Arrival off the watchlist");
+    let emptied = viewer
+        .get_watchlist(api::GetWatchlistParams {
+            first: None,
+            after: None,
+        })
+        .await
+        .expect("read the watchlist")
+        .into_inner();
+    assert_eq!(emptied.total, 0);
+
+    let now = chrono::Utc::now().fixed_offset();
+    let collection = beam_entity::collection::ActiveModel {
+        id: Set(uuid::Uuid::new_v4()),
+        external_ref: Set("tmdb:1000".to_owned()),
+        name: Set("A Collection".to_owned()),
+        poster_url: Set(None),
+        backdrop_url: Set(None),
+        created_at: Set(now),
+        updated_at: Set(now),
+    }
+    .insert(admin.stack.db())
+    .await
+    .expect("store a collection");
+    for movie in [arrival, heat] {
+        beam_entity::collection_movie::ActiveModel {
+            movie_id: Set(movie),
+            collection_id: Set(collection.id),
+        }
+        .insert(admin.stack.db())
+        .await
+        .expect("put a movie in the collection");
+    }
+
+    let listed = viewer
+        .list_collections(api::ListCollectionsParams {
+            first: None,
+            after: None,
+        })
+        .await
+        .expect("list the collections")
+        .into_inner();
+    assert_eq!(listed.total, 1);
+    assert_eq!(listed.items[0].id, collection.id);
+    assert_eq!(listed.items[0].movie_count, 2);
+    let detail = viewer
+        .get_collection(collection.id)
+        .await
+        .expect("read the collection")
+        .into_inner();
+    assert_eq!(detail.name, "A Collection");
+    assert_eq!(
+        detail
+            .movies
+            .iter()
+            .map(|movie| movie.id)
+            .collect::<Vec<_>>(),
+        vec![heat, arrival],
+        "in release order"
+    );
 
     admin.finish().await;
 }
