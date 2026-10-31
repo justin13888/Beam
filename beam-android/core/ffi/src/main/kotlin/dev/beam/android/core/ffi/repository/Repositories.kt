@@ -34,9 +34,11 @@ import uniffi.beam_client_core.TelemetryFlush
 import uniffi.beam_client_core.UserSummary
 
 // Every screen depends on one of these interfaces rather than on `BeamClient`
-// directly. That is what lets a feature's tests run on the JVM with a fake,
-// with no `.so` loaded and no JNA on the classpath -- which in turn is what
-// makes the Android test suite runnable in CI without an emulator.
+// directly. That is what lets a feature's tests swap the server for a fake and
+// run on the JVM without an emulator. What the core decides locally -- cursor
+// paging, retryability, the part timeline -- is called directly instead, and
+// those tests run it against the host build of the core that
+// `beam.android.nativecore` puts on the JNA library path.
 
 /** Which servers are known, and who we are on them. */
 public interface ServerRepository {
