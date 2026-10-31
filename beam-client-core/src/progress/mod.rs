@@ -22,6 +22,15 @@ use std::sync::{Arc, Mutex};
 /// platform for no reason a user could understand.
 pub const REPORT_INTERVAL_SECS: i64 = 15;
 
+/// [`REPORT_INTERVAL_SECS`], for a platform player that samples its position
+/// on a timer: sampling more often only produces reports the throttle holds
+/// back, and less often loses resume granularity the throttle would allow.
+#[uniffi::export]
+#[must_use]
+pub fn progress_report_interval_secs() -> i64 {
+    REPORT_INTERVAL_SECS
+}
+
 /// What happened to a reported position.
 #[derive(Debug, Clone, PartialEq, uniffi::Enum)]
 pub enum ProgressOutcome {

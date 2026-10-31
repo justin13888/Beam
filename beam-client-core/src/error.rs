@@ -144,15 +144,17 @@ pub enum BeamError {
     },
 }
 
+#[uniffi::export]
 impl BeamError {
-    /// Whether retrying the identical request *now* could plausibly succeed.
+    /// Whether retrying the identical request *now* could plausibly succeed,
+    /// which is whether a screen may honestly offer a retry.
     ///
-    /// Not exported across the FFI: Kotlin and Swift read the `retryable`
-    /// field that [`BeamError::Server`] and [`BeamError::Network`] carry, which
-    /// is where the verdict for a status is decided once. Deliberately
-    /// conservative: an error whose retryability is unclear is treated as *not*
-    /// retryable. Whether a failed progress sample is kept is a different
-    /// question -- see [`BeamError::is_permanent`].
+    /// Exported so a platform asks rather than keeping its own table: Android
+    /// used to hard-code the answer for `RateLimited` and `Storage`, and for
+    /// `Server` and `Network` it reads the `retryable` field this returns for
+    /// them anyway. Deliberately conservative: an error whose retryability is
+    /// unclear is treated as *not* retryable. Whether a failed progress sample
+    /// is kept is a different question -- see [`BeamError::is_permanent`].
     #[must_use]
     pub fn is_retryable(&self) -> bool {
         match self {
@@ -174,7 +176,9 @@ impl BeamError {
             _ => false,
         }
     }
+}
 
+impl BeamError {
     /// Whether the identical request will fail identically until the request
     /// itself changes -- so retrying it later, after anything at all has
     /// happened, is pointless.

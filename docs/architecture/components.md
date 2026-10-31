@@ -320,6 +320,13 @@ which does not cross-compile to Android.
   (`catalog/{media,library,watching,admin}.rs`, one file per API resource).
   Which episode plays next is the server's `next_episode_id`, not worked out in the core, and a
   continue-watching or history row is drawn from its own display fields with no lookup per row.
+  `CursorPager` is exported as an object, so a platform pages a list through it rather than
+  keeping its own cursor loop.
+- **`timeline.rs`, `resolution.rs`** — the arithmetic that carries a position across the parts
+  of a multi-part source, and the one rule that names a resolution (keyed on width, so a 1920x804
+  scope rip is `1080p`). The constants a platform needs to agree with the core -- the progress
+  interval, the telemetry batch size, the session cookie name -- and `BeamError.is_retryable` are
+  exported alongside them, so no client restates them.
 
 - **`ffi/`** — the UniFFI surface, a façade over the modules above. `BeamClient` lives in
   `ffi/mod.rs` with the server registry, sign-in and the shared request plumbing; each resource

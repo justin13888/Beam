@@ -23,6 +23,14 @@ use std::sync::{Arc, Mutex};
 /// `beam-server/src/routes/api_error.rs`.
 pub const SESSION_COOKIE: &str = "beam_session";
 
+/// [`SESSION_COOKIE`], for a platform that lifts the session out of a browser
+/// sign-in's cookie jar.
+#[uniffi::export]
+#[must_use]
+pub fn session_cookie_name() -> String {
+    SESSION_COOKIE.to_owned()
+}
+
 tokio::task_local! {
     /// Where the middleware leaves the problem document for the call in progress.
     ///
