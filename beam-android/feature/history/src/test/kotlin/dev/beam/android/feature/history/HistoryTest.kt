@@ -18,6 +18,7 @@ import org.junit.Before
 import org.junit.Test
 import uniffi.beam_client_core.BeamException
 import uniffi.beam_client_core.HistoryPage
+import uniffi.beam_client_core.MediaKind
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class HistoryTest {
@@ -120,6 +121,30 @@ class HistoryTest {
                 listOf("a", "b", "c"),
                 viewModel.state.value.entries
                     .map { it.mediaId },
+            )
+        }
+
+    @Test
+    fun `two episodes of one series on different pages are both listed`() =
+        runTest {
+            // Episodes share their series' media id, so a row is told apart by
+            // its episode; keyed on the series alone, the second episode would
+            // be dropped as a repeat of the first.
+            val playback =
+                FakePlaybackRepository().apply {
+                    historyPage = episodePage("episode-2", endCursor = "page-1", hasNextPage = true)
+                }
+            val viewModel = HistoryViewModel(playback)
+            testScheduler.advanceUntilIdle()
+
+            playback.historyPage = episodePage("episode-1", endCursor = "page-2", hasNextPage = false)
+            viewModel.loadMore()
+            testScheduler.advanceUntilIdle()
+
+            assertEquals(
+                listOf("episode-2", "episode-1"),
+                viewModel.state.value.entries
+                    .map { it.episodeId },
             )
         }
 
@@ -268,6 +293,23 @@ class HistoryTest {
     ): HistoryPage =
         HistoryPage(
             mediaIds.map { Fixtures.historyEntry(mediaId = it) },
+            total = 9uL,
+            endCursor = endCursor,
+            hasNextPage = hasNextPage,
+        )
+
+    /** A page holding one episode of the series `show-1`. */
+    private fun episodePage(
+        episodeId: String,
+        endCursor: String?,
+        hasNextPage: Boolean,
+    ): HistoryPage =
+        HistoryPage(
+            listOf(
+                Fixtures
+                    .historyEntry(mediaId = "show-1")
+                    .copy(episodeId = episodeId, kind = MediaKind.SHOW),
+            ),
             total = 9uL,
             endCursor = endCursor,
             hasNextPage = hasNextPage,

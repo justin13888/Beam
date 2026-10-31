@@ -250,6 +250,28 @@ class ExploreViewModelTest {
         }
 
     @Test
+    fun `a failed page is asked for again from the same cursor`() =
+        runTest {
+            // A pager left waiting on the failed request would refuse every
+            // later one, and the grid could never page on; one that advanced
+            // past it would skip every title on that page.
+            val catalog = FakeCatalogRepository().apply { nextCursor = "cursor-1" }
+            val viewModel = ExploreViewModel(catalog)
+            testScheduler.advanceUntilIdle()
+
+            catalog.failWith = BeamException.Network("offline", retryable = true)
+            viewModel.loadMore()
+            testScheduler.advanceUntilIdle()
+            catalog.failWith = null
+            viewModel.loadMore()
+            testScheduler.advanceUntilIdle()
+
+            // The fake records only the requests it answered, so the failed
+            // one is absent here.
+            assertEquals(listOf(null, "cursor-1"), catalog.browseCalls.map { it.after })
+        }
+
+    @Test
     fun `selecting the sort field already in use reverses it`() =
         runTest {
             val catalog = FakeCatalogRepository()
