@@ -163,17 +163,17 @@ pub fn pinned_certificate_accepted(
     trusted_fingerprints: Vec<String>,
     now_unix: i64,
 ) -> bool {
-    let Ok(now_unix) = u64::try_from(now_unix) else {
+    let Ok(now_secs) = u64::try_from(now_unix) else {
         return false;
     };
-    let Some(details) = describe(&CertificateDer::from(der)) else {
+    let Some(details) = describe(&CertificateDer::from(der), now_unix) else {
         return false;
     };
     let fingerprint = normalize(&details.sha256_fingerprint);
     let pinned = trusted_fingerprints
         .iter()
         .any(|trusted| normalize(trusted) == fingerprint);
-    pin_admits(&details, &host, pinned, now_unix)
+    pin_admits(&details, &host, pinned, now_secs)
 }
 
 /// The platform verifier, with a user-approved exception.
@@ -216,7 +216,7 @@ impl ServerCertVerifier for TofuVerifier {
             _ => String::new(),
         };
 
-        let Some(details) = describe(end_entity) else {
+        let Some(details) = describe(end_entity, now.as_secs().cast_signed()) else {
             // Unparseable certificates are rejected outright rather than
             // offered to the user: there is nothing truthful to show them.
             return Err(public_error);
@@ -282,9 +282,14 @@ pub fn client_config(decision: Arc<TrustDecision>) -> Result<rustls::ClientConfi
 
 /// Everything a trust prompt needs, read out of a DER certificate.
 ///
+/// `now_unix` is the time, in Unix seconds, that `is_expired` is decided
+/// against: the caller's handshake or platform time, so the expiry the prompt
+/// shows is the one the validity window was checked at, never a second read
+/// of the wall clock.
+///
 /// Returns `None` when the bytes do not parse as X.509 at all.
 #[must_use]
-pub fn describe(der: &CertificateDer<'_>) -> Option<CertificateDetails> {
+pub fn describe(der: &CertificateDer<'_>, now_unix: i64) -> Option<CertificateDetails> {
     use x509_parser::prelude::*;
 
     let (_, certificate) = X509Certificate::from_der(der.as_ref()).ok()?;
@@ -323,9 +328,6 @@ pub fn describe(der: &CertificateDer<'_>) -> Option<CertificateDetails> {
     let issuer = certificate.issuer().to_string();
     let not_before_unix = certificate.validity().not_before.timestamp();
     let not_after_unix = certificate.validity().not_after.timestamp();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs().cast_signed());
 
     Some(CertificateDetails {
         sha256_fingerprint,
@@ -337,7 +339,7 @@ pub fn describe(der: &CertificateDer<'_>) -> Option<CertificateDetails> {
         not_after_unix,
         subject_alt_names,
         serial_hex: certificate.raw_serial_as_string().replace(':', ""),
-        is_expired: now > not_after_unix,
+        is_expired: now_unix > not_after_unix,
     })
 }
 
@@ -361,6 +363,10 @@ mod tests {
     use super::*;
     use rustls::pki_types::CertificateDer;
 
+    /// A fixed instant (2027-01-15) inside the validity window `rcgen` gives a
+    /// certificate by default, for the cases whose subject is not expiry.
+    const NOW: i64 = 1_800_000_000;
+
     /// A real self-signed certificate for the given SANs.
     fn certificate(sans: &[&str]) -> CertificateDer<'static> {
         let names: Vec<String> = sans.iter().map(|name| (*name).to_owned()).collect();
@@ -371,7 +377,7 @@ mod tests {
     #[test]
     fn a_certificate_is_described_from_its_der() {
         let der = certificate(&["beam.local", "192.168.1.10"]);
-        let details = describe(&der).expect("a generated certificate parses");
+        let details = describe(&der, NOW).expect("a generated certificate parses");
 
         assert!(details.is_self_signed);
         assert!(!details.is_expired);
@@ -384,26 +390,51 @@ mod tests {
     }
 
     /// A certificate whose validity ended reads as expired, which the trust
-    /// prompt shows rather than inviting the user to accept it unawares.
+    /// prompt shows rather than inviting the user to accept it unawares. Its
+    /// last valid second is still inside the window -- the same inclusive end
+    /// `pin_admits` checks -- so the prompt and the verifier agree there.
     #[test]
-    fn a_certificate_past_its_validity_reads_as_expired() {
+    fn a_certificate_expires_only_after_its_last_valid_second() {
         let mut params =
             rcgen::CertificateParams::new(vec!["beam.local".to_owned()]).expect("params");
         params.not_before = rcgen::date_time_ymd(2000, 1, 1);
         params.not_after = rcgen::date_time_ymd(2001, 1, 1);
         let key = rcgen::KeyPair::generate().expect("a key");
         let der = params.self_signed(&key).expect("signed").der().clone();
+        let not_after = describe(&der, NOW).expect("parses").not_after_unix;
 
-        let details = describe(&der).expect("parses");
+        let at_the_end = describe(&der, not_after).expect("parses");
+        assert!(
+            !at_the_end.is_expired,
+            "a certificate is valid through its notAfter second"
+        );
 
-        assert!(details.is_expired);
+        let one_second_later = describe(&der, not_after + 1).expect("parses");
+        assert!(one_second_later.is_expired);
+
+        let pinned = vec![at_the_end.sha256_fingerprint];
+        assert!(
+            pinned_certificate_accepted(
+                der.to_vec(),
+                "beam.local".to_owned(),
+                pinned.clone(),
+                not_after
+            ),
+            "the verifier admits the same last second the prompt calls unexpired"
+        );
+        assert!(!pinned_certificate_accepted(
+            der.to_vec(),
+            "beam.local".to_owned(),
+            pinned,
+            not_after + 1
+        ));
     }
 
     /// An IPv6 SAN is rendered as the address is written, so a server
     /// reached by one can be matched against it.
     #[test]
     fn an_ipv6_subject_alt_name_is_rendered_as_written() {
-        let details = describe(&certificate(&["fd00::10"])).expect("parses");
+        let details = describe(&certificate(&["fd00::10"]), NOW).expect("parses");
 
         assert_eq!(details.subject_alt_names, vec!["fd00::10".to_owned()]);
         assert!(details.covers_host("fd00::10"));
@@ -414,7 +445,7 @@ mod tests {
         // The digest must match what `openssl x509 -fingerprint -sha256`
         // prints, because that is what a user is asked to compare against.
         let der = certificate(&["beam.local"]);
-        let details = describe(&der).expect("parses");
+        let details = describe(&der, NOW).expect("parses");
 
         let expected = Sha256::digest(der.as_ref())
             .iter()
@@ -426,15 +457,15 @@ mod tests {
 
     #[test]
     fn two_certificates_do_not_share_a_fingerprint() {
-        let first = describe(&certificate(&["beam.local"])).expect("parses");
-        let second = describe(&certificate(&["beam.local"])).expect("parses");
+        let first = describe(&certificate(&["beam.local"]), NOW).expect("parses");
+        let second = describe(&certificate(&["beam.local"]), NOW).expect("parses");
         assert_ne!(first.sha256_fingerprint, second.sha256_fingerprint);
     }
 
     #[test]
     fn bytes_that_are_not_a_certificate_describe_as_nothing() {
         let garbage = CertificateDer::from(vec![0x00, 0x01, 0x02, 0x03]);
-        assert!(describe(&garbage).is_none());
+        assert!(describe(&garbage, NOW).is_none());
     }
 
     #[test]
@@ -464,7 +495,7 @@ mod tests {
         let decision = TrustDecision::new(Vec::new());
         assert!(decision.take_rejection().is_none());
 
-        let details = describe(&certificate(&["beam.local"])).expect("parses");
+        let details = describe(&certificate(&["beam.local"]), NOW).expect("parses");
         decision.record_rejection("beam.local".to_owned(), details);
 
         assert!(decision.take_rejection().is_some());
@@ -499,7 +530,7 @@ mod tests {
     fn a_pinned_certificate_is_accepted_for_the_host_it_covers() {
         install_crypto_provider();
         let der = certificate(&["beam.local"]);
-        let details = describe(&der).expect("parses");
+        let details = describe(&der, NOW).expect("parses");
         let decision = Arc::new(TrustDecision::new(vec![details.sha256_fingerprint]));
         let verifier = verifier(Arc::clone(&decision));
 
@@ -522,7 +553,7 @@ mod tests {
         install_crypto_provider();
         for address_text in ["192.168.1.10", "fd00::10"] {
             let der = certificate(&[address_text]);
-            let details = describe(&der).expect("parses");
+            let details = describe(&der, NOW).expect("parses");
             let address = ServerName::try_from(address_text).expect("an address");
 
             let unpinned = Arc::new(TrustDecision::new(Vec::new()));
@@ -566,7 +597,7 @@ mod tests {
         // for any host that could present it.
         install_crypto_provider();
         let der = certificate(&["beam.local"]);
-        let details = describe(&der).expect("parses");
+        let details = describe(&der, NOW).expect("parses");
         let decision = Arc::new(TrustDecision::new(vec![details.sha256_fingerprint]));
         let verifier = verifier(Arc::clone(&decision));
 
@@ -584,7 +615,7 @@ mod tests {
     #[test]
     fn an_unrelated_certificate_is_rejected_even_when_another_is_pinned() {
         install_crypto_provider();
-        let pinned = describe(&certificate(&["beam.local"])).expect("parses");
+        let pinned = describe(&certificate(&["beam.local"]), NOW).expect("parses");
         let decision = Arc::new(TrustDecision::new(vec![pinned.sha256_fingerprint]));
         let verifier = verifier(Arc::clone(&decision));
 
@@ -621,7 +652,7 @@ mod tests {
         // certificate a public CA would refuse for not having started yet.
         install_crypto_provider();
         let der = certificate(&["beam.local"]);
-        let details = describe(&der).expect("parses");
+        let details = describe(&der, NOW).expect("parses");
         let decision = Arc::new(TrustDecision::new(vec![details.sha256_fingerprint.clone()]));
         let verifier = verifier(Arc::clone(&decision));
         let name = ServerName::try_from("beam.local").expect("name");
@@ -639,6 +670,13 @@ mod tests {
                 .is_err(),
             "a certificate whose validity has not begun must be refused"
         );
+        let (_, not_yet_valid) = decision
+            .take_rejection()
+            .expect("the rejection is recorded");
+        assert!(
+            !not_yet_valid.is_expired,
+            "the prompt's expiry is decided at the handshake's time"
+        );
 
         let after_it_ends = UnixTime::since_unix_epoch(std::time::Duration::from_secs(
             details.not_after_unix.max(0).unsigned_abs() + 3_600,
@@ -648,6 +686,13 @@ mod tests {
                 .verify_server_cert(&der, &[], &name, &[], after_it_ends)
                 .is_err(),
             "an expired certificate must be refused even when pinned"
+        );
+        let (_, expired) = decision
+            .take_rejection()
+            .expect("the rejection is recorded");
+        assert!(
+            expired.is_expired,
+            "the prompt's expiry is decided at the handshake's time, not the wall clock's"
         );
     }
 
@@ -671,12 +716,12 @@ mod tests {
         // breaks exactly one of the three conditions, so none of them can be
         // dropped without a case failing.
         let der = certificate(&["beam.local"]);
-        let details = describe(&der).expect("parses");
+        let details = describe(&der, NOW).expect("parses");
         let pinned = vec![details.sha256_fingerprint.clone()];
         let inside = details.not_before_unix + 60;
         let before = details.not_before_unix - 3_600;
         let after = details.not_after_unix + 3_600;
-        let unrelated = describe(&certificate(&["beam.local"]))
+        let unrelated = describe(&certificate(&["beam.local"]), NOW)
             .expect("parses")
             .sha256_fingerprint;
 
