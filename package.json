@@ -15,7 +15,7 @@
 		"check:fix": "biome check --write ."
 	},
 	"devDependencies": {
-		"@biomejs/biome": "2.5.11"
+		"@biomejs/biome": "2.6.2"
 	},
 	"overrides": {
 		"@redocly/openapi-core": "^1.34.22"
