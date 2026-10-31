@@ -24,8 +24,26 @@ const MAX_ENTRIES: usize = 256;
 /// has almost certainly watched the title elsewhere since.
 const MAX_AGE_SECS: i64 = 30 * 24 * 60 * 60;
 
-/// Attempts after which a sample is abandoned.
-const MAX_ATTEMPTS: u32 = 8;
+/// Refusals of the sample itself after which it is abandoned.
+///
+/// Only a [`SendFailure::Rejected`] send counts. A server that was down or
+/// could not be reached says nothing about the sample, and an outage of any
+/// length must not cost the viewer their place: [`MAX_AGE_SECS`] alone bounds
+/// how long such a sample waits.
+const MAX_REJECTIONS: u32 = 8;
+
+/// What a failed send says about the sample it carried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendFailure {
+    /// The server refused this request, and the identical one fails
+    /// identically: a body it rejects, a file the user may not touch, an id
+    /// that can never be valid. Counts toward [`MAX_REJECTIONS`].
+    Rejected,
+    /// The request did not get a verdict on the sample: the server was
+    /// unreachable, overloaded, rate limiting, or waiting on the user to sign
+    /// in. Backs the sample off, and never retires it.
+    Undelivered,
+}
 
 /// One unsent playback position.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -38,8 +56,13 @@ pub struct QueuedProgress {
     pub duration_secs: Option<f64>,
     /// When the sample was taken, for age-based eviction.
     pub captured_at_unix: i64,
-    /// How many send attempts have failed.
+    /// How many send attempts have failed, of any kind. Drives the backoff.
     pub attempts: u32,
+    /// How many of those failures were the server refusing the sample
+    /// itself. Drives abandonment; absent from queues written before it was
+    /// counted separately, which read as none.
+    #[serde(default)]
+    pub rejections: u32,
     /// Earliest time worth retrying, honouring `Retry-After`.
     pub not_before_unix: i64,
 }
@@ -89,7 +112,7 @@ impl ProgressQueue {
         let mut live: Vec<QueuedProgress> = entries
             .into_iter()
             .filter(|entry| {
-                now - entry.captured_at_unix < MAX_AGE_SECS && entry.attempts < MAX_ATTEMPTS
+                now - entry.captured_at_unix < MAX_AGE_SECS && entry.rejections < MAX_REJECTIONS
             })
             .collect();
         live.sort_by_key(|entry| entry.captured_at_unix);
@@ -146,19 +169,28 @@ impl ProgressQueue {
 
     /// Record a failed attempt, backing the entry off exponentially.
     ///
+    /// Every failure backs off; only a [`SendFailure::Rejected`] one moves the
+    /// entry toward abandonment.
+    ///
     /// # Errors
     ///
     /// Propagates storage failures.
     pub async fn record_failure(
         &self,
         file_id: &str,
+        kind: SendFailure,
         retry_after_secs: Option<u64>,
     ) -> Result<(), StorageError> {
         let mut entries = self.load().await?;
         let now = self.clock.now_unix();
         for entry in &mut entries {
             if entry.file_id == file_id {
-                entry.attempts += 1;
+                // Saturating: an outage no longer retires the entry, so this
+                // count is bounded only by `MAX_AGE_SECS` worth of retries.
+                entry.attempts = entry.attempts.saturating_add(1);
+                if kind == SendFailure::Rejected {
+                    entry.rejections = entry.rejections.saturating_add(1);
+                }
                 let backoff = retry_after_secs.map_or_else(
                     // 2s, 4s, 8s, ... capped, so a flapping server is not
                     // hammered but a brief outage still recovers quickly.
@@ -170,9 +202,9 @@ impl ProgressQueue {
                 entry.not_before_unix = now.saturating_add(backoff);
             }
         }
-        // An entry that just exhausted its attempts is dropped by `load`, so
-        // persisting the incremented count is what retires it.
-        entries.retain(|entry| entry.attempts < MAX_ATTEMPTS);
+        // An entry that just exhausted its rejections is dropped by `load`,
+        // so persisting the incremented count is what retires it.
+        entries.retain(|entry| entry.rejections < MAX_REJECTIONS);
         self.persist(&entries).await
     }
 
@@ -225,6 +257,7 @@ mod tests {
             duration_secs: Some(7200.0),
             captured_at_unix: at,
             attempts: 0,
+            rejections: 0,
             not_before_unix: 0,
         }
     }
@@ -337,7 +370,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_entry_is_retired_once_it_exhausts_its_attempts() {
+    async fn an_entry_is_retired_once_it_exhausts_its_rejections() {
         let clock = Arc::new(TestClock::new(1_000));
         let (queue, storage) = queue(clock.clone());
         queue
@@ -346,14 +379,19 @@ mod tests {
             .expect("enqueue");
         assert!(!queue.is_empty().await.expect("is_empty"));
 
-        for _ in 0..MAX_ATTEMPTS {
+        for _ in 0..MAX_REJECTIONS - 1 {
             queue
-                .record_failure("f1", None)
+                .record_failure("f1", SendFailure::Rejected, None)
                 .await
                 .expect("record_failure");
             // Time has to move, or backoff keeps the entry out of `ready`.
             clock.advance_secs(1_000);
         }
+        assert_eq!(queue.len().await.expect("len"), 1, "one refusal short");
+        queue
+            .record_failure("f1", SendFailure::Rejected, None)
+            .await
+            .expect("record_failure");
         assert!(
             queue.is_empty().await.expect("is_empty"),
             "a permanently failing sample must not occupy the queue forever"
@@ -362,6 +400,42 @@ mod tests {
             !storage.has_plain("progress_queue/server-1"),
             "nor the disk: retiring it is what empties the stored queue"
         );
+    }
+
+    /// A server that cannot be reached says nothing about the sample: an
+    /// outage of any length backs the entry off, up to the cap, and never
+    /// retires it. Only the retention window does.
+    #[tokio::test]
+    async fn an_outage_backs_an_entry_off_without_ever_retiring_it() {
+        let clock = Arc::new(TestClock::new(1_000));
+        let (queue, _storage) = queue(clock.clone());
+        queue
+            .enqueue(sample("f1", 120.0, 1_000))
+            .await
+            .expect("enqueue");
+
+        let mut waits = Vec::new();
+        for _ in 0..(4 * MAX_REJECTIONS) {
+            queue
+                .record_failure("f1", SendFailure::Undelivered, None)
+                .await
+                .expect("record_failure");
+            let entry = queue.load().await.expect("load").pop().expect("still held");
+            assert_eq!(entry.rejections, 0, "an outage is not a refusal");
+            waits.push(entry.not_before_unix - clock.now_unix());
+            clock.advance_secs(entry.not_before_unix - clock.now_unix());
+        }
+
+        assert_eq!(&waits[..6], &[2, 4, 8, 16, 32, 64], "the backoff is kept");
+        assert!(waits[6..].iter().all(|wait| *wait == 64), "and capped");
+        assert_eq!(
+            queue.ready().await.expect("ready").len(),
+            1,
+            "still sendable"
+        );
+
+        clock.advance_secs(MAX_AGE_SECS);
+        assert!(queue.is_empty().await.expect("is_empty"), "age retires it");
     }
 
     #[tokio::test]
@@ -374,7 +448,7 @@ mod tests {
             .expect("enqueue");
 
         queue
-            .record_failure("f1", None)
+            .record_failure("f1", SendFailure::Undelivered, None)
             .await
             .expect("record_failure");
         assert!(queue.ready().await.expect("ready").is_empty());
@@ -393,7 +467,7 @@ mod tests {
             .expect("enqueue");
 
         queue
-            .record_failure("f1", Some(300))
+            .record_failure("f1", SendFailure::Undelivered, Some(300))
             .await
             .expect("record_failure");
         clock.advance_secs(299);
@@ -414,7 +488,11 @@ mod tests {
             .expect("enqueue");
 
         queue
-            .record_failure("f1", Some(9_223_372_036_854_775_807))
+            .record_failure(
+                "f1",
+                SendFailure::Undelivered,
+                Some(9_223_372_036_854_775_807),
+            )
             .await
             .expect("record_failure");
 
@@ -454,14 +532,14 @@ mod tests {
         );
     }
 
-    /// An entry stored with its attempts already spent -- by a build that
+    /// An entry stored with its rejections already spent -- by a build that
     /// persisted before retiring it -- is not sent again.
     #[tokio::test]
     async fn an_exhausted_entry_already_on_disk_is_not_resurrected() {
         let clock = Arc::new(TestClock::new(1_000));
         let storage = Arc::new(InMemoryKeyValueStore::new());
         let mut spent = sample("spent", 1.0, 1_000);
-        spent.attempts = MAX_ATTEMPTS;
+        spent.rejections = MAX_REJECTIONS;
         let fresh = sample("fresh", 1.0, 1_000);
         storage
             .put(
@@ -476,6 +554,31 @@ mod tests {
 
         let ids: Vec<&str> = loaded.iter().map(|entry| entry.file_id.as_str()).collect();
         assert_eq!(ids, vec!["fresh"]);
+    }
+
+    /// A queue written before refusals were counted apart from attempts
+    /// still loads, and its entries start with none: their old attempt
+    /// counts were outages as often as refusals, and keeping a resume point
+    /// is the safer reading.
+    #[tokio::test]
+    async fn a_queue_written_before_rejections_were_counted_still_loads() {
+        let clock = Arc::new(TestClock::new(1_000));
+        let storage = Arc::new(InMemoryKeyValueStore::new());
+        storage
+            .put(
+                "progress_queue/server-1".to_owned(),
+                r#"[{"file_id":"f1","position_secs":1.0,"duration_secs":null,"captured_at_unix":1000,"attempts":7,"not_before_unix":0}]"#
+                    .to_owned(),
+            )
+            .await
+            .expect("put");
+        let queue = ProgressQueue::new(storage, clock, "server-1");
+
+        let loaded = queue.load().await.expect("load");
+
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].attempts, 7, "the backoff picks up where it was");
+        assert_eq!(loaded[0].rejections, 0);
     }
 
     #[tokio::test]
@@ -514,10 +617,21 @@ mod tests {
     /// a failed send for one, a successful one, or time passing.
     #[derive(Debug, Clone)]
     enum Step {
-        Enqueue { file: u16, position: f64 },
-        Fail { file: u16, retry_after: Option<u64> },
-        Remove { file: u16 },
-        Wait { secs: i64 },
+        Enqueue {
+            file: u16,
+            position: f64,
+        },
+        Fail {
+            file: u16,
+            rejected: bool,
+            retry_after: Option<u64>,
+        },
+        Remove {
+            file: u16,
+        },
+        Wait {
+            secs: i64,
+        },
     }
 
     fn step() -> impl proptest::strategy::Strategy<Value = Step> {
@@ -525,8 +639,12 @@ mod tests {
         prop_oneof![
             4 => (0_u16..300, 0.0_f64..10_000.0)
                 .prop_map(|(file, position)| Step::Enqueue { file, position }),
-            2 => (0_u16..300, proptest::option::of(0_u64..7200))
-                .prop_map(|(file, retry_after)| Step::Fail { file, retry_after }),
+            2 => (0_u16..300, any::<bool>(), proptest::option::of(0_u64..7200))
+                .prop_map(|(file, rejected, retry_after)| Step::Fail {
+                    file,
+                    rejected,
+                    retry_after,
+                }),
             1 => (0_u16..300).prop_map(|file| Step::Remove { file }),
             1 => (0_i64..(2 * MAX_AGE_SECS)).prop_map(|secs| Step::Wait { secs }),
         ]
@@ -537,7 +655,7 @@ mod tests {
 
         /// Whatever happens to it, the queue holds at most one sample per
         /// file and at most `MAX_ENTRIES` in all, oldest first, and never
-        /// offers a sample that is past its age or out of attempts.
+        /// offers a sample that is past its age or out of rejections.
         #[test]
         fn the_queue_stays_within_its_bounds(
             steps in proptest::collection::vec(step(), 1..400)
@@ -557,10 +675,21 @@ mod tests {
                             entry.not_before_unix = clock.now_unix();
                             queue.enqueue(entry).await.expect("enqueue");
                         }
-                        Step::Fail { file, retry_after } => queue
-                            .record_failure(&format!("f{file}"), retry_after)
-                            .await
-                            .expect("record_failure"),
+                        Step::Fail {
+                            file,
+                            rejected,
+                            retry_after,
+                        } => {
+                            let kind = if rejected {
+                                SendFailure::Rejected
+                            } else {
+                                SendFailure::Undelivered
+                            };
+                            queue
+                                .record_failure(&format!("f{file}"), kind, retry_after)
+                                .await
+                                .expect("record_failure");
+                        }
                         Step::Remove { file } => {
                             queue.remove(&format!("f{file}")).await.expect("remove");
                         }
@@ -577,7 +706,8 @@ mod tests {
                         .all(|pair| pair[0].captured_at_unix <= pair[1].captured_at_unix));
                     let now = clock.now_unix();
                     for entry in &loaded {
-                        proptest::prop_assert!(entry.attempts < MAX_ATTEMPTS);
+                        proptest::prop_assert!(entry.rejections < MAX_REJECTIONS);
+                        proptest::prop_assert!(entry.rejections <= entry.attempts);
                         proptest::prop_assert!(now - entry.captured_at_unix < MAX_AGE_SECS);
                     }
                     for entry in queue.ready().await.expect("ready") {
