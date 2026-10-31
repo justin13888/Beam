@@ -1331,7 +1331,8 @@ impl Authenticator<SessionCookie, AppState> for SessionAuthenticator {
 
 // ── Dependency injection ─────────────────────────────────────────────────────
 
-/// The auth dependencies the OIDC handlers reach for individually.
+/// The auth dependencies the OIDC handlers reach for individually, and the
+/// admin log they record sign-in outcomes in.
 ///
 /// Written out rather than derived: `AppState` keeps its fields behind
 /// `AppStateInner`, and `#[derive(Provider)]` needs public fields on the
@@ -1356,6 +1357,7 @@ provides_service! {
     Arc<dyn beam_auth::utils::oidc::OidcClient> => oidc_client,
     Arc<dyn beam_auth::utils::pending_auth_store::PendingAuthStore> => pending_auth_store,
     Arc<dyn beam_auth::utils::device_auth_store::DeviceAuthStore> => device_auth_store,
+    Arc<dyn beam_index::services::admin_log::AdminLogService> => admin_log,
 }
 
 impl kynos::di::Provides<beam_auth::utils::oidc_config::OidcRuntimeConfig> for AppState {

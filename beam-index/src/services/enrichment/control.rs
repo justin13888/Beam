@@ -23,14 +23,14 @@ use beam_domain::models::enrichment::{
     EnrichmentListFilter, EnrichmentListPosition, EnrichmentListQuery, EnrichmentState,
     EnrichmentStatus, EnrichmentTargetId, FieldLocks, MetadataField,
 };
-use beam_domain::models::{AdminLogCategory, AdminLogLevel, PinSource, ProviderPin};
+use beam_domain::models::{AdminLogCategory, PinSource, ProviderPin};
 use beam_domain::providers::enrichment::{EnrichmentError, EnrichmentProvider, MediaQuery};
 use beam_domain::repositories::{
     EnrichmentStateRepository, LibraryRepository, MovieRepository, ShowRepository,
 };
 
 use super::matcher;
-use crate::services::admin_log::AdminLogService;
+use crate::services::admin_log::{AdminLogService, record_admin_action};
 use crate::services::index::{IndexError, LocalIndexService};
 
 /// How many candidates a search offers an administrator.
@@ -668,27 +668,17 @@ impl EnrichmentControl {
         Ok(queued)
     }
 
-    /// Record what an administrator did, and who, in the admin log.
-    async fn audit(&self, message: String, admin_user_id: &str, mut details: serde_json::Value) {
-        if let Some(details) = details.as_object_mut() {
-            details.insert(
-                "admin_user_id".to_owned(),
-                serde_json::Value::from(admin_user_id),
-            );
-        }
-        if let Err(err) = self
-            .deps
-            .admin_log
-            .log(
-                AdminLogLevel::Info,
-                AdminLogCategory::Enrichment,
-                message,
-                Some(details),
-            )
-            .await
-        {
-            tracing::warn!(error = %err, "could not record an administrator's enrichment action");
-        }
+    /// Record what an administrator did, and who, in the process log and the
+    /// admin log.
+    async fn audit(&self, message: String, admin_user_id: &str, details: serde_json::Value) {
+        record_admin_action(
+            self.deps.admin_log.as_ref(),
+            AdminLogCategory::Enrichment,
+            message,
+            admin_user_id,
+            details,
+        )
+        .await;
     }
 }
 

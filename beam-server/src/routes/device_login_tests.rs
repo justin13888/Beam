@@ -35,6 +35,7 @@ use crate::routes::api_error::SESSION_COOKIE;
 use crate::routes::auth::DEVICE_LOGIN_MAX_SECS;
 use crate::routes::create_router;
 use crate::routes::test_support::make_app_state_full;
+use crate::services::admin_log::AdminLogService;
 use crate::services::health::InMemoryDependencyProbe;
 use crate::state::{AppServices, AppState};
 
@@ -51,6 +52,8 @@ struct Harness {
     sessions: Arc<InMemorySessionStore>,
     clock: Arc<TestClock>,
     oidc_config: OidcRuntimeConfig,
+    /// The admin log the handlers record sign-in outcomes in.
+    admin_log: Arc<dyn AdminLogService>,
 }
 
 fn identity(claims: Value) -> OidcIdentity {
@@ -85,6 +88,7 @@ fn harness_with(
         sessions: built.3,
         clock: built.4,
         oidc_config: built.5,
+        admin_log: built.6,
     }
 }
 
@@ -95,6 +99,7 @@ type Built = (
     Arc<InMemorySessionStore>,
     Arc<TestClock>,
     OidcRuntimeConfig,
+    Arc<dyn AdminLogService>,
 );
 
 fn build(
@@ -122,6 +127,7 @@ fn build(
         ..base.services.oidc_config.clone()
     };
 
+    let admin_log = base.services.admin_log.clone();
     let session_dyn: Arc<dyn SessionStore> = sessions.clone();
     let users_dyn: Arc<dyn UserRepository> = users.clone();
     let services = AppServices {
@@ -181,6 +187,7 @@ fn build(
         sessions,
         clock,
         oidc_config,
+        admin_log,
     )
 }
 
@@ -835,4 +842,89 @@ async fn no_answer_carrying_a_handle_or_a_session_may_be_cached() {
     let pending = poll(&waiting, &waiting_handle).await;
     pending.assert_status(StatusCode::ACCEPTED);
     assert_no_store(&pending, "the 202");
+}
+
+/// Every `Auth` entry the harness's admin log holds, oldest first.
+async fn sign_in_records(harness: &Harness) -> Vec<beam_domain::models::AdminLog> {
+    let mut entries = harness
+        .admin_log
+        .get_logs_by_category(beam_domain::models::AdminLogCategory::Auth, 100, 0)
+        .await
+        .unwrap();
+    entries.reverse();
+    entries
+}
+
+/// NFR-403: a refused and an approved device login are each recorded with
+/// the method, the outcome and the account -- and neither the device handle,
+/// the IdP's device code, nor the minted session token reaches the record.
+/// A poll of a flow that does not exist is not recorded: any request can
+/// make one.
+#[tokio::test]
+async fn a_denied_and_an_approved_device_login_are_recorded_without_secrets() {
+    let denied =
+        harness(FakeOidcClient::default().with_device_script(vec![Ok(DevicePoll::Denied)]));
+    let denied_handle = started(&denied).await;
+    poll(&denied, &denied_handle)
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+    poll(&denied, "never-issued")
+        .await
+        .assert_status(StatusCode::BAD_REQUEST);
+
+    let approved = harness(
+        FakeOidcClient::default()
+            .with_device_script(vec![Ok(DevicePoll::Complete(identity(json!({}))))]),
+    );
+    let handle = started(&approved).await;
+    let response = poll(&approved, &handle).await;
+    response.assert_status(StatusCode::OK);
+    let body: Value = response.json();
+    let token = body["session_token"].as_str().expect("a session token");
+
+    let refusals = sign_in_records(&denied).await;
+    assert_eq!(
+        refusals.len(),
+        1,
+        "only the open flow's outcome: {refusals:?}"
+    );
+    let refusal = refusals[0].details.clone().unwrap_or_default();
+    assert_eq!(
+        (
+            &refusals[0].level,
+            refusal["method"].as_str(),
+            refusal["outcome"].as_str()
+        ),
+        (
+            &beam_domain::models::AdminLogLevel::Warning,
+            Some("device"),
+            Some("denied")
+        )
+    );
+
+    let sign_ins = sign_in_records(&approved).await;
+    assert_eq!(sign_ins.len(), 1, "{sign_ins:?}");
+    let sign_in = sign_ins[0].details.clone().unwrap_or_default();
+    assert_eq!(
+        (
+            &sign_ins[0].level,
+            sign_in["method"].as_str(),
+            sign_in["outcome"].as_str(),
+            sign_in["user_id"].as_str()
+        ),
+        (
+            &beam_domain::models::AdminLogLevel::Info,
+            Some("device"),
+            Some("signed_in"),
+            body["user"]["id"].as_str()
+        )
+    );
+
+    let stored = format!("{refusals:?} {sign_ins:?}");
+    let mut secrets = vec![token.to_owned(), handle, denied_handle];
+    secrets.extend(denied.oidc.polled_device_codes());
+    secrets.extend(approved.oidc.polled_device_codes());
+    for secret in secrets {
+        assert!(!stored.contains(&secret), "{secret} reached the admin log");
+    }
 }
