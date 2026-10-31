@@ -24,7 +24,7 @@ against the IdP itself, and holds the same opaque credential (see
    (via the `openidconnect` crate), and validates the ID token's issuer, audience, signature, nonce,
    and expiry.
    Every server-to-IdP request (discovery, JWKS, token exchange) goes through `OidcHttpClient`
-   (`beam-auth/src/utils/oidc.rs`): redirects are never followed, TLS is verified against the
+   (`beam-auth/src/utils/oidc/discovered.rs`): redirects are never followed, TLS is verified against the
    system trust store, and requests are bounded (10 s to connect, 30 s in total) so an IdP that
    stops answering cannot stall startup discovery or a login.
 4. **JIT provisioning.** A `users` row is looked up (or created) by `(oidc_issuer, oidc_subject)` —

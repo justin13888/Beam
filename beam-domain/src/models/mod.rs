@@ -30,6 +30,11 @@ pub use collection::*;
 pub use enrichment::*;
 pub use file::*;
 pub use genre::*;
+// Named rather than globbed: a glob would also re-export its `test_utils`,
+// which `playback_telemetry::*` already puts at this path.
+pub use language_preferences::{
+    LanguageCode, LanguagePreferences, MAX_PREFERRED_LANGUAGES, SubtitleMode, TooManyLanguages,
+};
 pub use library::*;
 pub use library_shape::*;
 pub use movie::*;

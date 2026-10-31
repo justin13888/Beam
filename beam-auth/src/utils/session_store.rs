@@ -7,13 +7,16 @@ use sea_orm::{
     QueryFilter,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracing::debug;
 use uuid::Uuid;
 
 use beam_domain::services::{Clock, RealClock};
 use beam_entity::session::{ActiveModel as SessionActiveModel, Column, Entity as SessionEntity};
+
+// A session token is an opaque credential: minted fresh, and persisted only
+// as its hash.
+use crate::utils::opaque_token::{generate as generate_session_token, hash as hash_token, seconds};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SessionData {
@@ -70,10 +73,13 @@ pub async fn get_and_touch(
 ///
 /// This trait abstracts the underlying storage mechanism (Postgres, or an
 /// in-memory map for tests) used to persist session data across requests.
-/// Shared by the legacy password-JWT-refresh flow and the OIDC BFF cookie
-/// flow -- both mint sessions through the same store, they just differ in
-/// how the resulting opaque token reaches the client (JWT claim vs. cookie
-/// value) and in what idle/absolute TTLs they pass.
+/// Every session is minted by an OIDC login (ADR-0003), through one of two
+/// flows that share this store: the browser's authorization-code flow, whose
+/// token reaches the client as the session cookie, and the device-
+/// authorization grant (RFC 8628) a TV or phone client completes, whose
+/// token it receives in the response body and then presents as that same
+/// cookie (ADR-0017). Both pass the deployment's configured idle and
+/// absolute TTLs.
 ///
 /// The token returned by `create` and accepted by `get`/`touch`/`delete` is
 /// always the plaintext opaque credential; only its SHA-256 hash is ever
@@ -81,7 +87,10 @@ pub async fn get_and_touch(
 #[async_trait]
 pub trait SessionStore: Send + Sync + std::fmt::Debug {
     /// Persists new session data and returns the plaintext opaque token the
-    /// caller should hand to the client (as a cookie value, JWT claim, etc).
+    /// caller should hand to the client (as the session cookie, or in the
+    /// device grant's response). `created_at` and `last_active` are stamped
+    /// from the store's clock, whatever `data` carries. A `user_id` that is
+    /// not a UUID is refused before anything is written.
     ///
     /// # Parameters
     /// - `data`: The session state to be stored.
@@ -150,24 +159,6 @@ pub trait SessionStore: Send + Sync + std::fmt::Debug {
     fn now(&self) -> chrono::DateTime<Utc>;
 }
 
-/// Generates an opaque, random 32-byte URL-safe base64 session token.
-fn generate_session_token() -> String {
-    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-    use rand::Rng;
-
-    let mut bytes = [0u8; 32];
-    let mut rng = rand::rng();
-    rng.fill_bytes(&mut bytes);
-
-    URL_SAFE_NO_PAD.encode(bytes)
-}
-
-/// Hashes a plaintext session token for at-rest storage/lookup. The
-/// plaintext token is never persisted.
-fn hash_token(token: &str) -> String {
-    crate::utils::hex::encode_lower(&Sha256::digest(token.as_bytes()))
-}
-
 fn to_session_data(model: &beam_entity::session::Model) -> SessionData {
     SessionData {
         user_id: model.user_id.to_string(),
@@ -218,8 +209,8 @@ impl SessionStore for PgSessionStore {
     ) -> Result<String> {
         let token = generate_session_token();
         let now = self.clock.now();
-        let idle_expires_at = now + chrono::Duration::seconds(idle_ttl_secs as i64);
-        let absolute_expires_at = now + chrono::Duration::seconds(absolute_ttl_secs as i64);
+        let idle_expires_at = now + seconds(idle_ttl_secs);
+        let absolute_expires_at = now + seconds(absolute_ttl_secs);
 
         let active_model = SessionActiveModel {
             id: Set(Uuid::new_v4()),
@@ -265,7 +256,7 @@ impl SessionStore for PgSessionStore {
         };
 
         let now = self.clock.now();
-        let requested_idle_expiry = now + chrono::Duration::seconds(idle_ttl_secs as i64);
+        let requested_idle_expiry = now + seconds(idle_ttl_secs);
         // Never slide the idle deadline past the absolute ceiling.
         let idle_expires_at = requested_idle_expiry.min(model.absolute_expires_at.into());
         let mut active_model: SessionActiveModel = model.into();
@@ -423,8 +414,8 @@ pub mod in_memory {
                 StoredSession {
                     id: Uuid::new_v4(),
                     data,
-                    idle_expires_at: now + chrono::Duration::seconds(idle_ttl_secs as i64),
-                    absolute_expires_at: now + chrono::Duration::seconds(absolute_ttl_secs as i64),
+                    idle_expires_at: now + seconds(idle_ttl_secs),
+                    absolute_expires_at: now + seconds(absolute_ttl_secs),
                 },
             );
             Ok(token)
@@ -445,8 +436,8 @@ pub mod in_memory {
             let now = self.clock.now();
             if let Some(session) = self.lock_sessions().get_mut(&hash_token(token)) {
                 session.data.last_active = now.timestamp();
-                session.idle_expires_at = (now + chrono::Duration::seconds(idle_ttl_secs as i64))
-                    .min(session.absolute_expires_at);
+                session.idle_expires_at =
+                    (now + seconds(idle_ttl_secs)).min(session.absolute_expires_at);
             }
             Ok(())
         }
@@ -723,30 +714,5 @@ mod get_and_touch_under_a_failing_store {
             stored.last_active, session.last_active,
             "the touch failed, so nothing was rewritten"
         );
-    }
-}
-
-#[cfg(test)]
-mod token_hashing_tests {
-    use super::hash_token;
-
-    #[test]
-    fn a_token_hashes_to_the_lowercase_sha256_hex_of_its_bytes() {
-        // Ground truth from `printf 'session-token-example' | sha256sum`, not
-        // from this crate. Session rows are looked up by this string, so a
-        // change to the digest or its encoding silently invalidates every
-        // stored session -- the failure this test exists to catch.
-        assert_eq!(
-            hash_token("session-token-example"),
-            "467bb7ff1ca961ab8a9bf090853e52da11c3ce8a4eddb0c7f57e3b67e9259505"
-        );
-    }
-
-    #[test]
-    fn the_plaintext_token_does_not_survive_hashing() {
-        let hashed = hash_token("session-token-example");
-
-        assert!(!hashed.contains("session-token"), "{hashed}");
-        assert_eq!(hashed.len(), 64, "a SHA-256 digest is 64 hex characters");
     }
 }

@@ -186,7 +186,7 @@ impl CacheKey {
     /// The key for an upstream artwork URL.
     pub fn for_url(url: &str) -> Self {
         let digest = Sha256::digest(url.as_bytes());
-        Self(beam_auth::utils::hex::encode_lower(&digest[..16]))
+        Self(beam_domain::utils::hex::encode_lower(&digest[..16]))
     }
 
     /// The key for `url` scaled to `width` pixels wide (issue #266).

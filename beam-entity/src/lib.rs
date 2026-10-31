@@ -38,6 +38,10 @@ pub mod user_library_access;
 pub mod user_list_entry;
 pub mod watch_state;
 
+// One name per table's `Entity`. The opt-in `pg-integration` tier
+// (`beam-index/tests/pg_integration/entity.rs`) lists every entity by these to
+// check each one against the migrated schema, so a default build sees no use
+// of them.
 pub use admin_log::Entity as AdminLog;
 pub use applied_nfo::Entity as AppliedNfo;
 pub use collection::Entity as Collection;

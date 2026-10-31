@@ -10,15 +10,17 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use sea_orm::sea_query::OnConflict;
 use sea_orm::{
-    ConnectionTrait, DatabaseConnection, DbBackend, DbErr, FromQueryResult, Statement,
-    TransactionTrait, Value,
+    ColumnTrait, DatabaseConnection, DbBackend, DbErr, EntityTrait, FromQueryResult, QueryFilter,
+    Set, Statement, TransactionTrait, Value,
 };
 use uuid::Uuid;
 
 use beam_domain::models::access::{AccessPolicy, ContentRating, LibraryAccess};
 use beam_domain::repositories::AccessPolicyRepository;
 use beam_domain::services::{Clock, RealClock};
+use beam_entity::{user_access_policy, user_library_access};
 
 /// SQL-based implementation of the AccessPolicyRepository trait.
 #[derive(Debug, Clone)]
@@ -106,42 +108,43 @@ impl AccessPolicyRepository for SqlAccessPolicyRepository {
             max_rating,
         } = policy;
         let txn = self.db.begin().await?;
-        txn.execute_raw(statement(
-            "DELETE FROM user_library_access WHERE user_id = $1",
-            vec![user_id.into()],
-        ))
-        .await?;
-        if policy.is_unrestricted() {
-            txn.execute_raw(statement(
-                "DELETE FROM user_access_policies WHERE user_id = $1",
-                vec![user_id.into()],
-            ))
+        user_library_access::Entity::delete_many()
+            .filter(user_library_access::Column::UserId.eq(user_id))
+            .exec(&txn)
             .await?;
+        if policy.is_unrestricted() {
+            user_access_policy::Entity::delete_by_id(user_id)
+                .exec(&txn)
+                .await?;
             return txn.commit().await;
         }
-        txn.execute_raw(statement(
-            "INSERT INTO user_access_policies \
-                 (user_id, all_libraries, max_content_rating, updated_at) \
-             VALUES ($1, $2, $3, $4) \
-             ON CONFLICT (user_id) DO UPDATE SET \
-                 all_libraries = EXCLUDED.all_libraries, \
-                 max_content_rating = EXCLUDED.max_content_rating, \
-                 updated_at = EXCLUDED.updated_at",
-            vec![
-                user_id.into(),
-                matches!(libraries, LibraryAccess::All).into(),
-                max_rating.map(|band| band.as_str().to_string()).into(),
-                self.clock.now().into(),
-            ],
-        ))
-        .await?;
+        let row = user_access_policy::ActiveModel {
+            user_id: Set(user_id),
+            all_libraries: Set(matches!(libraries, LibraryAccess::All)),
+            max_content_rating: Set(max_rating.map(|band| band.as_str().to_string())),
+            updated_at: Set(self.clock.now().into()),
+        };
+        user_access_policy::Entity::insert(row)
+            .on_conflict(
+                OnConflict::column(user_access_policy::Column::UserId)
+                    .update_columns([
+                        user_access_policy::Column::AllLibraries,
+                        user_access_policy::Column::MaxContentRating,
+                        user_access_policy::Column::UpdatedAt,
+                    ])
+                    .to_owned(),
+            )
+            .exec_without_returning(&txn)
+            .await?;
         if let LibraryAccess::Only(granted) = libraries {
             for library_id in granted {
-                txn.execute_raw(statement(
-                    "INSERT INTO user_library_access (user_id, library_id) VALUES ($1, $2)",
-                    vec![user_id.into(), (*library_id).into()],
-                ))
-                .await?;
+                let grant = user_library_access::ActiveModel {
+                    user_id: Set(user_id),
+                    library_id: Set(*library_id),
+                };
+                user_library_access::Entity::insert(grant)
+                    .exec_without_returning(&txn)
+                    .await?;
             }
         }
         txn.commit().await

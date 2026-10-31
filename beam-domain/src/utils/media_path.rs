@@ -8,18 +8,18 @@
 //! combines the two. Pure and deterministic: the input is the path relative to
 //! the library root, and nothing is read from disk.
 
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 use std::sync::LazyLock;
 
 use chrono::{Datelike, NaiveDate};
 use regex::Regex;
 
+use crate::utils::disc::DiscKind;
 use crate::utils::filename::{
     ParsedFilename, episode_title_after, is_edition_only, is_noise_only, normalized_stem,
-    parse_media_filename, part_token,
+    parse_media_filename,
 };
 use crate::utils::identity::{normalize_title, title_identity_key};
-use crate::utils::path_policy::DiscKind;
 
 /// The version of the rules [`infer_media`] classifies by, and of the title
 /// fold ([`crate::utils::identity`]) that turns its titles into identity
@@ -207,11 +207,6 @@ static SEASON_EPISODE_DIGITS_REGEX: LazyLock<Regex> =
 
 static YEAR_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(?:19|20)\d{2}$").expect("valid regex"));
-
-/// A folder named for nothing but one disc of a set: `Disc 1`, `DISC1`,
-/// `CD2`, `Disk_2`.
-static BARE_DISC_FOLDER_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)^(?:cd|disc|disk)[ ._-]?(\d{1,2})$").expect("valid regex"));
 
 /// A folder that says only which piece of a release it is, and so names no
 /// film: which disc -- `Disc 1`, `Disc One`, `DVD 1`, `BD1`, `Blu-ray 2`,
@@ -675,69 +670,6 @@ fn dated_piece_tail(folder: &str) -> Option<&str> {
     };
     let tail = tail.trim();
     parse_media_filename(tail).year.is_some().then_some(tail)
-}
-
-/// The disc a folder's name is nothing but: `Disc 2` is disc 2.
-fn bare_disc_number(name: &str) -> Option<u32> {
-    let caps = BARE_DISC_FOLDER_REGEX.captures(name.trim())?;
-    caps[1].parse().ok().filter(|disc| *disc >= 1)
-}
-
-/// Where a disc folder sits in a set of discs of one film (decision
-/// D234-7): which disc of the set it is, and what every disc of the set
-/// shares -- the folder they are in, and what their names say besides the
-/// disc number. `Heat (1995)/Disc 2` is disc 2 of the set of bare `Disc N`
-/// folders in `Heat (1995)`; `Movies/Heat (1995) - CD2` is disc 2 of the set
-/// of `Heat (1995) - CDn` folders in `Movies`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct DiscSetPlace {
-    /// The folder the set's disc folders are in, as the path given was
-    /// (relative to a library root, or absolute).
-    pub container: PathBuf,
-    /// What the disc folder's name says besides its disc number, folded so
-    /// that `Heat (1995) - Disc 1` and `Heat.1995.DISC2` agree: empty for a
-    /// bare `Disc N`.
-    pub name: String,
-    /// Which disc of the set it is, from 1.
-    pub disc: u32,
-}
-
-/// Where `folder` -- a folder enclosing a disc structure's root, relative to
-/// a library root or absolute -- sits in a set of discs, if its name numbers
-/// a disc: a bare `Disc 2`, `DISC2`, `CD2` or `Disk 2`, or a film's name with
-/// a disc token (`Heat (1995) - Disc 2`, `Heat.1995.CD2`) as a filename's
-/// part token is read ([`parse_media_filename`]).
-pub fn disc_set_member(folder: &Path) -> Option<DiscSetPlace> {
-    let name = folder.file_name()?.to_string_lossy();
-    let container = folder.parent()?.to_path_buf();
-    if let Some(disc) = bare_disc_number(&name) {
-        return Some(DiscSetPlace {
-            container,
-            name: String::new(),
-            disc,
-        });
-    }
-    let token = part_token(&name).filter(|token| token.confirmed)?;
-    // Every run of letters and digits, lowercased: separators, brackets and
-    // dashes differ between the discs of one set as often as not.
-    let folded: Vec<String> = token
-        .stripped
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|word| !word.is_empty())
-        .map(str::to_lowercase)
-        .collect();
-    (!folded.is_empty()).then(|| DiscSetPlace {
-        container,
-        name: folded.join(" "),
-        disc: token.number,
-    })
-}
-
-/// Where the disc structure rooted at `disc_root` (a `VIDEO_TS/` or `BDMV/`
-/// folder) sits in a set of discs: [`disc_set_member`] of the folder
-/// enclosing it.
-pub fn disc_set_place(disc_root: &Path) -> Option<DiscSetPlace> {
-    disc_set_member(disc_root.parent()?)
 }
 
 /// The movie a filename parse names, completed from its parent folder.

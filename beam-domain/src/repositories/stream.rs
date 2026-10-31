@@ -6,8 +6,18 @@ use crate::models::stream::{CreateMediaStream, MediaStream};
 
 #[cfg_attr(any(test, feature = "test-utils"), mockall::automock)]
 #[async_trait]
+///
+/// Every method returns the store's own failure as `Err(DbErr)`.
 pub trait MediaStreamRepository: Send + Sync + std::fmt::Debug {
+    /// Stores each of `streams`, each under a fresh id, and returns how many
+    /// were written: all of them, or an error. Not one transaction -- the
+    /// caller replaces a file's streams after [`Self::delete_by_file_id`],
+    /// and a failure part-way leaves the ones already written. The SQL store
+    /// refuses a stream of a file that does not exist, and a second stream
+    /// at an index the file already has.
     async fn insert_streams(&self, streams: Vec<CreateMediaStream>) -> Result<u32, DbErr>;
+    /// The streams of the file `file_id` names, in stream-index order;
+    /// empty for a file with none, or no such file.
     async fn find_by_file_id(&self, file_id: Uuid) -> Result<Vec<MediaStream>, DbErr>;
     /// Delete every stream belonging to a file. Used when reconciling a changed
     /// file replaces its stream set. Returns the number of rows removed.

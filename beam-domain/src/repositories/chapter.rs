@@ -10,7 +10,6 @@ use crate::models::chapter::Chapter;
 /// A file's chapters are written whole, each time it is probed: they are
 /// what the container says, so nothing edits one chapter on its own. They go
 /// with their file when its row is purged.
-#[cfg_attr(any(test, feature = "test-utils"), mockall::automock)]
 #[async_trait]
 pub trait ChapterRepository: Send + Sync + std::fmt::Debug {
     /// Replace the chapters of the file `file_id` with `chapters`, whole and

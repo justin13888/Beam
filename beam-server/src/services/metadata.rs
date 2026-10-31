@@ -19,8 +19,8 @@ use beam_domain::models::catalog::{
     self, CatalogFilters, CatalogPosition, CatalogQuery, CatalogSort, CatalogSortField, Seek,
     ShowChildCounts, SortDirection,
 };
+use beam_domain::models::genre::slugify;
 use beam_domain::models::watch_state::TitleRef;
-use beam_domain::repositories::genre::slugify;
 use beam_domain::repositories::{
     CatalogRepository, CollectionRepository, GenreRepository, MovieRepository, PersonRepository,
     ShowRepository,

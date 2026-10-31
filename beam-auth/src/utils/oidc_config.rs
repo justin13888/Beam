@@ -36,7 +36,6 @@ pub struct OidcRuntimeConfig {
 
 impl OidcRuntimeConfig {
     /// How long a session survives without activity, in seconds.
-    #[allow(clippy::missing_const_for_fn)]
     pub fn idle_ttl_secs(&self) -> u64 {
         self.session_idle_days * SECONDS_PER_DAY
     }
