@@ -6,6 +6,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import uniffi.beam_client_core.progressReportIntervalSecs
 
 /**
  * Keeps the server's idea of where the viewer is roughly current.
@@ -80,13 +81,16 @@ internal class ProgressReporter(
     }
 
     internal companion object {
-        /**
-         * Matches `beam-web`'s `usePlaybackBeacon`, so a viewer moving between
-         * the web app and the phone sees the same resume granularity rather
-         * than two different answers to "where was I".
-         */
-        const val DEFAULT_SAMPLE_INTERVAL_MS: Long = 15_000L
         const val MILLIS_PER_SECOND: Double = 1_000.0
+
+        /**
+         * The core's throttle interval, which `beam-web`'s `usePlaybackBeacon`
+         * matches, so a viewer moving between the web app and the phone sees
+         * the same resume granularity rather than two different answers to
+         * "where was I". Read from the core rather than restated: sampling
+         * faster only produces reports its throttle holds back.
+         */
+        val DEFAULT_SAMPLE_INTERVAL_MS: Long = progressReportIntervalSecs() * MILLIS_PER_SECOND.toLong()
     }
 }
 

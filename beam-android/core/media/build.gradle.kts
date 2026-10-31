@@ -3,6 +3,8 @@ plugins {
     id("beam.android.hilt")
     alias(libs.plugins.kotlin.serialization)
     id("beam.android.pitest")
+    // The player reads the core's part timeline and constants.
+    id("beam.android.nativecore")
 }
 
 android {

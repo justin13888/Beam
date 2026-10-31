@@ -45,7 +45,8 @@ public class FakeCatalogRepository : CatalogRepository {
     public val browseCalls: MutableList<BrowseQuery> = mutableListOf()
 
     /**
-     * The cursor every page reports, or null for "this is the last page".
+     * The cursor every page reports, with a next page after it; null leaves
+     * each page's own cursor and `hasNextPage` as [pages] carries them.
      *
      * Overrides whatever [pages] carries, so a paging test can be written
      * without constructing a page fixture per page.
@@ -65,7 +66,7 @@ public class FakeCatalogRepository : CatalogRepository {
         failWith?.let { throw it }
         browseCalls += query
         val page = pages.getOrElse(browseCalls.size - 1) { pages.last() }
-        return page.copy(endCursor = nextCursor, hasNextPage = nextCursor != null)
+        return nextCursor?.let { page.copy(endCursor = it, hasNextPage = true) } ?: page
     }
 
     override suspend fun detail(mediaId: String): MediaDetail {

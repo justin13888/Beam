@@ -55,9 +55,11 @@ pub mod ffi;
 pub mod paging;
 pub mod ports;
 pub mod progress;
+pub mod resolution;
 pub mod servers;
 pub mod session;
 pub mod telemetry;
+pub mod timeline;
 pub mod tls;
 pub mod transport;
 pub mod trust;
@@ -79,6 +81,7 @@ pub use ffi::{PlaybackHttpConfig, RebufferMonitor, ServerHttpConfig};
 pub use paging::{CursorPager, PageAdvance};
 pub use ports::kv::KeyValueStore;
 pub use progress::{ProgressOutcome, ProgressQueue, ProgressThrottle, QueuedProgress};
+pub use resolution::resolution_label;
 pub use servers::{ServerRecord, normalize_base_url, server_id_for};
 pub use session::{DeviceLoginPrompt, DeviceLoginStep, SessionEvent, SessionState, UserSummary};
 pub use telemetry::{
@@ -86,6 +89,7 @@ pub use telemetry::{
     RebufferBucketRow, SourceSwitchRow, StartFailureCause, SwitchTrigger, TelemetryClientKind,
     TelemetryFlush, TelemetryQueue,
 };
+pub use timeline::{PartPosition, part_absolute_ms, part_locate};
 pub use tls::{TrustDecision, install_crypto_provider};
 pub use trust::CertificateDetails;
 

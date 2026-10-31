@@ -1,6 +1,7 @@
 package dev.beam.android.feature.explore
 
 import dev.beam.android.core.testing.FakeCatalogRepository
+import dev.beam.android.core.testing.Fixtures
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -15,6 +16,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import uniffi.beam_client_core.BeamException
+import uniffi.beam_client_core.MediaPage
 import uniffi.beam_client_core.MediaSortField
 import uniffi.beam_client_core.MediaTypeFilter
 import uniffi.beam_client_core.SortOrder
@@ -101,15 +103,76 @@ class ExploreViewModelTest {
     @Test
     fun `a further page is appended rather than replacing what is shown`() =
         runTest {
-            val catalog = FakeCatalogRepository().apply { nextCursor = "cursor-1" }
+            val catalog =
+                FakeCatalogRepository().apply {
+                    nextCursor = "cursor-1"
+                    pages = listOf(pageOf("a", "b"), pageOf("c", "d"))
+                }
             val viewModel = ExploreViewModel(catalog)
             testScheduler.advanceUntilIdle()
-            val first = viewModel.state.value.items.size
 
             viewModel.loadMore()
             testScheduler.advanceUntilIdle()
 
-            assertEquals(first * 2, viewModel.state.value.items.size)
+            assertEquals(
+                listOf("a", "b", "c", "d"),
+                viewModel.state.value.items
+                    .map { it.id },
+            )
+        }
+
+    @Test
+    fun `a title the shifting catalog repeats on a later page is listed once`() =
+        runTest {
+            // Indexing mutates the set underneath the cursor, so the server can
+            // legitimately send a title again; listing it twice would put two
+            // identical tiles in the grid.
+            val catalog =
+                FakeCatalogRepository().apply {
+                    nextCursor = "cursor-1"
+                    pages = listOf(pageOf("a", "b"), pageOf("b", "c"))
+                }
+            val viewModel = ExploreViewModel(catalog)
+            testScheduler.advanceUntilIdle()
+
+            viewModel.loadMore()
+            testScheduler.advanceUntilIdle()
+
+            assertEquals(
+                listOf("a", "b", "c"),
+                viewModel.state.value.items
+                    .map { it.id },
+            )
+        }
+
+    @Test
+    fun `a page that carries no cursor keeps the position the last one ended on`() =
+        runTest {
+            // Overwriting the cursor with nothing would send the next request
+            // from the head, and the grid would fill with the first page again.
+            val catalog =
+                FakeCatalogRepository().apply {
+                    pages =
+                        listOf(
+                            Fixtures.page(listOf(Fixtures.movie(id = "a")), endCursor = "cursor-1", hasNextPage = true),
+                            Fixtures.page(listOf(Fixtures.movie(id = "b")), endCursor = null, hasNextPage = true),
+                            pageOf("c"),
+                        )
+                }
+            val viewModel = ExploreViewModel(catalog)
+            testScheduler.advanceUntilIdle()
+
+            viewModel.loadMore()
+            testScheduler.advanceUntilIdle()
+            viewModel.loadMore()
+            testScheduler.advanceUntilIdle()
+
+            assertEquals(listOf(null, "cursor-1", "cursor-1"), catalog.browseCalls.map { it.after })
+            assertEquals(
+                listOf("a", "b", "c"),
+                viewModel.state.value.items
+                    .map { it.id },
+            )
         }
 
     @Test
@@ -187,6 +250,28 @@ class ExploreViewModelTest {
         }
 
     @Test
+    fun `a failed page is asked for again from the same cursor`() =
+        runTest {
+            // A pager left waiting on the failed request would refuse every
+            // later one, and the grid could never page on; one that advanced
+            // past it would skip every title on that page.
+            val catalog = FakeCatalogRepository().apply { nextCursor = "cursor-1" }
+            val viewModel = ExploreViewModel(catalog)
+            testScheduler.advanceUntilIdle()
+
+            catalog.failWith = BeamException.Network("offline", retryable = true)
+            viewModel.loadMore()
+            testScheduler.advanceUntilIdle()
+            catalog.failWith = null
+            viewModel.loadMore()
+            testScheduler.advanceUntilIdle()
+
+            // The fake records only the requests it answered, so the failed
+            // one is absent here.
+            assertEquals(listOf(null, "cursor-1"), catalog.browseCalls.map { it.after })
+        }
+
+    @Test
     fun `selecting the sort field already in use reverses it`() =
         runTest {
             val catalog = FakeCatalogRepository()
@@ -234,5 +319,8 @@ class ExploreViewModelTest {
     private companion object {
         /** One millisecond inside the view model's 300 ms search debounce. */
         const val KEYSTROKE_GAP_MS = 299L
+
+        /** A last page of films with these ids. */
+        fun pageOf(vararg ids: String): MediaPage = Fixtures.page(ids.map { Fixtures.movie(id = it) })
     }
 }
