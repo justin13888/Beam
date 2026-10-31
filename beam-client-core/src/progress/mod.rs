@@ -9,7 +9,7 @@
 
 pub mod queue;
 
-pub use queue::{ProgressQueue, QueuedProgress};
+pub use queue::{ProgressQueue, QueuedProgress, SendFailure};
 
 use crate::clock::Clock;
 use std::collections::HashMap;

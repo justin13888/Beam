@@ -2,7 +2,7 @@
 
 use super::{BeamClient, parse_uuid};
 use crate::error::BeamError;
-use crate::progress::{ProgressOutcome, QueuedProgress, ThrottleDecision};
+use crate::progress::{ProgressOutcome, QueuedProgress, SendFailure, ThrottleDecision};
 use crate::transport::TransportFailure;
 use std::sync::Arc;
 
@@ -74,9 +74,9 @@ impl BeamClient {
                 // exists: the identical request fails identically forever.
                 // Queuing one occupied a slot in a bounded queue and never
                 // retired, because `enqueue` replaces the entry and resets
-                // `attempts` -- so while a title played and sampled every
-                // fifteen seconds, MAX_ATTEMPTS was reset before it could
-                // count. `Dropped` existed for exactly this and had no
+                // its counts -- so while a title played and sampled every
+                // fifteen seconds, the retirement cap was reset before it
+                // could count. `Dropped` existed for exactly this and had no
                 // producer.
                 //
                 // Only a *permanent* refusal is dropped. An expired session,
@@ -109,6 +109,7 @@ impl BeamClient {
                         duration_secs: duration,
                         captured_at_unix: now,
                         attempts: 0,
+                        rejections: 0,
                         not_before_unix,
                     })
                     .await?;
@@ -145,7 +146,9 @@ impl BeamClient {
                 // The path parameter is a UUID, so an entry that is not one
                 // was written by an older build and can never be accepted.
                 // It is treated exactly like a rejected send.
-                queue.record_failure(&entry.file_id, None).await?;
+                queue
+                    .record_failure(&entry.file_id, SendFailure::Rejected, None)
+                    .await?;
                 break;
             };
             let body = crate::api::types::ReportProgressRequest {
@@ -160,18 +163,31 @@ impl BeamClient {
                     sent = sent.saturating_add(1);
                 }
                 Err(failure) => {
+                    let mapped = self.fail(&server_id, &failure).await;
+                    // Only a refusal of this sample counts toward retiring
+                    // it. Every attempt used to count, so a server down for
+                    // longer than eight backoff steps -- about four and a
+                    // half minutes -- cost the viewer the very resume point
+                    // the queue exists to keep. An outage, a 5xx (which is
+                    // what a reverse proxy answers while the server is
+                    // down), a rate limit or a sign-out says nothing about
+                    // the sample; `MAX_AGE_SECS` bounds how long it waits.
+                    let kind = if mapped.is_permanent() {
+                        SendFailure::Rejected
+                    } else {
+                        SendFailure::Undelivered
+                    };
                     // The server's own interval, where it sent one. Passing
                     // `None` here fell back to blind exponential backoff and
                     // ignored a 429's `Retry-After` -- which this crate reads,
                     // parses, and carried as far as this line before dropping.
                     queue
-                        .record_failure(&entry.file_id, failure.retry_after_secs)
+                        .record_failure(&entry.file_id, kind, failure.retry_after_secs)
                         .await?;
                     // A queue drain stops at the first failure rather than
                     // hammering an unreachable server with the whole backlog.
                     // An expiry stops it *and says so*: this is a background
                     // call, and it has just signed the device out.
-                    let mapped = self.fail(&server_id, &failure).await;
                     if matches!(mapped, BeamError::SessionExpired) {
                         return Err(mapped);
                     }

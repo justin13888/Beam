@@ -210,12 +210,98 @@ async fn a_flush_stops_at_the_first_failure_and_backs_that_sample_off() {
     assert_eq!(queue[0].file_id, FILE_A);
     assert_eq!(queue[0].attempts, 1);
     assert_eq!(
+        queue[0].rejections, 0,
+        "a 503 is the server failing, not the sample"
+    );
+    assert_eq!(
         queue[0].not_before_unix,
         now + 2,
         "no Retry-After: the first exponential step"
     );
     assert_eq!(queue[1].file_id, FILE_B);
     assert_eq!(queue[1].attempts, 0, "never attempted");
+}
+
+/// An outage longer than any fixed number of retries: every flush meets a
+/// server that cannot be reached, and the resume point is still queued --
+/// and sent -- once it answers. Eight failures used to retire it, which on
+/// the 2 s..64 s backoff is about four and a half minutes of downtime.
+#[tokio::test]
+async fn a_long_outage_does_not_cost_the_queued_resume_point() {
+    let (client, id, storage, clock) = clocked_client().await;
+    let backend = answer_with(
+        &client,
+        &id,
+        vec![crate::transport::CannedAnswer::Unreachable],
+    );
+    assert_eq!(
+        client
+            .report_progress(FILE_A.to_owned(), 30.0, Some(7200.0), true)
+            .await
+            .expect("an outcome"),
+        ProgressOutcome::Queued { pending: 1 }
+    );
+
+    let outages = 3 * 8;
+    for _ in 0..outages {
+        assert_eq!(client.flush_progress().await.expect("not an error"), 0);
+        let queue = queued(&storage, &id).await;
+        assert_eq!(queue.len(), 1, "an outage never retires the sample");
+        assert_eq!(queue[0].rejections, 0);
+        clock.advance_secs(queue[0].not_before_unix - clock.now_unix());
+    }
+    assert_eq!(
+        backend.recorded().len(),
+        1 + outages,
+        "every flush really did try the server"
+    );
+    assert_eq!(
+        queued(&storage, &id).await[0].attempts,
+        u32::try_from(outages).expect("small"),
+        "each outage still backed the sample off"
+    );
+
+    let backend = answer_with(
+        &client,
+        &id,
+        vec![crate::transport::CannedAnswer::respond(
+            200,
+            JSON,
+            PROGRESS_ACK,
+        )],
+    );
+    assert_eq!(client.flush_progress().await.expect("flushed"), 1);
+    let sent = backend.recorded();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].url.path(), format!("/v1/files/{FILE_A}/progress"));
+    assert_eq!(json_body(&sent[0])["position_secs"], 30.0);
+    assert_eq!(client.pending_progress_count().await.expect("countable"), 0);
+}
+
+/// The other side of the same rule: a server that refuses the sample
+/// itself counts toward retiring it, so a flush cannot spend the queue's
+/// whole retention window resending a request that fails identically.
+#[tokio::test]
+async fn a_flush_the_server_refuses_counts_toward_retiring_the_sample() {
+    let (client, id, storage, clock) = clocked_client().await;
+    queue_two_samples(&client, &id, &clock).await;
+    answer_with(
+        &client,
+        &id,
+        vec![crate::transport::CannedAnswer::respond(
+            404,
+            PROBLEM,
+            r#"{"type":"about:blank","status":404,"detail":"no such file"}"#,
+        )],
+    );
+
+    assert_eq!(client.flush_progress().await.expect("not an error"), 0);
+
+    let queue = queued(&storage, &id).await;
+    assert_eq!(queue[0].file_id, FILE_A);
+    assert_eq!(queue[0].attempts, 1);
+    assert_eq!(queue[0].rejections, 1);
+    assert_eq!(queue[1].rejections, 0, "never attempted");
 }
 
 #[tokio::test]
@@ -320,6 +406,7 @@ async fn a_queued_sample_with_a_malformed_id_fails_without_a_request() {
             duration_secs: None,
             captured_at_unix: now - 2,
             attempts: 0,
+            rejections: 0,
             not_before_unix: now - 2,
         },
         QueuedProgress {
@@ -328,6 +415,7 @@ async fn a_queued_sample_with_a_malformed_id_fails_without_a_request() {
             duration_secs: None,
             captured_at_unix: now - 1,
             attempts: 0,
+            rejections: 0,
             not_before_unix: now - 1,
         },
     ];
@@ -353,6 +441,7 @@ async fn a_queued_sample_with_a_malformed_id_fails_without_a_request() {
     let queue = queued(&storage, &id).await;
     assert_eq!(queue[0].file_id, "not-a-uuid");
     assert_eq!(queue[0].attempts, 1);
+    assert_eq!(queue[0].rejections, 1, "an id that can never be valid");
     assert_eq!(queue[1].attempts, 0);
 
     assert_eq!(client.flush_progress().await.expect("flushed"), 1);
