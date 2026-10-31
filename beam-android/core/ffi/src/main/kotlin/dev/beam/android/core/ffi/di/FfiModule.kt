@@ -34,8 +34,9 @@ import javax.inject.Singleton
  * Everything the core needs to exist, and the repositories over it.
  *
  * Public, with [FfiBindsModule], so a test in another module can name both in
- * `@TestInstallIn(replaces = ...)`: the app's Hilt tests swap the native core
- * for the `:core:testing` fakes, which Robolectric can load where JNA cannot.
+ * `@TestInstallIn(replaces = ...)`: the app's Hilt tests swap the real
+ * repositories for the `:core:testing` fakes, because these sit over a
+ * `BeamClient` that talks to a server, which a test has none of.
  */
 @Module
 @InstallIn(SingletonComponent::class)
