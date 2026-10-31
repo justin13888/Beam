@@ -2,6 +2,7 @@ package dev.beam.android.feature.history
 
 import dev.beam.android.core.testing.FakePlaybackRepository
 import dev.beam.android.core.testing.Fixtures
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -163,6 +164,41 @@ class HistoryTest {
                 viewModel.state.value.entries
                     .map { it.mediaId },
             )
+        }
+
+    @Test
+    fun `a further page still arriving when the list is refreshed is dropped`() =
+        runTest {
+            // The page belongs to the list being replaced: landing it on the
+            // reset pager would append stale rows and page on from its cursor.
+            val playback =
+                FakePlaybackRepository().apply {
+                    historyPage = pageOf("a", endCursor = "page-1", hasNextPage = true)
+                }
+            val viewModel = HistoryViewModel(playback)
+            testScheduler.advanceUntilIdle()
+
+            val stale = CompletableDeferred<Unit>()
+            playback.historyHold = stale
+            playback.historyPage = pageOf("stale", endCursor = "stale-cursor", hasNextPage = true)
+            viewModel.loadMore()
+            testScheduler.advanceUntilIdle()
+
+            playback.historyHold = null
+            playback.historyPage = pageOf("fresh", endCursor = "fresh-cursor", hasNextPage = true)
+            viewModel.refresh()
+            testScheduler.advanceUntilIdle()
+            stale.complete(Unit)
+            testScheduler.advanceUntilIdle()
+
+            assertEquals(
+                listOf("fresh"),
+                viewModel.state.value.entries
+                    .map { it.mediaId },
+            )
+            viewModel.loadMore()
+            testScheduler.advanceUntilIdle()
+            assertEquals("fresh-cursor", playback.historyAfters.last())
         }
 
     @Test

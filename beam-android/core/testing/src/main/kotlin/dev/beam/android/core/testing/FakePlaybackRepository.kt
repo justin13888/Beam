@@ -39,6 +39,14 @@ public class FakePlaybackRepository : PlaybackRepository {
     public val historyAfters: MutableList<String?> = mutableListOf()
 
     /**
+     * When set, [history] holds its answer until this completes.
+     *
+     * The page and the hold are both read when the request is made, so a test
+     * can hold one request open, then set up what the next one answers.
+     */
+    public var historyHold: CompletableDeferred<Unit>? = null
+
+    /**
      * Every progress report, in order.
      *
      * Records the duration and the force flag as well as the position, because
@@ -158,8 +166,10 @@ public class FakePlaybackRepository : PlaybackRepository {
         after: String?,
     ): HistoryPage {
         historyAfters += after
+        val page = historyPage
+        historyHold?.await()
         failWith?.let { throw it }
-        return historyPage
+        return page
     }
 
     override suspend fun reportProgress(
