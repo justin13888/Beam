@@ -134,7 +134,9 @@ built for the clients only.
 
 **beam-android**
 Kotlin/Compose client for Android phones and tablets, built on `beam-client-core`. Playback is
-Media3; only its `core:ffi` module sees the generated bindings or loads the native library.
+Media3. Its `core:ffi` module owns the generated bindings and loads the native library; the
+server-facing calls sit behind Kotlin repository interfaces, while what the core decides locally
+(cursor paging, retryability, the part timeline, the resolution label) is called directly.
 
 **beam-apple**
 SwiftUI client for iOS/iPadOS and macOS, built on `beam-client-core`. Playback runs through two
