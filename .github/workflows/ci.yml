@@ -196,7 +196,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           rustflags: ""
       - run: mise run rust:fmt
@@ -209,7 +209,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           rustflags: ""
       - run: mise run rust:lockfile
@@ -329,7 +329,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           rustflags: ""
       - run: mise run rust:deny
@@ -346,7 +346,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           rustflags: ""
       - uses: ./.github/actions/install-rust-build-deps
@@ -363,7 +363,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           rustflags: ""
       - uses: ./.github/actions/install-rust-build-deps
@@ -410,7 +410,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           rustflags: ""
       - uses: ./.github/actions/install-rust-build-deps
@@ -465,7 +465,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           rustflags: ""
       - uses: ./.github/actions/install-rust-build-deps
@@ -636,7 +636,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           rustflags: ""
       - uses: ./.github/actions/setup-android
@@ -651,7 +651,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           rustflags: ""
       - uses: ./.github/actions/setup-android
@@ -675,7 +675,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           rustflags: ""
       - uses: ./.github/actions/setup-android
@@ -701,7 +701,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           rustflags: ""
       - uses: ./.github/actions/setup-android
@@ -721,7 +721,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           rustflags: ""
       - uses: ./.github/actions/setup-android
@@ -773,7 +773,7 @@ jobs:
         with:
           xcode-version: "26.0"
       - uses: jdx/mise-action@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           rustflags: ""
       # The runner image has no iOS simulator runtime; the action explains why
@@ -794,7 +794,7 @@ jobs:
         with:
           xcode-version: "26.0"
       - uses: jdx/mise-action@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           rustflags: ""
       # The runner image has no iOS simulator runtime; the action explains why
@@ -828,7 +828,7 @@ jobs:
         with:
           xcode-version: "26.0"
       - uses: jdx/mise-action@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           rustflags: ""
       # The runner image has no iOS simulator runtime; the action explains why
