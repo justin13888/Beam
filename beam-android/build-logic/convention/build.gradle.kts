@@ -50,6 +50,10 @@ gradlePlugin {
             id = "beam.android.pitest"
             implementationClass = "AndroidPitestConventionPlugin"
         }
+        register("androidNativeCore") {
+            id = "beam.android.nativecore"
+            implementationClass = "AndroidNativeCoreConventionPlugin"
+        }
         register("jvmLibrary") {
             id = "beam.jvm.library"
             implementationClass = "JvmLibraryConventionPlugin"

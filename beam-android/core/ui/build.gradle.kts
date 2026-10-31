@@ -1,6 +1,8 @@
 plugins {
     id("beam.android.library")
     id("beam.android.compose")
+    // `Format.resolution` is the core's rule.
+    id("beam.android.nativecore")
 }
 
 android {

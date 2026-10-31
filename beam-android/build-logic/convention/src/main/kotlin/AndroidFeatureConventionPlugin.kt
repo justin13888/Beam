@@ -21,6 +21,9 @@ class AndroidFeatureConventionPlugin : Plugin<Project> {
             pluginManager.apply("beam.android.compose")
             pluginManager.apply("beam.android.hilt")
             pluginManager.apply("org.jetbrains.kotlin.plugin.serialization")
+            // Every feature's view models reach the core: its errors, its
+            // pager, its labels.
+            pluginManager.apply("beam.android.nativecore")
 
             extensions.configure<LibraryExtension> {
                 // One shared `robolectric.properties` rather than a copy per

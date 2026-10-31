@@ -342,9 +342,11 @@ A Compose app for phone and tablet, on top of `beam-client-core`. Multi-module w
 plugins in `build-logic/`: `core/{model,ffi,designsystem,ui,media,testing}` and
 `feature/{auth,home,libraries,explore,detail,player,downloads,history,settings,admin}`.
 
-- **`core:ffi`** is the only module that sees the generated UniFFI Kotlin or loads the `.so`.
-  Everything above it depends on a Kotlin interface, which is what lets every screen be tested on
-  the JVM with no native library and no JNA on the classpath.
+- **`core:ffi`** owns the generated UniFFI Kotlin and loads the `.so`. The server-facing calls
+  sit behind Kotlin repository interfaces, so a screen's tests swap the network for a fake; what
+  the core decides locally -- cursor paging, whether an error is retryable, the part timeline, the
+  resolution label -- is called directly, and the JVM tests run it against the host build of the
+  core (`beam.android.nativecore`), never a Kotlin copy of it.
 - **Navigation** is Navigation 3: the back stack is ordinary observable state, so the tabs, the
   detail pages and the player share one history. Destinations are typed keys carrying their own
   arguments, so a navigation call cannot lose or misspell one.

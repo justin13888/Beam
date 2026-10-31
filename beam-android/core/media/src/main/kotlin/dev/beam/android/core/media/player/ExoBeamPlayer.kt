@@ -35,6 +35,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import uniffi.beam_client_core.BeamException
+import uniffi.beam_client_core.PartPosition
 import uniffi.beam_client_core.PlaybackPart
 import uniffi.beam_client_core.PlaybackPlan
 import uniffi.beam_client_core.RebufferMonitor
@@ -42,6 +43,8 @@ import uniffi.beam_client_core.RebufferMonitorInterface
 import uniffi.beam_client_core.ServerHttpConfig
 import uniffi.beam_client_core.SwitchTrigger
 import uniffi.beam_client_core.TelemetryClientKind
+import uniffi.beam_client_core.partAbsoluteMs
+import uniffi.beam_client_core.partLocate
 
 /**
  * [BeamPlayer] over Media3's [ExoPlayer].
@@ -83,8 +86,11 @@ internal class ExoBeamPlayer(
     /** The file playing: the source's own, or the part of it the player is in. */
     private var currentFileId: String? = null
 
-    /** Where the loaded source's parts sit end to end, for a switch to hold position. */
-    private var timeline: PartTimeline? = null
+    /**
+     * The loaded source's parts, whose durations place them end to end, so a
+     * switch holds position. The arithmetic is the core's.
+     */
+    private var loadedParts: List<PlaybackPart>? = null
 
     /**
      * True from a prepare or a seek until playback is next ready. Buffering
@@ -114,7 +120,7 @@ internal class ExoBeamPlayer(
         val started =
             prepare(request) { plan ->
                 PartPosition(
-                    index = plan.startPartIndex.toInt(),
+                    index = plan.startPartIndex,
                     offsetMs = (request.startPositionSecs * ProgressReporter.MILLIS_PER_SECOND).toLong(),
                 )
             }
@@ -196,15 +202,20 @@ internal class ExoBeamPlayer(
         // whole film, not of the part playing, so a switch between a
         // multi-part version and a whole file lands at the same scene.
         val resumeAtMs =
-            timeline?.absoluteMs(exoPlayer.currentMediaItemIndex, exoPlayer.currentPosition)
-                ?: exoPlayer.currentPosition
+            loadedParts?.let { parts ->
+                partAbsoluteMs(
+                    parts,
+                    exoPlayer.currentMediaItemIndex.coerceAtLeast(0).toUInt(),
+                    exoPlayer.currentPosition,
+                )
+            } ?: exoPlayer.currentPosition
         val wasPlaying = exoPlayer.playWhenReady
         val switched =
             request.copy(
                 fileId = fileId,
                 startPositionSecs = resumeAtMs / ProgressReporter.MILLIS_PER_SECOND,
             )
-        if (prepare(switched) { plan -> plan.timeline().locate(resumeAtMs) }) {
+        if (prepare(switched) { plan -> partLocate(plan.parts, resumeAtMs) }) {
             exoPlayer.playWhenReady = wasPlaying
         }
     }
@@ -217,7 +228,7 @@ internal class ExoBeamPlayer(
         exoPlayer.stop()
         exoPlayer.clearMediaItems()
         currentFileId = null
-        timeline = null
+        loadedParts = null
         mutableState.value = PlaybackUiState()
         recorder.end()
     }
@@ -275,11 +286,10 @@ internal class ExoBeamPlayer(
             plan.parts.mapIndexed { index, part ->
                 factory.createMediaSource(mediaItem(request, part, index, plan.parts.size))
             }
-        val start =
-            startAt(plan).let { position ->
-                position.copy(index = position.index.coerceIn(0, plan.parts.lastIndex))
-            }
-        val startPart = plan.parts[start.index]
+        val start = startAt(plan)
+        val startIndex = start.index.coerceAtMost(plan.parts.lastIndex.toUInt()).toInt()
+        val startOffsetMs = start.offsetMs.coerceAtLeast(0L)
+        val startPart = plan.parts[startIndex]
 
         // A different file: whatever the last one's stalls said about it, they
         // say nothing about this one.
@@ -293,8 +303,8 @@ internal class ExoBeamPlayer(
         // Set before the items, so the transition the new playlist reports is
         // recognised as this start rather than a move to the next part.
         currentFileId = startPart.fileId
-        timeline = plan.timeline()
-        exoPlayer.setMediaSources(sources, start.index, start.offsetMs.coerceAtLeast(0L))
+        loadedParts = plan.parts
+        exoPlayer.setMediaSources(sources, startIndex, startOffsetMs)
         exoPlayer.prepare()
 
         mutableState.value =
@@ -305,8 +315,8 @@ internal class ExoBeamPlayer(
                     (startPart.durationSecs ?: request.durationSecs.takeIf { plan.parts.size == 1 })
                         ?.let { (it * ProgressReporter.MILLIS_PER_SECOND).toLong() }
                         ?: PlaybackUiState.UNKNOWN_DURATION,
-                positionMs = start.offsetMs.coerceAtLeast(0L),
-                partIndex = start.index,
+                positionMs = startOffsetMs,
+                partIndex = startIndex,
                 partCount = plan.parts.size,
             )
         reporter.start(startPart.fileId, ::sample)
@@ -574,7 +584,3 @@ internal class ExoBeamPlayer(
         const val POSITION_POLL_MS: Long = 500L
     }
 }
-
-/** Where this plan's parts sit end to end. */
-internal fun PlaybackPlan.timeline(): PartTimeline =
-    PartTimeline(parts.map { part -> part.durationSecs?.let { (it * ProgressReporter.MILLIS_PER_SECOND).toLong() } })

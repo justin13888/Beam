@@ -13,6 +13,12 @@ import uniffi.beam_client_core.BeamException
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class ProgressReporterTest {
+    /** The core's interval, so these follow it rather than restating it. */
+    private val interval = ProgressReporter.DEFAULT_SAMPLE_INTERVAL_MS
+
+    /** Well inside one interval, so no step lands on a tick. */
+    private val slack = 1_000L
+
     @Test
     fun `nothing is reported before the first interval elapses`() =
         runTest {
@@ -21,7 +27,7 @@ class ProgressReporterTest {
             val reporter = ProgressReporter(repository, scope)
 
             reporter.start("file-1") { PlaybackPosition(positionMs = 1_000L, durationMs = 60_000L) }
-            scope.advanceTimeBy(14_000L)
+            scope.advanceTimeBy(interval - slack)
             scope.runCurrent()
 
             assertTrue(repository.reportedProgress.isEmpty())
@@ -36,7 +42,7 @@ class ProgressReporterTest {
             val reporter = ProgressReporter(repository, scope)
 
             reporter.start("file-1") { PlaybackPosition(positionMs = 30_000L, durationMs = 60_000L) }
-            scope.advanceTimeBy(46_000L)
+            scope.advanceTimeBy(3 * interval + slack)
             scope.runCurrent()
 
             assertEquals(3, repository.reportedProgress.size)
@@ -95,12 +101,12 @@ class ProgressReporterTest {
             val reporter = ProgressReporter(repository, scope)
 
             reporter.start("file-1") { PlaybackPosition(positionMs = 1_000L, durationMs = 60_000L) }
-            scope.advanceTimeBy(16_000L)
+            scope.advanceTimeBy(interval + slack)
             scope.runCurrent()
             val afterFirst = repository.reportedProgress.size
 
             reporter.stop()
-            scope.advanceTimeBy(60_000L)
+            scope.advanceTimeBy(4 * interval)
             scope.runCurrent()
 
             assertEquals(afterFirst, repository.reportedProgress.size)
@@ -114,7 +120,7 @@ class ProgressReporterTest {
             val reporter = ProgressReporter(repository, scope)
 
             reporter.start("file-1") { null }
-            scope.advanceTimeBy(46_000L)
+            scope.advanceTimeBy(3 * interval + slack)
             scope.runCurrent()
 
             assertTrue(repository.reportedProgress.isEmpty())
@@ -135,7 +141,7 @@ class ProgressReporterTest {
             val reporter = ProgressReporter(repository, scope)
 
             reporter.start("file-1") { PlaybackPosition(positionMs = 1_000L, durationMs = 60_000L) }
-            scope.advanceTimeBy(46_000L)
+            scope.advanceTimeBy(3 * interval + slack)
             scope.runCurrent()
 
             reporter.stop()

@@ -84,26 +84,16 @@ class FormatTest {
     }
 
     @Test
-    fun `a resolution is named by its height, or by a 4K width at a wide aspect`() {
+    fun `a resolution is the core's label, and blank where it has none`() {
+        // The bands are the core's (`resolution.rs`) and tested there. This
+        // pins what is Android's own: the call reaches the core's width-keyed
+        // rule, and "no label" renders as nothing rather than as "null".
         val cases =
             listOf(
+                // A 2.39:1 scope rip: 720p by its height, 1080p by its width.
+                Triple(1920u, 804u, "1080p"),
+                Triple(null, 1080u, "1080p"),
                 Triple(null, null, ""),
-                Triple(1920u, null, ""),
-                Triple(3840u, 2160u, "4K"),
-                // A 2.39:1 film: 4K by width, though short of 2000 lines.
-                Triple(3840u, 1600u, "4K"),
-                Triple(3199u, 1999u, "1440p"),
-                Triple(null, 2000u, "4K"),
-                Triple(2560u, 1440u, "1440p"),
-                Triple(null, 1400u, "1440p"),
-                Triple(null, 1399u, "1080p"),
-                Triple(1920u, 1080u, "1080p"),
-                Triple(null, 900u, "1080p"),
-                Triple(null, 899u, "720p"),
-                Triple(null, 600u, "720p"),
-                Triple(null, 599u, "480p"),
-                Triple(null, 400u, "480p"),
-                Triple(null, 399u, "399p"),
             )
         for ((width, height, expected) in cases) {
             assertEquals("resolution($width, $height)", expected, Format.resolution(width, height))
