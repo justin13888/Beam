@@ -92,14 +92,24 @@ impl BeamClient {
                     });
                 }
 
+                // A 429 names the interval the server wants left alone. Queued
+                // as due at once, the next `flush_progress` sent it straight
+                // back into that interval -- the flush path already honoured
+                // `Retry-After`, this one dropped it. Saturating, like
+                // `record_failure`: the transport clamps the header, but this
+                // layer must not be the one that panics if it ever does not.
+                let now = self.clock.now_unix();
+                let not_before_unix = failure.retry_after_secs.map_or(now, |seconds| {
+                    now.saturating_add(i64::try_from(seconds).unwrap_or(i64::MAX))
+                });
                 queue
                     .enqueue(QueuedProgress {
                         file_id,
                         position_secs: position,
                         duration_secs: duration,
-                        captured_at_unix: self.clock.now_unix(),
+                        captured_at_unix: now,
                         attempts: 0,
-                        not_before_unix: self.clock.now_unix(),
+                        not_before_unix,
                     })
                     .await?;
                 let pending = queue.len().await?;
