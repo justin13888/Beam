@@ -876,7 +876,7 @@ pub enum PlaybackTelemetryReportError {
 /// Three of the statuses these operations answer with are not here, and each
 /// absence is deliberate. The 401 and 403 arrive from `SessionAuth` and
 /// `EnforceSameOrigin`. The 416 is declared on
-/// [`RuntimeDelivery`](crate::routes::delivery::RuntimeDelivery) -- the
+/// [`Delivery`](kynos::response::range::served::Delivery) -- the
 /// generic delivery type file delivery shares with artwork -- because
 /// `Served::deliver` resolves an unsatisfiable range into a problem document
 /// and hands it back as an `Ok` delivery -- the handler never sees an error to
@@ -920,7 +920,7 @@ pub enum DeliveryError {
 /// No 400 for a malformed id: both path parameters are typed `Uuid`, so the
 /// `Path` extractor answers that before the handler runs. The 416 of an
 /// unsatisfiable range is declared on
-/// [`RuntimeDelivery`](crate::routes::delivery::RuntimeDelivery), as for file
+/// [`Delivery`](kynos::response::range::served::Delivery), as for file
 /// delivery.
 ///
 /// The three 404s share one declared response. `file-not-found` and
@@ -987,7 +987,7 @@ pub enum TrickplayDeliveryError {
 /// What `/v1/artwork/{kind}/{id}/{variant}` can fail with.
 ///
 /// Separate from [`DeliveryError`] even though both deliver bytes through
-/// `RuntimeDelivery`, because the conditions do not mean the same thing to a
+/// kynos's `Delivery`, because the conditions do not mean the same thing to a
 /// client. `file-not-found` and `source-file-missing` are about an indexed file
 /// a viewer asked to play; a title with no poster is neither -- it is the
 /// ordinary case a client renders as a placeholder. Reusing the delivery codes
