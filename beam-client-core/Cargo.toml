@@ -69,6 +69,9 @@ url = "2.5.8"
 # floors E023 enforces are explained in `[workspace.dependencies]`.
 futures-core = { workspace = true }
 uuid = { workspace = true }
+# Named by the generated client since spargen 0.6, for the same E023 reason:
+# 1.0.1 is the floor it audits.
+http-body = "1.0.1"
 
 # rustls with `ring`, deliberately not `aws-lc-rs`: aws-lc-rs needs cmake and a
 # per-ABI C toolchain, which does not cross-compile cleanly to Android.

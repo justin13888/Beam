@@ -1238,18 +1238,18 @@ mod tests {
         assert!(!response.text().contains("gone@example.com"));
     }
 
-    /// The authenticator cannot say "I could not tell" (see
-    /// `SessionAuthenticator::authenticate`), so a session store that fails
-    /// the lookup is a 401 -- never a 500 that reads as the endpoint being
-    /// broken, and never the user the cookie named.
+    /// A session store that fails the lookup is a 503 "I could not tell" (see
+    /// `SessionAuthenticator::authenticate`) -- never a 401 that tells the
+    /// client to discard a session that may be valid, and never the user the
+    /// cookie named.
     #[tokio::test]
-    async fn a_session_store_outage_is_401_not_500() {
+    async fn a_session_store_outage_is_503_not_401() {
         let harness = harness_failing("outage@example.com", SessionStoreOperation::Get);
         let session_cookie = login_and_get_session_cookie(&harness, "outage@example.com").await;
 
         let response = get_me(&harness, &session_cookie).await;
 
-        response.assert_status(StatusCode::UNAUTHORIZED);
+        response.assert_status(StatusCode::SERVICE_UNAVAILABLE);
         assert!(
             !response.text().contains("outage@example.com"),
             "no account is answered for a cookie that could not be checked"

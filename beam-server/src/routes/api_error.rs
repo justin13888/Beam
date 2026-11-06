@@ -327,8 +327,6 @@ pub enum FixMatchError {
     #[error("the request body breaks {} rule(s)", errors.len())]
     #[problem(status = 422, title = "Validation failed")]
     ValidationFailed {
-        // kynos gap: the `errors` extension is not described (see
-        // `PlaybackTelemetryError::ValidationFailed`); getkono/kynos#991.
         #[problem(extension)]
         errors: Vec<crate::models::FieldError>,
     },
@@ -351,7 +349,6 @@ pub enum FieldLocksError {
     #[error("the request body breaks {} rule(s)", errors.len())]
     #[problem(status = 422, title = "Validation failed")]
     ValidationFailed {
-        // kynos gap: as for `FixMatchError::ValidationFailed`; getkono/kynos#991.
         #[problem(extension)]
         errors: Vec<crate::models::FieldError>,
     },
@@ -435,8 +432,6 @@ pub enum LibraryCreateError {
     #[error("the request body breaks {} rule(s)", errors.len())]
     #[problem(status = 422, title = "Validation failed")]
     ValidationFailed {
-        // kynos gap: as for `PlaybackTelemetryError::ValidationFailed`;
-        // getkono/kynos#991.
         #[problem(extension)]
         errors: Vec<crate::models::FieldError>,
     },
@@ -533,7 +528,6 @@ pub enum LanguagePreferencesUpdateError {
     #[error("the request body breaks {} rule(s)", errors.len())]
     #[problem(status = 422, title = "Validation failed")]
     ValidationFailed {
-        // kynos gap: as for `FixMatchError::ValidationFailed`; getkono/kynos#991.
         #[problem(extension)]
         errors: Vec<crate::models::FieldError>,
     },
@@ -577,7 +571,6 @@ pub enum UserAccessUpdateError {
     #[error("the request body breaks {} rule(s)", errors.len())]
     #[problem(status = 422, title = "Validation failed")]
     ValidationFailed {
-        // kynos gap: as for `FixMatchError::ValidationFailed`; getkono/kynos#991.
         #[problem(extension)]
         errors: Vec<crate::models::FieldError>,
     },
@@ -606,8 +599,6 @@ pub enum ProgressError {
     #[error("the request body breaks {} rule(s)", errors.len())]
     #[problem(status = 422, title = "Validation failed")]
     ValidationFailed {
-        // kynos gap: as for `PlaybackTelemetryError::ValidationFailed`;
-        // getkono/kynos#991.
         #[problem(extension)]
         errors: Vec<crate::models::FieldError>,
     },
@@ -856,11 +847,6 @@ pub enum PlaybackTelemetryError {
     #[error("the request body breaks {} rule(s)", errors.len())]
     #[problem(status = 422, title = "Validation failed")]
     ValidationFailed {
-        // kynos gap: the derived responses describe a problem's `type` and
-        // `title` only, never its `#[problem(extension)]` members, so the
-        // OpenAPI document's 422 omits `errors` and `FieldError` and a
-        // generated client cannot type them. getkono/kynos#991; the document
-        // is not patched locally.
         #[problem(extension)]
         errors: Vec<crate::models::FieldError>,
     },
@@ -1187,6 +1173,7 @@ pub struct AuthenticatedUser {
     name = "BeamSession",
     credential = AuthenticatedUser,
     scope = BeamScope,
+    unavailable,
     description = "Opaque session cookie issued by the OIDC login flow (ADR-0003). \
                    Hashed at rest; never recoverable from the API."
 )]
@@ -1256,15 +1243,12 @@ impl Authenticates<SessionCookie> for AppState {
 impl Authenticator<SessionCookie, AppState> for SessionAuthenticator {
     /// Resolves the cookie to a user, sliding the idle expiry forward.
     ///
-    /// Note the one behaviour change the migration forces: a *session store
-    /// failure* used to surface as 500 and now surfaces as 401.
-    /// `AuthRejection` has only `Unauthenticated` and `Forbidden`, so a
-    /// verifier has no way to say "I could not tell". The error is logged at
-    /// `error` level so an outage is still visible in operations.
-    ///
-    /// Upstream gap: getkono/kynos#993, which adds a 503 an authenticator can
-    /// answer when its store is unavailable. It is fixed on kynos's master and
-    /// not yet in a release; take it from the first release that carries it.
+    /// A *session store failure* is a 503: the authenticator could not tell
+    /// whether the cookie is valid, which is neither a 401 -- that would tell
+    /// a client to discard a session that may be fine -- nor the user the
+    /// cookie named. [`SessionCookie`] declares it (`unavailable`), so every
+    /// operation it guards documents the 503. The error is logged at `error`
+    /// level so an outage is visible in operations.
     async fn authenticate(
         &self,
         presented: kynos::security::carrier::ApiKey,
@@ -1280,7 +1264,7 @@ impl Authenticator<SessionCookie, AppState> for SessionAuthenticator {
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "session store failed while authenticating");
-            AuthRejection::unauthenticated()
+            AuthRejection::unavailable::<SessionCookie>()
         })?
         .ok_or_else(AuthRejection::unauthenticated)?;
 
@@ -1317,7 +1301,7 @@ impl Authenticator<SessionCookie, AppState> for SessionAuthenticator {
             .await
             .map_err(|e| {
                 tracing::error!(error = %e, "user lookup failed while authorizing");
-                AuthRejection::unauthenticated()
+                AuthRejection::unavailable::<SessionCookie>()
             })?
             .ok_or_else(AuthRejection::unauthenticated)?;
 

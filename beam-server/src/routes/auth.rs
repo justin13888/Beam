@@ -36,14 +36,11 @@ use beam_auth::utils::pending_auth_store::{PendingAuth, PendingAuthStore};
 use beam_auth::utils::repository::UserRepository;
 use beam_auth::utils::session_store::{SessionData, SessionStore};
 use chrono::{DateTime, Utc};
-use kynos::error::rejection::HeaderRejection;
-use kynos::extract::params::header::{DecodeHeaders, HeaderParams};
-use kynos::http::HeaderMap;
 use kynos::http::forwarded::Forwarded;
 use kynos::prelude::*;
 use kynos::response::cookie::{Cookie, SameSite};
 use kynos::response::headers::WithHeaders;
-use kynos::response::status::{NoContent, Redirect};
+use kynos::response::status::{InvalidLocation, Location, NoContent, Redirect};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -51,7 +48,6 @@ use crate::routes::api_error::{
     ERROR_BASE, INTERNAL_DETAIL, InternalError, OIDC_UNAVAILABLE_DETAIL, SESSION_COOKIE,
     ServerFault, SessionAuth,
 };
-use crate::routes::middleware::optional_header;
 use crate::routes::tags::Auth;
 
 const STATE_COOKIE: &str = "beam_oidc_state";
@@ -506,6 +502,21 @@ impl From<CookieEncodingError> for LoginCallbackError {
     }
 }
 
+// Likewise a redirect target that is not a field value: the IdP's URL and the
+// configured web URL are both the server's own to get right.
+
+impl From<InvalidLocation> for LoginStartError {
+    fn from(e: InvalidLocation) -> Self {
+        Self::Internal(ServerFault::new(e))
+    }
+}
+
+impl From<InvalidLocation> for LoginCallbackError {
+    fn from(e: InvalidLocation) -> Self {
+        Self::Internal(ServerFault::new(e))
+    }
+}
+
 impl From<CookieEncodingError> for SessionRevokeError {
     fn from(e: CookieEncodingError) -> Self {
         Self::Internal(ServerFault::new(e))
@@ -528,26 +539,11 @@ impl From<CookieEncodingError> for InternalError {
 /// The client address is not a header here at all: it is [`Forwarded`],
 /// resolved by the router's trusted-proxy policy, so a client cannot name its
 /// own address by writing `X-Forwarded-For`.
-//
-// Hand-implemented rather than derived because `#[derive(HeaderParams)]` in
-// kynos 0.4.0 has no way to set `DESCRIBED = false`: getkono/kynos#1021.
-// Once a release carries that attribute, go back to the derive with it.
-#[derive(Debug)]
+#[derive(Debug, HeaderParams)]
+#[header(described = false)]
 pub struct ClientHeaders {
+    #[header(rename = "User-Agent")]
     pub user_agent: Option<String>,
-}
-
-impl HeaderParams for ClientHeaders {
-    const NAMES: &'static [&'static str] = &["User-Agent"];
-    const DESCRIBED: bool = false;
-}
-
-impl DecodeHeaders for ClientHeaders {
-    fn decode(headers: &HeaderMap) -> Result<Self, HeaderRejection> {
-        Ok(Self {
-            user_agent: optional_header(headers, "User-Agent")?,
-        })
-    }
 }
 
 fn build_cookie(name: &str, value: String, path: &str, secure: bool, max_age: Duration) -> Cookie {
@@ -651,7 +647,7 @@ pub async fn oidc_login(
     );
 
     Ok(WithHeaders::new(
-        Redirect::to(begin.auth_url),
+        Redirect::to(Location::try_from(begin.auth_url)?),
         SetCookie::new(&cookie)?,
     ))
 }
@@ -753,7 +749,10 @@ pub async fn oidc_callback(
     let redirect_path = pending.redirect_path.unwrap_or_else(|| "/".to_owned());
 
     Ok(WithHeaders::new(
-        Redirect::to(format!("{}{}", config.web_url, redirect_path)),
+        Redirect::to(Location::try_from(format!(
+            "{}{}",
+            config.web_url, redirect_path
+        ))?),
         SetCookie::new(&cookie)?,
     ))
 }
@@ -1142,10 +1141,6 @@ pub async fn oidc_delete_session(
 /// `required: false`, so the description states that a client cannot count on
 /// it. This replaced a hand-written `IntoResponse`/`Responses` pair that
 /// declared the header required on a response that usually omits it.
-///
-/// Kynos 0.4.0 describes an optional header's schema as nullable, which a
-/// header value cannot be; getkono/kynos#992 fixes that on its master, and the
-/// description corrects itself when a release carries it.
 #[derive(Schema, HeaderParams)]
 pub struct SessionRevoked {
     #[header(rename = "Set-Cookie")]

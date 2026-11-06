@@ -21,8 +21,9 @@ use std::time::SystemTime;
 
 use bytes::Bytes;
 use kynos::http::etag::ETag;
+use kynos::http::media::MediaRanges;
 use kynos::prelude::*;
-use kynos::response::range::served::{Conditions, Served};
+use kynos::response::range::served::{Conditions, Delivery, Served};
 use kynos::response::range::source::ByteSource;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tracing::error;
@@ -31,7 +32,6 @@ use uuid::Uuid;
 use beam_index::library_file::{open_regular_file, relative_to};
 
 use crate::routes::api_error::{DeliveryError, ServerFault, SessionAuth};
-use crate::routes::delivery::{AnyMedia, MediaRanges, RuntimeDelivery};
 use crate::routes::playback::caller_access;
 use crate::routes::tags::Playback;
 use crate::services::library::LocatedFile;
@@ -124,7 +124,7 @@ impl MediaRanges for SourceFileRanges {
 }
 
 /// A ranged delivery of one indexed source file.
-pub type MediaDelivery = RuntimeDelivery<SourceFileRanges>;
+pub type MediaDelivery = Delivery<SourceFileRanges>;
 
 /// Resolve `file_id` to the file's on-disk path, its library's root and its
 /// detected content type.
@@ -222,7 +222,8 @@ async fn deliver(
             DeliveryError::SourceFileMissing("Source video file not found".into())
         })?;
 
-    let mut served = Served::<_, AnyMedia>::new(source)
+    let mut served = Served::<_, SourceFileRanges>::new(source)
+        .content_type(&content_type)
         .etag(validator(modified, length))
         .last_modified(modified)
         .cache_control("private, max-age=3600");
@@ -233,12 +234,10 @@ async fn deliver(
         served = served.attachment(download_filename(&path, file_id));
     }
 
-    let delivery = served.deliver(conditions).await.map_err(|err| {
+    served.deliver(conditions).await.map_err(|err| {
         error!(?err, "failed to read source file span");
         DeliveryError::Internal(ServerFault::logged("Failed to read source file"))
-    })?;
-
-    Ok(MediaDelivery::new(delivery, content_type))
+    })
 }
 
 /// The name a download is saved under.

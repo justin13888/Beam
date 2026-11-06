@@ -24,8 +24,9 @@
 use beam_domain::models::access::AccessPolicy;
 use beam_domain::providers::artwork::ArtworkFetchError;
 use kynos::http::etag::ETag;
+use kynos::http::media::MediaRanges;
 use kynos::prelude::*;
-use kynos::response::range::served::{Conditions, Served};
+use kynos::response::range::served::{Conditions, Delivery, Served};
 use kynos::response::range::source::InMemory;
 use serde::{Deserialize, Serialize};
 use tracing::error;
@@ -33,7 +34,6 @@ use uuid::Uuid;
 
 use crate::models::media::{ArtworkKind, ArtworkSize, ArtworkVariant};
 use crate::routes::api_error::{ArtworkError, ServerFault, SessionAuth};
-use crate::routes::delivery::{AnyMedia, MediaRanges, RuntimeDelivery};
 use crate::routes::playback::{caller_access, hides};
 use crate::routes::tags::Media;
 use crate::state::AppState;
@@ -70,7 +70,7 @@ impl MediaRanges for ArtworkRanges {
 }
 
 /// A delivery of one cached image.
-pub type ArtworkDelivery = RuntimeDelivery<ArtworkRanges>;
+pub type ArtworkDelivery = Delivery<ArtworkRanges>;
 
 /// The provider URL enrichment stored for this title and variant, if any.
 ///
@@ -230,19 +230,15 @@ async fn deliver(
     // `private`: whether the art is served at all depends on who asks, so a
     // shared cache must not answer one viewer with what it stored for
     // another (issue #263).
-    let served = Served::<_, AnyMedia>::new(InMemory::new(image.bytes))
+    let served = Served::<_, ArtworkRanges>::new(InMemory::new(image.bytes))
+        .content_type(image.format.content_type())
         .etag(ETag::strong(image.key.to_string()))
         .cache_control("private, max-age=86400");
 
-    let delivery = served.deliver(conditions).await.map_err(|err| {
+    served.deliver(conditions).await.map_err(|err| {
         error!(?err, "failed to read cached artwork");
         ArtworkError::Internal(ServerFault::logged("Failed to read artwork"))
-    })?;
-
-    Ok(ArtworkDelivery::new(
-        delivery,
-        image.format.content_type().to_owned(),
-    ))
+    })
 }
 
 /// Poster, backdrop or thumbnail art for one title.

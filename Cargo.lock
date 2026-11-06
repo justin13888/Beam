@@ -596,6 +596,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "http",
+ "http-body",
  "matroska-demuxer",
  "mutants",
  "proptest",

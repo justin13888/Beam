@@ -22,8 +22,11 @@ license = "AGPL-3.0-only"
 publish = false
 
 [workspace.dependencies]
-# http 1.3.x has a corrupted publish that fails to compile; pin to >=1.4
-http = ">=1.4, <2"
+# http 1.3.x has a corrupted publish that fails to compile, so the floor is
+# past it. 1.4.2 is spargen 0.6's floor for a generated client: its E023
+# runtime-dependency check refuses anything but a caret requirement at or above
+# it.
+http = "1.4.2"
 sha2 = "0.11"
 async-trait = "0.1"
 chrono = "0.4.45"
