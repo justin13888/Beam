@@ -565,10 +565,19 @@ fn clearing_cookie(name: &str, path: &str) -> Cookie {
 /// same-origin-relative path (leading `/`, not `//...` or `/\...` -- both
 /// of which some browsers treat as protocol-relative and would send the
 /// user off-site). Anything else falls back to `/`.
+///
+/// The path also becomes the callback's `Location`, which refuses a control
+/// character and surrounding whitespace (RFC 9110 §5.5). A path holding either
+/// falls back to `/` here, at login, rather than failing the callback after the
+/// session is already minted -- a 500 that would orphan it with no cookie sent.
 fn sanitize_redirect_path(raw: Option<&str>) -> String {
     match raw {
         Some(path)
-            if path.starts_with('/') && !path.starts_with("//") && !path.starts_with("/\\") =>
+            if path.starts_with('/')
+                && !path.starts_with("//")
+                && !path.starts_with("/\\")
+                && !path.chars().any(char::is_control)
+                && !path.ends_with(char::is_whitespace) =>
         {
             path.to_owned()
         }
@@ -1180,5 +1189,20 @@ mod helper_tests {
             "/"
         );
         assert_eq!(sanitize_redirect_path(None), "/");
+    }
+
+    /// Neither can be a `Location` field value, so keeping either would fail
+    /// the callback after the session is minted.
+    #[test]
+    fn a_control_character_or_trailing_whitespace_falls_back_to_root() {
+        for unusable in ["/a ", "/a\t", "/a\r\nSet-Cookie: x=y", "/a\0", "/a\u{7f}b"] {
+            assert_eq!(sanitize_redirect_path(Some(unusable)), "/", "{unusable:?}");
+        }
+    }
+
+    /// An inner space is a field value, so it is not refused.
+    #[test]
+    fn an_inner_space_is_kept() {
+        assert_eq!(sanitize_redirect_path(Some("/a b")), "/a b");
     }
 }

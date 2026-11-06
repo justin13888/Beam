@@ -470,6 +470,33 @@ mod tests {
         }
     }
 
+    /// A `redirect` that cannot be a `Location` -- trailing whitespace or a
+    /// control character -- still completes the login: the callback lands on
+    /// the web root and sends the session cookie, rather than answering 500
+    /// after the session is minted.
+    #[tokio::test]
+    async fn an_unusable_redirect_still_signs_in_and_lands_on_the_web_root() {
+        // URL-encoded: `/a `, `/a\t`, and `/a\r\nX: y`.
+        for unusable in ["%2Fa%20", "%2Fa%09", "%2Fa%0D%0AX%3A%20y"] {
+            let harness = make_harness(FakeOidcClient::with_identity(identity(
+                "user@example.com",
+                true,
+            )));
+
+            let (state_cookie, _) = do_login(&harness, Some(unusable)).await;
+            let begin = harness.oidc_client.last_begin().unwrap();
+
+            let response = do_callback(&harness, &state_cookie, &begin.state).await;
+            response
+                .assert_status(StatusCode::FOUND)
+                .assert_redirect("http://localhost:5173/");
+            assert!(
+                live_cookie(&response, SESSION_COOKIE).is_some(),
+                "{unusable}: the minted session's cookie is sent"
+            );
+        }
+    }
+
     /// With no identity provider configured, login is a 503 -- the server is
     /// up, sign-in is not -- and no login attempt is started. Driven through
     /// the served router, whose default state carries the
