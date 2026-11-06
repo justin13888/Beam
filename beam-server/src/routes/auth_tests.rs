@@ -293,6 +293,8 @@ mod tests {
                     oidc_logout_all,
                     oidc_list_sessions,
                     oidc_delete_session,
+                    // One admin operation, for the scope check's own failures.
+                    crate::routes::admin::get_admin_logs,
                 ]),
             )
             .trusted_proxies(trusted_proxies)
@@ -1275,6 +1277,30 @@ mod tests {
             .await
             .assert_status(StatusCode::INTERNAL_SERVER_ERROR)
             .assert_problem_type("https://beam.justinchung.net/reference/errors/#internal");
+    }
+
+    /// The admin check reads the user row, and a row that cannot be read is
+    /// the same "could not tell" as a session store outage: a 503, never the
+    /// 401 that would sign a valid administrator out.
+    #[tokio::test]
+    async fn an_account_store_failure_on_an_admin_operation_is_503_not_401() {
+        let users = Arc::new(FailingUserRepository::new(
+            InMemoryUserRepository::default(),
+            UserRepositoryOperation::FindById,
+        ));
+        let harness = make_harness_over_users(
+            FakeOidcClient::with_identity(identity("admin@example.com", true)),
+            users,
+        );
+        let session_cookie = login_and_get_session_cookie(&harness, "admin@example.com").await;
+
+        harness
+            .client
+            .get("/v1/admin/logs")
+            .cookie(SESSION_COOKIE, &session_cookie)
+            .send()
+            .await
+            .assert_status(StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]
