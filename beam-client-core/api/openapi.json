@@ -2685,7 +2685,7 @@
           {
             "name": "min_rating",
             "in": "query",
-            "description": "Filter by minimum rating, on the same 0-10 scale as `Ratings.tmdb`;\nan unrated title counts as 0. `NaN` is `#invalid-filter`.",
+            "description": "Filter by minimum rating, on the same 0-10 scale as `Ratings.tmdb`;\nan unrated title counts as 0. A value off the scale, `NaN` included,\nis a 400.",
             "required": false,
             "schema": {
               "type": "number",

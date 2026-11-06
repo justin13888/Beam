@@ -64,7 +64,8 @@ pub struct BrowseQuery {
     /// ignoring case. Results keep the requested sort.
     pub query: Option<String>,
     /// Filter by minimum rating, on the same 0-10 scale as `Ratings.tmdb`;
-    /// an unrated title counts as 0. `NaN` is `#invalid-filter`.
+    /// an unrated title counts as 0. A value off the scale, `NaN` included,
+    /// is a 400.
     #[schema(minimum = 0, maximum = 10)]
     pub min_rating: Option<f64>,
 }
