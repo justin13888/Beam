@@ -724,7 +724,6 @@ dependencies = [
  "dotenvy",
  "eyre",
  "futures",
- "futures-core",
  "http",
  "image",
  "kynos",

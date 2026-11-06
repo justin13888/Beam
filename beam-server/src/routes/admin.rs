@@ -587,7 +587,7 @@ pub async fn stream_admin_events(
     _auth: AdminAuth,
     Inject(state): Inject<AppState>,
 ) -> WithHeaders<
-    Sse<impl futures_core::Stream<Item = Result<Event<AdminEvent>, Infallible>>>,
+    Sse<impl kynos::response::stream::Stream<Item = Result<Event<AdminEvent>, Infallible>>>,
     StreamHeaders,
 > {
     let mut receiver = state.services.notification.subscribe();
