@@ -516,10 +516,17 @@ impl BeamClient {
         let context = servers
             .get(&server_id)
             .ok_or(BeamError::UnknownServer { server_id })?;
-        // Built by hand: the generated client cannot name an operation's URL
-        // without sending the request, and the in-app browser sends this one
-        // (getkono/spargen#1067).
-        context.record.absolute_url("/v1/auth/login?redirect=/")
+        // Named by the generated client without sending it: the in-app
+        // browser sends this one.
+        context
+            .client
+            .oidc_login_url(Some(crate::api::OidcLoginParams {
+                redirect: Some("/".to_owned()),
+            }))
+            .map(|url| url.to_string())
+            .map_err(|error| BeamError::InvalidServerUrl {
+                detail: format!("could not build the login URL: {error}"),
+            })
     }
 
     /// Hand over a cookie lifted from the in-app browser and verify it.

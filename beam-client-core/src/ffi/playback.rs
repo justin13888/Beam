@@ -255,9 +255,9 @@ impl BeamClient {
             host,
         } = server;
 
-        // Built by hand, because the generated client has no way to name an
-        // operation's URL without sending it, and the platform player sends
-        // this one itself (getkono/spargen#1067). Where the title's sources
+        // Built by hand, because `build.rs` omits the delivery operations from
+        // the generated client -- the platform player sends this one itself
+        // -- so there is no URL accessor to name it with. Where the title's sources
         // are known, `playback_plan` takes each part's `stream_url` from them
         // instead.
         let server_id = self.require_active()?;
