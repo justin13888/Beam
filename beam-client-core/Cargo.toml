@@ -100,7 +100,7 @@ features = [
 ]
 
 [build-dependencies]
-spargen = "0.5.0"
+spargen = "0.6.0"
 
 [dev-dependencies]
 # The invariants the crate's docs state (bounds, idempotence, never-panics on
