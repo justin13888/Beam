@@ -66,9 +66,10 @@ Anything a correct `/v1` client could notice as breakage:
 - Changing a status code, or the problem `type` for a condition that already had a specific one.
 - **Adding a problem `type` to an operation**, even for a condition that was answered with
   `about:blank` or a less specific `type`, with the status code unchanged. The native client core
-  decodes each operation's problem `type` against the set the contract lists for it, and reports
-  any other `type` as a malformed response that has lost its status code, so a documented 404
-  would reach an older app as a protocol error
+  decodes each operation's problem `type` against the set the contract lists for it. Apps built
+  since the client generator kept the status of a body it cannot decode see the new `type` under
+  its documented status, but an app built before that reports it as a malformed response that has
+  lost its status code, so a documented 404 would reach that app as a protocol error
   ([getkono/spargen#268](https://github.com/getkono/spargen/issues/268)).
 - Changing what a field means while keeping its shape: units, time zones, which way a sort runs, or
   what a default is.
