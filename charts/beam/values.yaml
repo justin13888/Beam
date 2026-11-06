@@ -46,7 +46,9 @@ server:
   # terminationGracePeriodSeconds is this plus 15, so the server always
   # finishes draining before the kubelet's SIGKILL.
   shutdownTimeoutSeconds: 30
-  logLevel: "beam_server=info,tower_http=info"
+  # RUST_LOG. The default is beam-server's DEFAULT_LOG_FILTER -- every Beam
+  # crate at info -- and a test holds the two together.
+  logLevel: "beam_server=info,beam_auth=info,beam_domain=info,beam_entity=info,beam_index=info,beam_migration=info,kynos=info"
   # The server pod runs as the image's user: uid 1000, gid 1000 (with fsGroup
   # 1000 for /data). That is fixed, not a value -- the image owns /data as
   # 1000. Library media must therefore be readable by uid 1000, by gid 1000,

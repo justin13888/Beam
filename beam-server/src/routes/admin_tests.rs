@@ -2998,3 +2998,194 @@ async fn a_restricted_viewer_reads_only_the_libraries_granted_to_them() {
         StatusCode::NOT_FOUND
     );
 }
+
+// ─── Admin change records (NFR-403) ─────────────────────────────────────────
+
+/// Every `System` entry in the fixture's admin log, oldest first, as its
+/// message and details.
+async fn change_records(fixture: &TestFixture) -> Vec<(String, Value)> {
+    let mut entries = fixture
+        .state
+        .services
+        .admin_log
+        .get_logs_by_category(beam_domain::models::AdminLogCategory::System, 100, 0)
+        .await
+        .unwrap();
+    entries.reverse();
+    entries
+        .into_iter()
+        .map(|entry| (entry.message, entry.details.unwrap_or(Value::Null)))
+        .collect()
+}
+
+/// The seeded admin's user id, as the records name it.
+async fn admin_id(fixture: &TestFixture) -> String {
+    fixture
+        .user_repo
+        .find_by_oidc_identity("https://test.example", "admin-subj")
+        .await
+        .unwrap()
+        .expect("the admin was seeded")
+        .id
+        .to_string()
+}
+
+/// Registering, scanning and deleting a library each leave one record naming
+/// the administrator and the library -- and never its root path. A refused
+/// change leaves none.
+#[tokio::test]
+async fn an_admin_mutation_writes_an_admin_log_entry_for_each_library_change() {
+    let fixture = make_scan_test_state(Gate::Open);
+    let client = build_client(&fixture);
+    let admin_token = seed_user_session(&fixture, true).await;
+    let regular_token = seed_user_session(&fixture, false).await;
+    let admin = admin_id(&fixture).await;
+
+    // Refused: by validation, and by the admin gate.
+    client
+        .post("/v1/admin/libraries")
+        .cookie("beam_session", &admin_token)
+        .json(&CreateLibraryRequest {
+            name: " ".to_string(),
+            root_path: "movies".to_string(),
+        })
+        .send()
+        .await
+        .assert_status(StatusCode::UNPROCESSABLE_ENTITY);
+    client
+        .post("/v1/admin/libraries")
+        .cookie("beam_session", &regular_token)
+        .json(&CreateLibraryRequest {
+            name: "Movies".to_string(),
+            root_path: "movies".to_string(),
+        })
+        .send()
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+    assert!(change_records(&fixture).await.is_empty());
+
+    let (_, library_id) = create_movies_library(&client, &admin_token).await;
+    client
+        .post(&format!("/v1/admin/libraries/{library_id}/scan"))
+        .cookie("beam_session", &admin_token)
+        .send()
+        .await
+        .assert_status(StatusCode::ACCEPTED);
+    wait_for_scan(&fixture, library_id, finished).await;
+    client
+        .delete(&format!("/v1/admin/libraries/{library_id}"))
+        .cookie("beam_session", &admin_token)
+        .send()
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    // A delete of what is already gone changes nothing, and records nothing.
+    client
+        .delete(&format!("/v1/admin/libraries/{library_id}"))
+        .cookie("beam_session", &admin_token)
+        .send()
+        .await
+        .assert_status(StatusCode::NOT_FOUND);
+
+    let records = change_records(&fixture).await;
+    let messages: Vec<&str> = records
+        .iter()
+        .map(|(message, _)| message.as_str())
+        .collect();
+    assert_eq!(
+        messages,
+        vec![
+            "Created library \"Movies\"".to_owned(),
+            format!("Started a scan of library {library_id}"),
+            format!("Deleted library {library_id}"),
+        ]
+    );
+    let root = fixture.library_root().to_string_lossy().into_owned();
+    for (message, details) in &records {
+        assert_eq!(details["admin_user_id"], admin, "{message}");
+        assert_eq!(details["library_id"], library_id.to_string(), "{message}");
+        assert!(
+            !details.to_string().contains(&root) && !message.contains(&root),
+            "{message}: the root path reached the admin log"
+        );
+    }
+}
+
+/// Disabling and re-enabling an account, and setting what it may see, each
+/// leave one record naming the administrator, the account and the change.
+#[tokio::test]
+async fn an_admin_mutation_writes_an_admin_log_entry_for_each_account_change() {
+    let fixture = make_test_state();
+    let client = build_client(&fixture);
+    let admin_token = seed_user_session(&fixture, true).await;
+    let admin = admin_id(&fixture).await;
+    let target = seed_plain_user(&fixture, "target-subj", "Target").await;
+    seed_session_for(&fixture, &target.id.to_string()).await;
+    let library = seed_library(&fixture, "Kids").await;
+
+    let path = format!("/v1/admin/users/{}", target.id);
+    for disabled in [true, false] {
+        client
+            .patch(&path)
+            .cookie("beam_session", &admin_token)
+            .json(&UpdateAdminUserRequest { disabled })
+            .send()
+            .await
+            .assert_status(StatusCode::NO_CONTENT);
+    }
+    let access = UserAccess {
+        all_libraries: false,
+        library_ids: vec![library],
+        max_content_rating: None,
+    };
+    client
+        .put(&format!("{path}/access"))
+        .cookie("beam_session", &admin_token)
+        .json(&access)
+        .send()
+        .await
+        .assert_status(StatusCode::OK);
+    // Refused: a grant naming a library that does not exist changes nothing.
+    client
+        .put(&format!("{path}/access"))
+        .cookie("beam_session", &admin_token)
+        .json(&UserAccess {
+            library_ids: vec![uuid::Uuid::new_v4()],
+            ..access.clone()
+        })
+        .send()
+        .await
+        .assert_status(StatusCode::UNPROCESSABLE_ENTITY);
+
+    let target_id = target.id.to_string();
+    assert_eq!(
+        change_records(&fixture).await,
+        vec![
+            (
+                format!("Disabled account {target_id}"),
+                serde_json::json!({
+                    "admin_user_id": admin,
+                    "target_user_id": target_id,
+                    "disabled": true,
+                    "revoked_sessions": 1,
+                }),
+            ),
+            (
+                format!("Enabled account {target_id}"),
+                serde_json::json!({
+                    "admin_user_id": admin,
+                    "target_user_id": target_id,
+                    "disabled": false,
+                    "revoked_sessions": 0,
+                }),
+            ),
+            (
+                format!("Set the access of account {target_id}"),
+                serde_json::json!({
+                    "admin_user_id": admin,
+                    "target_user_id": target_id,
+                    "access": serde_json::to_value(&access).unwrap(),
+                }),
+            ),
+        ]
+    );
+}

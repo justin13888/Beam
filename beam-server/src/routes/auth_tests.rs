@@ -43,6 +43,7 @@ mod tests {
         oidc_logout_all, oidc_me,
     };
     use crate::routes::test_support::make_app_state;
+    use crate::services::admin_log::AdminLogService;
     use crate::services::health::InMemoryDependencyProbe;
     use crate::state::{AppServices, AppState};
 
@@ -114,6 +115,8 @@ mod tests {
         /// advances it, so a login attempt's expiry is reached without
         /// waiting for it.
         pending_clock: Arc<TestClock>,
+        /// The admin log the handlers record sign-in outcomes in.
+        admin_log: Arc<dyn AdminLogService>,
     }
 
     fn make_harness(oidc_client: FakeOidcClient) -> Harness {
@@ -305,6 +308,7 @@ mod tests {
             user_repo,
             session_store,
             pending_clock,
+            admin_log: base.services.admin_log.clone(),
         }
     }
 
@@ -1109,6 +1113,20 @@ mod tests {
                 .len(),
             0,
             "no session should exist for a rejected disabled account"
+        );
+        let refusal = sign_in_records(&harness).await.pop().expect("a record");
+        assert_eq!(
+            (
+                refusal.0,
+                refusal.1["outcome"].as_str(),
+                refusal.1["user_id"].as_str()
+            ),
+            (
+                AdminLogLevel::Warning,
+                Some("account_disabled"),
+                Some(user.id.to_string().as_str())
+            ),
+            "the refusal is recorded against the account"
         );
     }
 
@@ -1990,5 +2008,223 @@ mod tests {
             stored.avatar_url.as_deref(),
             Some("https://idp.test/new.png")
         );
+    }
+
+    // ─── Sign-in records (NFR-403) ─────────────────────────────────────────
+
+    use beam_domain::models::{AdminLogCategory, AdminLogLevel};
+
+    /// Every `Auth` entry the harness's admin log holds, oldest first, as its
+    /// level and details.
+    async fn sign_in_records(harness: &Harness) -> Vec<(AdminLogLevel, Value)> {
+        let mut entries = harness
+            .admin_log
+            .get_logs_by_category(AdminLogCategory::Auth, 100, 0)
+            .await
+            .unwrap();
+        entries.reverse();
+        entries
+            .into_iter()
+            .map(|entry| (entry.level, entry.details.unwrap_or(Value::Null)))
+            .collect()
+    }
+
+    /// Process log output, captured for one test.
+    #[derive(Clone, Default)]
+    struct CapturedLogs(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLogs {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl CapturedLogs {
+        /// Captures every event on this thread until the guard drops.
+        fn install(&self) -> tracing::subscriber::DefaultGuard {
+            Self::keep_every_callsite_live();
+            let logs = self.clone();
+            tracing::subscriber::set_default(
+                tracing_subscriber::fmt()
+                    .with_ansi(false)
+                    .with_max_level(tracing::Level::INFO)
+                    .with_writer(move || logs.clone())
+                    .finish(),
+            )
+        }
+    }
+
+    /// A process-wide subscriber that takes no event but never lets a
+    /// callsite be switched off.
+    ///
+    /// `tracing` caches each callsite's interest across every thread. A
+    /// callsite another test thread registers while no capturing subscriber is
+    /// live is cached as "never", and its events then skip this thread's
+    /// subscriber too, so a capture loses events at random under the parallel
+    /// test runner. With this as the global default every callsite is at
+    /// least "sometimes", which asks the current thread's subscriber each
+    /// time.
+    struct EveryCallsite;
+
+    impl tracing::Subscriber for EveryCallsite {
+        fn register_callsite(
+            &self,
+            _metadata: &'static tracing::Metadata<'static>,
+        ) -> tracing::subscriber::Interest {
+            tracing::subscriber::Interest::sometimes()
+        }
+
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            false
+        }
+
+        /// What the captures here read, so `debug` and `trace` callsites stay
+        /// off unless another subscriber asks for them.
+        fn max_level_hint(&self) -> Option<tracing::level_filters::LevelFilter> {
+            Some(tracing::level_filters::LevelFilter::INFO)
+        }
+
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+        fn event(&self, _event: &tracing::Event<'_>) {}
+
+        fn enter(&self, _span: &tracing::span::Id) {}
+
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    impl CapturedLogs {
+        fn keep_every_callsite_live() {
+            static INSTALLED: std::sync::Once = std::sync::Once::new();
+            INSTALLED.call_once(|| {
+                // Another test may have set one first; either way callsites
+                // are then decided per thread.
+                let _ = tracing::subscriber::set_global_default(EveryCallsite);
+            });
+        }
+
+        fn text(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+        }
+    }
+
+    /// NFR-403: a failed and a successful browser sign-in each reach the
+    /// process log and the admin log, with the account, the method and the
+    /// outcome -- and none of the round-trip's secrets: not the session
+    /// token, the authorization code, the state, the nonce or the PKCE
+    /// verifier.
+    #[tokio::test]
+    async fn a_failed_and_a_successful_sign_in_are_logged_without_secrets() {
+        let logs = CapturedLogs::default();
+        let _guard = logs.install();
+
+        let failing = make_harness(FakeOidcClient::with_exchange_error("the code was refused"));
+        let (state_cookie, _) = do_login(&failing, None).await;
+        let failed_begin = failing.oidc_client.last_begin().unwrap();
+        do_callback(&failing, &state_cookie, &failed_begin.state)
+            .await
+            .assert_status(StatusCode::BAD_REQUEST);
+
+        let harness = make_harness(FakeOidcClient::with_identity(identity(
+            "user@example.com",
+            true,
+        )));
+        let (state_cookie, _) = do_login(&harness, None).await;
+        let begin = harness.oidc_client.last_begin().unwrap();
+        let response = do_callback(&harness, &state_cookie, &begin.state).await;
+        response.assert_status(StatusCode::FOUND);
+        let token = live_cookie(&response, SESSION_COOKIE)
+            .expect("a session")
+            .to_owned();
+        let user = harness
+            .user_repo
+            .find_by_oidc_identity("https://dex.test", "subj-1")
+            .await
+            .unwrap()
+            .expect("provisioned");
+
+        let failure = sign_in_records(&failing).await;
+        assert_eq!(failure.len(), 1, "{failure:?}");
+        let (level, details) = &failure[0];
+        assert_eq!(*level, AdminLogLevel::Warning);
+        assert_eq!(details["method"], "browser");
+        assert_eq!(details["outcome"], "verification_failed");
+        assert!(
+            details["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("the code was refused")),
+            "{details}"
+        );
+
+        let success = sign_in_records(&harness).await;
+        assert_eq!(success.len(), 1, "{success:?}");
+        let (level, details) = &success[0];
+        assert_eq!(*level, AdminLogLevel::Info);
+        assert_eq!(details["method"], "browser");
+        assert_eq!(details["outcome"], "signed_in");
+        assert_eq!(details["user_id"], user.id.to_string());
+
+        let logged = logs.text();
+        assert!(logged.contains("WARN"), "{logged}");
+        assert!(logged.contains("verification_failed"), "{logged}");
+        assert!(
+            logged.contains(&format!("User {} signed in", user.id)),
+            "{logged}"
+        );
+
+        let stored = format!("{failure:?} {success:?}");
+        for secret in [
+            token.as_str(),
+            "fake-code",
+            begin.state.as_str(),
+            begin.nonce.as_str(),
+            begin.pkce_verifier.as_str(),
+            failed_begin.state.as_str(),
+            failed_begin.nonce.as_str(),
+            failed_begin.pkce_verifier.as_str(),
+        ] {
+            assert!(!logged.contains(secret), "{secret} reached the process log");
+            assert!(!stored.contains(secret), "{secret} reached the admin log");
+        }
+    }
+
+    /// A callback this server never began -- a forged or replayed one -- is
+    /// logged for the operator but never stored, so nobody can fill the admin
+    /// log with requests alone.
+    #[tokio::test]
+    async fn a_callback_this_server_did_not_begin_is_logged_but_not_stored() {
+        let logs = CapturedLogs::default();
+        let _guard = logs.install();
+        let harness = make_harness(FakeOidcClient::with_identity(identity(
+            "user@example.com",
+            true,
+        )));
+
+        do_callback(&harness, "forged-state", "forged-state")
+            .await
+            .assert_status(StatusCode::BAD_REQUEST);
+        harness
+            .client
+            .get("/v1/auth/callback?error=access_denied")
+            .send()
+            .await
+            .assert_status(StatusCode::BAD_REQUEST);
+
+        assert!(sign_in_records(&harness).await.is_empty());
+        let logged = logs.text();
+        assert!(logged.contains("attempt_invalid"), "{logged}");
+        assert!(logged.contains("idp_error"), "{logged}");
+        assert!(!logged.contains("forged-state"), "{logged}");
     }
 }
