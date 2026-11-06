@@ -1,34 +1,6 @@
-use std::{
-    io::{self, BufReader, Read},
-    ops::Deref,
-};
+use std::io::{self, BufReader, Read};
 
-use serde::{Deserialize, Serialize};
 use xxhash_rust::xxh3::Xxh3;
-
-/// XXH3 Hash
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct XXH3Hash(u64);
-
-impl XXH3Hash {
-    pub fn new(hash: u64) -> Self {
-        Self(hash)
-    }
-}
-
-impl Deref for XXH3Hash {
-    type Target = u64;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl std::fmt::Debug for XXH3Hash {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "XXH3Hash({:016x})", self.0)
-    }
-}
 
 /// Computes the XXH3 (64-bit) hash of everything `content` yields, from
 /// where it stands to its end.
@@ -151,25 +123,5 @@ mod tests {
             compute_hash(handle).is_err(),
             "a read that fails is not hashable content"
         );
-    }
-
-    #[test]
-    fn the_debug_format_is_a_fixed_width_hex_digest() {
-        // Padded to 16 digits: the digest is used in log lines and admin
-        // output, where a variable-width value is hard to scan.
-        assert_eq!(
-            format!("{:?}", XXH3Hash::new(0xff)),
-            "XXH3Hash(00000000000000ff)"
-        );
-        assert_eq!(
-            format!("{:?}", XXH3Hash::new(u64::MAX)),
-            "XXH3Hash(ffffffffffffffff)"
-        );
-    }
-
-    #[test]
-    fn the_wrapper_derefs_to_the_digest_it_wraps() {
-        let hash = XXH3Hash::new(0x0123_4567_89ab_cdef);
-        assert_eq!(*hash, 0x0123_4567_89ab_cdef);
     }
 }

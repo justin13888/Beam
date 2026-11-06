@@ -1,9 +1,8 @@
 //! Person entity: someone a metadata provider credits on a title (issue #261).
 
 use sea_orm::entity::prelude::*;
-use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "people")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]

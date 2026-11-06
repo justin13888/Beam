@@ -29,7 +29,7 @@ use beam_domain::repositories::{
     ChapterRepository, FileRepository, MediaStreamRepository, MovieRepository,
     SidecarSubtitleRepository, TrickplayRepository,
 };
-use beam_domain::utils::path_policy::{DiscKind, disc_stream_kind};
+use beam_domain::utils::disc::{DiscKind, disc_stream_kind};
 use beam_domain::utils::source_rank::{
     SourceRankKey, StackKey, rank_sources, stack_keys, stack_parts,
 };

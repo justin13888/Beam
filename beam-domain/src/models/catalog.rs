@@ -181,7 +181,7 @@ pub struct CatalogFilters {
     /// Titles resembling this text (trigram similarity, or containing it).
     pub query: Option<String>,
     /// Titles carrying the genre with this slug
-    /// (see [`crate::repositories::genre::slugify`]).
+    /// (see [`crate::models::genre::slugify`]).
     pub genre_slug: Option<String>,
     /// Signed, as the `year` columns are: a bound the column cannot hold is
     /// refused where the request is read, never wrapped into one it can.

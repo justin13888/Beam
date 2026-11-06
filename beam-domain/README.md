@@ -14,8 +14,8 @@ architecture.
   genres, people, collections, lists, watch state, streams, chapters, access policies, language
   preferences, playback telemetry, and the enrichment queue's row type.
 - **`repositories`** -- one trait per aggregate (`repositories/mod.rs` re-exports every one), each
-  with an `InMemory*` fake alongside the trait definition and, in `repositories/contract.rs`, the
-  shared behavioural contract its implementations are bound to. `beam-index` provides the
+  with an `InMemory*` fake alongside the trait definition and, in `repositories/contract/` (one file per
+  aggregate, fixtures in `mod.rs`), the shared behavioural contract its implementations are bound to. `beam-index` provides the
   sea-orm-backed implementations.
 - **`providers`** -- `EnrichmentProvider`: a provider-agnostic trait for external metadata lookup
   (search/enrich movies, shows, seasons; invalidate a cached match), returning `beam-domain`'s own

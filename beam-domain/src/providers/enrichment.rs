@@ -205,21 +205,40 @@ pub trait EnrichmentProvider: Send + Sync + std::fmt::Debug {
     /// means enrichment is effectively disabled.
     fn available_providers(&self) -> Vec<String>;
 
+    /// The movies `query` could name, in the order the provider returned
+    /// them (several providers' hits one provider after another); `Ok` and
+    /// empty when nothing matches. When some providers fail and another
+    /// finds hits, the hits are returned. A rate limit is
+    /// [`EnrichmentError::RateLimited`], an unreachable provider
+    /// [`EnrichmentError::Transport`], and no provider configured
+    /// [`EnrichmentError::NotConfigured`].
     async fn search_movies(
         &self,
         query: &MediaQuery,
     ) -> Result<Vec<MovieSearchHit>, EnrichmentError>;
+    /// The shows `query` could name, as [`Self::search_movies`] does movies.
     async fn search_shows(&self, query: &MediaQuery)
     -> Result<Vec<ShowSearchHit>, EnrichmentError>;
 
+    /// The details of the movie `id` names, from the provider `id` belongs
+    /// to. An id that provider does not know is
+    /// [`EnrichmentError::NotFound`]; an id of a provider that is not
+    /// configured is [`EnrichmentError::NotConfigured`]. Other failures are
+    /// as [`Self::search_movies`]'s.
     async fn movie_enrichment(
         &self,
         id: &ExternalMediaRef,
     ) -> Result<MovieEnrichment, EnrichmentError>;
+    /// The details of the show `id` names, as [`Self::movie_enrichment`]
+    /// does a movie's. Its seasons are read one by one with
+    /// [`Self::season_enrichment`].
     async fn show_enrichment(
         &self,
         id: &ExternalMediaRef,
     ) -> Result<ShowEnrichment, EnrichmentError>;
+    /// Season `season_number` of the show `show` names, with its episodes;
+    /// a season the provider does not have is [`EnrichmentError::NotFound`].
+    /// Other failures are as [`Self::movie_enrichment`]'s.
     async fn season_enrichment(
         &self,
         show: &ExternalMediaRef,

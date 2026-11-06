@@ -8,8 +8,8 @@ use uuid::Uuid;
 use beam_domain::models::Genre;
 use beam_domain::models::access::AccessPolicy;
 use beam_domain::models::catalog::TitleKind;
+use beam_domain::models::genre::{slugify, sort_genre_names};
 use beam_domain::repositories::GenreRepository;
-use beam_domain::repositories::genre::{slugify, sort_genre_names};
 
 use crate::repositories::access_sql::AccessConditions;
 

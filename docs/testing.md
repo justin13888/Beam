@@ -65,7 +65,8 @@ a divergence between the fake and production fails instead of drifting. Writing 
 these immediately found two such divergences — an in-memory session store that listed expired
 sessions the SQL one filtered out, and one that echoed the caller's `created_at` back instead of
 stamping its own. The contracts live beside the traits they constrain, in
-`beam-domain/src/repositories/contract.rs` and `beam-auth/src/utils/contract.rs`.
+`beam-domain/src/repositories/contract/` and `beam-auth/src/utils/contract/`, one file per
+contract.
 
 **Time is injected, never slept through.** Every store and service that stamps or compares a
 timestamp takes a `Clock` (`beam-domain/src/services/clock.rs`). One trait covers both time bases:

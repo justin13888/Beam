@@ -48,15 +48,16 @@ use beam_domain::repositories::{
 };
 use beam_domain::services::{Clock, IdGenerator, RealClock, UuidGenerator};
 use beam_domain::utils::classification::{Classification, ContainerTags, Hints, classify};
+use beam_domain::utils::disc::{
+    DiscKind, DiscSetPlace, disc_set_member, disc_set_place, disc_stream_kind,
+};
 use beam_domain::utils::filename::{ParsedFilename, parse_media_filename};
 use beam_domain::utils::identity::title_identity_key;
 use beam_domain::utils::media_path::{
-    CLASSIFIER_VERSION, DiscSetPlace, EpisodeInference, MediaInference, MovieInference, TitleGuess,
-    UnclassifiableReason, disc_set_member, disc_set_place, infer_media, season_folder_number,
+    CLASSIFIER_VERSION, EpisodeInference, MediaInference, MovieInference, TitleGuess,
+    UnclassifiableReason, infer_media, season_folder_number,
 };
-use beam_domain::utils::path_policy::{
-    DiscKind, PathDisposition, PathPolicy, disc_stream_kind, is_video_path,
-};
+use beam_domain::utils::path_policy::{PathDisposition, PathPolicy, is_video_path};
 
 /// Read the size and modification time of `path`, a file beneath the
 /// library `root`, the mtime as [`stored_mtime`] reads it. The stat follows

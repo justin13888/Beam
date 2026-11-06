@@ -1,5 +1,4 @@
 use sea_orm::entity::prelude::*;
-use serde::{Deserialize, Serialize};
 
 /// An in-flight RFC 8628 device authorization grant (ADR-0017).
 ///
@@ -8,7 +7,7 @@ use serde::{Deserialize, Serialize};
 /// the flow ends: approved, denied, or expired. Keyed by the SHA-256 of the
 /// opaque handle the client holds; the handle itself is never stored, so a
 /// read of this table cannot be replayed as a poll.
-#[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "device_auths")]
 pub struct Model {
     /// Lower-case hex SHA-256 of the client's device handle.

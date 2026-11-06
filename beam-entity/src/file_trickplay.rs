@@ -1,9 +1,8 @@
 //! What Beam made of one video file's trickplay sheets (issue #265).
 
 use sea_orm::entity::prelude::*;
-use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "file_trickplay")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]

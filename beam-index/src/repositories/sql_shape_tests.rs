@@ -2378,17 +2378,19 @@ mod access_policy {
         assert_eq!(sql.first(), Some(&"BEGIN"), "{sql:?}");
         assert_eq!(sql.last(), Some(&"COMMIT"), "{sql:?}");
         assert!(
-            sql[1].starts_with("DELETE FROM user_library_access"),
+            sql[1].starts_with(r#"DELETE FROM "user_library_access""#),
             "the old grants go first: {sql:?}"
         );
+        assert_filters(restricting[1], "user_library_access", "user_id", "=");
+        assert_bound(restricting[1], &user.to_string());
         assert!(
-            sql[2].contains("ON CONFLICT (user_id) DO UPDATE"),
+            sql[2].contains(r#"ON CONFLICT ("user_id") DO UPDATE"#),
             "{sql:?}"
         );
         assert_bound(restricting[2], "teen");
         let grants: Vec<&&Statement> = restricting
             .iter()
-            .filter(|s| s.sql.starts_with("INSERT INTO user_library_access"))
+            .filter(|s| s.sql.starts_with(r#"INSERT INTO "user_library_access""#))
             .collect();
         assert_eq!(grants.len(), 2, "one grant per library: {sql:?}");
         for library in [kids, family] {
@@ -2404,7 +2406,7 @@ mod access_policy {
         assert!(
             lifting
                 .iter()
-                .any(|s| s.starts_with("DELETE FROM user_access_policies")),
+                .any(|s| s.starts_with(r#"DELETE FROM "user_access_policies""#)),
             "{lifting:?}"
         );
         assert!(

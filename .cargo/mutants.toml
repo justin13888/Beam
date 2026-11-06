@@ -108,6 +108,9 @@ exclude_globs = [
     # The domain's test-data builders, declared the same way for the same
     # reason (issue #349).
     "beam-domain/src/test_utils.rs",
+    # `FakeOidcClient`, declared the same way for the same reason (issue
+    # #359).
+    "beam-auth/src/utils/oidc/fake.rs",
 
     # Pure DDL: sea-orm-migration up/down bodies, with no unit tests by design
     # (docs/testing.md). The only thing that can validate a migration is running

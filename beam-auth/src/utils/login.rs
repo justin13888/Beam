@@ -160,8 +160,8 @@ pub async fn complete_login(
 #[must_use]
 pub fn device_hash(user_agent: Option<&str>) -> String {
     // Session rows are compared by equality against this string, so it is
-    // produced by the crate's one encoder rather than a local `{:x}`.
-    crate::utils::hex::encode_lower(&Sha256::digest(user_agent.unwrap_or("").as_bytes()))
+    // produced by the workspace's one encoder rather than a local `{:x}`.
+    beam_domain::utils::hex::encode_lower(&Sha256::digest(user_agent.unwrap_or("").as_bytes()))
 }
 
 /// Picks a display name when the IdP doesn't release a `name` claim: the
@@ -169,7 +169,11 @@ pub fn device_hash(user_agent: Option<&str>) -> String {
 /// placeholder. Real IdPs (including Dex) send `name`, so this is a rare
 /// fallback, not the common case.
 #[must_use]
-pub fn derive_display_name(name: Option<&str>, email: Option<&str>, subject: &str) -> String {
+pub(crate) fn derive_display_name(
+    name: Option<&str>,
+    email: Option<&str>,
+    subject: &str,
+) -> String {
     if let Some(name) = name
         && !name.is_empty()
     {

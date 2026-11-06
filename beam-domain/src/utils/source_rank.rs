@@ -13,8 +13,7 @@ use std::path::{Path, PathBuf};
 
 use uuid::Uuid;
 
-use crate::utils::media_path::disc_set_place;
-use crate::utils::path_policy::{DiscKind, disc_stream_kind};
+use crate::utils::disc::{DiscKind, disc_set_place, disc_stream_kind};
 
 /// What a source is ranked by, most significant first. A multi-part movie's
 /// parts are one source ([`stack_parts`]), ranked by its first part's picture

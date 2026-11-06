@@ -1,0 +1,1965 @@
+use super::{
+    BeginAuth, ClientAuthMethod, DeviceAuthStart, DevicePoll, OidcClient, OidcError, OidcIdentity,
+};
+use async_trait::async_trait;
+use openidconnect::core::{
+    CoreAuthDisplay, CoreAuthenticationFlow, CoreClaimName, CoreClaimType, CoreClient,
+    CoreClientAuthMethod, CoreDeviceAuthorizationResponse, CoreGrantType, CoreIdToken,
+    CoreIdTokenClaims, CoreJsonWebKey, CoreJweContentEncryptionAlgorithm,
+    CoreJweKeyManagementAlgorithm, CoreResponseMode, CoreResponseType, CoreSubjectIdentifierType,
+    CoreTokenResponse,
+};
+use openidconnect::{
+    AdditionalProviderMetadata, AsyncHttpClient, HttpClientError, HttpRequest, HttpResponse,
+    ProviderMetadata,
+};
+use openidconnect::{
+    AuthorizationCode, ClientId, ClientSecret, CsrfToken, DeviceAuthorizationUrl,
+    DeviceCodeErrorResponse, DeviceCodeErrorResponseType, EndpointMaybeSet, EndpointNotSet,
+    EndpointSet, IssuerUrl, Nonce, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope,
+    TokenResponse,
+};
+use serde::{Deserialize, Serialize};
+use std::future::Future;
+use std::pin::Pin;
+use std::time::Duration;
+
+/// The HTTP client `openidconnect` makes discovery, JWKS, and token
+/// requests through.
+///
+/// oauth2 5.0.0 implements [`AsyncHttpClient`] only for reqwest 0.12; this
+/// is the same adapter (ported from its `reqwest_client.rs`) over the
+/// workspace's reqwest 0.13, so the server links one reqwest (issue #132).
+#[derive(Debug, Clone)]
+pub(crate) struct OidcHttpClient(reqwest::Client);
+
+/// How long establishing a connection to the IdP may take.
+///
+/// Fixed rather than configurable: discovery runs once at startup and the
+/// exchange runs inside a user's login request, and neither has a caller
+/// that would pick a different bound. Without one, an IdP that accepts a
+/// connection and never answers stalls startup, or the login, forever.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long a whole request -- connect, send, and reading the full
+/// response -- may take. Covers the IdP that connects but never responds.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+impl OidcHttpClient {
+    pub(crate) fn new() -> Result<Self, reqwest::Error> {
+        Self::from_builder(
+            reqwest::ClientBuilder::new(),
+            CONNECT_TIMEOUT,
+            REQUEST_TIMEOUT,
+        )
+    }
+
+    /// [`Self::new`] over a caller's builder and with explicit bounds, so
+    /// a test can prove the bound is enforced without waiting out the
+    /// production one, and can talk to a loopback listener without
+    /// routing through whatever proxy the environment names.
+    fn from_builder(
+        builder: reqwest::ClientBuilder,
+        connect: Duration,
+        request: Duration,
+    ) -> Result<Self, reqwest::Error> {
+        // Redirects are never followed: an IdP endpoint that answers with
+        // a redirect is surfaced as that response, not chased to wherever
+        // it points (the SSRF guidance of the OIDC/OAuth 2.0 specs).
+        let client = builder
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(connect)
+            .timeout(request)
+            .build()?;
+        Ok(Self(client))
+    }
+}
+
+impl<'c> AsyncHttpClient<'c> for OidcHttpClient {
+    type Error = HttpClientError<reqwest::Error>;
+    type Future =
+        Pin<Box<dyn Future<Output = Result<HttpResponse, Self::Error>> + Send + Sync + 'c>>;
+
+    fn call(&'c self, request: HttpRequest) -> Self::Future {
+        Box::pin(async move {
+            let request = reqwest::Request::try_from(request).map_err(Box::new)?;
+            let response = self.0.execute(request).await.map_err(Box::new)?;
+            into_http_response(response).await
+        })
+    }
+}
+
+/// Copies a reqwest response into the `http::Response` `openidconnect`
+/// parses: status, version, every header (repeated ones included), and
+/// the full body.
+async fn into_http_response(
+    response: reqwest::Response,
+) -> Result<HttpResponse, HttpClientError<reqwest::Error>> {
+    let mut builder = openidconnect::http::Response::builder()
+        .status(response.status())
+        .version(response.version());
+    for (name, value) in response.headers() {
+        builder = builder.header(name, value);
+    }
+    let body = response.bytes().await.map_err(Box::new)?;
+    builder.body(body.to_vec()).map_err(HttpClientError::Http)
+}
+
+/// The exact endpoint typestate `CoreClient::from_provider_metadata(...)`
+/// produces: the authorization endpoint is always present after
+/// discovery (`EndpointSet`); device-auth/introspection/revocation are
+/// never populated from discovery (`EndpointNotSet`); token/userinfo are
+/// `EndpointMaybeSet` because OIDC discovery technically allows either to
+/// be absent (in practice a real IdP always sends both, but the type
+/// only promises "maybe").
+type DiscoveredCoreClient = CoreClient<
+    EndpointSet,
+    EndpointNotSet,
+    EndpointNotSet,
+    EndpointNotSet,
+    EndpointMaybeSet,
+    EndpointMaybeSet,
+>;
+
+/// The one discovery field `CoreProviderMetadata` drops that Beam reads:
+/// RFC 8628's `device_authorization_endpoint` (RFC 8414 section 2
+/// registers it in the discovery document). Optional, because plenty of
+/// IdPs do not offer the grant -- its absence turns the device login off,
+/// not discovery.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct DeviceAwareMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    device_authorization_endpoint: Option<DeviceAuthorizationUrl>,
+}
+
+impl AdditionalProviderMetadata for DeviceAwareMetadata {}
+
+/// `CoreProviderMetadata` with [`DeviceAwareMetadata`] in place of
+/// `EmptyAdditionalProviderMetadata` -- the pattern openidconnect's own
+/// `okta_device_grant` example uses.
+pub(crate) type DeviceAwareProviderMetadata = ProviderMetadata<
+    DeviceAwareMetadata,
+    CoreAuthDisplay,
+    CoreClientAuthMethod,
+    CoreClaimName,
+    CoreClaimType,
+    CoreGrantType,
+    CoreJweContentEncryptionAlgorithm,
+    CoreJweKeyManagementAlgorithm,
+    CoreJsonWebKey,
+    CoreResponseMode,
+    CoreResponseType,
+    CoreSubjectIdentifierType,
+>;
+
+/// The device authorization endpoint a discovery document names, if any.
+pub(crate) fn device_endpoint(
+    metadata: &DeviceAwareProviderMetadata,
+) -> Option<DeviceAuthorizationUrl> {
+    metadata
+        .additional_metadata()
+        .device_authorization_endpoint
+        .clone()
+}
+
+/// RFC 8628 section 3.4's grant type for polling the token endpoint.
+const DEVICE_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
+
+/// Real OIDC client, backed by discovery against a configured issuer.
+/// Construct once at process startup (discovery is an async network
+/// call); the resulting client is reused for every login.
+#[derive(Debug)]
+pub struct DiscoveredOidcClient {
+    client: DiscoveredCoreClient,
+    http_client: OidcHttpClient,
+    scopes: Vec<String>,
+    /// From discovery; `None` when the IdP does not offer the grant.
+    device_url: Option<DeviceAuthorizationUrl>,
+    /// How every request carrying the client secret authenticates: the
+    /// code exchange (through `client`, whose auth type is set from it)
+    /// and both device-grant requests. The operator's setting, never
+    /// read from discovery -- see [`ClientAuthMethod`].
+    auth_method: ClientAuthMethod,
+    /// Kept for the device-token poll, which Beam sends itself (see
+    /// `poll_device_token`).
+    client_id: String,
+    client_secret: String,
+}
+
+impl DiscoveredOidcClient {
+    pub async fn discover(
+        issuer: &str,
+        client_id: &str,
+        client_secret: &str,
+        auth_method: ClientAuthMethod,
+        redirect_url: &str,
+        scopes: Vec<String>,
+    ) -> Result<Self, OidcError> {
+        let http_client = OidcHttpClient::new().map_err(|e| OidcError::Discovery(e.to_string()))?;
+
+        let issuer_url =
+            IssuerUrl::new(issuer.to_string()).map_err(|e| OidcError::Discovery(e.to_string()))?;
+        let provider_metadata =
+            DeviceAwareProviderMetadata::discover_async(issuer_url, &http_client)
+                .await
+                .map_err(|e| OidcError::Discovery(e.to_string()))?;
+        let device_url = device_endpoint(&provider_metadata);
+
+        let redirect_url = RedirectUrl::new(redirect_url.to_string())
+            .map_err(|e| OidcError::Discovery(e.to_string()))?;
+
+        let client = CoreClient::from_provider_metadata(
+            provider_metadata,
+            ClientId::new(client_id.to_string()),
+            Some(ClientSecret::new(client_secret.to_string())),
+        )
+        .set_redirect_uri(redirect_url)
+        .set_auth_type(match auth_method {
+            ClientAuthMethod::ClientSecretBasic => openidconnect::AuthType::BasicAuth,
+            // oauth2 puts `client_id` and `client_secret` in the form.
+            ClientAuthMethod::ClientSecretPost => openidconnect::AuthType::RequestBody,
+        });
+
+        Ok(Self {
+            client,
+            http_client,
+            scopes,
+            device_url,
+            auth_method,
+            client_id: client_id.to_owned(),
+            client_secret: client_secret.to_owned(),
+        })
+    }
+
+    /// The one form POST RFC 8628 section 3.4 describes, authenticated
+    /// with the configured method.
+    fn device_token_request(
+        &self,
+        token_url: &str,
+        device_code: &str,
+    ) -> Result<HttpRequest, OidcError> {
+        device_token_request(
+            token_url,
+            &self.client_id,
+            &self.client_secret,
+            device_code,
+            self.auth_method,
+        )
+    }
+}
+
+/// Builds the device-code poll. Free-standing so a test can read exactly
+/// what goes on the wire without an IdP.
+pub(crate) fn device_token_request(
+    token_url: &str,
+    client_id: &str,
+    client_secret: &str,
+    device_code: &str,
+    auth: ClientAuthMethod,
+) -> Result<HttpRequest, OidcError> {
+    use base64::Engine as _;
+    use openidconnect::http::{Method, header};
+    use openidconnect::url::form_urlencoded;
+
+    let encode =
+        |value: &str| -> String { form_urlencoded::byte_serialize(value.as_bytes()).collect() };
+    let credential = base64::engine::general_purpose::STANDARD.encode(format!(
+        "{}:{}",
+        encode(client_id),
+        encode(client_secret)
+    ));
+    let mut form = form_urlencoded::Serializer::new(String::new());
+    form.append_pair("grant_type", DEVICE_CODE_GRANT)
+        .append_pair("device_code", device_code)
+        // An identifier some IdPs read only from the form, whichever way
+        // the client authenticates.
+        .append_pair("client_id", client_id);
+    if auth == ClientAuthMethod::ClientSecretPost {
+        form.append_pair("client_secret", client_secret);
+    }
+    let body = form.finish();
+
+    let mut builder = openidconnect::http::Request::builder()
+        .method(Method::POST)
+        .uri(token_url)
+        .header(header::ACCEPT, "application/json")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+    // One authentication method per request (RFC 6749 section 2.3).
+    if auth == ClientAuthMethod::ClientSecretBasic {
+        builder = builder.header(header::AUTHORIZATION, format!("Basic {credential}"));
+    }
+    builder
+        .body(body.into_bytes())
+        .map_err(|e| OidcError::Exchange(e.to_string()))
+}
+
+/// What one device-token poll answered, before any ID token is verified.
+#[derive(Debug)]
+pub(crate) enum DeviceTokenOutcome {
+    Pending,
+    SlowDown,
+    Denied,
+    Expired,
+    Issued(Box<CoreTokenResponse>),
+}
+
+/// Classifies a token-endpoint response to a device-code poll (RFC 8628
+/// section 3.5). Pure, so every branch is reachable from a table.
+///
+/// A success status is a token response. Anything else is read as an
+/// OAuth error body: the four RFC 8628 codes map to their outcomes, and
+/// `invalid_grant` -- what an IdP answers for a device code it no longer
+/// holds -- is read as expiry, since the user's remedy is the same:
+/// start again. Every other error is an exchange failure.
+pub(crate) fn classify_device_token_response(
+    status: openidconnect::http::StatusCode,
+    body: &[u8],
+) -> Result<DeviceTokenOutcome, OidcError> {
+    if status.is_success() {
+        let token: CoreTokenResponse = serde_json::from_slice(body)
+            .map_err(|e| OidcError::Exchange(format!("unreadable device token response: {e}")))?;
+        return Ok(DeviceTokenOutcome::Issued(Box::new(token)));
+    }
+
+    let error: DeviceCodeErrorResponse = serde_json::from_slice(body).map_err(|e| {
+        OidcError::Exchange(format!(
+            "device token request failed with {status} and an unreadable body: {e}"
+        ))
+    })?;
+    match error.error() {
+        DeviceCodeErrorResponseType::AuthorizationPending => Ok(DeviceTokenOutcome::Pending),
+        DeviceCodeErrorResponseType::SlowDown => Ok(DeviceTokenOutcome::SlowDown),
+        DeviceCodeErrorResponseType::AccessDenied => Ok(DeviceTokenOutcome::Denied),
+        DeviceCodeErrorResponseType::ExpiredToken => Ok(DeviceTokenOutcome::Expired),
+        DeviceCodeErrorResponseType::Basic(
+            openidconnect::core::CoreErrorResponseType::InvalidGrant,
+        ) => Ok(DeviceTokenOutcome::Expired),
+        other => Err(OidcError::Exchange(format!(
+            "device token request failed with {status}: {other}"
+        ))),
+    }
+}
+
+/// The identity a verified ID token asserts.
+///
+/// Shared by the code exchange and the device grant so the two logins
+/// cannot disagree about who somebody is.
+fn identity_from(id_token: &CoreIdToken, claims: &CoreIdTokenClaims) -> OidcIdentity {
+    // `claims` verified the token's signature (and, for the code flow,
+    // its nonce), but the typed `CoreIdTokenClaims` (with
+    // `EmptyAdditionalClaims`) drops any non-standard claim -- e.g. the
+    // `groups`/`roles` a deployment binds admin to (issue #85). Re-decode
+    // the now-trusted payload as raw JSON to carry every claim through for
+    // admin evaluation.
+    let raw_claims = decode_claims_payload(&id_token.to_string());
+
+    OidcIdentity {
+        issuer: claims.issuer().as_str().to_string(),
+        subject: claims.subject().as_str().to_string(),
+        email: claims.email().map(|e| e.as_str().to_string()),
+        email_verified: claims.email_verified().unwrap_or(false),
+        name: claims
+            .name()
+            .and_then(|n| n.get(None))
+            .map(|n| n.as_str().to_string()),
+        picture: claims
+            .picture()
+            .and_then(|p| p.get(None))
+            .map(|p| p.as_str().to_string()),
+        claims: raw_claims,
+    }
+}
+
+#[async_trait]
+impl OidcClient for DiscoveredOidcClient {
+    fn begin_auth(&self) -> Result<BeginAuth, OidcError> {
+        let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
+
+        let mut auth_request = self.client.authorize_url(
+            CoreAuthenticationFlow::AuthorizationCode,
+            CsrfToken::new_random,
+            Nonce::new_random,
+        );
+        for scope in &self.scopes {
+            auth_request = auth_request.add_scope(Scope::new(scope.clone()));
+        }
+        let (auth_url, csrf_token, nonce) = auth_request.set_pkce_challenge(pkce_challenge).url();
+
+        Ok(BeginAuth {
+            auth_url: auth_url.to_string(),
+            state: csrf_token.secret().clone(),
+            nonce: nonce.secret().clone(),
+            pkce_verifier: pkce_verifier.secret().clone(),
+        })
+    }
+
+    async fn exchange_code(
+        &self,
+        code: &str,
+        pkce_verifier: &str,
+        nonce: &str,
+    ) -> Result<OidcIdentity, OidcError> {
+        let token_response = self
+            .client
+            .exchange_code(AuthorizationCode::new(code.to_string()))
+            .map_err(|e| OidcError::Exchange(e.to_string()))?
+            .set_pkce_verifier(PkceCodeVerifier::new(pkce_verifier.to_string()))
+            .request_async(&self.http_client)
+            .await
+            .map_err(|e| OidcError::Exchange(e.to_string()))?;
+
+        let id_token = token_response.id_token().ok_or(OidcError::MissingIdToken)?;
+
+        let expected_nonce = Nonce::new(nonce.to_string());
+        let claims = id_token
+            .claims(&self.client.id_token_verifier(), &expected_nonce)
+            .map_err(|e| OidcError::ClaimsVerification(e.to_string()))?;
+
+        Ok(identity_from(id_token, claims))
+    }
+
+    /// Authenticates with the configured method, exactly as the code
+    /// exchange does. A refusal is returned, never retried with the other
+    /// method: the registration names one, and the operator's setting is
+    /// the only place Beam learns which.
+    async fn begin_device_auth(&self) -> Result<DeviceAuthStart, OidcError> {
+        let device_url = self
+            .device_url
+            .clone()
+            .ok_or(OidcError::DeviceFlowUnsupported)?;
+
+        // `client`'s auth type is already the configured method.
+        let client = self.client.clone().set_device_authorization_url(device_url);
+        let mut request = client.exchange_device_code();
+        if self.auth_method == ClientAuthMethod::ClientSecretBasic {
+            // `client_id` in the form as well as in the Basic header: RFC
+            // 8628 section 3.1 makes it optional for an authenticated
+            // client, but some IdPs (Dex) read it from the form only. It
+            // is an identifier, not a second authentication method.
+            request = request.add_extra_param("client_id", self.client_id.clone());
+        }
+        // `openid` is skipped because openidconnect already adds it.
+        for scope in self
+            .scopes
+            .iter()
+            .filter(|scope| scope.as_str() != "openid")
+        {
+            request = request.add_scope(Scope::new(scope.clone()));
+        }
+        let details: CoreDeviceAuthorizationResponse = request
+            .request_async(&self.http_client)
+            .await
+            .map_err(|e| OidcError::Exchange(e.to_string()))?;
+
+        Ok(DeviceAuthStart {
+            device_code: details.device_code().secret().clone(),
+            user_code: details.user_code().secret().clone(),
+            verification_uri: details.verification_uri().to_string(),
+            verification_uri_complete: details
+                .verification_uri_complete()
+                .map(|uri| uri.secret().clone()),
+            expires_in_secs: details.expires_in().as_secs(),
+            interval_secs: details.interval().as_secs(),
+        })
+    }
+
+    /// One request, sent by Beam rather than by `oauth2`: oauth2 5.0.0's
+    /// `DeviceAccessTokenRequest` polls in a loop until the user decides,
+    /// and the single-request step inside it is private. Beam's client
+    /// does the pacing (ADR-0017), so a handler makes exactly one request
+    /// and returns.
+    async fn poll_device_token(&self, device_code: &str) -> Result<DevicePoll, OidcError> {
+        // An IdP that stopped offering the grant since the flow began is
+        // not polled with a code it may no longer honour.
+        if self.device_url.is_none() {
+            return Err(OidcError::DeviceFlowUnsupported);
+        }
+        let token_url = self
+            .client
+            .token_uri()
+            .ok_or_else(|| {
+                OidcError::Exchange("the identity provider has no token endpoint".to_owned())
+            })?
+            .to_string();
+
+        let request = self.device_token_request(&token_url, device_code)?;
+        let response = self
+            .http_client
+            .call(request)
+            .await
+            .map_err(|e| OidcError::Exchange(e.to_string()))?;
+
+        let token = match classify_device_token_response(response.status(), response.body())? {
+            DeviceTokenOutcome::Pending => return Ok(DevicePoll::Pending),
+            DeviceTokenOutcome::SlowDown => return Ok(DevicePoll::SlowDown),
+            DeviceTokenOutcome::Denied => return Ok(DevicePoll::Denied),
+            DeviceTokenOutcome::Expired => return Ok(DevicePoll::Expired),
+            DeviceTokenOutcome::Issued(token) => token,
+        };
+
+        let id_token = token.id_token().ok_or(OidcError::MissingIdToken)?;
+        // No nonce: the device grant has no authorization request to bind
+        // one into (RFC 8628 section 3.1 takes only `client_id` and
+        // `scope`). Signature, issuer, audience and expiry are all still
+        // verified.
+        let no_nonce = |_: Option<&Nonce>| -> Result<(), String> { Ok(()) };
+        let claims = id_token
+            .claims(&self.client.id_token_verifier(), no_nonce)
+            .map_err(|e| OidcError::ClaimsVerification(e.to_string()))?;
+
+        Ok(DevicePoll::Complete(identity_from(id_token, claims)))
+    }
+}
+
+/// Decodes the claim-set (payload) segment of an already-verified compact
+/// JWT into raw JSON. The signature and nonce were validated by the caller
+/// before this runs, so the bytes are trusted; any decode failure yields
+/// `Value::Null` (admin is then simply never granted) rather than an error.
+///
+/// Takes the compact string rather than a `CoreIdToken`, because that type
+/// can only be built by signing and verifying a real JWT -- which put the
+/// decoding, and the admin-claim evaluation that depends on it, out of
+/// reach of every test. The caller stringifies at the one call site.
+pub(crate) fn decode_claims_payload(compact: &str) -> serde_json::Value {
+    use base64::Engine;
+
+    let Some(payload_b64) = compact.split('.').nth(1) else {
+        return serde_json::Value::Null;
+    };
+    let Ok(payload) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload_b64) else {
+        return serde_json::Value::Null;
+    };
+    serde_json::from_slice(&payload).unwrap_or(serde_json::Value::Null)
+}
+
+#[cfg(test)]
+mod http_client_tests {
+    use super::{CONNECT_TIMEOUT, OidcHttpClient, REQUEST_TIMEOUT, into_http_response};
+    use openidconnect::http::{self, Method, StatusCode, Version, header::LOCATION};
+    use openidconnect::{AsyncHttpClient, HttpClientError};
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    /// The production client with the given bounds, minus the
+    /// environment's proxy. Every test here talks to a loopback socket,
+    /// and an `HTTP_PROXY` would route the request to the proxy instead,
+    /// whose own answer -- a 502, or a connection it does make -- is not
+    /// what the test is about.
+    fn loopback_client(connect: Duration, request: Duration) -> OidcHttpClient {
+        OidcHttpClient::from_builder(reqwest::ClientBuilder::new().no_proxy(), connect, request)
+            .unwrap()
+    }
+
+    /// Reads one HTTP/1.1 request (head plus a `Content-Length` body)
+    /// off `stream` and returns it raw.
+    pub(super) async fn read_request(stream: &mut TcpStream) -> String {
+        let mut raw = Vec::new();
+        let mut chunk = [0u8; 1024];
+        loop {
+            let n = stream.read(&mut chunk).await.unwrap();
+            assert!(n > 0, "connection closed mid-request");
+            raw.extend_from_slice(&chunk[..n]);
+            let text = String::from_utf8_lossy(&raw);
+            let Some(head_end) = text.find("\r\n\r\n") else {
+                continue;
+            };
+            let content_length = text[..head_end]
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap_or(0);
+            if raw.len() >= head_end + 4 + content_length {
+                return String::from_utf8(raw).unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_redirect_is_returned_as_is_and_its_target_is_never_contacted() {
+        // Following an IdP's redirect would let whoever controls that
+        // response aim the server at an arbitrary host (SSRF), so the 3xx
+        // must come back to `openidconnect` unfollowed.
+        let idp = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let elsewhere = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let elsewhere_url = format!("http://{}/", elsewhere.local_addr().unwrap());
+        let idp_url = format!("http://{}/token", idp.local_addr().unwrap());
+
+        let location = elsewhere_url.clone();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = idp.accept().await.unwrap();
+            let request = read_request(&mut stream).await;
+            let response = format!(
+                "HTTP/1.1 302 Found\r\nLocation: {location}\r\n\
+                 Content-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            request
+        });
+
+        let body = b"grant_type=authorization_code&code=abc".to_vec();
+        let request = http::Request::builder()
+            .method(Method::POST)
+            .uri(&idp_url)
+            .header("x-beam-probe", "forwarded")
+            .body(body.clone())
+            .unwrap();
+
+        let client = loopback_client(CONNECT_TIMEOUT, REQUEST_TIMEOUT);
+        let response = client.call(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(response.headers()[LOCATION], elsewhere_url.as_str());
+
+        // The request reached the IdP as `openidconnect` built it.
+        let received = server.await.unwrap();
+        assert!(
+            received.starts_with("POST /token HTTP/1.1\r\n"),
+            "{received}"
+        );
+        assert!(
+            received
+                .to_ascii_lowercase()
+                .contains("\r\nx-beam-probe: forwarded\r\n"),
+            "{received}"
+        );
+        assert!(
+            received.ends_with(std::str::from_utf8(&body).unwrap()),
+            "{received}"
+        );
+
+        // A followed redirect would have left a connection queued here.
+        let elsewhere = elsewhere.into_std().unwrap();
+        elsewhere.set_nonblocking(true).unwrap();
+        assert_eq!(
+            elsewhere.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "the redirect target was contacted"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_idp_is_a_transport_error() {
+        // A socket bound but never listening: a connection to its port is
+        // refused, and because the socket is held until the end of the
+        // test no other test running in parallel can be handed the same
+        // port and answer in its place -- as one could if the port were
+        // bound and released.
+        let reserved = tokio::net::TcpSocket::new_v4().unwrap();
+        reserved.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let addr = reserved.local_addr().unwrap();
+        let request = http::Request::builder()
+            .uri(format!("http://{addr}/.well-known/openid-configuration"))
+            .body(Vec::new())
+            .unwrap();
+
+        let result = loopback_client(CONNECT_TIMEOUT, REQUEST_TIMEOUT)
+            .call(request)
+            .await;
+        drop(reserved);
+
+        match result {
+            Err(HttpClientError::Reqwest(error)) => assert!(error.is_connect(), "{error}"),
+            other => panic!("expected a reqwest connect error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_idp_that_never_answers_times_out() {
+        // An IdP that accepts the connection and then goes silent must not
+        // hold discovery (startup) or a code exchange (a login) forever.
+        let idp = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", idp.local_addr().unwrap());
+        let _server = tokio::spawn(async move {
+            let (mut stream, _) = idp.accept().await.unwrap();
+            // Read until the client gives up and closes; never reply.
+            let mut sink = Vec::new();
+            let _ = stream.read_to_end(&mut sink).await;
+        });
+        let request = http::Request::builder().uri(url).body(Vec::new()).unwrap();
+        let client = loopback_client(Duration::from_millis(200), Duration::from_millis(200));
+
+        // The outer bound only turns a missing timeout into a failure
+        // instead of a hung test run.
+        let result = tokio::time::timeout(Duration::from_secs(10), client.call(request))
+            .await
+            .expect("the request was not bounded by the client's timeout");
+
+        match result {
+            Err(HttpClientError::Reqwest(error)) => assert!(error.is_timeout(), "{error}"),
+            other => panic!("expected a reqwest timeout error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_response_is_copied_with_status_version_every_header_and_body() {
+        // `openidconnect` parses this copy, so a dropped header, a
+        // collapsed repeat, or a lost body misreports why discovery or the
+        // exchange failed.
+        let upstream = http::Response::builder()
+            .status(StatusCode::FOUND)
+            .version(Version::HTTP_2)
+            .header(LOCATION, "https://elsewhere.test/")
+            .header("x-repeated", "first")
+            .header("x-repeated", "second")
+            .body("redirect body")
+            .unwrap();
+
+        let converted = into_http_response(reqwest::Response::from(upstream))
+            .await
+            .unwrap();
+
+        assert_eq!(converted.status(), StatusCode::FOUND);
+        assert_eq!(converted.version(), Version::HTTP_2);
+        assert_eq!(converted.headers()[LOCATION], "https://elsewhere.test/");
+        let repeated: Vec<_> = converted.headers().get_all("x-repeated").iter().collect();
+        assert_eq!(repeated, ["first", "second"]);
+        assert_eq!(converted.body().as_slice(), b"redirect body");
+    }
+}
+
+#[cfg(test)]
+mod device_grant_tests {
+    use super::{
+        DeviceAwareProviderMetadata, DeviceTokenOutcome, classify_device_token_response,
+        device_endpoint, device_token_request,
+    };
+    use crate::utils::oidc::{ClientAuthMethod, OidcError};
+    use base64::Engine as _;
+    use openidconnect::TokenResponse as _;
+    use openidconnect::http::{Method, StatusCode, header};
+    use serde_json::{Value, json};
+
+    fn discovery(extra: Value) -> DeviceAwareProviderMetadata {
+        let mut document = json!({
+            "issuer": "https://idp.test",
+            "authorization_endpoint": "https://idp.test/auth",
+            "token_endpoint": "https://idp.test/token",
+            "jwks_uri": "https://idp.test/keys",
+            "response_types_supported": ["code"],
+            "subject_types_supported": ["public"],
+            "id_token_signing_alg_values_supported": ["RS256"],
+        });
+        document
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        serde_json::from_value(document).expect("a valid discovery document")
+    }
+
+    #[test]
+    fn a_discovery_document_naming_a_device_endpoint_enables_the_grant() {
+        let metadata = discovery(json!({
+            "device_authorization_endpoint": "https://idp.test/device/code",
+        }));
+        assert_eq!(
+            device_endpoint(&metadata).map(|url| url.to_string()),
+            Some("https://idp.test/device/code".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_discovery_document_without_one_still_discovers_with_the_grant_off() {
+        // Most IdPs that do not offer the grant simply omit the field; that
+        // must not fail discovery and take the browser login down with it.
+        assert!(device_endpoint(&discovery(json!({}))).is_none());
+    }
+
+    fn body(value: Value) -> Vec<u8> {
+        value.to_string().into_bytes()
+    }
+
+    #[test]
+    fn each_rfc_8628_error_code_maps_to_its_outcome() {
+        for (code, expected) in [
+            ("authorization_pending", "Pending"),
+            ("slow_down", "SlowDown"),
+            ("access_denied", "Denied"),
+            ("expired_token", "Expired"),
+            // An IdP that no longer holds the device code: start again.
+            ("invalid_grant", "Expired"),
+        ] {
+            let outcome = classify_device_token_response(
+                StatusCode::BAD_REQUEST,
+                &body(json!({ "error": code })),
+            )
+            .unwrap_or_else(|e| panic!("{code} must classify, got {e}"));
+            let name = match outcome {
+                DeviceTokenOutcome::Pending => "Pending",
+                DeviceTokenOutcome::SlowDown => "SlowDown",
+                DeviceTokenOutcome::Denied => "Denied",
+                DeviceTokenOutcome::Expired => "Expired",
+                DeviceTokenOutcome::Issued(_) => "Issued",
+            };
+            assert_eq!(name, expected, "for {code}");
+        }
+    }
+
+    #[test]
+    fn any_other_oauth_error_is_an_exchange_failure() {
+        // `invalid_client` is a misconfigured deployment, not a user who
+        // has not decided yet: polling on would never end.
+        for (status, code) in [
+            (StatusCode::UNAUTHORIZED, "invalid_client"),
+            (StatusCode::BAD_REQUEST, "unsupported_grant_type"),
+            (StatusCode::BAD_REQUEST, "server_error"),
+        ] {
+            let outcome = classify_device_token_response(status, &body(json!({ "error": code })));
+            assert!(
+                matches!(outcome, Err(OidcError::Exchange(ref message)) if message.contains(code)),
+                "{code} -> {outcome:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_error_status_with_an_unreadable_body_is_an_exchange_failure() {
+        let outcome =
+            classify_device_token_response(StatusCode::BAD_GATEWAY, b"<html>upstream</html>");
+        assert!(
+            matches!(outcome, Err(OidcError::Exchange(ref message)) if message.contains("502")),
+            "{outcome:?}"
+        );
+    }
+
+    fn compact_jwt(payload: &Value) -> String {
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        format!(
+            "{}.{}.{}",
+            encode(br#"{"alg":"RS256","typ":"JWT"}"#),
+            encode(payload.to_string().as_bytes()),
+            encode(b"signature-checked-later")
+        )
+    }
+
+    #[test]
+    fn a_success_is_a_token_response_carrying_the_id_token() {
+        let id_token = compact_jwt(&json!({
+            "iss": "https://idp.test",
+            "sub": "subj-1",
+            "aud": "beam",
+            "exp": 2_000_000_000u64,
+            "iat": 1_700_000_000u64,
+        }));
+        let outcome = classify_device_token_response(
+            StatusCode::OK,
+            &body(json!({
+                "access_token": "access",
+                "token_type": "Bearer",
+                "id_token": id_token,
+            })),
+        )
+        .unwrap();
+        match outcome {
+            DeviceTokenOutcome::Issued(token) => assert_eq!(
+                token.id_token().map(ToString::to_string),
+                Some(id_token),
+                "the ID token must reach verification byte-for-byte"
+            ),
+            _ => panic!("a 200 is an issued token"),
+        }
+    }
+
+    #[test]
+    fn a_success_that_is_not_a_token_response_is_an_exchange_failure() {
+        let outcome = classify_device_token_response(StatusCode::OK, b"{\"hello\":1}");
+        assert!(
+            matches!(outcome, Err(OidcError::Exchange(_))),
+            "{outcome:?}"
+        );
+    }
+
+    fn poll_form(auth: ClientAuthMethod) -> (Vec<(String, String)>, Option<String>) {
+        let request = device_token_request(
+            "https://idp.test/token",
+            "beam",
+            "s3cret:with&odd=chars",
+            "the-device-code",
+            auth,
+        )
+        .unwrap();
+
+        assert_eq!(request.method(), Method::POST);
+        assert_eq!(request.uri(), "https://idp.test/token");
+        assert_eq!(
+            request.headers()[header::CONTENT_TYPE],
+            "application/x-www-form-urlencoded"
+        );
+        let form = openidconnect::url::form_urlencoded::parse(request.body())
+            .into_owned()
+            .collect();
+        let authorization = request
+            .headers()
+            .get(header::AUTHORIZATION)
+            .map(|value| value.to_str().unwrap().to_owned());
+        (form, authorization)
+    }
+
+    fn pair(name: &str, value: &str) -> (String, String) {
+        (name.to_owned(), value.to_owned())
+    }
+
+    #[test]
+    fn a_basic_poll_keeps_the_secret_in_the_header() {
+        let (form, authorization) = poll_form(ClientAuthMethod::ClientSecretBasic);
+        assert_eq!(
+            form,
+            [
+                pair("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+                pair("device_code", "the-device-code"),
+                pair("client_id", "beam"),
+            ],
+            "with client_secret_basic the secret never enters the body"
+        );
+
+        // RFC 6749 section 2.3.1: id and secret are each form-encoded
+        // before being joined and base64-encoded.
+        let authorization = authorization.expect("basic auth");
+        let encoded = authorization.strip_prefix("Basic ").expect("basic auth");
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(decoded).unwrap(),
+            "beam:s3cret%3Awith%26odd%3Dchars"
+        );
+    }
+
+    #[test]
+    fn a_post_poll_carries_the_secret_in_the_form_and_no_header() {
+        let (form, authorization) = poll_form(ClientAuthMethod::ClientSecretPost);
+        assert_eq!(
+            form,
+            [
+                pair("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+                pair("device_code", "the-device-code"),
+                pair("client_id", "beam"),
+                pair("client_secret", "s3cret:with&odd=chars"),
+            ]
+        );
+        assert_eq!(
+            authorization, None,
+            "one authentication method per request (RFC 6749 section 2.3)"
+        );
+    }
+}
+
+/// [`DiscoveredOidcClient`] against a loopback IdP.
+///
+/// The fake IdP is a real HTTP listener on 127.0.0.1 serving discovery, a
+/// JWKS, a device authorization endpoint and a token endpoint, so these
+/// drive the whole client -- discovery, how it authenticates each request,
+/// the ID token verifier -- rather than the pure helpers above. Its
+/// registration for Beam names one [`ClientAuthMethod`] and it refuses
+/// the other with `invalid_client`, as Authelia does. It signs ID tokens
+/// with a test-only RSA key whose public half it serves as its JWKS.
+#[cfg(test)]
+mod wire_tests {
+    use super::DiscoveredOidcClient;
+    use super::http_client_tests::read_request;
+    use crate::utils::oidc::{
+        ClientAuthMethod, DeviceAuthStart, DevicePoll, OidcClient, OidcError,
+    };
+    use base64::Engine as _;
+    use openidconnect::core::{
+        CoreGenderClaim, CoreJweContentEncryptionAlgorithm, CoreJwsSigningAlgorithm,
+        CoreRsaPrivateSigningKey,
+    };
+    use openidconnect::{
+        AdditionalClaims, Audience, EndUserEmail, EndUserName, EndUserPictureUrl, IdToken,
+        IdTokenClaims, IssuerUrl, JsonWebKeyId, Nonce, PrivateSigningKey, StandardClaims,
+        SubjectIdentifier,
+    };
+    use serde_json::json;
+    use std::collections::{HashMap, VecDeque};
+    use std::sync::{Arc, Mutex};
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
+
+    /// A key used for nothing but signing these tests' ID tokens.
+    const SIGNING_KEY_PEM: &str = include_str!("../testdata/fake-idp-rs256.pem");
+    const KEY_ID: &str = "fake-idp-key";
+    const CLIENT_ID: &str = "beam";
+    const CLIENT_SECRET: &str = "s3cret:with&odd=chars";
+    const PKCE_VERIFIER: &str = "a-pkce-verifier-of-the-forty-three-char-min";
+    const BOTH: [ClientAuthMethod; 2] = [
+        ClientAuthMethod::ClientSecretBasic,
+        ClientAuthMethod::ClientSecretPost,
+    ];
+
+    fn signing_key() -> CoreRsaPrivateSigningKey {
+        CoreRsaPrivateSigningKey::from_pem(
+            SIGNING_KEY_PEM,
+            Some(JsonWebKeyId::new(KEY_ID.to_owned())),
+        )
+        .expect("the test key parses")
+    }
+
+    /// The method a client is not configured with.
+    fn other(method: ClientAuthMethod) -> ClientAuthMethod {
+        match method {
+            ClientAuthMethod::ClientSecretBasic => ClientAuthMethod::ClientSecretPost,
+            ClientAuthMethod::ClientSecretPost => ClientAuthMethod::ClientSecretBasic,
+        }
+    }
+
+    /// One request the fake IdP received.
+    #[derive(Clone, Debug)]
+    struct Received {
+        /// The request path, without its query string.
+        path: String,
+        query: Vec<(String, String)>,
+        authorization: Option<String>,
+        form: Vec<(String, String)>,
+    }
+
+    impl Received {
+        fn query_value(&self, name: &str) -> Option<&str> {
+            self.query
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.as_str())
+        }
+
+        fn form_value(&self, name: &str) -> Option<&str> {
+            self.form
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.as_str())
+        }
+
+        fn basic_credentials(&self) -> Option<String> {
+            let encoded = self.authorization.as_deref()?.strip_prefix("Basic ")?;
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .ok()?;
+            String::from_utf8(decoded).ok()
+        }
+
+        /// Whether this request authenticated with `method` -- and only
+        /// that way (RFC 6749 section 2.3).
+        fn authenticated_with(&self, method: ClientAuthMethod) -> bool {
+            let secret_in_form = self.form_value("client_secret");
+            match method {
+                ClientAuthMethod::ClientSecretBasic => {
+                    // RFC 6749 section 2.3.1: id and secret are each
+                    // form-encoded before being joined.
+                    self.basic_credentials().as_deref() == Some("beam:s3cret%3Awith%26odd%3Dchars")
+                        && secret_in_form.is_none()
+                }
+                ClientAuthMethod::ClientSecretPost => {
+                    self.authorization.is_none()
+                        && self.form_value("client_id") == Some(CLIENT_ID)
+                        && secret_in_form == Some(CLIENT_SECRET)
+                }
+            }
+        }
+    }
+
+    /// How a [`FakeIdp`] is set up, beyond the method it is registered
+    /// for.
+    #[derive(Clone, Debug)]
+    struct IdpSetup {
+        registered: ClientAuthMethod,
+        /// Whether discovery names a device authorization endpoint.
+        device_endpoint: bool,
+        /// The `issuer` discovery claims, when not the URL it is served
+        /// from.
+        claimed_issuer: Option<String>,
+    }
+
+    impl IdpSetup {
+        fn registered_for(registered: ClientAuthMethod) -> Self {
+            Self {
+                registered,
+                device_endpoint: true,
+                claimed_issuer: None,
+            }
+        }
+    }
+
+    /// What the IdP's listener task shares with the test.
+    struct IdpState {
+        setup: IdpSetup,
+        issuer: String,
+        jwks: serde_json::Value,
+        received: Mutex<Vec<Received>>,
+        /// Bodies the token endpoint answers with, front first, once the
+        /// request authenticated (and, for a code, its verifier matched).
+        /// Empty: `authorization_pending`.
+        tokens: Mutex<VecDeque<String>>,
+        /// Every code the authorization endpoint issued and not yet
+        /// redeemed, with the PKCE challenge it was issued against.
+        challenges: Mutex<HashMap<String, String>>,
+        codes_issued: Mutex<u64>,
+    }
+
+    struct FakeIdp {
+        issuer: String,
+        state: Arc<IdpState>,
+    }
+
+    impl FakeIdp {
+        /// An IdP whose registration for Beam names `registered`.
+        async fn start(registered: ClientAuthMethod) -> Self {
+            Self::start_with(IdpSetup::registered_for(registered)).await
+        }
+
+        async fn start_with(setup: IdpSetup) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let issuer = format!("http://{}", listener.local_addr().unwrap());
+            let state = Arc::new(IdpState {
+                setup,
+                issuer: issuer.clone(),
+                jwks: json!({ "keys": [signing_key().as_verification_key()] }),
+                received: Mutex::new(Vec::new()),
+                tokens: Mutex::new(VecDeque::new()),
+                challenges: Mutex::new(HashMap::new()),
+                codes_issued: Mutex::new(0),
+            });
+
+            let server_state = state.clone();
+            tokio::spawn(async move {
+                loop {
+                    let Ok((mut stream, _)) = listener.accept().await else {
+                        return;
+                    };
+                    let raw = read_request(&mut stream).await;
+                    let request = parse(&raw);
+                    let (status, body) = answer(&server_state, &request);
+                    if !["/.well-known/openid-configuration", "/keys", "/auth"]
+                        .contains(&request.path.as_str())
+                    {
+                        server_state.received.lock().unwrap().push(request);
+                    }
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                }
+            });
+
+            Self { issuer, state }
+        }
+
+        /// What the browser does with `begin_auth`'s URL: visits the
+        /// authorization endpoint, which records the PKCE challenge and
+        /// hands back a code. The user approving is implied.
+        async fn authorize(&self, auth_url: &str) -> String {
+            let response = reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .unwrap()
+                .get(auth_url)
+                .send()
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = response.text().await.unwrap();
+            assert!(
+                status.is_success(),
+                "the authorization endpoint refused {auth_url}: {status} {body}"
+            );
+            let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+            body["code"].as_str().unwrap().to_owned()
+        }
+
+        /// Beam's client, configured with `method`.
+        async fn client(&self, method: ClientAuthMethod) -> DiscoveredOidcClient {
+            DiscoveredOidcClient::discover(
+                &self.issuer,
+                CLIENT_ID,
+                CLIENT_SECRET,
+                method,
+                "http://127.0.0.1/v1/auth/callback",
+                vec!["openid".to_owned(), "email".to_owned()],
+            )
+            .await
+            .expect("discovery against the fake IdP")
+        }
+
+        /// Every request it received other than discovery and the JWKS,
+        /// in order.
+        fn received(&self) -> Vec<Received> {
+            self.state.received.lock().unwrap().clone()
+        }
+
+        fn will_issue(&self, body: String) {
+            self.state.tokens.lock().unwrap().push_back(body);
+        }
+
+        /// A token response carrying an ID token with these claims,
+        /// signed with the key the JWKS serves.
+        fn id_token(&self, issuer: &str, audience: &str, nonce: Option<&str>) -> String {
+            self.id_token_with(
+                issuer,
+                audience,
+                nonce,
+                StandardClaims::new(SubjectIdentifier::new("tv-user".to_owned())),
+                GroupsClaim::default(),
+            )
+        }
+
+        /// [`Self::id_token`] with every standard claim and the
+        /// non-standard `groups` under the test's control.
+        fn id_token_with(
+            &self,
+            issuer: &str,
+            audience: &str,
+            nonce: Option<&str>,
+            standard: StandardClaims<CoreGenderClaim>,
+            extra: GroupsClaim,
+        ) -> String {
+            let now = chrono::Utc::now();
+            let claims = IdTokenClaims::new(
+                IssuerUrl::new(issuer.to_owned()).unwrap(),
+                vec![Audience::new(audience.to_owned())],
+                now + chrono::Duration::minutes(5),
+                now,
+                standard,
+                extra,
+            )
+            .set_nonce(nonce.map(|nonce| Nonce::new(nonce.to_owned())));
+            let token = IdToken::<
+                GroupsClaim,
+                CoreGenderClaim,
+                CoreJweContentEncryptionAlgorithm,
+                CoreJwsSigningAlgorithm,
+            >::new(
+                claims,
+                &signing_key(),
+                CoreJwsSigningAlgorithm::RsaSsaPkcs1V15Sha256,
+                None,
+                None,
+            )
+            .unwrap();
+            json!({
+                "access_token": "access",
+                "token_type": "Bearer",
+                "id_token": token.to_string(),
+            })
+            .to_string()
+        }
+    }
+
+    /// A successful token response that carries no ID token: what an
+    /// OAuth-only authorization server answers.
+    fn token_without_id_token() -> String {
+        json!({ "access_token": "access", "token_type": "Bearer" }).to_string()
+    }
+
+    /// The one non-standard claim these tests need: the `groups` a
+    /// deployment binds admin to, which the typed claim set drops.
+    #[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
+    struct GroupsClaim {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        groups: Option<Vec<String>>,
+    }
+
+    impl AdditionalClaims for GroupsClaim {}
+
+    fn parse(raw: &str) -> Received {
+        let (head, body) = raw.split_once("\r\n\r\n").unwrap_or((raw, ""));
+        let mut lines = head.lines();
+        let target = lines
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .unwrap_or_default();
+        let (path, query) = target.split_once('?').unwrap_or((target, ""));
+        let authorization = lines.find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("authorization")
+                .then(|| value.trim().to_owned())
+        });
+        let decode = |raw: &str| -> Vec<(String, String)> {
+            openidconnect::url::form_urlencoded::parse(raw.as_bytes())
+                .into_owned()
+                .collect()
+        };
+        Received {
+            path: path.to_owned(),
+            query: decode(query),
+            authorization,
+            form: decode(body),
+        }
+    }
+
+    /// RFC 7636 section 4.2's `S256` transform: what a challenge must be
+    /// for the verifier later presented with the code.
+    fn s256(verifier: &str) -> String {
+        use sha2::Digest as _;
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(sha2::Sha256::digest(verifier.as_bytes()))
+    }
+
+    fn oauth_error(status: &'static str, code: &str) -> (&'static str, String) {
+        (status, json!({ "error": code }).to_string())
+    }
+
+    fn answer(idp: &IdpState, request: &Received) -> (&'static str, String) {
+        let issuer = idp.issuer.as_str();
+        let registered = idp.setup.registered;
+        match request.path.as_str() {
+            "/.well-known/openid-configuration" => {
+                let mut document = json!({
+                    "issuer": idp.setup.claimed_issuer.as_deref().unwrap_or(issuer),
+                    "authorization_endpoint": format!("{issuer}/auth"),
+                    "token_endpoint": format!("{issuer}/token"),
+                    "jwks_uri": format!("{issuer}/keys"),
+                    "response_types_supported": ["code"],
+                    "subject_types_supported": ["public"],
+                    "id_token_signing_alg_values_supported": ["RS256"],
+                    "code_challenge_methods_supported": ["S256"],
+                    // Capability, not this client's registration: both
+                    // are listed whichever one `registered` names.
+                    "token_endpoint_auth_methods_supported":
+                        ["client_secret_basic", "client_secret_post"],
+                });
+                if idp.setup.device_endpoint {
+                    document["device_authorization_endpoint"] =
+                        json!(format!("{issuer}/device/code"));
+                }
+                ("200 OK", document.to_string())
+            }
+            "/keys" => ("200 OK", idp.jwks.to_string()),
+            // The authorization endpoint, as the browser reaches it. Like
+            // any IdP that enforces PKCE for a confidential client, it
+            // refuses a request without an S256 challenge.
+            "/auth" => {
+                let challenge = request.query_value("code_challenge").unwrap_or_default();
+                if request.query_value("client_id") != Some(CLIENT_ID)
+                    || request.query_value("response_type") != Some("code")
+                    || request.query_value("code_challenge_method") != Some("S256")
+                    || challenge.is_empty()
+                {
+                    return oauth_error("400 Bad Request", "invalid_request");
+                }
+                let mut issued = idp.codes_issued.lock().unwrap();
+                *issued += 1;
+                let code = format!("code-{issued}");
+                idp.challenges
+                    .lock()
+                    .unwrap()
+                    .insert(code.clone(), challenge.to_owned());
+                (
+                    "200 OK",
+                    json!({ "code": code, "state": request.query_value("state") }).to_string(),
+                )
+            }
+            "/device/code" | "/token" if !request.authenticated_with(registered) => {
+                oauth_error("401 Unauthorized", "invalid_client")
+            }
+            "/device/code" => (
+                "200 OK",
+                json!({
+                    "device_code": "the-device-code",
+                    "user_code": "BCDF-GHJK",
+                    "verification_uri": format!("{issuer}/device"),
+                    "verification_uri_complete":
+                        format!("{issuer}/device?user_code=BCDF-GHJK"),
+                    "expires_in": 600,
+                    "interval": 7,
+                })
+                .to_string(),
+            ),
+            // RFC 7636 section 4.6: a code is redeemed only by the
+            // verifier whose S256 transform is the challenge it was issued
+            // against -- and only once.
+            "/token" if request.form_value("grant_type") == Some("authorization_code") => {
+                let code = request.form_value("code").unwrap_or_default();
+                let challenge = idp.challenges.lock().unwrap().remove(code);
+                let verifier = request.form_value("code_verifier").unwrap_or_default();
+                match challenge {
+                    Some(challenge) if s256(verifier) == challenge => {
+                        match idp.tokens.lock().unwrap().pop_front() {
+                            Some(body) => ("200 OK", body),
+                            None => oauth_error("500 Internal Server Error", "server_error"),
+                        }
+                    }
+                    _ => oauth_error("400 Bad Request", "invalid_grant"),
+                }
+            }
+            "/token" => match idp.tokens.lock().unwrap().pop_front() {
+                Some(body) => ("200 OK", body),
+                None => oauth_error("400 Bad Request", "authorization_pending"),
+            },
+            _ => ("404 Not Found", "{}".to_owned()),
+        }
+    }
+
+    /// The browser's half of a login with `client` at `idp`: begun, then
+    /// authorized, and the code handed back for the exchange.
+    async fn authorized(
+        idp: &FakeIdp,
+        client: &DiscoveredOidcClient,
+    ) -> (crate::utils::oidc::BeginAuth, String) {
+        let begin = client.begin_auth().expect("a discovered client begins");
+        let code = idp.authorize(&begin.auth_url).await;
+        (begin, code)
+    }
+
+    #[tokio::test]
+    async fn each_method_completes_a_code_exchange_at_an_idp_registered_for_it() {
+        for method in BOTH {
+            let idp = FakeIdp::start(method).await;
+            let client = idp.client(method).await;
+            let (begin, code) = authorized(&idp, &client).await;
+            idp.will_issue(idp.id_token(&idp.issuer, CLIENT_ID, Some(&begin.nonce)));
+
+            let identity = client
+                .exchange_code(&code, &begin.pkce_verifier, &begin.nonce)
+                .await;
+
+            assert!(
+                matches!(identity, Ok(ref identity) if identity.subject == "tv-user"),
+                "{method:?}: {identity:?}"
+            );
+            let received = idp.received();
+            assert_eq!(received.len(), 1, "{method:?}: {received:?}");
+            let exchange = &received[0];
+            assert_eq!(exchange.path, "/token");
+            assert_eq!(
+                exchange.form_value("grant_type"),
+                Some("authorization_code")
+            );
+            assert_eq!(exchange.form_value("code"), Some(code.as_str()));
+            assert_eq!(
+                exchange.form_value("code_verifier"),
+                Some(begin.pkce_verifier.as_str())
+            );
+            assert!(exchange.authenticated_with(method), "{exchange:?}");
+            // Basic carries the client id in the header alone, exactly as
+            // the code exchange did before the method was configurable --
+            // so existing deployments send an unchanged request. Post
+            // must name it in the form beside the secret.
+            let expected_client_id = match method {
+                ClientAuthMethod::ClientSecretBasic => None,
+                ClientAuthMethod::ClientSecretPost => Some(CLIENT_ID),
+            };
+            assert_eq!(
+                exchange.form_value("client_id"),
+                expected_client_id,
+                "{method:?}: {exchange:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_code_exchange_sent_the_unregistered_method_is_refused() {
+        for registered in BOTH {
+            let configured = other(registered);
+            let idp = FakeIdp::start(registered).await;
+            let client = idp.client(configured).await;
+
+            let identity = client
+                .exchange_code("the-code", PKCE_VERIFIER, "the-nonce")
+                .await;
+
+            assert!(
+                matches!(identity, Err(OidcError::Exchange(ref message)) if message.contains("invalid_client")),
+                "registered {registered:?}, configured {configured:?}: {identity:?}"
+            );
+            let received = idp.received();
+            assert_eq!(received.len(), 1, "no second attempt: {received:?}");
+            assert!(received[0].authenticated_with(configured), "{received:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn each_method_completes_a_device_login_at_an_idp_registered_for_it() {
+        for method in BOTH {
+            let idp = FakeIdp::start(method).await;
+            let client = idp.client(method).await;
+
+            let start = client
+                .begin_device_auth()
+                .await
+                .expect("device login starts");
+            assert_eq!(start.user_code, "BCDF-GHJK");
+            idp.will_issue(idp.id_token(&idp.issuer, CLIENT_ID, None));
+            let poll = client.poll_device_token(&start.device_code).await;
+
+            assert!(
+                matches!(poll, Ok(DevicePoll::Complete(ref identity)) if identity.subject == "tv-user"),
+                "{method:?}: {poll:?}"
+            );
+            let received = idp.received();
+            assert_eq!(
+                received.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(),
+                ["/device/code", "/token"],
+                "{method:?}"
+            );
+            for request in &received {
+                assert!(request.authenticated_with(method), "{request:?}");
+                // Dex reads `client_id` from the form only, whichever
+                // way the client authenticates.
+                assert_eq!(
+                    request.form_value("client_id"),
+                    Some(CLIENT_ID),
+                    "{method:?}: {request:?}"
+                );
+            }
+            assert_eq!(
+                received[1].form_value("device_code"),
+                Some("the-device-code")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_device_login_sent_the_unregistered_method_is_refused_and_not_retried() {
+        for registered in BOTH {
+            let configured = other(registered);
+            let idp = FakeIdp::start(registered).await;
+            let client = idp.client(configured).await;
+
+            let result = client.begin_device_auth().await;
+
+            assert!(
+                matches!(result, Err(OidcError::Exchange(ref message)) if message.contains("invalid_client")),
+                "registered {registered:?}, configured {configured:?}: {result:?}"
+            );
+            let received = idp.received();
+            assert_eq!(received.len(), 1, "no second attempt: {received:?}");
+            assert!(received[0].authenticated_with(configured), "{received:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_id_token_for_another_audience_or_issuer_is_refused() {
+        let method = ClientAuthMethod::ClientSecretBasic;
+        let idp = FakeIdp::start(method).await;
+        let client = idp.client(method).await;
+        let start = client.begin_device_auth().await.unwrap();
+
+        for (issuer, audience) in [
+            (idp.issuer.clone(), "some-other-client".to_owned()),
+            ("https://impostor.test".to_owned(), CLIENT_ID.to_owned()),
+        ] {
+            idp.will_issue(idp.id_token(&issuer, &audience, None));
+            let poll = client.poll_device_token(&start.device_code).await;
+            assert!(
+                matches!(poll, Err(OidcError::ClaimsVerification(_))),
+                "iss {issuer}, aud {audience}: {poll:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_device_grant_id_token_needs_no_nonce() {
+        // The device grant has no authorization request to bind a nonce
+        // into; a verifier demanding one would refuse every approval.
+        let method = ClientAuthMethod::ClientSecretBasic;
+        let idp = FakeIdp::start(method).await;
+        let client = idp.client(method).await;
+        let start = client.begin_device_auth().await.unwrap();
+
+        idp.will_issue(idp.id_token(&idp.issuer, CLIENT_ID, None));
+        let poll = client.poll_device_token(&start.device_code).await;
+
+        match poll {
+            Ok(DevicePoll::Complete(identity)) => {
+                assert_eq!(identity.issuer, idp.issuer);
+                assert!(identity.claims.get("nonce").is_none());
+            }
+            other => panic!("expected a verified identity, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_poll_before_approval_is_pending() {
+        let method = ClientAuthMethod::ClientSecretBasic;
+        let idp = FakeIdp::start(method).await;
+        let client = idp.client(method).await;
+        let start = client.begin_device_auth().await.unwrap();
+
+        let poll = client.poll_device_token(&start.device_code).await;
+
+        assert!(matches!(poll, Ok(DevicePoll::Pending)), "{poll:?}");
+    }
+
+    #[tokio::test]
+    async fn the_authorization_url_carries_an_s256_challenge_of_the_returned_verifier_state_nonce_and_scopes()
+     {
+        let method = ClientAuthMethod::ClientSecretBasic;
+        let idp = FakeIdp::start(method).await;
+        let client = idp.client(method).await;
+
+        let begin = client.begin_auth().unwrap();
+
+        let url = openidconnect::url::Url::parse(&begin.auth_url).unwrap();
+        assert_eq!(
+            url.as_str().split('?').next(),
+            Some(format!("{}/auth", idp.issuer).as_str()),
+            "the discovered authorization endpoint"
+        );
+        let query: HashMap<String, String> = url.query_pairs().into_owned().collect();
+        let param = |name: &str| query.get(name).map(String::as_str);
+        assert_eq!(param("response_type"), Some("code"));
+        assert_eq!(param("client_id"), Some(CLIENT_ID));
+        assert_eq!(
+            param("redirect_uri"),
+            Some("http://127.0.0.1/v1/auth/callback")
+        );
+        assert_eq!(param("state"), Some(begin.state.as_str()));
+        assert_eq!(param("nonce"), Some(begin.nonce.as_str()));
+        // The challenge commits to the verifier Beam keeps: only the
+        // holder of the verifier can redeem a code issued against it.
+        assert_eq!(param("code_challenge_method"), Some("S256"));
+        assert_eq!(
+            param("code_challenge"),
+            Some(s256(&begin.pkce_verifier).as_str())
+        );
+        let scopes: Vec<&str> = param("scope").unwrap_or_default().split(' ').collect();
+        for scope in ["openid", "email"] {
+            assert!(scopes.contains(&scope), "{scope} in {scopes:?}");
+        }
+
+        // Every login mints its own: a reused state, nonce or verifier
+        // would let one captured login replay another.
+        let again = client.begin_auth().unwrap();
+        assert_ne!(again.state, begin.state);
+        assert_ne!(again.nonce, begin.nonce);
+        assert_ne!(again.pkce_verifier, begin.pkce_verifier);
+    }
+
+    #[tokio::test]
+    async fn a_code_exchange_presenting_another_verifier_is_refused() {
+        // A code intercepted on its way back to Beam is useless without
+        // the verifier, which never left the server.
+        let method = ClientAuthMethod::ClientSecretBasic;
+        let idp = FakeIdp::start(method).await;
+        let client = idp.client(method).await;
+        let (begin, code) = authorized(&idp, &client).await;
+        idp.will_issue(idp.id_token(&idp.issuer, CLIENT_ID, Some(&begin.nonce)));
+
+        let identity = client
+            .exchange_code(&code, PKCE_VERIFIER, &begin.nonce)
+            .await;
+
+        assert!(
+            matches!(identity, Err(OidcError::Exchange(ref message)) if message.contains("invalid_grant")),
+            "{identity:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_code_exchange_whose_id_token_names_another_nonce_is_refused() {
+        // The nonce binds the ID token to this login: one minted for
+        // another (an injected token) must not sign anybody in.
+        let method = ClientAuthMethod::ClientSecretBasic;
+        let idp = FakeIdp::start(method).await;
+        let client = idp.client(method).await;
+
+        for nonce in [Some("somebody-elses-nonce"), None] {
+            let (begin, code) = authorized(&idp, &client).await;
+            idp.will_issue(idp.id_token(&idp.issuer, CLIENT_ID, nonce));
+
+            let identity = client
+                .exchange_code(&code, &begin.pkce_verifier, &begin.nonce)
+                .await;
+
+            assert!(
+                matches!(identity, Err(OidcError::ClaimsVerification(_))),
+                "nonce {nonce:?}: {identity:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_code_exchange_whose_id_token_names_another_audience_or_issuer_is_refused() {
+        let method = ClientAuthMethod::ClientSecretBasic;
+        let idp = FakeIdp::start(method).await;
+        let client = idp.client(method).await;
+
+        for (issuer, audience) in [
+            (idp.issuer.clone(), "some-other-client".to_owned()),
+            ("https://impostor.test".to_owned(), CLIENT_ID.to_owned()),
+        ] {
+            let (begin, code) = authorized(&idp, &client).await;
+            idp.will_issue(idp.id_token(&issuer, &audience, Some(&begin.nonce)));
+
+            let identity = client
+                .exchange_code(&code, &begin.pkce_verifier, &begin.nonce)
+                .await;
+
+            assert!(
+                matches!(identity, Err(OidcError::ClaimsVerification(_))),
+                "iss {issuer}, aud {audience}: {identity:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_token_response_without_an_id_token_is_missing_id_token() {
+        // An OAuth-only answer proves nothing about who the user is.
+        let method = ClientAuthMethod::ClientSecretBasic;
+        let idp = FakeIdp::start(method).await;
+        let client = idp.client(method).await;
+
+        let (begin, code) = authorized(&idp, &client).await;
+        idp.will_issue(token_without_id_token());
+        let identity = client
+            .exchange_code(&code, &begin.pkce_verifier, &begin.nonce)
+            .await;
+        assert!(
+            matches!(identity, Err(OidcError::MissingIdToken)),
+            "code exchange: {identity:?}"
+        );
+
+        let start = client.begin_device_auth().await.unwrap();
+        idp.will_issue(token_without_id_token());
+        let poll = client.poll_device_token(&start.device_code).await;
+        assert!(
+            matches!(poll, Err(OidcError::MissingIdToken)),
+            "device poll: {poll:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_identity_claim_is_mapped_from_the_verified_id_token() {
+        let method = ClientAuthMethod::ClientSecretBasic;
+        let idp = FakeIdp::start(method).await;
+        let client = idp.client(method).await;
+        let (begin, code) = authorized(&idp, &client).await;
+        idp.will_issue(
+            idp.id_token_with(
+                &idp.issuer,
+                CLIENT_ID,
+                Some(&begin.nonce),
+                StandardClaims::new(SubjectIdentifier::new("ada".to_owned()))
+                    .set_email(Some(EndUserEmail::new("ada@example.com".to_owned())))
+                    .set_email_verified(Some(true))
+                    .set_name(Some(EndUserName::new("Ada Lovelace".to_owned()).into()))
+                    .set_picture(Some(
+                        EndUserPictureUrl::new("https://idp.test/ada.png".to_owned()).into(),
+                    )),
+                GroupsClaim {
+                    groups: Some(vec!["beam-admin".to_owned()]),
+                },
+            ),
+        );
+
+        let identity = client
+            .exchange_code(&code, &begin.pkce_verifier, &begin.nonce)
+            .await
+            .unwrap();
+
+        assert_eq!(identity.issuer, idp.issuer);
+        assert_eq!(identity.subject, "ada");
+        assert_eq!(identity.email.as_deref(), Some("ada@example.com"));
+        assert!(identity.email_verified);
+        assert_eq!(identity.name.as_deref(), Some("Ada Lovelace"));
+        assert_eq!(
+            identity.picture.as_deref(),
+            Some("https://idp.test/ada.png")
+        );
+        // The non-standard claim admin is bound to survives, beside the
+        // standard ones.
+        assert_eq!(identity.claims["groups"], json!(["beam-admin"]));
+        assert_eq!(identity.claims["sub"], "ada");
+    }
+
+    #[tokio::test]
+    async fn an_id_token_without_profile_claims_maps_to_an_empty_profile() {
+        let method = ClientAuthMethod::ClientSecretBasic;
+        let idp = FakeIdp::start(method).await;
+        let client = idp.client(method).await;
+        let (begin, code) = authorized(&idp, &client).await;
+        idp.will_issue(idp.id_token(&idp.issuer, CLIENT_ID, Some(&begin.nonce)));
+
+        let identity = client
+            .exchange_code(&code, &begin.pkce_verifier, &begin.nonce)
+            .await
+            .unwrap();
+
+        assert_eq!(identity.email, None);
+        assert!(
+            !identity.email_verified,
+            "an unasserted email is not a verified one"
+        );
+        assert_eq!(identity.name, None);
+        assert_eq!(identity.picture, None);
+    }
+
+    #[tokio::test]
+    async fn a_device_authorization_carries_every_field_the_idp_answered() {
+        let method = ClientAuthMethod::ClientSecretBasic;
+        let idp = FakeIdp::start(method).await;
+        let client = idp.client(method).await;
+
+        let start = client.begin_device_auth().await.unwrap();
+
+        assert_eq!(
+            start,
+            DeviceAuthStart {
+                device_code: "the-device-code".to_owned(),
+                user_code: "BCDF-GHJK".to_owned(),
+                verification_uri: format!("{}/device", idp.issuer),
+                verification_uri_complete: Some(format!(
+                    "{}/device?user_code=BCDF-GHJK",
+                    idp.issuer
+                )),
+                expires_in_secs: 600,
+                interval_secs: 7,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn an_idp_without_a_device_endpoint_refuses_the_grant_and_is_never_asked() {
+        let method = ClientAuthMethod::ClientSecretBasic;
+        let idp = FakeIdp::start_with(IdpSetup {
+            device_endpoint: false,
+            ..IdpSetup::registered_for(method)
+        })
+        .await;
+        let client = idp.client(method).await;
+
+        let started = client.begin_device_auth().await;
+        assert!(
+            matches!(started, Err(OidcError::DeviceFlowUnsupported)),
+            "{started:?}"
+        );
+        let poll = client.poll_device_token("a-code-from-before").await;
+        assert!(
+            matches!(poll, Err(OidcError::DeviceFlowUnsupported)),
+            "{poll:?}"
+        );
+        assert!(idp.received().is_empty(), "{:?}", idp.received());
+
+        // The browser login does not depend on the grant.
+        let (begin, code) = authorized(&idp, &client).await;
+        idp.will_issue(idp.id_token(&idp.issuer, CLIENT_ID, Some(&begin.nonce)));
+        client
+            .exchange_code(&code, &begin.pkce_verifier, &begin.nonce)
+            .await
+            .expect("the code flow still works");
+    }
+
+    async fn discover_at(issuer: &str, redirect_url: &str) -> Result<(), OidcError> {
+        DiscoveredOidcClient::discover(
+            issuer,
+            CLIENT_ID,
+            CLIENT_SECRET,
+            ClientAuthMethod::ClientSecretBasic,
+            redirect_url,
+            vec!["openid".to_owned()],
+        )
+        .await
+        .map(drop)
+    }
+
+    const REDIRECT_URL: &str = "http://127.0.0.1/v1/auth/callback";
+
+    #[tokio::test]
+    async fn discovery_fails_for_an_issuer_that_is_not_a_url() {
+        let result = discover_at("not a url", REDIRECT_URL).await;
+        assert!(matches!(result, Err(OidcError::Discovery(_))), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn discovery_fails_for_an_unreachable_issuer() {
+        // Bound but never listening, and held for the whole test, so the
+        // port refuses and no parallel test can be handed it.
+        let reserved = tokio::net::TcpSocket::new_v4().unwrap();
+        reserved.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let issuer = format!("http://{}", reserved.local_addr().unwrap());
+
+        let result = discover_at(&issuer, REDIRECT_URL).await;
+        drop(reserved);
+
+        assert!(matches!(result, Err(OidcError::Discovery(_))), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn discovery_fails_when_the_document_names_another_issuer() {
+        // OIDC Discovery section 4.3: a document claiming another issuer
+        // is not this issuer's, and every token check would be against
+        // the wrong one.
+        let idp = FakeIdp::start_with(IdpSetup {
+            claimed_issuer: Some("https://impostor.test".to_owned()),
+            ..IdpSetup::registered_for(ClientAuthMethod::ClientSecretBasic)
+        })
+        .await;
+
+        let result = discover_at(&idp.issuer, REDIRECT_URL).await;
+
+        assert!(matches!(result, Err(OidcError::Discovery(_))), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn discovery_fails_for_a_redirect_url_that_is_not_a_url() {
+        let idp = FakeIdp::start(ClientAuthMethod::ClientSecretBasic).await;
+
+        let result = discover_at(&idp.issuer, "not a url").await;
+
+        assert!(matches!(result, Err(OidcError::Discovery(_))), "{result:?}");
+    }
+}
+
+#[cfg(test)]
+mod claims_payload_tests {
+    use super::decode_claims_payload;
+    use base64::Engine as _;
+    use serde_json::{Value, json};
+
+    fn compact_jwt(payload: &Value) -> String {
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        format!(
+            "{}.{}.{}",
+            encode(br#"{"alg":"RS256"}"#),
+            encode(payload.to_string().as_bytes()),
+            encode(b"not-checked-here")
+        )
+    }
+
+    #[test]
+    fn every_claim_in_the_payload_is_carried_through() {
+        // This raw claim set is what admin evaluation reads; dropping it
+        // silently means nobody is ever an admin, with no error anywhere.
+        let payload = json!({
+            "sub": "subj-1",
+            "groups": ["beam-admin", "everyone"],
+            "is_admin": true,
+            "nested": { "a": 1 },
+        });
+        assert_eq!(decode_claims_payload(&compact_jwt(&payload)), payload);
+    }
+
+    #[test]
+    fn the_header_and_signature_segments_are_ignored() {
+        // Only the middle segment is the claim set; reading the first
+        // would return the algorithm header instead.
+        let decoded = decode_claims_payload(&compact_jwt(&json!({"sub": "subj-1"})));
+        assert_eq!(decoded["sub"], "subj-1");
+        assert!(decoded.get("alg").is_none());
+    }
+
+    #[test]
+    fn a_malformed_token_decodes_to_null_rather_than_failing_the_login() {
+        // A login that already passed signature and nonce verification must
+        // not be rejected here; the worst case is no admin claim.
+        for malformed in [
+            "",
+            "not-a-jwt",
+            "onlyheader.",
+            "header.!!!not-base64!!!.sig",
+            &format!(
+                "header.{}.sig",
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"not json")
+            ),
+        ] {
+            assert_eq!(
+                decode_claims_payload(malformed),
+                Value::Null,
+                "for {malformed:?}"
+            );
+        }
+    }
+}

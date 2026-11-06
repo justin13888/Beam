@@ -14,6 +14,7 @@ use std::path::{Component, Path, PathBuf};
 
 use thiserror::Error;
 
+use crate::utils::disc::{DiscKind, disc_stream_kind};
 use crate::utils::filename::parse_media_filename;
 use crate::utils::media_path::season_folder_number;
 
@@ -46,83 +47,6 @@ const SYSTEM_DIRECTORIES: &[&str] = &[
 /// Blu-ray's `CERTIFICATE/` (AACS data and its backups). Matched
 /// case-insensitively at any depth.
 const DISC_COMPANION_DIRECTORIES: &[&str] = &["audio_ts", "certificate"];
-
-/// A DVD or Blu-ray disc structure copied whole: a `VIDEO_TS/` or `BDMV/`
-/// folder (issue #234).
-///
-/// What is inside one is not a set of titles -- a DVD splits one film into
-/// `VTS_01_1.VOB`, `VTS_01_2.VOB`, ...; a Blu-ray's `BDMV/STREAM/` holds
-/// `00001.m2ts` and friends -- so no file in it is judged by its own name,
-/// which would invent films named `VTS 01 1` or `00001` and merge every
-/// disc's same-numbered file into one. The disc is one source of the title
-/// its enclosing folder names, and which of its stream files that source
-/// plays -- its main title -- is read from the disc itself, which a path
-/// cannot say. So the policy only marks a disc's candidate stream files
-/// ([`PathDisposition::DiscStream`]) and keeps the rest of it out.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum DiscKind {
-    /// A `VIDEO_TS/` folder: its main title set's `VTS_nn_1.VOB`,
-    /// `VTS_nn_2.VOB`, ... play in turn.
-    Dvd,
-    /// A `BDMV/` folder: the clips in `BDMV/STREAM/` its main playlist plays.
-    BluRay,
-}
-
-impl DiscKind {
-    /// The kind of disc structure a folder named `name` is the root of, in
-    /// any case.
-    pub fn of_folder(name: &str) -> Option<Self> {
-        if name.eq_ignore_ascii_case("video_ts") {
-            Some(DiscKind::Dvd)
-        } else if name.eq_ignore_ascii_case("bdmv") {
-            Some(DiscKind::BluRay)
-        } else {
-            None
-        }
-    }
-}
-
-/// The title set and part a DVD title file is named for, in any case:
-/// `VTS_03_2.VOB` is part 2 of title set 3. Only a title set's content
-/// files (parts 1 to 9) are named; its menu (`VTS_03_0.VOB`) and the disc's
-/// own (`VIDEO_TS.VOB`) are not, and nor is a name of any other shape, such
-/// as an AppleDouble `._VTS_01_1.VOB`.
-pub fn dvd_title_file(file_name: &str) -> Option<(u32, u32)> {
-    let (stem, ext) = file_name.rsplit_once('.')?;
-    if !ext.eq_ignore_ascii_case("vob") {
-        return None;
-    }
-    let prefix = stem.get(..4)?;
-    if !prefix.eq_ignore_ascii_case("vts_") {
-        return None;
-    }
-    let (set, part) = stem[4..].split_once('_')?;
-    if set.len() != 2 || part.len() != 1 {
-        return None;
-    }
-    let set = set.parse::<u32>().ok().filter(|set| *set >= 1)?;
-    let part = part.parse::<u32>().ok().filter(|part| *part >= 1)?;
-    Some((set, part))
-}
-
-/// The kind of disc a stream file at `path` belongs to, judged from where
-/// it sits alone: a DVD title file ([`dvd_title_file`]) directly in a
-/// `VIDEO_TS/` folder, or an `.m2ts` clip directly in a `BDMV/STREAM/`
-/// folder. `path` may be relative to a library root or absolute.
-pub fn disc_stream_kind(path: &Path) -> Option<DiscKind> {
-    let file_name = path.file_name()?.to_string_lossy();
-    let parent = path.parent()?;
-    let parent_name = parent.file_name()?.to_string_lossy();
-    if DiscKind::of_folder(&parent_name) == Some(DiscKind::Dvd) {
-        return dvd_title_file(&file_name).map(|_| DiscKind::Dvd);
-    }
-    let disc_folder = parent.parent()?.file_name()?.to_string_lossy();
-    let is_clip = parent_name.eq_ignore_ascii_case("stream")
-        && DiscKind::of_folder(&disc_folder) == Some(DiscKind::BluRay)
-        && !file_name.starts_with('.')
-        && lowercase_extension(&file_name).as_deref() == Some("m2ts");
-    is_clip.then_some(DiscKind::BluRay)
-}
 
 /// Folders that hold a title's extras rather than the title (the Plex and
 /// Jellyfin conventions), and could not plausibly be anything else. Matched
@@ -735,28 +659,6 @@ mod tests {
             disposition(&policy, "Heat (1995)/VIDEO_TS/VTS_01_1.VOB"),
             PathDisposition::DiscStream(DiscKind::Dvd)
         );
-    }
-
-    #[test]
-    fn a_dvd_title_file_names_its_title_set_and_part() {
-        let cases: [(&str, Option<(u32, u32)>); 12] = [
-            ("VTS_01_1.VOB", Some((1, 1))),
-            ("vts_12_9.vob", Some((12, 9))),
-            ("VTS_99_2.Vob", Some((99, 2))),
-            // A menu, the disc's own files and the title set's IFO.
-            ("VTS_01_0.VOB", None),
-            ("VIDEO_TS.VOB", None),
-            ("VTS_01_0.IFO", None),
-            ("VTS_00_1.VOB", None),
-            ("VTS_1_1.VOB", None),
-            ("VTS_01_10.VOB", None),
-            ("VTS_01_1.mkv", None),
-            ("._VTS_01_1.VOB", None),
-            ("VTS-01-1.VOB", None),
-        ];
-        for (name, expected) in cases {
-            assert_eq!(dvd_title_file(name), expected, "{name}");
-        }
     }
 
     /// A disc's stream files are video for the empty-root guard, wherever

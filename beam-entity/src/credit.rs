@@ -6,14 +6,13 @@
 //! each kind to its own columns.
 
 use sea_orm::entity::prelude::*;
-use serde::{Deserialize, Serialize};
 
 /// `credits.kind` for an on-screen role.
 pub const KIND_CAST: &str = "cast";
 /// `credits.kind` for a production role.
 pub const KIND_CREW: &str = "crew";
 
-#[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "credits")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]

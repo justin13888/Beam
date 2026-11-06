@@ -1,18 +1,16 @@
-//! Lowercase hex encoding for digests that are persisted.
+//! Lowercase hex encoding for digests that are persisted or used as keys.
 //!
 //! `sha2` 0.11 returns a `hybrid_array::Array`, which -- unlike the
-//! `GenericArray` of 0.10 -- does not implement `LowerHex`, so the
-//! `format!("{:x}", Sha256::digest(..))` this crate used no longer compiles.
+//! `GenericArray` of 0.10 -- does not implement `LowerHex`, so a
+//! `format!("{:x}", Sha256::digest(..))` no longer compiles.
 //!
-//! Every call site stores its result in the database and looks rows up by
-//! equality against it, so the encoding has to stay byte-for-byte what `{:x}`
-//! produced: lowercase, exactly two characters per byte, no separators, no
-//! `0x` prefix. That contract is what the tests below pin.
-//!
-//! Public rather than `pub(crate)` because one of those call sites is no longer
-//! in this crate: the Kynos migration moved the OIDC adapter, and with it
-//! `device_hash`, to `beam-server`. Two implementations of an encoding that
-//! rows are matched on is precisely the mirror that drifts.
+//! The callers store the result -- `beam-auth`'s session-token, device-handle
+//! and user-agent hashes in the database, `beam-server`'s artwork cache key on
+//! disk -- and look it up by equality, so the encoding has to stay
+//! byte-for-byte what `{:x}` produced: lowercase, exactly two characters per
+//! byte, no separators, no `0x` prefix. That contract is what the tests below
+//! pin. It lives here, in the crate both callers already depend on, so there
+//! is one implementation for them to agree on.
 
 const LOWER_HEX_DIGITS: [u8; 16] = *b"0123456789abcdef";
 

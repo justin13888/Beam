@@ -241,16 +241,6 @@ pub mod test_utils {
             self.calls.lock().unwrap().len()
         }
 
-        /// How many times `url` specifically was fetched.
-        pub fn call_count_for(&self, url: &str) -> usize {
-            self.calls
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|fetched| *fetched == url)
-                .count()
-        }
-
         /// Every URL fetched, in order.
         pub fn calls(&self) -> Vec<String> {
             self.calls.lock().unwrap().clone()
