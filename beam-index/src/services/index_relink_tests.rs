@@ -611,11 +611,6 @@ struct CountingHasher {
 
 #[async_trait::async_trait]
 impl HashService for CountingHasher {
-    fn hash_sync(&self, file: std::fs::File) -> std::io::Result<u64> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        self.inner.hash_sync(file)
-    }
-
     async fn hash_async(&self, file: std::fs::File) -> std::io::Result<u64> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.inner.hash_async(file).await

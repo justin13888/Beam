@@ -30,7 +30,6 @@ impl Default for HashConfig {
 #[cfg_attr(any(test, feature = "test-utils"), mockall::automock)]
 #[async_trait::async_trait]
 pub trait HashService: Send + Sync + std::fmt::Debug {
-    fn hash_sync(&self, file: File) -> io::Result<u64>;
     async fn hash_async(&self, file: File) -> io::Result<u64>;
 }
 
@@ -77,17 +76,6 @@ impl LocalHashService {
 
 #[async_trait::async_trait]
 impl HashService for LocalHashService {
-    fn hash_sync(&self, file: File) -> io::Result<u64> {
-        let (tx, rx) = std::sync::mpsc::channel();
-
-        self.thread_pool.spawn(move || {
-            let result = hash_whole(file);
-            let _ = tx.send(result);
-        });
-
-        rx.recv().map_err(io::Error::other)?
-    }
-
     async fn hash_async(&self, file: File) -> io::Result<u64> {
         let thread_pool = self.thread_pool.clone();
 
@@ -137,8 +125,6 @@ mod tests {
             let service = LocalHashService::default();
             let file = File::open(temp_file.path()).unwrap();
             assert_eq!(service.hash_async(file).await.unwrap(), before);
-            let file = File::open(temp_file.path()).unwrap();
-            assert_eq!(service.hash_sync(file).unwrap(), before);
         }
     }
 

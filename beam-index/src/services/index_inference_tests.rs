@@ -124,10 +124,7 @@ impl Harness {
     }
 
     async fn scan(&self) -> u32 {
-        self.service
-            .scan_library(self.library.id.to_string())
-            .await
-            .unwrap()
+        self.service.scan_library(self.library.id).await.unwrap()
     }
 
     fn file(&self, rel: &str) -> MediaFile {
@@ -623,7 +620,7 @@ async fn a_root_of_only_samples_is_reconciled_not_refused() {
     h.write("Movie (2019)/Movie.2019-sample.mkv");
 
     h.service
-        .scan_library(h.library.id.to_string())
+        .scan_library(h.library.id)
         .await
         .expect("a root with video files on it is not refused");
 

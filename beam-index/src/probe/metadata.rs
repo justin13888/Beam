@@ -11,7 +11,7 @@ use crate::probe::{
         ChromaLocation, ColorPrimaries, ColorRange, ColorSpace, ColorTransferCharacteristic,
         PixelFormat,
     },
-    format::{ChannelLayout, Disposition, Resolution, SampleFormat},
+    format::{ChannelLayout, Disposition, SampleFormat},
     media::{CodecId, Discard},
 };
 
@@ -94,11 +94,6 @@ impl VideoMetadata {
     /// Returns None if unknown.
     pub fn bit_depth(&self) -> Option<u8> {
         self.format.bit_depth()
-    }
-
-    /// Get resolution
-    pub fn resolution(&self) -> Resolution {
-        Resolution::new(self.width, self.height)
     }
 }
 
@@ -208,14 +203,6 @@ impl VideoStreamMetadata {
                 0
             }
         }
-    }
-
-    /// Get a unique identifier based on codec and resolution
-    pub fn unique_id(&self) -> String {
-        format!(
-            "{}-{}x{}",
-            self.video.codec_name, self.video.width, self.video.height
-        ) // TODO: make this a hash of all relevant properties
     }
 }
 
@@ -1190,21 +1177,6 @@ mod tests {
         }
 
         #[test]
-        fn a_streams_unique_id_distinguishes_codec_and_resolution() {
-            let hd = video_stream(0, 0, HashMap::new());
-            assert_eq!(hd.unique_id(), "h264-1920x1080");
-
-            let mut sd = video_stream(0, 0, HashMap::new());
-            sd.video.width = 640;
-            sd.video.height = 480;
-            assert_ne!(hd.unique_id(), sd.unique_id());
-
-            let mut other_codec = video_stream(0, 0, HashMap::new());
-            other_codec.video.codec_name = "hevc".to_string();
-            assert_ne!(hd.unique_id(), other_codec.unique_id());
-        }
-
-        #[test]
         fn frame_rate_is_the_streams_rational_rate() {
             // 24000/1001 is NTSC film: a rational the probe must not round to
             // 24, or A/V sync drifts a frame every ~17 minutes.
@@ -1222,10 +1194,9 @@ mod tests {
 
         /// A stream's bit depth is its pixel format's, as FFmpeg's own
         /// descriptor gives it -- 8-bit SDR, and the 10-, 12- and 16-bit
-        /// formats HDR and mastering files use, in either byte order -- and
-        /// its resolution is its probed width and height.
+        /// formats HDR and mastering files use, in either byte order.
         #[test]
-        fn video_bit_depth_and_resolution_come_from_the_probed_format() {
+        fn video_bit_depth_comes_from_the_probed_format() {
             use ffmpeg::format::Pixel;
             for pixel in [
                 Pixel::YUV420P,
@@ -1248,9 +1219,6 @@ mod tests {
                     "{pixel:?}"
                 );
             }
-            let mut video = video_metadata(0);
-            (video.width, video.height) = (3840, 1606);
-            assert_eq!(video.resolution(), Resolution::new(3840, 1606));
         }
     }
 

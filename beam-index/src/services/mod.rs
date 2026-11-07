@@ -11,12 +11,6 @@ pub mod trickplay;
 pub mod watch_status;
 pub mod watcher;
 
-// The clock seam lives in `beam-domain` (one canonical `Clock` for the whole
-// workspace); re-exported here so `beam_index::services::Clock` keeps working.
-#[cfg(any(test, feature = "test-utils"))]
-pub use beam_domain::services::TestClock;
-pub use beam_domain::services::{Clock, RealClock};
-
 #[cfg(any(test, feature = "test-utils"))]
 pub use admin_log::NoOpAdminLogService;
 pub use admin_log::{AdminLogService, LocalAdminLogService};
@@ -35,6 +29,6 @@ pub use scan::{
     Retirement, ScanJob, ScanPhase, ScanProgress, ScanState, ScanTicket, ScanTrigger, StoppedScan,
 };
 pub use trickplay::{LocalTrickplayGenerator, TrickplayGenerator};
-pub use watcher::{FsEvent, FsEventKind, FsWatcher, NotifyFsWatcher, PathDebouncer, WatchError};
 #[cfg(any(test, feature = "test-utils"))]
-pub use watcher::{InMemoryFsWatcher, MockFsWatcher};
+pub use watcher::InMemoryFsWatcher;
+pub use watcher::{FsEvent, FsEventKind, FsWatcher, NotifyFsWatcher, PathDebouncer, WatchError};

@@ -427,7 +427,7 @@ impl Harness {
     }
 
     async fn scan(&self) -> Result<u32, IndexError> {
-        self.service.scan_library(self.library.id.to_string()).await
+        self.service.scan_library(self.library.id).await
     }
 
     /// The row as the reconcile reads see it, missing or not.

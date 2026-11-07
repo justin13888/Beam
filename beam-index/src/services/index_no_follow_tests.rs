@@ -86,11 +86,6 @@ impl SwapBeforeHash {
 
 #[async_trait::async_trait]
 impl HashService for SwapBeforeHash {
-    fn hash_sync(&self, file: std::fs::File) -> std::io::Result<u64> {
-        self.run_swap();
-        self.inner.hash_sync(file)
-    }
-
     async fn hash_async(&self, file: std::fs::File) -> std::io::Result<u64> {
         self.run_swap();
         self.inner.hash_async(file).await
@@ -193,10 +188,7 @@ impl Harness {
     }
 
     async fn scan(&self) {
-        self.service
-            .scan_library(self.library.id.to_string())
-            .await
-            .unwrap();
+        self.service.scan_library(self.library.id).await.unwrap();
     }
 
     async fn row(&self, path: &Path) -> Option<MediaFile> {

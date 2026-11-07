@@ -15,18 +15,17 @@ async-trait = { workspace = true }
 # regardless of our postgres-only sea-orm feature selection) pins. See
 # docs/architecture/decisions/ADR-0006-cameo-enrichment.md.
 cameo = { version = "0.2.0", default-features = false, features = ["tmdb", "anilist"] }
-chrono = { workspace = true, features = ["serde"] }
+chrono = { workspace = true }
 ffmpeg-next = { workspace = true }
 # Facade only: every counter is a no-op unless beam-server installed a
 # recorder (BEAM_ENABLE_METRICS=true).
 metrics = { workspace = true }
 mutants = { workspace = true }
 notify = "8"
-num = { version = "0.4.3", features = ["serde"] }
+num = "0.4.3"
 num_cpus = "1.17.0"
 parking_lot = "0.12.5"
 rayon = "1.12.0"
-regex = { workspace = true }
 reqwest = { workspace = true }
 sea-orm = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

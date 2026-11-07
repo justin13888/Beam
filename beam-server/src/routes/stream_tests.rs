@@ -52,9 +52,6 @@ struct StubHashService;
 
 #[async_trait::async_trait]
 impl HashService for StubHashService {
-    fn hash_sync(&self, _file: std::fs::File) -> std::io::Result<u64> {
-        unimplemented!("not called in stream route tests")
-    }
     async fn hash_async(&self, _file: std::fs::File) -> std::io::Result<u64> {
         unimplemented!("not called in stream route tests")
     }
