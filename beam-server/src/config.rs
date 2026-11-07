@@ -1969,4 +1969,23 @@ mod tests {
         // An exact filter that matched nothing would also exit 0.
         assert!(stdout.contains("1 passed"), "stdout: {stdout}");
     }
+
+    /// The indexer's own defaults -- what it does when nothing overrides it,
+    /// as its tests and any caller building it directly see -- are the
+    /// defaults this config documents to operators: one value each, not two
+    /// that drift. confique's `default` takes only a literal, so the config
+    /// cannot name beam-index's constants; this holds the two together.
+    #[test]
+    fn the_indexer_defaults_are_the_documented_defaults() {
+        let config = ServerConfig::default();
+        let policy = beam_index::services::EnrichmentPolicy::default();
+        assert_eq!(config.enrich_batch_size, policy.batch_size);
+        assert_eq!(config.enrich_min_confidence, policy.min_confidence);
+        assert_eq!(
+            std::time::Duration::from_secs(
+                u64::from(config.missing_file_grace_days) * 24 * 60 * 60
+            ),
+            beam_index::services::index::DEFAULT_MISSING_FILE_GRACE
+        );
+    }
 }

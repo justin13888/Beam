@@ -270,7 +270,9 @@ pub enum IndexError {
     /// The four sites are the scan's two root guards (a root that is not a
     /// directory, and a root that holds no video files while the library has
     /// indexed video files) and the two `process_new_file` failures (metadata,
-    /// hash).
+    /// hash). The first guard runs twice: in `begin_scan`, before a job is
+    /// registered, and again when the job starts, in case the root went away
+    /// while it was queued.
     ///
     /// The path itself goes to a structured `tracing` field at the failing
     /// site. Where it *also* reaches the admin log differs by site, and the
@@ -1839,6 +1841,12 @@ impl LocalIndexService {
     ///
     /// A library whose scan job is already queued or running -- an
     /// administrator's scan, say -- is skipped: that scan covers it.
+    ///
+    /// Returns how many files the scans added in total, saturating at
+    /// [`u32::MAX`]. A library that is skipped, deleted mid-sweep, or whose
+    /// scan fails adds nothing to the count and is logged, never returned:
+    /// the only error is the [`IndexError::Db`] from listing the libraries,
+    /// before any is scanned.
     pub async fn scan_all_libraries(&self, trigger: ScanTrigger) -> Result<u32, IndexError> {
         let reclassify = self.identity_passes_done().await;
 

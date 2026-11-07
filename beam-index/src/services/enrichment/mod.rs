@@ -1,8 +1,17 @@
 //! Background metadata enrichment: sweeps `metadata_enrichment` for rows due
 //! for (re-)processing, resolves each against the configured
 //! [`EnrichmentProvider`], and applies accepted matches to the movie/show
-//! repositories. Wired to [`beam_domain::providers::enrichment::NoopEnrichmentProvider`]
-//! in production for this commit; the real cameo-backed adapter lands in D4.
+//! repositories.
+//!
+//! The provider is whatever `beam-server` wires: the cameo-backed
+//! [`CameoEnrichmentProvider`](crate::providers::cameo::CameoEnrichmentProvider)
+//! (TMDB and AniList) and TheTVDB's
+//! [`TvdbEnrichmentProvider`](crate::providers::tvdb::TvdbEnrichmentProvider),
+//! asked together through a
+//! [`CompositeEnrichmentProvider`](crate::providers::composite::CompositeEnrichmentProvider)
+//! when both are configured, either alone when only it is, and
+//! [`NoopEnrichmentProvider`](beam_domain::providers::enrichment::NoopEnrichmentProvider)
+//! -- every sweep a no-op -- when neither is.
 
 pub mod control;
 #[cfg(test)]
@@ -73,8 +82,20 @@ impl EnrichmentPolicy {
             .get(idx)
             .or_else(|| self.backoff_schedule.last())
             .copied()
-            .unwrap_or(Duration::from_secs(60))
+            .unwrap_or(FALLBACK_DELAY)
     }
+}
+
+/// The delay a retry waits when nothing better is known: a rate limit that
+/// named no `Retry-After`, an empty backoff schedule, or a delay too long
+/// for a timestamp to hold.
+const FALLBACK_DELAY: Duration = Duration::from_secs(60);
+
+/// The instant `delay` after `now`. A delay too long for `chrono` to
+/// represent is read as [`FALLBACK_DELAY`] rather than failing the retry.
+fn after(now: chrono::DateTime<chrono::Utc>, delay: Duration) -> chrono::DateTime<chrono::Utc> {
+    let fallback = chrono::Duration::seconds(FALLBACK_DELAY.as_secs() as i64);
+    now + chrono::Duration::from_std(delay).unwrap_or(fallback)
 }
 
 /// The provider ids a match reports, which a pin is checked against.
@@ -902,10 +923,8 @@ impl MetadataEnrichmentService {
     async fn handle_error(&self, row: &EnrichmentState, err: EnrichmentError) -> ProcessOutcome {
         match err {
             EnrichmentError::RateLimited { retry_after } => {
-                let delay = retry_after.unwrap_or(Duration::from_secs(60));
                 let now = self.clock.now();
-                let next_attempt_at = now
-                    + chrono::Duration::from_std(delay).unwrap_or(chrono::Duration::seconds(60));
+                let next_attempt_at = after(now, retry_after.unwrap_or(FALLBACK_DELAY));
                 let _ = self
                     .state_repo
                     .mark_retrying(
@@ -951,10 +970,8 @@ impl MetadataEnrichmentService {
                 Exhausted::Unmatched => self.mark_unmatched(row, reason).await,
             };
         }
-        let delay = self.policy.backoff_for(attempts);
         let now = self.clock.now();
-        let next_attempt_at =
-            now + chrono::Duration::from_std(delay).unwrap_or(chrono::Duration::seconds(60));
+        let next_attempt_at = after(now, self.policy.backoff_for(attempts));
         let _ = self
             .state_repo
             .mark_retrying(row.id, reason, attempts, next_attempt_at, now)
