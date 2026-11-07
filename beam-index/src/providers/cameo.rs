@@ -5,6 +5,8 @@
 
 use tracing::warn;
 
+use super::composite::search_in_turn;
+
 use beam_domain::providers::enrichment::{
     CollectionEnrichment, CreditEnrichment, CreditRole, EnrichmentError, EnrichmentProvider,
     ExternalMediaRef, MediaQuery, MovieEnrichment, MovieSearchHit, SeasonEnrichment,
@@ -229,64 +231,44 @@ impl EnrichmentProvider for CameoEnrichmentProvider {
         &self,
         query: &MediaQuery,
     ) -> Result<Vec<MovieSearchHit>, EnrichmentError> {
-        let mut hits = Vec::new();
-        let mut last_err = None;
-        for provider in self.client.provider_ids() {
-            match self
-                .client
-                .search_movies_with(provider, &query.title, None)
-                .await
-            {
-                Ok(page) => hits.extend(page.results.iter().map(map_movie_hit)),
-                Err(cameo::CameoClientError::Provider(cameo::ProviderError::RateLimited {
-                    retry_after,
-                })) => {
-                    return Err(EnrichmentError::RateLimited { retry_after });
-                }
-                Err(e) => {
-                    warn!(provider = %provider, error = %e, "cameo movie search failed for provider; trying next");
-                    last_err = Some(e);
-                }
-            }
-        }
-        if hits.is_empty()
-            && let Some(err) = last_err
-        {
-            return Err(map_client_error(err));
-        }
-        Ok(hits)
+        search_in_turn(
+            self.client
+                .provider_ids()
+                .into_iter()
+                .map(|provider| {
+                    (provider, async move {
+                        self.client
+                            .search_movies_with(provider, &query.title, None)
+                            .await
+                            .map(|page| page.results.iter().map(map_movie_hit).collect())
+                            .map_err(map_client_error)
+                    })
+                })
+                .collect(),
+        )
+        .await
     }
 
     async fn search_shows(
         &self,
         query: &MediaQuery,
     ) -> Result<Vec<ShowSearchHit>, EnrichmentError> {
-        let mut hits = Vec::new();
-        let mut last_err = None;
-        for provider in self.client.provider_ids() {
-            match self
-                .client
-                .search_tv_shows_with(provider, &query.title, None)
-                .await
-            {
-                Ok(page) => hits.extend(page.results.iter().map(map_show_hit)),
-                Err(cameo::CameoClientError::Provider(cameo::ProviderError::RateLimited {
-                    retry_after,
-                })) => {
-                    return Err(EnrichmentError::RateLimited { retry_after });
-                }
-                Err(e) => {
-                    warn!(provider = %provider, error = %e, "cameo show search failed for provider; trying next");
-                    last_err = Some(e);
-                }
-            }
-        }
-        if hits.is_empty()
-            && let Some(err) = last_err
-        {
-            return Err(map_client_error(err));
-        }
-        Ok(hits)
+        search_in_turn(
+            self.client
+                .provider_ids()
+                .into_iter()
+                .map(|provider| {
+                    (provider, async move {
+                        self.client
+                            .search_tv_shows_with(provider, &query.title, None)
+                            .await
+                            .map(|page| page.results.iter().map(map_show_hit).collect())
+                            .map_err(map_client_error)
+                    })
+                })
+                .collect(),
+        )
+        .await
     }
 
     async fn movie_enrichment(
