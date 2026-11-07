@@ -11,6 +11,8 @@
       "pull-request-header": "Merging this pull request releases the version below. It is kept up to date automatically as commits land on master.",
       "draft": false,
       "prerelease": false,
+      "bump-minor-pre-major": true,
+      "bump-patch-for-minor-pre-major": true,
       "extra-files": [
         {
           "type": "toml",
