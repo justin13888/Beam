@@ -90,8 +90,6 @@ pub enum OidcError {
     MissingIdToken,
     #[error("ID token claims verification failed: {0}")]
     ClaimsVerification(String),
-    #[error("nonce mismatch")]
-    NonceMismatch,
     /// The IdP's discovery document names no `device_authorization_endpoint`,
     /// so the device grant cannot be offered (the browser flow still works).
     #[error("the identity provider does not support the device authorization grant")]

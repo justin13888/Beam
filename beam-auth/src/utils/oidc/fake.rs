@@ -130,7 +130,7 @@ impl OidcClient for FakeOidcClient {
             if begin.nonce != nonce {
                 // What `DiscoveredOidcClient` answers: openidconnect's
                 // verifier reports a wrong nonce as a claims failure like
-                // any other, so `NonceMismatch` never comes from it.
+                // any other.
                 return Err(OidcError::ClaimsVerification(
                     "nonce does not match".to_string(),
                 ));
