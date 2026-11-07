@@ -45,11 +45,14 @@ Cookie-backed sessions with hash-at-rest credentials and two-tier expiry. See
 | `absolute_expires_at` | TIMESTAMPTZ | no | hard ceiling the slide never extends past (`BEAM_SESSION_MAX_DAYS`) |
 
 Indexes: unique on `token_hash` (lookup is always by hash of the presented cookie value); `user_id`
-(list/revoke all sessions for a user); `idle_expires_at` (cheap sweep of expired rows).
+(list/revoke all sessions for a user); `idle_expires_at` (cheap sweep of expired rows). Rows past
+either expiry are swept whenever a new session is created
+([ADR-0005](decisions/ADR-0005-sessions-in-postgres.md)); reads filter on both regardless.
 
 ### `pending_auths`
 A single-use OIDC authorization round-trip record, created when the login redirect is issued and
 consumed atomically (a `state` value can be exchanged at most once) when the callback arrives.
+Expired rows are swept whenever a new login starts.
 
 | Column | Type | Nullable | Notes |
 |---|---|---|---|

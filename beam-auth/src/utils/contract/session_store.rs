@@ -262,6 +262,85 @@ macro_rules! session_store_contract {
         }
 
         #[tokio::test]
+        async fn creating_a_session_sweeps_the_expired_ones_and_leaves_live_ones() {
+            // `delete_all_for_user` counts the rows it removes whether or not
+            // they are expired, so it is what shows a dead session is gone
+            // rather than merely filtered out of reads.
+            let fixture = $setup().await;
+            let user = fixture.new_user().await;
+            let other = fixture.new_user().await;
+            const LAPSE: u64 = 300;
+
+            let idle_lapsed = fixture
+                .store()
+                .create(&session_for(&user), LAPSE - 1, ABSOLUTE_TTL)
+                .await
+                .unwrap();
+            // An idle TTL longer than the absolute one: only the absolute
+            // ceiling can mark this one dead.
+            let absolute_lapsed = fixture
+                .store()
+                .create(&session_for(&user), IDLE_TTL, LAPSE - 1)
+                .await
+                .unwrap();
+            let at_its_deadline = fixture
+                .store()
+                .create(&session_for(&user), LAPSE, ABSOLUTE_TTL)
+                .await
+                .unwrap();
+            let live = fixture
+                .store()
+                .create(&session_for(&user), IDLE_TTL, ABSOLUTE_TTL)
+                .await
+                .unwrap();
+            fixture
+                .store()
+                .create(&session_for(&other), LAPSE - 1, ABSOLUTE_TTL)
+                .await
+                .unwrap();
+
+            fixture.clock().advance(Duration::from_secs(LAPSE));
+            let newcomer = fixture.new_user().await;
+            fixture
+                .store()
+                .create(&session_for(&newcomer), IDLE_TTL, ABSOLUTE_TTL)
+                .await
+                .unwrap();
+
+            for dead in [&idle_lapsed, &absolute_lapsed] {
+                assert!(fixture.store().get(dead).await.unwrap().is_none());
+            }
+            assert!(
+                fixture
+                    .store()
+                    .get(&at_its_deadline)
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "a deadline of exactly now is still valid and must survive the sweep"
+            );
+            assert!(fixture.store().get(&live).await.unwrap().is_some());
+            assert_eq!(
+                fixture
+                    .store()
+                    .delete_all_for_user(&user.to_string())
+                    .await
+                    .unwrap(),
+                2,
+                "only the two live sessions are left; both expired ones were swept"
+            );
+            assert_eq!(
+                fixture
+                    .store()
+                    .delete_all_for_user(&other.to_string())
+                    .await
+                    .unwrap(),
+                0,
+                "the sweep is not scoped to the user signing in"
+            );
+        }
+
+        #[tokio::test]
         async fn listing_shows_a_users_live_sessions_only() {
             let fixture = $setup().await;
             let user = fixture.new_user().await;
