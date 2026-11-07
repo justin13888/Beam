@@ -23,7 +23,7 @@ use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
 use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
 use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
 use beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository;
-use beam_domain::services::TestClock;
+use beam_domain::services::{SequentialIdGenerator, TestClock};
 use tempfile::TempDir;
 
 use crate::probe::metadata::MetadataError;
@@ -169,6 +169,7 @@ impl Harness {
                 Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
             )
             .with_clock(clock.clone())
+            .with_id_generator(Arc::new(SequentialIdGenerator::new()))
             .with_settle_window(SETTLE),
         );
         Self {
@@ -288,6 +289,9 @@ async fn a_second_scan_is_refused_while_one_is_queued() {
         .await;
 
     assert!(matches!(second, Err(IndexError::ScanInProgress)));
+    // The job's id is the injected generator's first, and the refused
+    // second scan drew none: the library's job is still the first.
+    assert_eq!(first.job_id(), SequentialIdGenerator::nth(0));
     assert_eq!(
         h.service.scan_job(h.library.id).map(|job| job.id),
         Some(first.job_id())

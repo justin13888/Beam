@@ -282,9 +282,13 @@ impl AppServices {
             db.clone(),
         ));
         let enrichment_repo: Arc<dyn beam_domain::repositories::EnrichmentStateRepository> =
-            Arc::new(beam_index::repositories::SqlEnrichmentStateRepository::new(
-                db.clone(),
-            ));
+            Arc::new(
+                beam_index::repositories::SqlEnrichmentStateRepository::with_seams(
+                    db.clone(),
+                    clock.clone(),
+                    Arc::new(beam_domain::services::UuidGenerator),
+                ),
+            );
         let genre_repo: Arc<dyn beam_domain::repositories::GenreRepository> = Arc::new(
             beam_index::repositories::SqlGenreRepository::new(db.clone()),
         );
