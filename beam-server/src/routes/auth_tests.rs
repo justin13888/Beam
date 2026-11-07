@@ -293,6 +293,8 @@ mod tests {
                     oidc_logout_all,
                     oidc_list_sessions,
                     oidc_delete_session,
+                    // One admin operation, for the scope check's own failures.
+                    crate::routes::admin::get_admin_logs,
                 ]),
             )
             .trusted_proxies(trusted_proxies)
@@ -465,6 +467,33 @@ mod tests {
                 .await
                 .assert_status(StatusCode::FOUND)
                 .assert_redirect("http://localhost:5173/");
+        }
+    }
+
+    /// A `redirect` that cannot be a `Location` -- trailing whitespace or a
+    /// control character -- still completes the login: the callback lands on
+    /// the web root and sends the session cookie, rather than answering 500
+    /// after the session is minted.
+    #[tokio::test]
+    async fn an_unusable_redirect_still_signs_in_and_lands_on_the_web_root() {
+        // URL-encoded: `/a `, `/a\t`, and `/a\r\nX: y`.
+        for unusable in ["%2Fa%20", "%2Fa%09", "%2Fa%0D%0AX%3A%20y"] {
+            let harness = make_harness(FakeOidcClient::with_identity(identity(
+                "user@example.com",
+                true,
+            )));
+
+            let (state_cookie, _) = do_login(&harness, Some(unusable)).await;
+            let begin = harness.oidc_client.last_begin().unwrap();
+
+            let response = do_callback(&harness, &state_cookie, &begin.state).await;
+            response
+                .assert_status(StatusCode::FOUND)
+                .assert_redirect("http://localhost:5173/");
+            assert!(
+                live_cookie(&response, SESSION_COOKIE).is_some(),
+                "{unusable}: the minted session's cookie is sent"
+            );
         }
     }
 
@@ -1238,18 +1267,18 @@ mod tests {
         assert!(!response.text().contains("gone@example.com"));
     }
 
-    /// The authenticator cannot say "I could not tell" (see
-    /// `SessionAuthenticator::authenticate`), so a session store that fails
-    /// the lookup is a 401 -- never a 500 that reads as the endpoint being
-    /// broken, and never the user the cookie named.
+    /// A session store that fails the lookup is a 503 "I could not tell" (see
+    /// `SessionAuthenticator::authenticate`) -- never a 401 that tells the
+    /// client to discard a session that may be valid, and never the user the
+    /// cookie named.
     #[tokio::test]
-    async fn a_session_store_outage_is_401_not_500() {
+    async fn a_session_store_outage_is_503_not_401() {
         let harness = harness_failing("outage@example.com", SessionStoreOperation::Get);
         let session_cookie = login_and_get_session_cookie(&harness, "outage@example.com").await;
 
         let response = get_me(&harness, &session_cookie).await;
 
-        response.assert_status(StatusCode::UNAUTHORIZED);
+        response.assert_status(StatusCode::SERVICE_UNAVAILABLE);
         assert!(
             !response.text().contains("outage@example.com"),
             "no account is answered for a cookie that could not be checked"
@@ -1275,6 +1304,30 @@ mod tests {
             .await
             .assert_status(StatusCode::INTERNAL_SERVER_ERROR)
             .assert_problem_type("https://beam.justinchung.net/reference/errors/#internal");
+    }
+
+    /// The admin check reads the user row, and a row that cannot be read is
+    /// the same "could not tell" as a session store outage: a 503, never the
+    /// 401 that would sign a valid administrator out.
+    #[tokio::test]
+    async fn an_account_store_failure_on_an_admin_operation_is_503_not_401() {
+        let users = Arc::new(FailingUserRepository::new(
+            InMemoryUserRepository::default(),
+            UserRepositoryOperation::FindById,
+        ));
+        let harness = make_harness_over_users(
+            FakeOidcClient::with_identity(identity("admin@example.com", true)),
+            users,
+        );
+        let session_cookie = login_and_get_session_cookie(&harness, "admin@example.com").await;
+
+        harness
+            .client
+            .get("/v1/admin/logs")
+            .cookie(SESSION_COOKIE, &session_cookie)
+            .send()
+            .await
+            .assert_status(StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]

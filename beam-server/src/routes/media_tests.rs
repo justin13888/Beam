@@ -1171,7 +1171,6 @@ async fn an_out_of_range_numeric_filter_is_a_400_invalid_filter() {
         "year=4294967295",
         "year_from=4294967295",
         "year_to=2147483648",
-        "min_rating=NaN",
     ] {
         client
             .get(&format!("/v1/media?{query}"))
@@ -1183,8 +1182,14 @@ async fn an_out_of_range_numeric_filter_is_a_400_invalid_filter() {
     }
 
     // A rating outside its published 0-10 is Kynos's `QueryParams` check
-    // answering, before the handler's own.
-    for query in ["min_rating=10.5", "min_rating=-1", "min_rating=inf"] {
+    // answering, before the handler's own -- `NaN` too, which satisfies no
+    // bound.
+    for query in [
+        "min_rating=10.5",
+        "min_rating=-1",
+        "min_rating=inf",
+        "min_rating=NaN",
+    ] {
         client
             .get(&format!("/v1/media?{query}"))
             .cookie("beam_session", &token)

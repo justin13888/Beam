@@ -5,7 +5,6 @@ pub mod api_error;
 pub mod artwork;
 pub mod auth;
 pub mod collections;
-pub mod delivery;
 pub mod enrichment;
 pub mod genres;
 pub mod health;

@@ -371,8 +371,11 @@ struct SignsOutDuringMe {
 }
 
 impl crate::api::HttpBackend for SignsOutDuringMe {
-    fn execute(&self, request: reqwest::Request) -> crate::api::ExecuteFuture<'_> {
-        let is_me = request.url().path() == "/v1/me";
+    fn execute(
+        &self,
+        request: ::http::Request<crate::api::HttpBody>,
+    ) -> crate::api::ExecuteFuture<'_> {
+        let is_me = request.uri().path() == "/v1/me";
         Box::pin(async move {
             let (status, body) = if is_me {
                 let client = self.client.upgrade().expect("the client outlives its call");
@@ -387,9 +390,9 @@ impl crate::api::HttpBackend for SignsOutDuringMe {
             let response = ::http::Response::builder()
                 .status(status)
                 .header("content-type", "application/json")
-                .body(body.to_owned())
+                .body(crate::api::HttpBody::from(body))
                 .expect("a canned response is well-formed");
-            Ok(reqwest::Response::from(response))
+            Ok(response)
         })
     }
 }
@@ -1518,20 +1521,18 @@ async fn a_401_no_call_consumed_cannot_expire_the_session_that_replaced_it() {
     assert!(client.server_http_config().is_ok());
 }
 
-/// A problem `type` the contract does not list for the status is lost,
-/// status and all.
+/// A problem `type` the contract does not list for the status keeps its
+/// status, and its `type` rides along.
 ///
-/// This pins a gap, not a preference: the generated client decodes the
-/// `type` as a closed set and reports anything else as a decode failure
-/// that carries no status, so a code the server adds after a client ships
-/// turns a documented 404 into a malformed response (getkono/spargen#268).
-/// Expected to fail when that is fixed -- the failure is the reminder to
-/// classify this as the 404 it is.
+/// The generated client decodes the `type` as a closed set, so a code the
+/// server adds after a client ships fails to decode -- and the decode failure
+/// keeps the status, so the caller still sees the documented 404 it is, not a
+/// malformed response.
 #[tokio::test]
-async fn a_problem_type_the_contract_does_not_list_loses_its_status() {
+async fn a_problem_type_the_contract_does_not_list_keeps_its_status() {
     let (client, _) = client_answering(
         404,
-        r#"{"type":"https://beam.justinchung.net/reference/errors/#source-file-missing","status":404}"#,
+        r#"{"type":"https://beam.justinchung.net/reference/errors/#source-file-missing","status":404,"detail":"Source video file not found"}"#,
     )
     .await;
 
@@ -1540,28 +1541,36 @@ async fn a_problem_type_the_contract_does_not_list_loses_its_status() {
         .await
         .expect_err("the canned 404 fails the call");
 
-    assert!(matches!(error, BeamError::Protocol { .. }), "{error:?}");
+    assert_eq!(
+        error,
+        BeamError::NotFound {
+            detail: "Source video file not found".to_owned(),
+            code: "https://beam.justinchung.net/reference/errors/#source-file-missing".to_owned(),
+        }
+    );
 }
 
 /// A 429 whose body is not Beam's `rate-limited` problem -- a reverse
-/// proxy's own limiter answering in HTML -- is lost the same way.
+/// proxy's own limiter answering in HTML -- is still rate limiting, and its
+/// `Retry-After` is still honoured.
 ///
-/// `browse_media` declares its 429 as that problem, so the generated
-/// client decodes the body, fails, and reports a decode failure with no
-/// status: the caller sees a malformed response rather than
-/// `RateLimited`, and loses `Retry-After` (getkono/spargen#268). Expected
-/// to fail when that is fixed.
+/// `browse_media` declares its 429 as that problem, so the generated client
+/// fails to decode the body; the decode failure keeps the status and headers,
+/// which is all `RateLimited` needs.
 #[tokio::test]
-async fn a_429_a_proxy_wrote_is_not_recognised_as_rate_limiting() {
+async fn a_429_a_proxy_wrote_is_recognised_as_rate_limiting() {
     let (client, id, _) = signed_in_client().await;
     client
         .use_transport(
             &id,
-            Arc::new(CannedBackend::answering(
-                429,
-                "text/html",
-                "<html><body>Too Many Requests</body></html>",
-            )),
+            Arc::new(CannedBackend::saying(vec![
+                crate::transport::CannedAnswer::respond(
+                    429,
+                    "text/html",
+                    "<html><body>Too Many Requests</body></html>",
+                )
+                .with_header("retry-after", "17"),
+            ])),
         )
         .expect("the server is registered");
 
@@ -1570,7 +1579,12 @@ async fn a_429_a_proxy_wrote_is_not_recognised_as_rate_limiting() {
         .await
         .expect_err("the canned 429 fails the call");
 
-    assert!(matches!(error, BeamError::Protocol { .. }), "{error:?}");
+    assert_eq!(
+        error,
+        BeamError::RateLimited {
+            retry_after_secs: 17
+        }
+    );
 }
 
 /// The document the middleware captured is the one the error carries.
@@ -2047,7 +2061,10 @@ impl SelfSignedServer {
 }
 
 impl crate::api::HttpBackend for SelfSignedServer {
-    fn execute(&self, request: reqwest::Request) -> crate::api::ExecuteFuture<'_> {
+    fn execute(
+        &self,
+        request: ::http::Request<crate::api::HttpBody>,
+    ) -> crate::api::ExecuteFuture<'_> {
         self.handshake();
         self.refused.execute(request)
     }
