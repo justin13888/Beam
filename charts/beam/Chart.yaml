@@ -9,8 +9,8 @@ type: application
 # generic updater rewrites the version on each line carrying the marker and
 # leaves the rest of the file alone; the yaml updater would re-serialise it
 # and drop these comments.
-version: 0.1.0 # x-release-please-version
-appVersion: "0.1.0" # x-release-please-version
+version: 1.0.0 # x-release-please-version
+appVersion: "1.0.0" # x-release-please-version
 # startupProbe, seccompProfile and fsGroupChangePolicy are all GA well before
 # this; 1.29 is the oldest release still inside upstream's support window when
 # the chart was written. `helm:template` (mise.toml) runs kubeconform against
