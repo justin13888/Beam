@@ -137,6 +137,84 @@ macro_rules! pending_auth_store_contract {
         }
 
         #[tokio::test]
+        async fn starting_a_login_sweeps_the_expired_ones_and_leaves_live_ones() {
+            // Minting the abandoned state again is what shows its row is gone:
+            // `state` is the primary key, so a row still stored would refuse it.
+            let fixture = $setup().await;
+            let abandoned = ::uuid::Uuid::new_v4().to_string();
+            fixture
+                .store()
+                .create(&pending(&abandoned), TTL)
+                .await
+                .unwrap();
+            let at_its_deadline = ::uuid::Uuid::new_v4().to_string();
+            fixture
+                .store()
+                .create(&pending(&at_its_deadline), TTL + 1)
+                .await
+                .unwrap();
+            let live = ::uuid::Uuid::new_v4().to_string();
+            fixture
+                .store()
+                .create(&pending(&live), 2 * TTL)
+                .await
+                .unwrap();
+
+            fixture.clock().advance(Duration::from_secs(TTL + 1));
+            let newer = ::uuid::Uuid::new_v4().to_string();
+            fixture.store().create(&pending(&newer), TTL).await.unwrap();
+
+            assert!(
+                fixture
+                    .store()
+                    .consume(&at_its_deadline)
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "a deadline of exactly now is still exchangeable and must survive the sweep"
+            );
+            assert!(
+                fixture.store().consume(&live).await.unwrap().is_some(),
+                "a login still inside its window must survive the sweep"
+            );
+            fixture
+                .store()
+                .create(&pending(&abandoned), TTL)
+                .await
+                .expect("the abandoned state was swept, so minting it again is not a duplicate");
+        }
+
+        #[tokio::test]
+        async fn an_expired_state_still_stored_can_be_minted_again() {
+            // The sweep runs before the insert, so the very `create` that
+            // reuses an expired `state` clears the row that would collide.
+            let fixture = $setup().await;
+            let state = ::uuid::Uuid::new_v4().to_string();
+            fixture.store().create(&pending(&state), TTL).await.unwrap();
+
+            fixture.clock().advance(Duration::from_secs(TTL + 1));
+            fixture
+                .store()
+                .create(
+                    &PendingAuth {
+                        nonce: "a-fresh-nonce".to_string(),
+                        ..pending(&state)
+                    },
+                    TTL,
+                )
+                .await
+                .expect("an expired state is no longer a duplicate");
+
+            let consumed = fixture
+                .store()
+                .consume(&state)
+                .await
+                .unwrap()
+                .expect("the re-minted state is live");
+            assert_eq!(consumed.nonce, "a-fresh-nonce");
+        }
+
+        #[tokio::test]
         async fn a_redirect_path_is_optional() {
             let fixture = $setup().await;
             let state = ::uuid::Uuid::new_v4().to_string();

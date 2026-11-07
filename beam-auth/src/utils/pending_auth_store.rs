@@ -8,13 +8,15 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use sea_orm::{ActiveModelTrait, ActiveValue::Set, DatabaseConnection, EntityTrait};
+use sea_orm::{
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter,
+};
 
 use beam_domain::services::{Clock, RealClock};
 use thiserror::Error;
 
 use beam_entity::pending_auth::{
-    ActiveModel as PendingAuthActiveModel, Entity as PendingAuthEntity,
+    ActiveModel as PendingAuthActiveModel, Column, Entity as PendingAuthEntity,
 };
 
 use crate::utils::opaque_token::seconds;
@@ -38,6 +40,11 @@ type Result<T> = std::result::Result<T, PendingAuthError>;
 #[async_trait]
 pub trait PendingAuthStore: Send + Sync + std::fmt::Debug {
     /// Persists a new pending authorization, valid for `ttl_secs`.
+    ///
+    /// Sweeps every pending authorization already past its TTL as it goes,
+    /// so logins that are started and abandoned do not accumulate -- and a
+    /// `state` that has expired no longer blocks minting the same `state`
+    /// again. A `state` still inside its TTL is refused as a duplicate.
     async fn create(&self, auth: &PendingAuth, ttl_secs: u64) -> Result<()>;
 
     /// Atomically looks up and deletes the pending authorization for
@@ -78,6 +85,13 @@ impl PendingAuthStore for SqlPendingAuthStore {
     async fn create(&self, auth: &PendingAuth, ttl_secs: u64) -> Result<()> {
         let now = self.clock.now();
         let expires_at = now + seconds(ttl_secs);
+
+        // Strict `<`, as in `consume`: a deadline of exactly now is still
+        // exchangeable, so it is not swept.
+        PendingAuthEntity::delete_many()
+            .filter(Column::ExpiresAt.lt(now))
+            .exec(self.db.as_ref())
+            .await?;
 
         let active_model = PendingAuthActiveModel {
             state: Set(auth.state.clone()),
@@ -152,12 +166,14 @@ pub mod in_memory {
     #[async_trait]
     impl PendingAuthStore for InMemoryPendingAuthStore {
         async fn create(&self, auth: &PendingAuth, ttl_secs: u64) -> Result<()> {
-            let expires_at = self.clock.now() + seconds(ttl_secs);
+            let now = self.clock.now();
+            let expires_at = now + seconds(ttl_secs);
             let mut entries = self.entries.lock().unwrap();
+            // The sweep the SQL store runs before its insert.
+            entries.retain(|_, (_, expires_at)| *expires_at >= now);
             // `state` is the SQL table's primary key, so minting one that is
-            // already held -- expired or not, since nothing sweeps the table
-            // -- fails the insert there. Overwriting here instead let a test
-            // pass that production would fail.
+            // still pending fails the insert there. Overwriting here instead
+            // let a test pass that production would fail.
             if entries.contains_key(&auth.state) {
                 return Err(PendingAuthError::Db(sea_orm::DbErr::Custom(format!(
                     "duplicate key value violates unique constraint: state {:?} is already pending",

@@ -3,8 +3,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::Utc;
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ColumnTrait, DatabaseConnection, DeleteResult, EntityTrait,
-    QueryFilter,
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, Condition, DatabaseConnection, DeleteResult,
+    EntityTrait, QueryFilter,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -92,6 +92,10 @@ pub trait SessionStore: Send + Sync + std::fmt::Debug {
     /// from the store's clock, whatever `data` carries. A `user_id` that is
     /// not a UUID is refused before anything is written.
     ///
+    /// Sweeps every session already past its idle or absolute expiry as it
+    /// goes, so sessions that are never signed out of do not accumulate. A
+    /// session whose deadline is exactly now is still valid and survives.
+    ///
     /// # Parameters
     /// - `data`: The session state to be stored.
     /// - `idle_ttl_secs`: How long the session survives without activity;
@@ -171,11 +175,10 @@ fn to_session_data(model: &beam_entity::session::Model) -> SessionData {
 
 /// Postgres-backed session store.
 ///
-/// Sessions carry their own idle/absolute expiry; this store filters expired
-/// rows out of reads rather than deleting them proactively (there is no
-/// background sweep here yet -- a periodic cleanup task is future work, not
-/// required for correctness since every read already filters on both
-/// expiries).
+/// Sessions carry their own idle/absolute expiry. Every read filters on both,
+/// which is what keeps an expired session from authenticating; `create` also
+/// deletes the rows already past either deadline, so the table holds what
+/// accumulated since the last sign-in rather than every session ever minted.
 #[derive(Debug, Clone)]
 pub struct PgSessionStore {
     db: Arc<DatabaseConnection>,
@@ -207,14 +210,29 @@ impl SessionStore for PgSessionStore {
         idle_ttl_secs: u64,
         absolute_ttl_secs: u64,
     ) -> Result<String> {
+        // Parsed before the sweep: a malformed id writes nothing at all.
+        let user_id: Uuid = data.user_id.parse()?;
         let token = generate_session_token();
         let now = self.clock.now();
         let idle_expires_at = now + seconds(idle_ttl_secs);
         let absolute_expires_at = now + seconds(absolute_ttl_secs);
 
+        // Strict `<`, as in `get`: a deadline of exactly now is still valid.
+        // Both deadlines, because nothing forces the idle one to be the
+        // earlier: a configured idle TTL longer than the absolute one mints
+        // sessions whose absolute ceiling lapses first.
+        SessionEntity::delete_many()
+            .filter(
+                Condition::any()
+                    .add(Column::IdleExpiresAt.lt(now))
+                    .add(Column::AbsoluteExpiresAt.lt(now)),
+            )
+            .exec(self.db.as_ref())
+            .await?;
+
         let active_model = SessionActiveModel {
             id: Set(Uuid::new_v4()),
-            user_id: Set(data.user_id.parse()?),
+            user_id: Set(user_id),
             token_hash: Set(hash_token(&token)),
             device_hash: Set(data.device_hash.clone()),
             ip: Set(data.ip.clone()),
@@ -400,6 +418,10 @@ pub mod in_memory {
             let _: Uuid = data.user_id.parse()?;
             let token = generate_session_token();
             let now = self.clock.now();
+            let mut sessions = self.lock_sessions();
+            // The sweep the SQL store runs before its insert: everything past
+            // either deadline goes, a deadline of exactly now stays.
+            sessions.retain(|_, s| s.idle_expires_at >= now && s.absolute_expires_at >= now);
             // `created_at`/`last_active` belong to the store, not the caller:
             // the Postgres store stamps them from its own clock and ignores
             // whatever the caller put in the struct. Echoing the caller's
@@ -409,7 +431,7 @@ pub mod in_memory {
                 last_active: now.timestamp(),
                 ..data.clone()
             };
-            self.lock_sessions().insert(
+            sessions.insert(
                 hash_token(&token),
                 StoredSession {
                     id: Uuid::new_v4(),

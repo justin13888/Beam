@@ -9,11 +9,20 @@ use std::sync::Arc;
 use beam_auth::utils::contract::fixture::PendingAuthStoreFixture;
 use beam_auth::utils::pending_auth_store::{PendingAuthStore, SqlPendingAuthStore};
 use beam_domain::services::TestClock;
-use beam_test_support::postgres;
+use beam_test_support::postgres::ScopedSchema;
 
+/// Each instantiation gets its own migrated schema.
+///
+/// Starting a login sweeps every expired pending authorization in the table,
+/// and the contract moves its clock past the TTL to prove it. On a shared
+/// database that sweep deletes other tests' rows from under them, so each
+/// test owns its `pending_auths` table.
 struct PgFixture {
     store: SqlPendingAuthStore,
     clock: Arc<TestClock>,
+    // Kept alive for the fixture's lifetime; the schema is swept at the start
+    // of the next run (see `drop_stale_scoped_schemas`).
+    _schema: ScopedSchema,
 }
 
 #[async_trait::async_trait]
@@ -28,13 +37,16 @@ impl PendingAuthStoreFixture for PgFixture {
 }
 
 async fn setup() -> PgFixture {
-    let db = postgres::connection().await;
+    let schema = ScopedSchema::create_migrated("pending_auths")
+        .await
+        .expect("a private migrated schema");
     let clock = Arc::new(TestClock::starting_at(
         chrono::DateTime::from_timestamp(1_700_000_000, 0).expect("valid instant"),
     ));
     PgFixture {
-        store: SqlPendingAuthStore::with_clock(db, clock.clone()),
+        store: SqlPendingAuthStore::with_clock(schema.db(), clock.clone()),
         clock,
+        _schema: schema,
     }
 }
 
