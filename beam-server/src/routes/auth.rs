@@ -723,8 +723,7 @@ pub async fn oidc_callback(
 
     // Every exchange failure is the same failed login. A wrong nonce among
     // them: openidconnect's verifier reports it as a claims failure like any
-    // other, so no client this server runs answers `OidcError::NonceMismatch`
-    // and it needs no answer of its own.
+    // other, so it needs no answer of its own.
     let identity = oidc_client
         .exchange_code(&code, &pending.pkce_verifier, &pending.nonce)
         .await
@@ -955,11 +954,7 @@ pub async fn poll_device_login(
             )));
         }
         // An answer that did not verify will not verify on a retry.
-        Err(
-            e @ (OidcError::MissingIdToken
-            | OidcError::ClaimsVerification(_)
-            | OidcError::NonceMismatch),
-        ) => {
+        Err(e @ (OidcError::MissingIdToken | OidcError::ClaimsVerification(_))) => {
             device_auth_store
                 .consume(&handle_hash)
                 .await
