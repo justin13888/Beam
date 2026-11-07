@@ -49,7 +49,7 @@ pub struct EnrichmentPolicy {
     pub batch_size: u32,
     /// Minimum overall match confidence in `(0.0, 1.0]` a provider candidate
     /// must reach before its metadata is applied. Passed straight through to
-    /// [`matcher::best_movie_match`]/[`matcher::best_show_match`].
+    /// [`matcher::best_match`].
     pub min_confidence: f64,
     /// Attempts before a row is given up on (`Failed`).
     pub max_attempts: u32,
@@ -480,7 +480,7 @@ impl MetadataEnrichmentService {
             Err(err) => return Err(self.handle_error(row, err).await),
         };
         let Some((hit, score)) =
-            matcher::best_movie_match(&movie.title, movie.year, &hits, self.policy.min_confidence)
+            matcher::best_match(&movie.title, movie.year, &hits, self.policy.min_confidence)
         else {
             self.log_unmatched_movie(row.id, &movie.title, movie.year, &hits)
                 .await;
@@ -524,7 +524,7 @@ impl MetadataEnrichmentService {
             Err(err) => return Err(self.handle_error(row, err).await),
         };
         let Some((hit, score)) =
-            matcher::best_show_match(&show.title, show.year, &hits, self.policy.min_confidence)
+            matcher::best_match(&show.title, show.year, &hits, self.policy.min_confidence)
         else {
             self.log_unmatched_show(row.id, &show.title, show.year, &hits)
                 .await;
@@ -1014,7 +1014,7 @@ impl MetadataEnrichmentService {
         year: Option<u32>,
         hits: &[beam_domain::providers::enrichment::MovieSearchHit],
     ) {
-        let top = matcher::top_movie_candidates(title, year, hits, 3);
+        let top = matcher::top_candidates(title, year, hits, 3);
         let details = serde_json::json!({ "row_id": row_id.to_string(), "title": title, "year": year, "candidates": top.iter().map(|(label, score)| serde_json::json!({ "candidate": label, "score": score.total_score })).collect::<Vec<_>>() });
         let _ = self
             .admin_log
@@ -1034,7 +1034,7 @@ impl MetadataEnrichmentService {
         year: Option<u32>,
         hits: &[beam_domain::providers::enrichment::ShowSearchHit],
     ) {
-        let top = matcher::top_show_candidates(title, year, hits, 3);
+        let top = matcher::top_candidates(title, year, hits, 3);
         let details = serde_json::json!({ "row_id": row_id.to_string(), "title": title, "year": year, "candidates": top.iter().map(|(label, score)| serde_json::json!({ "candidate": label, "score": score.total_score })).collect::<Vec<_>>() });
         let _ = self
             .admin_log
