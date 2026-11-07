@@ -344,10 +344,7 @@ impl Harness {
     }
 
     async fn scan(&self) {
-        self.service
-            .scan_library(self.library.id.to_string())
-            .await
-            .unwrap();
+        self.service.scan_library(self.library.id).await.unwrap();
     }
 
     async fn event(&self, rel: &str, kind: FsEventKind) {
@@ -2346,7 +2343,7 @@ async fn a_walk_failure_where_a_kept_nfo_lives_keeps_its_record_and_the_pin() {
         eprintln!("skipped: running as root, which ignores file permissions");
         return;
     }
-    let scanned = h.service.scan_library(h.library.id.to_string()).await;
+    let scanned = h.service.scan_library(h.library.id).await;
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
     scanned.unwrap();
 
@@ -2390,7 +2387,7 @@ async fn a_subtitle_under_an_unreadable_folder_is_kept() {
         eprintln!("skipped: running as root, which ignores file permissions");
         return;
     }
-    let scanned = h.service.scan_library(h.library.id.to_string()).await;
+    let scanned = h.service.scan_library(h.library.id).await;
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
     scanned.unwrap();
 

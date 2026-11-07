@@ -50,10 +50,6 @@ struct ScriptedHasher {
 
 #[async_trait::async_trait]
 impl HashService for ScriptedHasher {
-    fn hash_sync(&self, _file: std::fs::File) -> std::io::Result<u64> {
-        unreachable!("the indexer hashes asynchronously")
-    }
-
     async fn hash_async(&self, _file: std::fs::File) -> std::io::Result<u64> {
         self.gate
             .acquire()

@@ -201,10 +201,7 @@ impl Harness {
     }
 
     async fn scan(&self) {
-        self.service
-            .scan_library(self.library.id.to_string())
-            .await
-            .unwrap();
+        self.service.scan_library(self.library.id).await.unwrap();
     }
 
     fn movies(&self) -> Vec<Movie> {
@@ -756,7 +753,7 @@ async fn a_scan_whose_walk_failed_retires_no_title() {
         return;
     }
 
-    let failed_walk = h.service.scan_library(h.library.id.to_string()).await;
+    let failed_walk = h.service.scan_library(h.library.id).await;
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
     failed_walk.unwrap();
     assert!(

@@ -6,7 +6,6 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use sea_orm::DbErr;
-use serde_json;
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -1107,7 +1106,7 @@ fn humanize_minutes(secs: f64) -> String {
 /// large ratio can still be only a few seconds, and on long content, where a
 /// few minutes of legitimate edition drift is a tiny ratio.
 #[derive(Debug, Clone, Copy)]
-pub struct DivergencePolicy {
+pub(crate) struct DivergencePolicy {
     /// Minimum relative runtime difference (`0.0`–`1.0`) for a pair to count as
     /// diverging. Defaults to `0.15` (15%).
     pub max_runtime_ratio: f64,
@@ -1131,8 +1130,6 @@ pub enum IndexError {
     Db(#[from] DbErr),
     #[error("Library not found")]
     LibraryNotFound,
-    #[error("Invalid Library ID")]
-    InvalidId,
     /// The message never contains a filesystem path (NFR-108). The admin
     /// boundary relies on that unconditionally, so every site constructing this
     /// variant must uphold it; `assert_names_no_path` pins all four.
@@ -1167,9 +1164,7 @@ impl IndexError {
             IndexError::PathNotFound(message) => message.clone(),
             IndexError::LibraryNotFound => "Library not found".to_string(),
             IndexError::Cancelled => CANCELLED.to_string(),
-            IndexError::Db(_) | IndexError::InvalidId | IndexError::ScanInProgress => {
-                "internal error".to_string()
-            }
+            IndexError::Db(_) | IndexError::ScanInProgress => "internal error".to_string(),
         }
     }
 }
@@ -1394,14 +1389,6 @@ impl LocalIndexService {
     /// not find the file. Defaults to [`DEFAULT_MISSING_FILE_GRACE`].
     pub fn with_missing_file_grace(mut self, grace: Duration) -> Self {
         self.missing_file_grace = grace;
-        self
-    }
-
-    /// Override the runtime-divergence thresholds used when warning that two
-    /// renditions of the same movie/episode disagree on runtime. Defaults to
-    /// [`DivergencePolicy::default`].
-    pub fn with_divergence_policy(mut self, policy: DivergencePolicy) -> Self {
-        self.divergence_policy = policy;
         self
     }
 
@@ -5033,8 +5020,7 @@ impl LocalIndexService {
     /// The administrator's scan, run to the end on the caller's task and
     /// reported as the number of files it added: the shape the tests of the
     /// scan itself were written against before scans became jobs.
-    pub(crate) async fn scan_library(&self, library_id: String) -> Result<u32, IndexError> {
-        let library_id = Uuid::parse_str(&library_id).map_err(|_| IndexError::InvalidId)?;
+    pub(crate) async fn scan_library(&self, library_id: Uuid) -> Result<u32, IndexError> {
         let progress = self.scan_now(library_id, ScanTrigger::Manual).await?;
         Ok(u32::try_from(progress.added).expect("a test scan adds few files"))
     }
@@ -6577,7 +6563,7 @@ mod tests {
 
         let service =
             make_multi_source_scan_service(lib_repo, file_repo.clone(), show_repo.clone());
-        let indexed = service.scan_library(library.id.to_string()).await.unwrap();
+        let indexed = service.scan_library(library.id).await.unwrap();
 
         assert_eq!(indexed, 2, "neither file is rejected by the scan");
         let files = file_repo.find_all_by_library(library.id).await.unwrap();
@@ -6639,7 +6625,7 @@ mod tests {
 
         let service =
             make_multi_source_scan_service(lib_repo, file_repo.clone(), show_repo.clone());
-        let indexed = service.scan_library(library.id.to_string()).await.unwrap();
+        let indexed = service.scan_library(library.id).await.unwrap();
 
         assert_eq!(indexed, 1);
         let files = file_repo.find_all_by_library(library.id).await.unwrap();
@@ -7305,7 +7291,7 @@ mod tests {
             Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
-        let result = service.scan_library(library.id.to_string()).await;
+        let result = service.scan_library(library.id).await;
         assert_eq!(result.unwrap(), 0);
 
         let files = file_repo.find_all_by_library(library.id).await.unwrap();
@@ -7353,7 +7339,7 @@ mod tests {
             Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
-        let result = service.scan_library(library.id.to_string()).await;
+        let result = service.scan_library(library.id).await;
         assert_eq!(result.unwrap(), 1);
 
         let files = file_repo.find_all_by_library(library.id).await.unwrap();
@@ -7395,7 +7381,7 @@ mod tests {
             Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
-        let result = service.scan_library(library.id.to_string()).await;
+        let result = service.scan_library(library.id).await;
         assert_eq!(result.unwrap(), 0);
         assert!(
             file_repo
@@ -7442,7 +7428,7 @@ mod tests {
             Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
-        let result = service.scan_library(library.id.to_string()).await;
+        let result = service.scan_library(library.id).await;
         assert_eq!(result.unwrap(), 3);
 
         let files = file_repo.find_all_by_library(library.id).await.unwrap();
@@ -7512,7 +7498,7 @@ mod tests {
             Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
-        let result = service.scan_library(library.id.to_string()).await;
+        let result = service.scan_library(library.id).await;
         assert_eq!(result.unwrap(), 0); // no new files added
 
         let files = file_repo.find_all_by_library(library.id).await.unwrap();
@@ -7580,7 +7566,7 @@ mod tests {
             Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
-        let result = service.scan_library(library.id.to_string()).await;
+        let result = service.scan_library(library.id).await;
         assert_eq!(result.unwrap(), 0); // no new files
 
         // The phantom is hidden from the visible reads but kept, stamped
@@ -7716,7 +7702,7 @@ mod tests {
         } = indexed_library_harness(root, &["a.mp4", "b.mkv"]).await;
 
         let err = service
-            .scan_library(library.id.to_string())
+            .scan_library(library.id)
             .await
             .expect_err("an empty root under indexed files must refuse the scan");
         assert!(matches!(err, IndexError::PathNotFound(_)));
@@ -7796,7 +7782,7 @@ mod tests {
         } = indexed_library_harness(root, &["disk1/a.mp4", "disk2/Movies/b.mkv"]).await;
 
         let err = service
-            .scan_library(library.id.to_string())
+            .scan_library(library.id)
             .await
             .expect_err("a root holding only empty directories must refuse the scan");
         assert!(matches!(err, IndexError::PathNotFound(_)));
@@ -7839,7 +7825,7 @@ mod tests {
         };
 
         let err = service
-            .scan_library(library.id.to_string())
+            .scan_library(library.id)
             .await
             .expect_err("a root holding only non-video files must refuse the scan");
         assert!(matches!(err, IndexError::PathNotFound(_)));
@@ -7898,10 +7884,7 @@ mod tests {
             .unwrap()
             .insert(kept.id, kept.clone());
 
-        assert_eq!(
-            service.scan_library(library.id.to_string()).await.unwrap(),
-            0
-        );
+        assert_eq!(service.scan_library(library.id).await.unwrap(), 0);
 
         // Both rows are legacy: sidecars and stray files are no longer
         // indexed (issue #182), so the one still on disk goes missing too.
@@ -7934,10 +7917,7 @@ mod tests {
             .unwrap()
             .insert(kept.id, kept.clone());
 
-        assert_eq!(
-            service.scan_library(library.id.to_string()).await.unwrap(),
-            0
-        );
+        assert_eq!(service.scan_library(library.id).await.unwrap(), 0);
 
         let files = file_repo.find_all_by_library(library.id).await.unwrap();
         let ids: Vec<Uuid> = files.iter().map(|f| f.id).collect();
@@ -7993,7 +7973,7 @@ mod tests {
             Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
-        let result = service.scan_library(library.id.to_string()).await;
+        let result = service.scan_library(library.id).await;
         let err = result.expect_err("a missing root must fail the scan");
         assert!(matches!(err, IndexError::PathNotFound(_)));
         // The path reaches the operator through the notification and admin
@@ -8072,7 +8052,7 @@ mod tests {
         );
 
         let err = service
-            .scan_library(library.id.to_string())
+            .scan_library(library.id)
             .await
             .expect_err("a root that is not a directory must fail the scan");
         assert!(matches!(err, IndexError::PathNotFound(_)));
@@ -8125,7 +8105,7 @@ mod tests {
             Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
-        let result = service.scan_library(library.id.to_string()).await;
+        let result = service.scan_library(library.id).await;
         assert_eq!(result.unwrap(), 1);
 
         let files = file_repo.find_all_by_library(library.id).await.unwrap();
@@ -8168,7 +8148,7 @@ mod tests {
             Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
-        let result = service.scan_library(library.id.to_string()).await;
+        let result = service.scan_library(library.id).await;
         assert_eq!(result.unwrap(), 1, "scan must succeed despite corrupt file");
 
         let files = file_repo.find_all_by_library(library.id).await.unwrap();
@@ -8217,7 +8197,7 @@ mod tests {
         );
 
         // Scan should succeed overall; the failing file is not counted
-        let result = service.scan_library(library.id.to_string()).await;
+        let result = service.scan_library(library.id).await;
         assert_eq!(result.unwrap(), 0);
 
         // A warning notification should have been published for the failed file
@@ -8263,7 +8243,7 @@ mod tests {
             Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
-        service.scan_library(library.id.to_string()).await.unwrap();
+        service.scan_library(library.id).await.unwrap();
 
         let updated = lib_repo.find_by_id(library.id).await.unwrap().unwrap();
         assert!(updated.last_scan_started_at.is_some());
@@ -8294,7 +8274,7 @@ mod tests {
             Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
-        service.scan_library(library.id.to_string()).await.unwrap();
+        service.scan_library(library.id).await.unwrap();
 
         // At least one Info notification with LibraryScan category whose message names the library
         let events = notification_svc.published_events();
@@ -8409,7 +8389,7 @@ mod tests {
             Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
-        let added = service.scan_library(library.id.to_string()).await.unwrap();
+        let added = service.scan_library(library.id).await.unwrap();
         assert_eq!(added, 1);
 
         // Admin log completion entry must record the counts in its JSON details
@@ -8484,7 +8464,7 @@ mod tests {
             Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
-        service.scan_library(library.id.to_string()).await.unwrap();
+        service.scan_library(library.id).await.unwrap();
 
         let files = file_repo.find_all_by_library(library.id).await.unwrap();
         assert_eq!(files.len(), 1);
@@ -8550,7 +8530,7 @@ mod tests {
             Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
-        service.scan_library(library.id.to_string()).await.unwrap();
+        service.scan_library(library.id).await.unwrap();
 
         let files = file_repo.find_all_by_library(library.id).await.unwrap();
         assert_eq!(files.len(), 1);
@@ -8619,7 +8599,7 @@ mod tests {
             Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
-        service.scan_library(library.id.to_string()).await.unwrap();
+        service.scan_library(library.id).await.unwrap();
 
         let files = file_repo.find_all_by_library(library.id).await.unwrap();
         assert_eq!(files.len(), 1);
@@ -8692,7 +8672,7 @@ mod tests {
         );
 
         service
-            .scan_library(library.id.to_string())
+            .scan_library(library.id)
             .await
             .expect("the scan does not fail on the file");
 
@@ -8878,7 +8858,7 @@ mod tests {
             Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
-        service.scan_library(library.id.to_string()).await.unwrap();
+        service.scan_library(library.id).await.unwrap();
 
         let logs = admin_log_repo.list(100, 0).await.unwrap();
         assert!(

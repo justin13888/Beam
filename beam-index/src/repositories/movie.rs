@@ -10,13 +10,7 @@ use beam_domain::models::{FieldLocks, MetadataField, PinSource, ProviderPin};
 use beam_domain::providers::enrichment::MovieEnrichment;
 use beam_domain::repositories::MovieRepository;
 
-/// Whether `err` is a unique-index violation.
-pub(crate) fn is_unique_violation(err: &DbErr) -> bool {
-    matches!(
-        err.sql_err(),
-        Some(sea_orm::SqlErr::UniqueConstraintViolation(_))
-    )
-}
+use super::is_unique_violation;
 
 /// SQL-based implementation of the MovieRepository trait.
 #[derive(Debug, Clone)]
