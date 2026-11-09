@@ -32,7 +32,8 @@ use uuid::Uuid;
 use beam_index::library_file::{open_regular_file, relative_to};
 
 use crate::routes::access::caller_access;
-use crate::routes::api_error::{DeliveryError, ServerFault, SessionAuth};
+use crate::routes::api_error::{DeliveryError, ServerFault};
+use crate::routes::session_auth::SessionAuth;
 use crate::routes::tags::Playback;
 use crate::services::library::LocatedFile;
 use crate::state::AppState;

@@ -6,10 +6,8 @@ use kynos::prelude::*;
 use beam_domain::models::language_preferences::{LanguageCode, LanguagePreferences};
 
 use crate::models::{FieldError, LanguagePreferenceSettings};
-use crate::routes::access::parse_user_id;
-use crate::routes::api_error::{
-    InternalError, LanguagePreferencesUpdateError, ServerFault, SessionAuth,
-};
+use crate::routes::api_error::{InternalError, LanguagePreferencesUpdateError, ServerFault};
+use crate::routes::session_auth::SessionAuth;
 use crate::routes::tags::Auth;
 use crate::state::AppState;
 
@@ -25,7 +23,7 @@ pub async fn get_language_preferences(
     auth: SessionAuth,
     Inject(state): Inject<AppState>,
 ) -> Result<Json<LanguagePreferenceSettings>, InternalError> {
-    let user_id = parse_user_id(&auth.0.user_id)?;
+    let user_id = auth.0.user_id;
     let preferences = state
         .services
         .language_preferences
@@ -50,7 +48,7 @@ pub async fn set_language_preferences(
     Inject(state): Inject<AppState>,
     Json(body): Json<LanguagePreferenceSettings>,
 ) -> Result<Json<LanguagePreferenceSettings>, LanguagePreferencesUpdateError> {
-    let user_id = parse_user_id(&auth.0.user_id)?;
+    let user_id = auth.0.user_id;
     let LanguagePreferenceSettings {
         audio_languages,
         subtitle_languages,

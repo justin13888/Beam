@@ -44,16 +44,15 @@ use kynos::response::cookie::{Cookie, SameSite};
 use kynos::response::headers::WithHeaders;
 use kynos::response::status::{InvalidLocation, Location, NoContent, Redirect};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use crate::models::auth::{
     CurrentUser, DeviceLoginComplete, DeviceLoginPending, DeviceLoginPoll, DeviceLoginStart,
     DeviceLoginWait, SessionConnection, SessionSummary,
 };
 use crate::routes::api_error::{
-    ERROR_BASE, INTERNAL_DETAIL, InternalError, OIDC_UNAVAILABLE_DETAIL, SESSION_COOKIE,
-    ServerFault, SessionAuth,
+    ERROR_BASE, INTERNAL_DETAIL, InternalError, OIDC_UNAVAILABLE_DETAIL, ServerFault,
 };
+use crate::routes::session_auth::{SESSION_COOKIE, SessionAuth};
 use crate::routes::tags::Auth;
 
 const STATE_COOKIE: &str = "beam_oidc_state";
@@ -797,11 +796,8 @@ pub async fn oidc_me(
     auth: SessionAuth,
     Inject(user_repo): Inject<Arc<dyn UserRepository>>,
 ) -> Result<Json<CurrentUser>, CurrentUserError> {
-    let user_uuid = Uuid::parse_str(&auth.0.user_id)
-        .map_err(|e| CurrentUserError::Internal(ServerFault::new(e)))?;
-
     let user = user_repo
-        .find_by_id(user_uuid)
+        .find_by_id(auth.0.user_id)
         .await
         .map_err(|e| CurrentUserError::Internal(ServerFault::new(e)))?
         .ok_or_else(|| CurrentUserError::AccountRemoved("User no longer exists".into()))?;
@@ -843,7 +839,7 @@ pub async fn oidc_logout_all(
     Inject(session_store): Inject<Arc<dyn SessionStore>>,
 ) -> Result<WithHeaders<NoContent, SetCookie>, InternalError> {
     session_store
-        .delete_all_for_user(&auth.0.user_id)
+        .delete_all_for_user(&auth.0.user_id.to_string())
         .await
         .map_err(|e| InternalError::Internal(ServerFault::new(e)))?;
 
@@ -860,7 +856,7 @@ pub async fn oidc_list_sessions(
     Inject(session_store): Inject<Arc<dyn SessionStore>>,
 ) -> Result<Json<SessionConnection>, InternalError> {
     let sessions = session_store
-        .list_for_user(&auth.0.user_id)
+        .list_for_user(&auth.0.user_id.to_string())
         .await
         .map_err(|e| InternalError::Internal(ServerFault::new(e)))?;
 
@@ -886,7 +882,7 @@ pub async fn oidc_delete_session(
     Inject(session_store): Inject<Arc<dyn SessionStore>>,
 ) -> Result<WithHeaders<NoContent, SessionRevoked>, SessionRevokeError> {
     let deleted = session_store
-        .delete_by_id(path.id, &auth.0.user_id)
+        .delete_by_id(path.id, &auth.0.user_id.to_string())
         .await
         .map_err(|e| SessionRevokeError::Internal(ServerFault::new(e)))?;
 

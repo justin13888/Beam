@@ -27,21 +27,21 @@ mod tests {
     use beam_auth::utils::repository::in_memory::{
         FailingUserRepository, InMemoryUserRepository, UserRepositoryOperation,
     };
-    use beam_auth::utils::session_store::SessionStore;
     use beam_auth::utils::session_store::in_memory::{
         FailingSessionStore, InMemorySessionStore, SessionStoreOperation,
     };
+    use beam_auth::utils::session_store::{SessionData, SessionError, SessionStore};
     use beam_domain::services::TestClock;
     use kynos::http::StatusCode;
     use kynos::prelude::*;
     use kynos::test::{TestClient, TestResponse};
     use serde_json::{Value, json};
 
-    use crate::routes::api_error::SESSION_COOKIE;
     use crate::routes::auth::{
         oidc_callback, oidc_delete_session, oidc_list_sessions, oidc_login, oidc_logout,
         oidc_logout_all, oidc_me,
     };
+    use crate::routes::session_auth::SESSION_COOKIE;
     use crate::routes::test_support::make_app_state;
     use crate::services::health::InMemoryDependencyProbe;
     use crate::state::{AppServices, AppState};
@@ -1260,6 +1260,98 @@ mod tests {
             !response.text().contains("outage@example.com"),
             "no account is answered for a cookie that could not be checked"
         );
+    }
+
+    /// A store that answers every token with a session whose user id is the
+    /// one it was built with -- the corrupted session neither real store can
+    /// produce, since both parse the id before writing it.
+    #[derive(Debug)]
+    struct CorruptedSessionStore {
+        user_id: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl SessionStore for CorruptedSessionStore {
+        fn now(&self) -> chrono::DateTime<chrono::Utc> {
+            chrono::Utc::now()
+        }
+
+        async fn create(
+            &self,
+            _data: &SessionData,
+            _idle_ttl_secs: u64,
+            _absolute_ttl_secs: u64,
+        ) -> Result<String, SessionError> {
+            unreachable!("the corrupted store is only read")
+        }
+
+        async fn get(&self, _token: &str) -> Result<Option<SessionData>, SessionError> {
+            Ok(Some(SessionData {
+                user_id: self.user_id.to_owned(),
+                device_hash: "test-device".to_owned(),
+                ip: "127.0.0.1".to_owned(),
+                created_at: chrono::Utc::now().timestamp(),
+                last_active: chrono::Utc::now().timestamp(),
+            }))
+        }
+
+        async fn touch(&self, _token: &str, _idle_ttl_secs: u64) -> Result<(), SessionError> {
+            Ok(())
+        }
+
+        async fn delete(&self, _token: &str) -> Result<(), SessionError> {
+            unreachable!("the corrupted store is only read")
+        }
+
+        async fn delete_all_for_user(&self, _user_id: &str) -> Result<u64, SessionError> {
+            unreachable!("the corrupted store is only read")
+        }
+
+        async fn list_for_user(
+            &self,
+            _user_id: &str,
+        ) -> Result<Vec<(uuid::Uuid, SessionData)>, SessionError> {
+            unreachable!("the corrupted store is only read")
+        }
+
+        async fn delete_by_id(
+            &self,
+            _id: uuid::Uuid,
+            _user_id: &str,
+        ) -> Result<bool, SessionError> {
+            unreachable!("the corrupted store is only read")
+        }
+    }
+
+    /// A session whose stored user id is not a UUID authenticates no one: a
+    /// 401 on every guarded route, never a fallback id. Every watched-state
+    /// row is keyed by this value, so resolving a malformed one to, say, the
+    /// nil UUID would pool every affected user's history and progress into one
+    /// shared, unowned account. Parsed once by the authenticator, so the
+    /// routes that read the id, the ones that only need a caller, and the
+    /// admin-scoped ones all refuse alike.
+    #[tokio::test]
+    async fn a_session_with_a_malformed_user_id_is_401_on_every_guarded_route() {
+        for malformed in [
+            "",
+            "not-a-uuid",
+            "1234",
+            "00000000-0000-0000-0000-00000000000",
+        ] {
+            let state = crate::routes::test_support::state_with(|services| {
+                services.session_store = Arc::new(CorruptedSessionStore { user_id: malformed });
+            });
+            let client = crate::routes::test_support::served_client(state);
+
+            for path in ["/v1/me", "/v1/me/language-preferences", "/v1/admin/logs"] {
+                client
+                    .get(path)
+                    .cookie(SESSION_COOKIE, "any-token")
+                    .send()
+                    .await
+                    .assert_status(StatusCode::UNAUTHORIZED);
+            }
+        }
     }
 
     /// NFR-205: an account store that cannot read is a 500 on `/v1/me`, never

@@ -20,7 +20,8 @@ use uuid::Uuid;
 
 use beam_domain::models::sidecar::SubtitleFormat;
 
-use crate::routes::api_error::{ServerFault, SessionAuth, SubtitleDeliveryError};
+use crate::routes::api_error::{ServerFault, SubtitleDeliveryError};
+use crate::routes::session_auth::SessionAuth;
 use crate::routes::stream::{FileByteSource, hides_file, validator_tag};
 use crate::routes::tags::Playback;
 use crate::services::subtitle::{LocatedSubtitle, SubtitleError, WebVttRendition};

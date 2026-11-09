@@ -17,6 +17,7 @@ pub mod middleware;
 pub mod people;
 pub mod playback;
 pub mod rate_limit;
+pub mod session_auth;
 pub mod stream;
 pub mod subtitle;
 pub mod tags;

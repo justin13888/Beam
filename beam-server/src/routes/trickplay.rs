@@ -14,7 +14,8 @@ use kynos::response::range::served::{Conditions, Delivery, Served};
 use tracing::{error, warn};
 use uuid::Uuid;
 
-use crate::routes::api_error::{ServerFault, SessionAuth, TrickplayDeliveryError};
+use crate::routes::api_error::{ServerFault, TrickplayDeliveryError};
+use crate::routes::session_auth::SessionAuth;
 use crate::routes::stream::{FileByteSource, hides_file};
 use crate::routes::tags::Playback;
 use crate::services::trickplay::{LocatedSheet, SheetLookupError};

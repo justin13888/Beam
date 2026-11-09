@@ -102,13 +102,13 @@ impl AdminUserService {
     /// [`AdminUsersError::Internal`] when a store fails.
     pub async fn set_disabled(
         &self,
-        actor: &str,
+        actor: Uuid,
         id: Uuid,
         disabled: bool,
     ) -> Result<(), AdminUsersError> {
         let target = self.target(id).await?;
 
-        if disabled && target.id.to_string() == actor {
+        if disabled && target.id == actor {
             return Err(AdminUsersError::CannotDisableSelf);
         }
 

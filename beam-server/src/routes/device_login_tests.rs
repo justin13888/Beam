@@ -31,9 +31,9 @@ use kynos::test::{TestClient, TestResponse};
 use serde_json::{Value, json};
 
 use crate::bootstrap::AllowedOrigins;
-use crate::routes::api_error::SESSION_COOKIE;
 use crate::routes::auth::DEVICE_LOGIN_MAX_SECS;
 use crate::routes::create_router;
+use crate::routes::session_auth::SESSION_COOKIE;
 use crate::routes::test_support::make_app_state_full;
 use crate::services::health::InMemoryDependencyProbe;
 use crate::state::{AppServices, AppState};

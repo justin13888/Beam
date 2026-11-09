@@ -12,8 +12,8 @@ use crate::models::{EpisodeDetail, MediaMetadata, MediaSourceConnection, SeasonD
 use crate::routes::access::{caller_access, hides, media_not_found};
 use crate::routes::api_error::{
     MediaBrowseError, MediaLookupError, MediaRefLookupError, MediaSourcesError, ServerFault,
-    SessionAuth,
 };
+use crate::routes::session_auth::SessionAuth;
 use crate::routes::tags::Media;
 use crate::services::metadata::{BrowseRequest, MediaSearchFilters, MetadataError};
 use crate::services::sources::apply_language_preferences;

@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::models::PageInfo;
 use crate::routes::access::caller_access;
-use crate::routes::api_error::{InternalError, ServerFault, SessionAuth};
+use crate::routes::api_error::{InternalError, ServerFault};
+use crate::routes::session_auth::SessionAuth;
 use crate::routes::tags::Media;
 use crate::state::AppState;
 

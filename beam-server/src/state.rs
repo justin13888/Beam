@@ -143,6 +143,41 @@ impl Deref for AppState {
     }
 }
 
+// ── Dependency injection ─────────────────────────────────────────────────────
+
+/// The auth dependencies the OIDC handlers reach for individually.
+///
+/// Written out rather than derived: `AppState` keeps its fields behind
+/// `AppStateInner`, and `#[derive(Provider)]` needs public fields on the
+/// context itself. Each one mirrors an `affix_state::inject` hoop the Salvo
+/// router used to mount, with the difference that asking for something absent
+/// is now a compile error rather than a 500.
+macro_rules! provides_service {
+    ($($ty:ty => $field:ident),+ $(,)?) => {
+        $(
+            impl kynos::di::Provides<$ty> for AppState {
+                fn provide(&self) -> $ty {
+                    self.services.$field.clone()
+                }
+            }
+        )+
+    };
+}
+
+provides_service! {
+    Arc<dyn UserRepository> => user_repo,
+    Arc<dyn SessionStore> => session_store,
+    Arc<dyn OidcClient> => oidc_client,
+    Arc<dyn PendingAuthStore> => pending_auth_store,
+    Arc<dyn DeviceAuthStore> => device_auth_store,
+}
+
+impl kynos::di::Provides<OidcRuntimeConfig> for AppState {
+    fn provide(&self) -> OidcRuntimeConfig {
+        self.services.oidc_config.clone()
+    }
+}
+
 /// Every field is shared (`Arc`) or plain configuration, so a clone is a
 /// second handle onto the same services -- which is what lets a test fixture
 /// swap a few of them and keep the rest (`AppServices { x, ..base.clone() }`).

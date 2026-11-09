@@ -39,11 +39,13 @@ hard (e.g. a cookie-Secure misconfiguration is a startup error) and logs redact 
 
 - `routes/` — the HTTP layer (`health.rs`, `media.rs`, `stream.rs`, `playback.rs`, `admin.rs`,
   `auth.rs`, `genres.rs`, `middleware.rs`, `metrics_mw.rs`, `rate_limit.rs`, `api_error.rs`,
-  `tags.rs`, and `mod.rs`, which is the whole route table as one value). Thin: parse the request,
+  `session_auth.rs`, `tags.rs`, and `mod.rs`, which is the whole route table as one value). Thin: parse the request,
   call a service trait, render the response. Kynos `Request`/`Response`/extractor types never leak
   past this layer. State arrives through `Inject<T>` rather than a run-time lookup, so a missing
   dependency is a compile error and the "handler returns 500 on missing state" arm no longer exists.
-  `api_error.rs` holds the one RFC 9457 error family every operation renders through.
+  `api_error.rs` holds the one RFC 9457 error family every operation renders through;
+  `session_auth.rs` holds the `beam_session` cookie scheme (`SessionAuth`, `AdminAuth`) that both
+  enforces and documents authentication.
 - `services/` — business logic behind traits (`library.rs`, `metadata.rs`, `playback.rs`,
   `admin_log.rs`, `notification.rs`, `hash.rs`, `media_info.rs`), each with a production
   implementation and an in-memory fake for tests. `telemetry/` builds, encodes (OTLP/HTTP JSON) and

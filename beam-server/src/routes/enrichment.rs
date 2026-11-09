@@ -22,9 +22,10 @@ use crate::models::{
     TitleKind,
 };
 use crate::routes::api_error::{
-    AdminAuth, EnrichmentListError, FieldLocksError, FixMatchError, InternalError,
-    LibraryRefreshError, MatchCandidatesError, MediaEnrichmentError, ServerFault,
+    EnrichmentListError, FieldLocksError, FixMatchError, InternalError, LibraryRefreshError,
+    MatchCandidatesError, MediaEnrichmentError, ServerFault,
 };
+use crate::routes::session_auth::AdminAuth;
 use crate::routes::tags::Admin;
 use crate::services::cursor;
 use crate::services::metadata::{DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE};
@@ -218,7 +219,7 @@ pub async fn fix_media_match(
     let detail = state
         .services
         .enrichment_control
-        .fix_match(path.id, &external_ref, &auth.0.user_id)
+        .fix_match(path.id, &external_ref, &auth.0.user_id.to_string())
         .await
         .map_err(|err| match err {
             ControlError::MediaNotFound(_) => FixMatchError::MediaNotFound(err.to_string()),
@@ -259,7 +260,7 @@ pub async fn clear_media_match(
     state
         .services
         .enrichment_control
-        .clear_match(path.id, &auth.0.user_id)
+        .clear_match(path.id, &auth.0.user_id.to_string())
         .await
         .map_err(|err| match err {
             ControlError::MediaNotFound(_) => MediaEnrichmentError::MediaNotFound(err.to_string()),
@@ -287,7 +288,7 @@ pub async fn set_media_field_locks(
     let detail = state
         .services
         .enrichment_control
-        .set_locks(path.id, &fields, &auth.0.user_id)
+        .set_locks(path.id, &fields, &auth.0.user_id.to_string())
         .await
         .map_err(|err| match err {
             ControlError::MediaNotFound(_) => FieldLocksError::MediaNotFound(err.to_string()),
@@ -322,7 +323,11 @@ pub async fn refresh_all_media_metadata(
     let queued_count = state
         .services
         .enrichment_control
-        .refresh(RefreshScope::All, rematch.unwrap_or(false), &auth.0.user_id)
+        .refresh(
+            RefreshScope::All,
+            rematch.unwrap_or(false),
+            &auth.0.user_id.to_string(),
+        )
         .await
         .map_err(|err| InternalError::Internal(ServerFault::new(err)))?;
     Ok(Accepted::new(Json(RefreshQueued { queued_count })))
@@ -348,7 +353,7 @@ pub async fn refresh_library_metadata(
         .refresh(
             RefreshScope::Library(path.id),
             rematch.unwrap_or(false),
-            &auth.0.user_id,
+            &auth.0.user_id.to_string(),
         )
         .await
         .map_err(|err| match err {

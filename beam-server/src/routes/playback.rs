@@ -19,8 +19,9 @@ use crate::models::{FieldError, PageInfo};
 use crate::routes::access::{caller_access, hides, media_not_found};
 use crate::routes::api_error::{
     ContinueWatchingError, HistoryError, InternalError, MediaRefLookupError,
-    PlaybackTelemetryError, ProgressError, ServerFault, SessionAuth, TitleProgressError,
+    PlaybackTelemetryError, ProgressError, ServerFault, TitleProgressError,
 };
+use crate::routes::session_auth::SessionAuth;
 use crate::routes::tags::Playback;
 use crate::services::cursor;
 use crate::services::paging::page_size;

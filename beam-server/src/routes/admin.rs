@@ -29,11 +29,11 @@ use crate::models::{
 };
 use crate::routes::access::caller_access;
 use crate::routes::api_error::{
-    AdminAuth, AdminListError, AdminUserError, InternalError, LibraryCreateError,
-    LibraryFilesError, LibraryRefError, LibraryScanError, LibraryScanReadError, MediaRefreshError,
-    PlaybackTelemetryReportError, ServerFault, SessionAuth, UserAccessReadError,
-    UserAccessUpdateError,
+    AdminListError, AdminUserError, InternalError, LibraryCreateError, LibraryFilesError,
+    LibraryRefError, LibraryScanError, LibraryScanReadError, MediaRefreshError,
+    PlaybackTelemetryReportError, ServerFault, UserAccessReadError, UserAccessUpdateError,
 };
+use crate::routes::session_auth::{AdminAuth, SessionAuth};
 use crate::routes::tags::Admin;
 use crate::services::admin_users::AdminUsersError;
 use crate::services::cursor;
@@ -289,7 +289,7 @@ pub async fn list_libraries(
     let libraries = state
         .services
         .library
-        .get_libraries(auth.0.user_id.clone())
+        .get_libraries(auth.0.user_id.to_string())
         .await
         .map_err(|e| InternalError::Internal(ServerFault::new(e)))?
         .into_iter()
@@ -490,7 +490,7 @@ pub async fn refresh_media_metadata(
         .refresh(
             RefreshScope::Title(path.id),
             rematch.unwrap_or(false),
-            &auth.0.user_id,
+            &auth.0.user_id.to_string(),
         )
         .await?;
     Ok(NoContent)
@@ -720,7 +720,7 @@ pub async fn update_admin_user(
     state
         .services
         .admin_users()
-        .set_disabled(&auth.0.user_id, path.id, disabled)
+        .set_disabled(auth.0.user_id, path.id, disabled)
         .await?;
     Ok(NoContent)
 }
