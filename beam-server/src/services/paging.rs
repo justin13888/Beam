@@ -1,6 +1,68 @@
-//! The page size every `first`/`last`-bounded list holds its request to.
+//! The page size every `first`/`last`-bounded list holds its request to, and
+//! the two-way Relay page request a list paged both ways reads.
 
 use std::num::NonZeroU32;
+
+/// Which way a page is read from its cursor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PageDirection {
+    /// `first`, optionally `after` a cursor.
+    Forward,
+    /// `last`, optionally `before` a cursor.
+    Backward,
+}
+
+/// A validated page request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PageRequest {
+    pub direction: PageDirection,
+    pub size: NonZeroU32,
+    pub cursor: Option<String>,
+}
+
+impl PageRequest {
+    /// Read the four Relay parameters into one page request, its size
+    /// defaulted and bounded as [`page_size`] does.
+    ///
+    /// Accepted are `first`/`after` (forwards, the default) and
+    /// `last`/`before` (backwards), each with or without its cursor. Mixing
+    /// the two directions is refused rather than guessed at, and so is a size
+    /// outside `1..=max`.
+    ///
+    /// # Errors
+    ///
+    /// The 400 detail for a request mixing the directions, or for a size
+    /// [`page_size`] refuses.
+    pub fn from_relay(
+        first: Option<u32>,
+        after: Option<String>,
+        last: Option<u32>,
+        before: Option<String>,
+        default: u32,
+        max: u32,
+        noun: &str,
+    ) -> Result<Self, String> {
+        let forward = first.is_some() || after.is_some();
+        let backward = last.is_some() || before.is_some();
+        if forward && backward {
+            return Err(
+                "`first`/`after` page forwards and `last`/`before` page backwards; send one pair"
+                    .to_string(),
+            );
+        }
+        let (direction, size, cursor) = if backward {
+            (PageDirection::Backward, last, before)
+        } else {
+            (PageDirection::Forward, first, after)
+        };
+        let size = page_size(size, default, max, noun)?;
+        Ok(Self {
+            direction,
+            size,
+            cursor,
+        })
+    }
+}
 
 /// `first`, defaulted to `default` and held to `1..=max`.
 ///

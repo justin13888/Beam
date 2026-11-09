@@ -22,9 +22,9 @@ mod tests {
 
     use uuid::Uuid;
 
+    use crate::models::search::{MediaSortField, SortOrder};
     use crate::services::metadata::{
-        BrowseRequest, DbMetadataService, MediaSearchFilters, MediaSortField, MetadataRepositories,
-        MetadataService, SortOrder,
+        BrowseRequest, DbMetadataService, MediaSearchFilters, MetadataRepositories, MetadataService,
     };
     use beam_domain::models::movie::Movie;
     use beam_domain::models::{Episode, MediaFile, MediaFileContent, MovieEntry, Season, Show};
@@ -41,6 +41,17 @@ mod tests {
     // ---------------------------------------------------------------------------
     // Helper builders
     // ---------------------------------------------------------------------------
+
+    /// A source's stream and download URLs both name `file_id`, and are two
+    /// URLs. How they are spelled is not restated here: that each is a served
+    /// route delivering the file it names is `access_tests`'
+    /// `every_url_a_source_carries_is_served_and_delivers_what_it_names`.
+    fn assert_urls_name(stream_url: &str, download_url: &str, file_id: Uuid) {
+        let id = file_id.to_string();
+        assert!(stream_url.contains(&id), "{stream_url} names {id}");
+        assert!(download_url.contains(&id), "{download_url} names {id}");
+        assert_ne!(stream_url, download_url);
+    }
 
     fn make_movie(title: &str, year: Option<u32>) -> Movie {
         Movie {
@@ -364,11 +375,7 @@ mod tests {
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].file_id, file_id);
         assert!(sources[0].is_primary);
-        assert_eq!(sources[0].stream_url, format!("/v1/files/{file_id}/stream"));
-        assert_eq!(
-            sources[0].download_url,
-            format!("/v1/files/{file_id}/download")
-        );
+        assert_urls_name(&sources[0].stream_url, &sources[0].download_url, file_id);
         assert_eq!(sources[0].size_bytes, 1024);
     }
 
@@ -504,8 +511,7 @@ mod tests {
 
         for (source, id) in sources.iter().zip(expected.iter()) {
             assert_eq!(source.file_id, *id);
-            assert_eq!(source.stream_url, format!("/v1/files/{id}/stream"));
-            assert_eq!(source.download_url, format!("/v1/files/{id}/download"));
+            assert_urls_name(&source.stream_url, &source.download_url, *id);
         }
     }
 
@@ -799,17 +805,21 @@ mod tests {
             (1300, Some(5800.0)),
             "all the parts, together"
         );
-        assert_eq!(stack.stream_url, format!("/v1/files/{cd1}/stream"));
+        // The stack plays from its first part; each part plays its own file.
+        assert_eq!(
+            (&stack.stream_url, &stack.download_url),
+            (&stack.parts[0].stream_url, &stack.parts[0].download_url)
+        );
+        for part in &stack.parts {
+            assert_urls_name(&part.stream_url, &part.download_url, part.file_id);
+        }
         assert_eq!(
             stack
                 .parts
                 .iter()
-                .map(|p| (p.stream_url.clone(), p.duration_secs))
+                .map(|p| (p.file_id, p.duration_secs))
                 .collect::<Vec<_>>(),
-            vec![
-                (format!("/v1/files/{cd1}/stream"), Some(2800.0)),
-                (format!("/v1/files/{cd2}/stream"), Some(3000.0)),
-            ]
+            vec![(cd1, Some(2800.0)), (cd2, Some(3000.0))]
         );
         assert!(stack.parts[0].subtitle_tracks.is_empty());
         assert_eq!(
@@ -1603,7 +1613,7 @@ mod tests {
     }
 
     fn only_shows() -> MediaSearchFilters {
-        use crate::services::metadata::TitleKind;
+        use crate::models::search::TitleKind;
 
         MediaSearchFilters {
             media_type: Some(TitleKind::Show),
@@ -1737,12 +1747,31 @@ mod browse {
     use uuid::Uuid;
 
     use crate::models::MediaMetadata;
+    use crate::models::search::{MediaConnection, MediaSortField, SortOrder};
     use crate::services::cursor::browse;
     use crate::services::metadata::{
-        BrowseRequest, DEFAULT_PAGE_SIZE, DbMetadataService, MAX_PAGE_SIZE, MediaConnection,
-        MediaSearchFilters, MediaSortField, MetadataError, MetadataRepositories, MetadataService,
-        PageDirection, PageRequest, SortOrder,
+        BrowseRequest, DEFAULT_PAGE_SIZE, DbMetadataService, MAX_PAGE_SIZE, MediaSearchFilters,
+        MetadataError, MetadataRepositories, MetadataService,
     };
+    use crate::services::paging::{PageDirection, PageRequest};
+
+    /// A browse page request, at browse's bounds.
+    fn browse_page(
+        first: Option<u32>,
+        after: Option<String>,
+        last: Option<u32>,
+        before: Option<String>,
+    ) -> Result<PageRequest, String> {
+        PageRequest::from_relay(
+            first,
+            after,
+            last,
+            before,
+            DEFAULT_PAGE_SIZE,
+            MAX_PAGE_SIZE,
+            "items",
+        )
+    }
 
     /// Every double, with the catalogue and genre store reading the title
     /// doubles, so a test writes through one trait and reads through another.
@@ -1944,10 +1973,10 @@ mod browse {
             (None, c(), Some(5), None, Err(())),
         ];
         for (first, after, last, before, expected) in cases {
-            let got = PageRequest::from_relay(first, after.clone(), last, before.clone());
+            let got = browse_page(first, after.clone(), last, before.clone());
             match (&got, &expected) {
                 (Ok(got), Ok(expected)) => assert_eq!(got, expected),
-                (Err(MetadataError::InvalidPagination(_)), Err(())) => {}
+                (Err(_), Err(())) => {}
                 _ => panic!(
                     "{first:?} {after:?} {last:?} {before:?}: got {got:?}, want {expected:?}"
                 ),
@@ -1965,7 +1994,7 @@ mod browse {
             last in proptest::option::of(any::<u32>()),
             before in proptest::option::of(".{0,4}"),
         ) {
-            if let Ok(page) = PageRequest::from_relay(first, after.clone(), last, before.clone()) {
+            if let Ok(page) = browse_page(first, after.clone(), last, before.clone()) {
                 prop_assert!(page.size.get() <= MAX_PAGE_SIZE);
                 match page.direction {
                     PageDirection::Forward => {

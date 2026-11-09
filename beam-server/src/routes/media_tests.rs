@@ -14,12 +14,12 @@ use kynos::http::StatusCode;
 use kynos::prelude::*;
 use kynos::test::TestClient;
 
+use crate::models::search::{MediaConnection, PageInfo};
 use crate::models::{MediaMetadata, MediaSource, MediaSourceConnection, MovieMetadata, Title};
 use crate::routes::media::{browse_media, get_media_detail, get_media_sources};
 use crate::routes::test_support::make_app_state;
 use crate::services::metadata::{
-    BrowseRequest, DbMetadataService, MediaConnection, MetadataError, MetadataRepositories,
-    MetadataService, PageInfo,
+    BrowseRequest, DbMetadataService, MetadataError, MetadataRepositories, MetadataService,
 };
 use crate::state::{AppServices, AppState};
 
@@ -1199,11 +1199,12 @@ async fn a_playable_id_yields_its_stream_and_download_urls() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let MediaSourceConnection { items, page_info } = response.json();
-    assert_eq!(items.len(), 1);
-    assert_eq!(items[0].stream_url, format!("/v1/files/{FILE_ID}/stream"));
+    // The service's sources, as it gave them: URLs and all. That those URLs
+    // are served routes is `access_tests`'
+    // `every_url_a_source_carries_is_served_and_delivers_what_it_names`.
     assert_eq!(
-        items[0].download_url,
-        format!("/v1/files/{FILE_ID}/download")
+        serde_json::to_value(&items).unwrap(),
+        serde_json::to_value(vec![movie_source(FILE_ID)]).unwrap()
     );
     // One complete page: nothing before it, nothing after.
     assert!(!page_info.has_next_page);
@@ -1301,8 +1302,19 @@ async fn sources_carry_their_tracks_and_the_subtitle_files_beside_them() {
         })
     );
     let id = sidecar.id;
+    // Where to fetch the file, as stored and as WebVTT: two distinct URLs.
+    // That each is a served route delivering this subtitle is `access_tests`'
+    // `every_url_a_source_carries_is_served_and_delivers_what_it_names`.
+    let mut sidecar_track = subtitles[1].clone();
+    let fields = sidecar_track.as_object_mut().expect("an object");
+    let url = fields.remove("url").expect("a url field");
+    let webvtt_url = fields.remove("webvtt_url").expect("a webvtt_url field");
+    assert!(
+        url.is_string() && webvtt_url.is_string() && url != webvtt_url,
+        "{url} / {webvtt_url}"
+    );
     assert_eq!(
-        subtitles[1],
+        sidecar_track,
         serde_json::json!({
             "origin": "sidecar",
             "index": null,
@@ -1314,8 +1326,6 @@ async fn sources_carry_their_tracks_and_the_subtitle_files_beside_them() {
             "is_forced": false,
             "is_hearing_impaired": true,
             "is_text": true,
-            "url": format!("/v1/files/{file}/subtitles/{id}"),
-            "webvtt_url": format!("/v1/files/{file}/subtitles/{id}/webvtt"),
         })
     );
 }
@@ -1403,8 +1413,23 @@ async fn sources_carry_their_chapters_markers_and_trickplay_sheets() {
             {"kind": "preview", "start_ms": 7_000_000, "end_ms": 7_030_000},
         ])
     );
+    // A URL per sheet: 150 tiles at 10 by 10 are two. That each is a served
+    // route delivering its own sheet is `access_tests`'
+    // `every_url_a_source_carries_is_served_and_delivers_what_it_names`.
+    let mut trickplay = source["trickplay"].clone();
+    let sheet_urls = trickplay
+        .as_object_mut()
+        .expect("an object")
+        .remove("sheet_urls")
+        .expect("a sheet_urls field");
+    let sheet_urls = sheet_urls.as_array().expect("an array");
+    assert_eq!(sheet_urls.len(), 2);
+    assert!(
+        sheet_urls[0].is_string() && sheet_urls[1].is_string() && sheet_urls[0] != sheet_urls[1],
+        "{sheet_urls:?}"
+    );
     assert_eq!(
-        source["trickplay"],
+        trickplay,
         serde_json::json!({
             "interval_ms": 10_000,
             "tile_width": 320,
@@ -1412,10 +1437,6 @@ async fn sources_carry_their_chapters_markers_and_trickplay_sheets() {
             "columns": 10,
             "rows": 10,
             "tile_count": 150,
-            "sheet_urls": [
-                format!("/v1/files/{file}/trickplay/0"),
-                format!("/v1/files/{file}/trickplay/1"),
-            ],
         })
     );
     let part = &source["parts"][0];

@@ -289,7 +289,7 @@ pub async fn list_libraries(
     let libraries = state
         .services
         .library
-        .get_libraries(auth.0.user_id.to_string())
+        .get_libraries()
         .await
         .map_err(|e| InternalError::Internal(ServerFault::new(e)))?
         .into_iter()

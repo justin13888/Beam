@@ -61,10 +61,7 @@ impl StubLibraryService {
 
 #[async_trait::async_trait]
 impl LibraryService for StubLibraryService {
-    async fn get_libraries(
-        &self,
-        _user_id: String,
-    ) -> Result<Vec<crate::models::Library>, LibraryError> {
+    async fn get_libraries(&self) -> Result<Vec<crate::models::Library>, LibraryError> {
         unimplemented!("not called in stream route tests")
     }
     async fn get_library_by_id(

@@ -47,7 +47,9 @@ use crate::routes::admin::{
     list_libraries, refresh_media_metadata, scan_library, set_admin_user_access,
     stream_admin_events, update_admin_user,
 };
-use crate::services::library::{InMemoryPathValidator, LibraryService, LocalLibraryService};
+use crate::services::library::{
+    InMemoryPathValidator, LibraryService, LibraryServiceDependencies, LocalLibraryService,
+};
 use crate::state::{AppServices, AppState};
 use beam_index::services::admin_log::{AdminLogService, LocalAdminLogService};
 use beam_index::services::hash::HashService;
@@ -277,18 +279,19 @@ fn build_fixture(
     );
 
     let watcher = Arc::new(beam_index::services::watcher::InMemoryFsWatcher::new());
-    let library: Arc<dyn LibraryService> = Arc::new(LocalLibraryService::new(
-        library_repo.clone(),
-        file_repo.clone(),
-        PathBuf::from("/videos"),
-        data_dir,
-        notification.clone(),
-        index.clone() as Arc<dyn IndexService>,
-        Arc::new(InMemoryPathValidator::success(library_root.clone())),
-        Arc::new(beam_index::runtime::LibraryWatches::new(Some(
-            watcher.clone(),
-        ))),
-    ));
+    let library: Arc<dyn LibraryService> =
+        Arc::new(LocalLibraryService::new(LibraryServiceDependencies {
+            library_repo: library_repo.clone(),
+            file_repo: file_repo.clone(),
+            video_dir: PathBuf::from("/videos"),
+            data_dir,
+            notification_service: notification.clone(),
+            index_service: index.clone() as Arc<dyn IndexService>,
+            path_validator: Arc::new(InMemoryPathValidator::success(library_root.clone())),
+            watch_hook: Arc::new(beam_index::runtime::LibraryWatches::new(Some(
+                watcher.clone(),
+            ))),
+        }));
 
     let services = AppServices {
         library,

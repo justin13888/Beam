@@ -41,16 +41,15 @@ impl DependencyProbe for DbProbe {
         self.db.ping().await.map_err(|e| e.to_string())
     }
 }
-/// Test doubles. Gated behind `test-utils` so downstream crates can depend on
-/// them without them reaching a release build.
-///
-/// Collected into one module rather than left as loose `#[cfg(...)]` items so a
-/// single `#[mutants::skip]` covers the lot: cargo-mutants recognises only the
-/// literal `#[cfg(test)]` and would otherwise mutate these bodies and report the
-/// scaffolding as untested product behaviour. `mise run check:mutants-skip-fakes`
-/// enforces the attribute.
-#[mutants::skip]
-#[cfg(any(test, feature = "test-utils"))]
+
+// Re-exported at the module root so the doubles keep the paths they had before
+// they moved into `in_memory`.
+#[cfg(test)]
+pub use in_memory::InMemoryDependencyProbe;
+
+/// Test doubles. No crate depends on `beam-server`, so they are plain
+/// `#[cfg(test)]`: the literal form cargo-mutants recognises and never mutates.
+#[cfg(test)]
 pub mod in_memory {
     use super::*;
 
@@ -86,8 +85,3 @@ pub mod in_memory {
         }
     }
 }
-
-// Re-exported at the module root so the doubles keep the paths they had before
-// they moved into `in_memory`.
-#[cfg(any(test, feature = "test-utils"))]
-pub use in_memory::InMemoryDependencyProbe;

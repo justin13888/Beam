@@ -42,7 +42,10 @@ use crate::{
         artwork::{ArtworkCache, ArtworkCacheConfig},
         collections::CollectionService,
         health::DependencyProbe,
-        library::{LibraryService, LocalLibraryService, OsPathValidator, audit_existing_roots},
+        library::{
+            LibraryService, LibraryServiceDependencies, LocalLibraryService, OsPathValidator,
+            audit_existing_roots,
+        },
         lists::{ListDependencies, ListService},
         metadata::{DbMetadataService, MetadataRepositories, MetadataService},
         people::PeopleService,
@@ -614,16 +617,16 @@ impl AppServices {
 
         let services = Self {
             access,
-            library: Arc::new(LocalLibraryService::new(
-                library_repo.clone(),
-                file_repo.clone(),
-                config.video_dir.clone(),
+            library: Arc::new(LocalLibraryService::new(LibraryServiceDependencies {
+                library_repo: library_repo.clone(),
+                file_repo: file_repo.clone(),
+                video_dir: config.video_dir.clone(),
                 data_dir,
-                notification_service.clone(),
-                index_service.clone() as Arc<dyn IndexService>,
-                Arc::new(OsPathValidator),
-                library_watches.clone(),
-            )),
+                notification_service: notification_service.clone(),
+                index_service: index_service.clone() as Arc<dyn IndexService>,
+                path_validator: Arc::new(OsPathValidator),
+                watch_hook: library_watches.clone(),
+            })),
             metadata,
             subtitles: Arc::new(DbSubtitleService::new(
                 library_repo.clone(),

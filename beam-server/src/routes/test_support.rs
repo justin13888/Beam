@@ -29,10 +29,11 @@ use beam_index::services::enrichment::control::{
     EnrichmentControl, EnrichmentControlDeps, TitleNfoPins,
 };
 
+use crate::models::search::{MediaConnection, PageInfo};
 use crate::services::artwork::{ArtworkCache, ArtworkCacheConfig};
 use crate::services::health::InMemoryDependencyProbe;
 use crate::services::library::LibraryError;
-use crate::services::metadata::{MediaConnection, MetadataError, MetadataService, PageInfo};
+use crate::services::metadata::{MetadataError, MetadataService};
 use crate::services::playback::{DbPlaybackService, PlaybackRepositories, PlaybackService};
 use crate::services::playback_telemetry::{PlaybackTelemetryConfig, PlaybackTelemetryService};
 use crate::services::sources::SourceCatalog;
@@ -46,10 +47,7 @@ struct StubLibraryService;
 
 #[async_trait::async_trait]
 impl crate::services::library::LibraryService for StubLibraryService {
-    async fn get_libraries(
-        &self,
-        _user_id: String,
-    ) -> Result<Vec<crate::models::Library>, LibraryError> {
+    async fn get_libraries(&self) -> Result<Vec<crate::models::Library>, LibraryError> {
         unimplemented!("not called in routing tests")
     }
     async fn get_library_by_id(

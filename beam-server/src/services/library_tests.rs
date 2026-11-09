@@ -1,7 +1,8 @@
 #[cfg(test)]
 mod tests {
     use crate::services::library::{
-        InMemoryPathValidator, LibraryError, LibraryService, LocalLibraryService, LocatedFile,
+        InMemoryPathValidator, LibraryError, LibraryService, LibraryServiceDependencies,
+        LocalLibraryService, LocatedFile,
     };
     use beam_domain::models::{CreateLibrary, FileStatus, Library as DomainLibrary, MediaFile};
     use beam_domain::repositories::LibraryRepository;
@@ -41,16 +42,16 @@ mod tests {
         video_dir: PathBuf,
         mock_index_service: MockIndexService,
     ) -> LocalLibraryService {
-        LocalLibraryService::new(
-            Arc::new(mock_library_repo),
-            Arc::new(mock_file_repo),
-            video_dir.clone(),
-            PathBuf::from("/beam-data"),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(mock_index_service),
-            Arc::new(InMemoryPathValidator::success(video_dir)),
-            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
-        )
+        LocalLibraryService::new(LibraryServiceDependencies {
+            library_repo: Arc::new(mock_library_repo),
+            file_repo: Arc::new(mock_file_repo),
+            video_dir: video_dir.clone(),
+            data_dir: PathBuf::from("/beam-data"),
+            notification_service: Arc::new(InMemoryNotificationService::new()),
+            index_service: Arc::new(mock_index_service),
+            path_validator: Arc::new(InMemoryPathValidator::success(video_dir)),
+            watch_hook: Arc::new(beam_index::runtime::LibraryWatches::new(None)),
+        })
     }
 
     /// What a double's `stop_scan` answers: a real retirement, of a
@@ -231,16 +232,16 @@ mod tests {
             .expect_delete()
             .times(1)
             .returning(|_| Err(DbErr::Custom("statement timeout".to_string())));
-        let service = LocalLibraryService::new(
-            Arc::new(libraries),
-            Arc::new(MockFileRepository::new()),
-            root.path().to_path_buf(),
-            PathBuf::from("/beam-data"),
-            Arc::new(InMemoryNotificationService::new()),
-            index.clone() as Arc<dyn IndexService>,
-            Arc::new(InMemoryPathValidator::success(root.path().to_path_buf())),
-            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
-        );
+        let service = LocalLibraryService::new(LibraryServiceDependencies {
+            library_repo: Arc::new(libraries),
+            file_repo: Arc::new(MockFileRepository::new()),
+            video_dir: root.path().to_path_buf(),
+            data_dir: PathBuf::from("/beam-data"),
+            notification_service: Arc::new(InMemoryNotificationService::new()),
+            index_service: index.clone() as Arc<dyn IndexService>,
+            path_validator: Arc::new(InMemoryPathValidator::success(root.path().to_path_buf())),
+            watch_hook: Arc::new(beam_index::runtime::LibraryWatches::new(None)),
+        });
 
         let result = service.delete_library(lib_id).await;
         assert!(matches!(result, Err(LibraryError::Db(_))), "{result:?}");
@@ -326,18 +327,18 @@ mod tests {
             inner: beam_index::services::watcher::InMemoryFsWatcher::new(),
             gate: std::sync::Mutex::new(gate),
         });
-        let service = LocalLibraryService::new(
-            Arc::new(InMemoryLibraryRepository::default()),
-            Arc::new(InMemoryFileRepository::default()),
-            video_dir.clone(),
-            PathBuf::from("/beam-data"),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(MockIndexService::new()),
-            Arc::new(InMemoryPathValidator::success(video_dir.clone())),
-            Arc::new(beam_index::runtime::LibraryWatches::new(Some(
+        let service = LocalLibraryService::new(LibraryServiceDependencies {
+            library_repo: Arc::new(InMemoryLibraryRepository::default()),
+            file_repo: Arc::new(InMemoryFileRepository::default()),
+            video_dir: video_dir.clone(),
+            data_dir: PathBuf::from("/beam-data"),
+            notification_service: Arc::new(InMemoryNotificationService::new()),
+            index_service: Arc::new(MockIndexService::new()),
+            path_validator: Arc::new(InMemoryPathValidator::success(video_dir.clone())),
+            watch_hook: Arc::new(beam_index::runtime::LibraryWatches::new(Some(
                 watcher.clone(),
             ))),
-        );
+        });
 
         let created = service
             .create_library("Movies".to_string(), "movies".to_string())
@@ -362,16 +363,16 @@ mod tests {
         let lib_repo_ref = Arc::clone(&lib_repo);
         let notif = Arc::new(InMemoryNotificationService::new());
         let notif_ref = Arc::clone(&notif);
-        let service = LocalLibraryService::new(
-            lib_repo,
-            Arc::new(InMemoryFileRepository::default()),
-            video_dir.clone(),
-            PathBuf::from("/beam-data"),
-            notif as Arc<dyn NotificationService>,
-            Arc::new(MockIndexService::new()),
-            Arc::new(InMemoryPathValidator::success(video_dir.clone())),
-            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
-        );
+        let service = LocalLibraryService::new(LibraryServiceDependencies {
+            library_repo: lib_repo,
+            file_repo: Arc::new(InMemoryFileRepository::default()),
+            video_dir: video_dir.clone(),
+            data_dir: PathBuf::from("/beam-data"),
+            notification_service: notif as Arc<dyn NotificationService>,
+            index_service: Arc::new(MockIndexService::new()),
+            path_validator: Arc::new(InMemoryPathValidator::success(video_dir.clone())),
+            watch_hook: Arc::new(beam_index::runtime::LibraryWatches::new(None)),
+        });
 
         let result = service
             .create_library("Movies".to_string(), "/media/videos/movies".to_string())
@@ -416,16 +417,16 @@ mod tests {
             let video_dir = PathBuf::from("/media/videos");
             let lib_repo = Arc::new(InMemoryLibraryRepository::default());
             let notif = Arc::new(InMemoryNotificationService::new());
-            let service = LocalLibraryService::new(
-                lib_repo.clone(),
-                Arc::new(InMemoryFileRepository::default()),
+            let service = LocalLibraryService::new(LibraryServiceDependencies {
+                library_repo: lib_repo.clone(),
+                file_repo: Arc::new(InMemoryFileRepository::default()),
                 video_dir,
-                PathBuf::from("/beam-data"),
-                notif.clone() as Arc<dyn NotificationService>,
-                Arc::new(MockIndexService::new()),
-                Arc::new(validator),
-                Arc::new(beam_index::runtime::LibraryWatches::new(None)),
-            );
+                data_dir: PathBuf::from("/beam-data"),
+                notification_service: notif.clone() as Arc<dyn NotificationService>,
+                index_service: Arc::new(MockIndexService::new()),
+                path_validator: Arc::new(validator),
+                watch_hook: Arc::new(beam_index::runtime::LibraryWatches::new(None)),
+            });
 
             let err = service
                 .create_library("Movies".to_string(), "/etc/secret".to_string())
@@ -458,16 +459,16 @@ mod tests {
             .times(1)
             .returning(|_| Err(DbErr::Custom("insert failed".to_string())));
 
-        let service = LocalLibraryService::new(
-            Arc::new(mock_library_repo),
-            Arc::new(InMemoryFileRepository::default()),
-            video_dir.clone(),
-            PathBuf::from("/beam-data"),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(MockIndexService::new()),
-            Arc::new(InMemoryPathValidator::success(video_dir.clone())),
-            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
-        );
+        let service = LocalLibraryService::new(LibraryServiceDependencies {
+            library_repo: Arc::new(mock_library_repo),
+            file_repo: Arc::new(InMemoryFileRepository::default()),
+            video_dir: video_dir.clone(),
+            data_dir: PathBuf::from("/beam-data"),
+            notification_service: Arc::new(InMemoryNotificationService::new()),
+            index_service: Arc::new(MockIndexService::new()),
+            path_validator: Arc::new(InMemoryPathValidator::success(video_dir.clone())),
+            watch_hook: Arc::new(beam_index::runtime::LibraryWatches::new(None)),
+        });
 
         let result = service
             .create_library("Movies".to_string(), "/media/videos/movies".to_string())
@@ -481,18 +482,18 @@ mod tests {
     #[tokio::test]
     async fn test_get_libraries_empty_repo_returns_empty_vec() {
         let video_dir = PathBuf::from("/media/videos");
-        let service = LocalLibraryService::new(
-            Arc::new(InMemoryLibraryRepository::default()),
-            Arc::new(InMemoryFileRepository::default()),
-            video_dir.clone(),
-            PathBuf::from("/beam-data"),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(MockIndexService::new()),
-            Arc::new(InMemoryPathValidator::success(video_dir)),
-            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
-        );
+        let service = LocalLibraryService::new(LibraryServiceDependencies {
+            library_repo: Arc::new(InMemoryLibraryRepository::default()),
+            file_repo: Arc::new(InMemoryFileRepository::default()),
+            video_dir: video_dir.clone(),
+            data_dir: PathBuf::from("/beam-data"),
+            notification_service: Arc::new(InMemoryNotificationService::new()),
+            index_service: Arc::new(MockIndexService::new()),
+            path_validator: Arc::new(InMemoryPathValidator::success(video_dir)),
+            watch_hook: Arc::new(beam_index::runtime::LibraryWatches::new(None)),
+        });
 
-        let result = service.get_libraries("user1".to_string()).await;
+        let result = service.get_libraries().await;
 
         assert!(result.is_ok());
         assert_eq!(result.unwrap().len(), 0);
@@ -508,18 +509,18 @@ mod tests {
         store_files(&indexed, id1, 5).await;
         store_files(&indexed, id2, 12).await;
 
-        let service = LocalLibraryService::new(
-            lib_repo,
-            Arc::new(InMemoryFileRepository::default()),
-            video_dir.clone(),
-            PathBuf::from("/beam-data"),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(MockIndexService::new()),
-            Arc::new(InMemoryPathValidator::success(video_dir)),
-            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
-        );
+        let service = LocalLibraryService::new(LibraryServiceDependencies {
+            library_repo: lib_repo,
+            file_repo: Arc::new(InMemoryFileRepository::default()),
+            video_dir: video_dir.clone(),
+            data_dir: PathBuf::from("/beam-data"),
+            notification_service: Arc::new(InMemoryNotificationService::new()),
+            index_service: Arc::new(MockIndexService::new()),
+            path_validator: Arc::new(InMemoryPathValidator::success(video_dir)),
+            watch_hook: Arc::new(beam_index::runtime::LibraryWatches::new(None)),
+        });
 
-        let result = service.get_libraries("user1".to_string()).await;
+        let result = service.get_libraries().await;
 
         assert!(result.is_ok());
         let libs = result.unwrap();
@@ -540,18 +541,18 @@ mod tests {
             .times(1)
             .returning(|| Err(DbErr::Custom("connection lost".to_string())));
 
-        let service = LocalLibraryService::new(
-            Arc::new(mock_library_repo),
-            Arc::new(InMemoryFileRepository::default()),
-            video_dir.clone(),
-            PathBuf::from("/beam-data"),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(MockIndexService::new()),
-            Arc::new(InMemoryPathValidator::success(video_dir)),
-            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
-        );
+        let service = LocalLibraryService::new(LibraryServiceDependencies {
+            library_repo: Arc::new(mock_library_repo),
+            file_repo: Arc::new(InMemoryFileRepository::default()),
+            video_dir: video_dir.clone(),
+            data_dir: PathBuf::from("/beam-data"),
+            notification_service: Arc::new(InMemoryNotificationService::new()),
+            index_service: Arc::new(MockIndexService::new()),
+            path_validator: Arc::new(InMemoryPathValidator::success(video_dir)),
+            watch_hook: Arc::new(beam_index::runtime::LibraryWatches::new(None)),
+        });
 
-        let result = service.get_libraries("user1".to_string()).await;
+        let result = service.get_libraries().await;
         assert!(matches!(result, Err(LibraryError::Db(_))));
     }
 
@@ -570,18 +571,18 @@ mod tests {
             .times(1)
             .returning(|_| Err(DbErr::Custom("count failed".to_string())));
 
-        let service = LocalLibraryService::new(
-            Arc::new(mock_library_repo),
-            Arc::new(InMemoryFileRepository::default()),
-            video_dir.clone(),
-            PathBuf::from("/beam-data"),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(MockIndexService::new()),
-            Arc::new(InMemoryPathValidator::success(video_dir)),
-            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
-        );
+        let service = LocalLibraryService::new(LibraryServiceDependencies {
+            library_repo: Arc::new(mock_library_repo),
+            file_repo: Arc::new(InMemoryFileRepository::default()),
+            video_dir: video_dir.clone(),
+            data_dir: PathBuf::from("/beam-data"),
+            notification_service: Arc::new(InMemoryNotificationService::new()),
+            index_service: Arc::new(MockIndexService::new()),
+            path_validator: Arc::new(InMemoryPathValidator::success(video_dir)),
+            watch_hook: Arc::new(beam_index::runtime::LibraryWatches::new(None)),
+        });
 
-        let result = service.get_libraries("user1".to_string()).await;
+        let result = service.get_libraries().await;
         assert!(matches!(result, Err(LibraryError::Db(_))));
     }
 
@@ -595,16 +596,16 @@ mod tests {
         let lib_id = stored_library(&lib_repo, "Movies", "/media/videos").await;
         store_files(&indexed, lib_id, 7).await;
 
-        let service = LocalLibraryService::new(
-            lib_repo,
-            Arc::new(InMemoryFileRepository::default()),
-            video_dir.clone(),
-            PathBuf::from("/beam-data"),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(MockIndexService::new()),
-            Arc::new(InMemoryPathValidator::success(video_dir)),
-            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
-        );
+        let service = LocalLibraryService::new(LibraryServiceDependencies {
+            library_repo: lib_repo,
+            file_repo: Arc::new(InMemoryFileRepository::default()),
+            video_dir: video_dir.clone(),
+            data_dir: PathBuf::from("/beam-data"),
+            notification_service: Arc::new(InMemoryNotificationService::new()),
+            index_service: Arc::new(MockIndexService::new()),
+            path_validator: Arc::new(InMemoryPathValidator::success(video_dir)),
+            watch_hook: Arc::new(beam_index::runtime::LibraryWatches::new(None)),
+        });
 
         let result = service.get_library_by_id(lib_id).await;
 
@@ -620,16 +621,16 @@ mod tests {
     #[tokio::test]
     async fn test_get_library_by_id_missing_library_returns_none() {
         let video_dir = PathBuf::from("/media/videos");
-        let service = LocalLibraryService::new(
-            Arc::new(InMemoryLibraryRepository::default()),
-            Arc::new(InMemoryFileRepository::default()),
-            video_dir.clone(),
-            PathBuf::from("/beam-data"),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(MockIndexService::new()),
-            Arc::new(InMemoryPathValidator::success(video_dir)),
-            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
-        );
+        let service = LocalLibraryService::new(LibraryServiceDependencies {
+            library_repo: Arc::new(InMemoryLibraryRepository::default()),
+            file_repo: Arc::new(InMemoryFileRepository::default()),
+            video_dir: video_dir.clone(),
+            data_dir: PathBuf::from("/beam-data"),
+            notification_service: Arc::new(InMemoryNotificationService::new()),
+            index_service: Arc::new(MockIndexService::new()),
+            path_validator: Arc::new(InMemoryPathValidator::success(video_dir)),
+            watch_hook: Arc::new(beam_index::runtime::LibraryWatches::new(None)),
+        });
 
         let result = service.get_library_by_id(Uuid::new_v4()).await;
 
@@ -661,16 +662,16 @@ mod tests {
                 .insert(file_id, make_media_file(file_id, lib_id));
         }
 
-        let service = LocalLibraryService::new(
-            lib_repo,
+        let service = LocalLibraryService::new(LibraryServiceDependencies {
+            library_repo: lib_repo,
             file_repo,
-            video_dir.clone(),
-            PathBuf::from("/beam-data"),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(MockIndexService::new()),
-            Arc::new(InMemoryPathValidator::success(video_dir)),
-            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
-        );
+            video_dir: video_dir.clone(),
+            data_dir: PathBuf::from("/beam-data"),
+            notification_service: Arc::new(InMemoryNotificationService::new()),
+            index_service: Arc::new(MockIndexService::new()),
+            path_validator: Arc::new(InMemoryPathValidator::success(video_dir)),
+            watch_hook: Arc::new(beam_index::runtime::LibraryWatches::new(None)),
+        });
 
         let two = std::num::NonZeroU32::new(2).unwrap();
         let first = service
@@ -719,16 +720,16 @@ mod tests {
     #[tokio::test]
     async fn test_get_library_files_library_not_found_returns_library_not_found_error() {
         let video_dir = PathBuf::from("/media/videos");
-        let service = LocalLibraryService::new(
-            Arc::new(InMemoryLibraryRepository::default()),
-            Arc::new(InMemoryFileRepository::default()),
-            video_dir.clone(),
-            PathBuf::from("/beam-data"),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(MockIndexService::new()),
-            Arc::new(InMemoryPathValidator::success(video_dir)),
-            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
-        );
+        let service = LocalLibraryService::new(LibraryServiceDependencies {
+            library_repo: Arc::new(InMemoryLibraryRepository::default()),
+            file_repo: Arc::new(InMemoryFileRepository::default()),
+            video_dir: video_dir.clone(),
+            data_dir: PathBuf::from("/beam-data"),
+            notification_service: Arc::new(InMemoryNotificationService::new()),
+            index_service: Arc::new(MockIndexService::new()),
+            path_validator: Arc::new(InMemoryPathValidator::success(video_dir)),
+            watch_hook: Arc::new(beam_index::runtime::LibraryWatches::new(None)),
+        });
 
         let result = service
             .get_library_files(Uuid::new_v4(), None, std::num::NonZeroU32::MIN)
@@ -761,16 +762,16 @@ mod tests {
             .unwrap()
             .insert(file_id, make_media_file(file_id, lib_id));
 
-        let service = LocalLibraryService::new(
+        let service = LocalLibraryService::new(LibraryServiceDependencies {
             library_repo,
             file_repo,
-            video_dir.clone(),
-            PathBuf::from("/beam-data"),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(MockIndexService::new()),
-            Arc::new(InMemoryPathValidator::success(video_dir.clone())),
-            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
-        );
+            video_dir: video_dir.clone(),
+            data_dir: PathBuf::from("/beam-data"),
+            notification_service: Arc::new(InMemoryNotificationService::new()),
+            index_service: Arc::new(MockIndexService::new()),
+            path_validator: Arc::new(InMemoryPathValidator::success(video_dir.clone())),
+            watch_hook: Arc::new(beam_index::runtime::LibraryWatches::new(None)),
+        });
 
         let result = service.get_file_by_id(file_id).await;
 
@@ -792,16 +793,16 @@ mod tests {
     #[tokio::test]
     async fn test_get_file_by_id_missing_file_returns_none() {
         let video_dir = PathBuf::from("/media/videos");
-        let service = LocalLibraryService::new(
-            Arc::new(InMemoryLibraryRepository::default()),
-            Arc::new(InMemoryFileRepository::default()),
-            video_dir.clone(),
-            PathBuf::from("/beam-data"),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(MockIndexService::new()),
-            Arc::new(InMemoryPathValidator::success(video_dir)),
-            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
-        );
+        let service = LocalLibraryService::new(LibraryServiceDependencies {
+            library_repo: Arc::new(InMemoryLibraryRepository::default()),
+            file_repo: Arc::new(InMemoryFileRepository::default()),
+            video_dir: video_dir.clone(),
+            data_dir: PathBuf::from("/beam-data"),
+            notification_service: Arc::new(InMemoryNotificationService::new()),
+            index_service: Arc::new(MockIndexService::new()),
+            path_validator: Arc::new(InMemoryPathValidator::success(video_dir)),
+            watch_hook: Arc::new(beam_index::runtime::LibraryWatches::new(None)),
+        });
 
         let result = service.get_file_by_id(Uuid::new_v4()).await;
 
@@ -828,16 +829,16 @@ mod tests {
             .mark_missing(vec![file_id], chrono::Utc::now())
             .await
             .unwrap();
-        let service = LocalLibraryService::new(
-            Arc::new(InMemoryLibraryRepository::default()),
+        let service = LocalLibraryService::new(LibraryServiceDependencies {
+            library_repo: Arc::new(InMemoryLibraryRepository::default()),
             file_repo,
-            video_dir.clone(),
-            PathBuf::from("/beam-data"),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(MockIndexService::new()),
-            Arc::new(InMemoryPathValidator::success(video_dir)),
-            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
-        );
+            video_dir: video_dir.clone(),
+            data_dir: PathBuf::from("/beam-data"),
+            notification_service: Arc::new(InMemoryNotificationService::new()),
+            index_service: Arc::new(MockIndexService::new()),
+            path_validator: Arc::new(InMemoryPathValidator::success(video_dir)),
+            watch_hook: Arc::new(beam_index::runtime::LibraryWatches::new(None)),
+        });
 
         assert!(service.get_file_by_id(file_id).await.unwrap().is_none());
     }
@@ -854,16 +855,16 @@ mod tests {
             .times(1)
             .returning(|_| Ok(None));
 
-        let service = LocalLibraryService::new(
-            Arc::new(mock_library_repo),
-            Arc::new(InMemoryFileRepository::default()),
-            video_dir.clone(),
-            PathBuf::from("/beam-data"),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(MockIndexService::new()),
-            Arc::new(InMemoryPathValidator::success(video_dir)),
-            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
-        );
+        let service = LocalLibraryService::new(LibraryServiceDependencies {
+            library_repo: Arc::new(mock_library_repo),
+            file_repo: Arc::new(InMemoryFileRepository::default()),
+            video_dir: video_dir.clone(),
+            data_dir: PathBuf::from("/beam-data"),
+            notification_service: Arc::new(InMemoryNotificationService::new()),
+            index_service: Arc::new(MockIndexService::new()),
+            path_validator: Arc::new(InMemoryPathValidator::success(video_dir)),
+            watch_hook: Arc::new(beam_index::runtime::LibraryWatches::new(None)),
+        });
 
         let result = service.delete_library(Uuid::new_v4()).await;
 
@@ -885,16 +886,16 @@ mod tests {
             .returning(|id| stopped_scan(id, true));
         idle_index.expect_forget_library().return_const(());
 
-        let service = LocalLibraryService::new(
-            lib_repo,
-            Arc::new(InMemoryFileRepository::default()),
-            video_dir.clone(),
-            PathBuf::from("/beam-data"),
-            notif as Arc<dyn NotificationService>,
-            Arc::new(idle_index),
-            Arc::new(InMemoryPathValidator::success(video_dir)),
-            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
-        );
+        let service = LocalLibraryService::new(LibraryServiceDependencies {
+            library_repo: lib_repo,
+            file_repo: Arc::new(InMemoryFileRepository::default()),
+            video_dir: video_dir.clone(),
+            data_dir: PathBuf::from("/beam-data"),
+            notification_service: notif as Arc<dyn NotificationService>,
+            index_service: Arc::new(idle_index),
+            path_validator: Arc::new(InMemoryPathValidator::success(video_dir)),
+            watch_hook: Arc::new(beam_index::runtime::LibraryWatches::new(None)),
+        });
 
         let result = service.delete_library(lib_id).await;
         assert!(result.is_ok());
@@ -938,16 +939,16 @@ mod tests {
         lib_repo: Arc<InMemoryLibraryRepository>,
         resolves_to: &str,
     ) -> LocalLibraryService {
-        LocalLibraryService::new(
-            lib_repo,
-            Arc::new(InMemoryFileRepository::default()),
-            PathBuf::from("/media"),
-            PathBuf::from("/media/beam-data"),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(MockIndexService::new()),
-            Arc::new(InMemoryPathValidator::success(PathBuf::from(resolves_to))),
-            Arc::new(beam_index::runtime::LibraryWatches::new(None)),
-        )
+        LocalLibraryService::new(LibraryServiceDependencies {
+            library_repo: lib_repo,
+            file_repo: Arc::new(InMemoryFileRepository::default()),
+            video_dir: PathBuf::from("/media"),
+            data_dir: PathBuf::from("/media/beam-data"),
+            notification_service: Arc::new(InMemoryNotificationService::new()),
+            index_service: Arc::new(MockIndexService::new()),
+            path_validator: Arc::new(InMemoryPathValidator::success(PathBuf::from(resolves_to))),
+            watch_hook: Arc::new(beam_index::runtime::LibraryWatches::new(None)),
+        })
     }
 
     #[tokio::test]
