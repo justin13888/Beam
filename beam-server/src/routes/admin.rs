@@ -938,5 +938,13 @@ pub async fn get_playback_telemetry(
 mod admin_tests;
 
 #[cfg(test)]
+#[path = "admin_logs_tests.rs"]
+mod admin_logs_tests;
+
+#[cfg(test)]
+#[path = "admin_users_tests.rs"]
+mod admin_users_tests;
+
+#[cfg(test)]
 #[path = "admin_telemetry_tests.rs"]
 mod admin_telemetry_tests;

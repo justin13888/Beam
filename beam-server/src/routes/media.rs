@@ -326,3 +326,7 @@ pub async fn get_season_detail(
 #[cfg(test)]
 #[path = "media_tests.rs"]
 mod media_tests;
+
+#[cfg(test)]
+#[path = "media_browse_tests.rs"]
+mod media_browse_tests;

@@ -492,5 +492,9 @@ pub async fn report_playback_telemetry(
 mod playback_tests;
 
 #[cfg(test)]
+#[path = "continue_watching_tests.rs"]
+mod continue_watching_tests;
+
+#[cfg(test)]
 #[path = "playback_telemetry_tests.rs"]
 mod playback_telemetry_tests;

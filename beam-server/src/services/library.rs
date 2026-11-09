@@ -697,3 +697,7 @@ impl From<IndexError> for LibraryError {
 #[cfg(test)]
 #[path = "library_tests.rs"]
 mod library_tests;
+
+#[cfg(test)]
+#[path = "library_roots_tests.rs"]
+mod library_roots_tests;

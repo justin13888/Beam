@@ -750,3 +750,11 @@ pub struct MediaSearchFilters {
 #[cfg(test)]
 #[path = "metadata_tests.rs"]
 mod metadata_tests;
+
+#[cfg(test)]
+#[path = "sources_tests.rs"]
+mod sources_tests;
+
+#[cfg(test)]
+#[path = "metadata_browse_tests.rs"]
+mod metadata_browse_tests;

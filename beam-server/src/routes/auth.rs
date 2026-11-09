@@ -937,6 +937,10 @@ pub struct SessionRevoked {
 mod auth_tests;
 
 #[cfg(test)]
+#[path = "session_tests.rs"]
+mod session_tests;
+
+#[cfg(test)]
 #[path = "device_login_tests.rs"]
 mod device_login_tests;
 
