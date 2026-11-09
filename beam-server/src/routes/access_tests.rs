@@ -267,7 +267,6 @@ fn fixture() -> Fixture {
     ));
 
     let services = AppServices {
-        hash: base.services.hash.clone(),
         access: access_over(movies.clone(), shows.clone(), files.clone()),
         library: Arc::new(FileLocator {
             files: files.clone(),
@@ -279,16 +278,10 @@ fn fixture() -> Fixture {
             files.clone(),
             sidecars.clone(),
         )),
-        notification: base.services.notification.clone(),
-        admin_log: base.services.admin_log.clone(),
-        user_repo: base.services.user_repo.clone(),
-        language_preferences: base.services.language_preferences.clone(),
         playback: playback.clone(),
         genre_repo: genres.clone(),
         library_repo: libraries.clone(),
         file_repo: files.clone(),
-        enrichment_repo: base.services.enrichment_repo.clone(),
-        enrichment_control: base.services.enrichment_control.clone(),
         people: Arc::new(PeopleService::new(
             people.clone(),
             movies.clone(),
@@ -309,15 +302,8 @@ fn fixture() -> Fixture {
         movie_repo: movies.clone(),
         show_repo: shows.clone(),
         artwork,
-        session_store: base.services.session_store.clone(),
-        oidc_client: base.services.oidc_client.clone(),
-        pending_auth_store: base.services.pending_auth_store.clone(),
-        device_auth_store: base.services.device_auth_store.clone(),
-        oidc_config: base.services.oidc_config.clone(),
-        watch_status: Arc::new(beam_index::services::watch_status::WatchStatus::new()),
-        telemetry: crate::routes::test_support::idle_library_report(),
-        playback_telemetry: crate::routes::test_support::idle_playback_telemetry(),
         trickplay,
+        ..base.services.clone()
     };
 
     Fixture {

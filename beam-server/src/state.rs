@@ -24,7 +24,7 @@ use beam_index::runtime::LibraryWatches;
 use beam_index::services::admin_log::{AdminLogService, LocalAdminLogService};
 use beam_index::services::enrichment::control::{EnrichmentControl, EnrichmentControlDeps};
 use beam_index::services::enrichment::{EnrichmentPolicy, MetadataEnrichmentService};
-use beam_index::services::hash::{HashConfig, HashService, LocalHashService};
+use beam_index::services::hash::{HashConfig, LocalHashService};
 use beam_index::services::index::{IndexService, LocalIndexService};
 use beam_index::services::media_info::LocalMediaInfoService;
 use beam_index::services::notification::{LocalNotificationService, NotificationService};
@@ -142,9 +142,11 @@ impl Deref for AppState {
     }
 }
 
-#[derive(Debug)]
+/// Every field is shared (`Arc`) or plain configuration, so a clone is a
+/// second handle onto the same services -- which is what lets a test fixture
+/// swap a few of them and keep the rest (`AppServices { x, ..base.clone() }`).
+#[derive(Debug, Clone)]
 pub struct AppServices {
-    pub hash: Arc<dyn HashService>,
     /// Which libraries and content ratings each user may see (issue #263),
     /// applied by every route that reads or delivers a title.
     pub access: Arc<AccessService>,
@@ -560,7 +562,6 @@ impl AppServices {
         }));
 
         let services = Self {
-            hash: hash_service.clone() as Arc<dyn HashService>,
             access,
             library: Arc::new(LocalLibraryService::new(
                 library_repo.clone(),

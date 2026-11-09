@@ -15,11 +15,8 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use beam_auth::utils::oidc_config::OidcRuntimeConfig;
 use beam_auth::utils::{
     models::{CreateUser, User},
-    oidc::NotConfiguredOidcClient,
-    pending_auth_store::in_memory::InMemoryPendingAuthStore,
     repository::{UserRepository, in_memory::InMemoryUserRepository},
     session_store::{SessionData, SessionStore, in_memory::InMemorySessionStore},
 };
@@ -51,77 +48,12 @@ use crate::routes::admin::{
     stream_admin_events, update_admin_user,
 };
 use crate::services::library::{InMemoryPathValidator, LibraryService, LocalLibraryService};
-use crate::services::metadata::{MediaConnection, MetadataError, MetadataService, PageInfo};
 use crate::state::{AppServices, AppState};
 use beam_index::services::admin_log::{AdminLogService, LocalAdminLogService};
 use beam_index::services::hash::HashService;
 use beam_index::services::notification::{
     AdminEvent, EventCategory, InMemoryNotificationService, NotificationService,
 };
-
-#[derive(Debug)]
-struct StubHashService;
-
-#[async_trait::async_trait]
-impl HashService for StubHashService {
-    async fn hash_async(&self, _file: std::fs::File) -> std::io::Result<u64> {
-        unimplemented!("not called in admin route tests")
-    }
-}
-
-#[derive(Debug, Default)]
-struct StubMetadataService;
-
-#[async_trait::async_trait]
-impl MetadataService for StubMetadataService {
-    async fn get_media_metadata(
-        &self,
-        _media_id: uuid::Uuid,
-    ) -> Result<Option<crate::models::MediaMetadata>, MetadataError> {
-        Ok(None)
-    }
-    async fn search_media(
-        &self,
-        _request: crate::services::metadata::BrowseRequest,
-    ) -> Result<MediaConnection, MetadataError> {
-        Ok(MediaConnection {
-            items: vec![],
-            page_info: PageInfo {
-                has_next_page: false,
-                has_previous_page: false,
-                start_cursor: None,
-                end_cursor: None,
-            },
-        })
-    }
-    async fn get_media_sources(
-        &self,
-        _media_id: uuid::Uuid,
-    ) -> Result<Vec<crate::models::MediaSource>, MetadataError> {
-        unimplemented!("not called in admin route tests")
-    }
-
-    async fn get_episode_detail(
-        &self,
-        _episode_id: uuid::Uuid,
-    ) -> Result<Option<crate::models::EpisodeDetail>, MetadataError> {
-        Ok(None)
-    }
-
-    async fn get_season_detail(
-        &self,
-        _season_id: uuid::Uuid,
-    ) -> Result<Option<crate::models::SeasonDetail>, MetadataError> {
-        Ok(None)
-    }
-
-    async fn get_titles(
-        &self,
-        _titles: &[beam_domain::models::watch_state::TitleRef],
-    ) -> Result<Vec<crate::models::MediaMetadata>, MetadataError> {
-        Ok(vec![])
-    }
-}
 
 /// A notification service whose live feed is finite.
 ///
@@ -359,26 +291,10 @@ fn build_fixture(
     ));
 
     let services = AppServices {
-        hash: Arc::new(StubHashService),
-        access: crate::routes::test_support::open_access(),
         library,
-        metadata: Arc::new(StubMetadataService),
-        subtitles: crate::routes::test_support::idle_subtitles(),
         notification: notification.clone(),
         admin_log,
         user_repo: user_repo.clone(),
-        language_preferences: crate::routes::test_support::idle_language_preferences(),
-        playback: crate::routes::test_support::in_memory_playback(
-            Arc::new(beam_domain::services::TestClock::new()),
-            Arc::new(beam_domain::repositories::file::in_memory::InMemoryFileRepository::default()),
-            Arc::new(
-                beam_domain::repositories::movie::in_memory::InMemoryMovieRepository::default(),
-            ),
-            Arc::new(beam_domain::repositories::show::in_memory::InMemoryShowRepository::default()),
-        ),
-        genre_repo: Arc::new(
-            beam_domain::repositories::genre::in_memory::InMemoryGenreRepository::default(),
-        ),
         library_repo: library_repo.clone(),
         file_repo: file_repo.clone(),
         enrichment_repo: enrichment_repo.clone(),
@@ -391,29 +307,10 @@ fn build_fixture(
             admin_log_for_control,
         ),
         people: crate::routes::test_support::idle_people(movie_repo.clone(), show_repo.clone()),
-        lists: crate::routes::test_support::unused_lists(),
-        collections: crate::routes::test_support::unused_collections(),
         movie_repo: movie_repo.clone(),
         show_repo,
-        artwork: crate::routes::test_support::cold_artwork_cache(),
         session_store: session_store.clone(),
-        oidc_client: Arc::new(NotConfiguredOidcClient::new("not used in these tests")),
-        pending_auth_store: Arc::new(InMemoryPendingAuthStore::default()),
-        device_auth_store: Arc::new(
-            beam_auth::utils::device_auth_store::in_memory::InMemoryDeviceAuthStore::default(),
-        ),
-        oidc_config: OidcRuntimeConfig {
-            web_url: "http://localhost:5173".to_string(),
-            cookie_secure: false,
-            admin_claim: None,
-            admin_value: None,
-            session_idle_days: 14,
-            session_max_days: 60,
-        },
-        watch_status: Arc::new(beam_index::services::watch_status::WatchStatus::new()),
-        telemetry: crate::routes::test_support::idle_library_report(),
-        playback_telemetry: crate::routes::test_support::idle_playback_telemetry(),
-        trickplay: crate::routes::test_support::idle_trickplay(),
+        ..crate::routes::test_support::idle_services()
     };
 
     let config = crate::config::ServerConfig {
