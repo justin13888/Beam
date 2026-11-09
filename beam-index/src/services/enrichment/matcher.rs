@@ -3,7 +3,7 @@
 //! a provider's seasons. No I/O -- fully unit-testable without a provider.
 
 use beam_domain::providers::enrichment::{
-    EpisodeEnrichment, MovieSearchHit, SeasonEnrichment, ShowSearchHit,
+    EpisodeEnrichment, ExternalMediaRef, MovieSearchHit, SeasonEnrichment, ShowSearchHit,
 };
 
 /// A hit is accepted only when it clears both bars: a low total score can
@@ -136,29 +136,84 @@ fn ranked_popularity(popularity: Option<f64>) -> f64 {
     popularity.filter(|value| value.is_finite()).unwrap_or(0.0)
 }
 
+/// What the ranking reads of a provider's search hit: a movie's and a
+/// show's are ranked by the same fields, by the same rules.
+pub trait SearchHit {
+    fn external_ref(&self) -> &ExternalMediaRef;
+    fn title(&self) -> &str;
+    fn original_title(&self) -> Option<&str>;
+    fn year(&self) -> Option<u32>;
+    fn popularity(&self) -> Option<f64>;
+}
+
+impl SearchHit for MovieSearchHit {
+    fn external_ref(&self) -> &ExternalMediaRef {
+        &self.external_ref
+    }
+    fn title(&self) -> &str {
+        &self.title
+    }
+    fn original_title(&self) -> Option<&str> {
+        self.original_title.as_deref()
+    }
+    fn year(&self) -> Option<u32> {
+        self.year
+    }
+    fn popularity(&self) -> Option<f64> {
+        self.popularity
+    }
+}
+
+impl SearchHit for ShowSearchHit {
+    fn external_ref(&self) -> &ExternalMediaRef {
+        &self.external_ref
+    }
+    fn title(&self) -> &str {
+        &self.title
+    }
+    fn original_title(&self) -> Option<&str> {
+        self.original_title.as_deref()
+    }
+    fn year(&self) -> Option<u32> {
+        self.year
+    }
+    fn popularity(&self) -> Option<f64> {
+        self.popularity
+    }
+}
+
+/// Every hit with its [`score`] against the query, in the order given --
+/// the one scoring every ranking and candidate list here reads.
+pub fn score_hits<'h, H: SearchHit>(
+    query_title: &str,
+    query_year: Option<u32>,
+    hits: &'h [H],
+) -> impl DoubleEndedIterator<Item = (&'h H, MatchScore)> {
+    hits.iter().map(move |hit| {
+        (
+            hit,
+            score(
+                query_title,
+                query_year,
+                hit.title(),
+                hit.original_title(),
+                hit.year(),
+            ),
+        )
+    })
+}
+
 /// Picks the best-scoring hit that clears both accept thresholds, breaking
 /// ties by: score, then exact title match, then exact year, then popularity,
 /// then provider list order (earlier providers are queried first by the
 /// caller, and `hits` preserves that order across providers).
-pub fn best_movie_match<'a>(
+pub fn best_match<'a, H: SearchHit>(
     query_title: &str,
     query_year: Option<u32>,
-    hits: &'a [MovieSearchHit],
+    hits: &'a [H],
     min_confidence: f64,
-) -> Option<(&'a MovieSearchHit, MatchScore)> {
-    hits.iter()
-        .map(|hit| {
-            (
-                hit,
-                score(
-                    query_title,
-                    query_year,
-                    &hit.title,
-                    hit.original_title.as_deref(),
-                    hit.year,
-                ),
-            )
-        })
+) -> Option<(&'a H, MatchScore)> {
+    score_hits(query_title, query_year, hits)
         .filter(|(_, s)| s.accepted(min_confidence))
         // `max_by` answers the *last* of equal maxima; walking the hits
         // backwards makes that the earliest, so a full tie goes to the
@@ -170,119 +225,41 @@ pub fn best_movie_match<'a>(
                 .total_cmp(&b_score.total_score)
                 .then_with(|| {
                     let a_exact =
-                        is_exact_title(query_title, &a_hit.title, a_hit.original_title.as_deref());
+                        is_exact_title(query_title, a_hit.title(), a_hit.original_title());
                     let b_exact =
-                        is_exact_title(query_title, &b_hit.title, b_hit.original_title.as_deref());
+                        is_exact_title(query_title, b_hit.title(), b_hit.original_title());
                     a_exact.cmp(&b_exact)
                 })
                 .then_with(|| {
-                    let a_year_exact = query_year.is_some() && a_hit.year == query_year;
-                    let b_year_exact = query_year.is_some() && b_hit.year == query_year;
+                    let a_year_exact = query_year.is_some() && a_hit.year() == query_year;
+                    let b_year_exact = query_year.is_some() && b_hit.year() == query_year;
                     a_year_exact.cmp(&b_year_exact)
                 })
                 .then_with(|| {
-                    ranked_popularity(a_hit.popularity)
-                        .total_cmp(&ranked_popularity(b_hit.popularity))
-                })
-        })
-}
-
-/// Same rules as [`best_movie_match`], for shows.
-pub fn best_show_match<'a>(
-    query_title: &str,
-    query_year: Option<u32>,
-    hits: &'a [ShowSearchHit],
-    min_confidence: f64,
-) -> Option<(&'a ShowSearchHit, MatchScore)> {
-    hits.iter()
-        .map(|hit| {
-            (
-                hit,
-                score(
-                    query_title,
-                    query_year,
-                    &hit.title,
-                    hit.original_title.as_deref(),
-                    hit.year,
-                ),
-            )
-        })
-        .filter(|(_, s)| s.accepted(min_confidence))
-        // `max_by` answers the *last* of equal maxima; walking the hits
-        // backwards makes that the earliest, so a full tie goes to the
-        // earlier provider.
-        .rev()
-        .max_by(|(a_hit, a_score), (b_hit, b_score)| {
-            a_score
-                .total_score
-                .total_cmp(&b_score.total_score)
-                .then_with(|| {
-                    let a_exact =
-                        is_exact_title(query_title, &a_hit.title, a_hit.original_title.as_deref());
-                    let b_exact =
-                        is_exact_title(query_title, &b_hit.title, b_hit.original_title.as_deref());
-                    a_exact.cmp(&b_exact)
-                })
-                .then_with(|| {
-                    let a_year_exact = query_year.is_some() && a_hit.year == query_year;
-                    let b_year_exact = query_year.is_some() && b_hit.year == query_year;
-                    a_year_exact.cmp(&b_year_exact)
-                })
-                .then_with(|| {
-                    ranked_popularity(a_hit.popularity)
-                        .total_cmp(&ranked_popularity(b_hit.popularity))
+                    ranked_popularity(a_hit.popularity())
+                        .total_cmp(&ranked_popularity(b_hit.popularity()))
                 })
         })
 }
 
 /// Top-N candidates by total score, for logging when nothing clears the
 /// accept threshold (admins can see what almost matched).
-pub fn top_movie_candidates(
+pub fn top_candidates<H: SearchHit>(
     query_title: &str,
     query_year: Option<u32>,
-    hits: &[MovieSearchHit],
+    hits: &[H],
     n: usize,
 ) -> Vec<(String, MatchScore)> {
-    let mut scored: Vec<(String, MatchScore)> = hits
-        .iter()
-        .map(|hit| {
+    let mut scored: Vec<(String, MatchScore)> = score_hits(query_title, query_year, hits)
+        .map(|(hit, score)| {
             (
-                format!("{} ({:?}) [{}]", hit.title, hit.year, hit.external_ref),
-                score(
-                    query_title,
-                    query_year,
-                    &hit.title,
-                    hit.original_title.as_deref(),
-                    hit.year,
+                format!(
+                    "{} ({:?}) [{}]",
+                    hit.title(),
+                    hit.year(),
+                    hit.external_ref()
                 ),
-            )
-        })
-        .collect();
-    scored.sort_by(|a, b| b.1.total_score.total_cmp(&a.1.total_score));
-    scored.truncate(n);
-    scored
-}
-
-/// Top-N candidates by total score, for logging when nothing clears the
-/// accept threshold.
-pub fn top_show_candidates(
-    query_title: &str,
-    query_year: Option<u32>,
-    hits: &[ShowSearchHit],
-    n: usize,
-) -> Vec<(String, MatchScore)> {
-    let mut scored: Vec<(String, MatchScore)> = hits
-        .iter()
-        .map(|hit| {
-            (
-                format!("{} ({:?}) [{}]", hit.title, hit.year, hit.external_ref),
-                score(
-                    query_title,
-                    query_year,
-                    &hit.title,
-                    hit.original_title.as_deref(),
-                    hit.year,
-                ),
+                score,
             )
         })
         .collect();
@@ -366,7 +343,7 @@ mod tests {
     #[test]
     fn exact_title_and_year_accepted() {
         let hits = vec![hit("Blade Runner 2049", Some(2017))];
-        let result = best_movie_match(
+        let result = best_match(
             "Blade Runner 2049",
             Some(2017),
             &hits,
@@ -383,14 +360,14 @@ mod tests {
     #[test]
     fn exact_title_no_year_query_still_accepted() {
         let hits = vec![hit("The Matrix", Some(1999))];
-        let result = best_movie_match("The Matrix", None, &hits, DEFAULT_MIN_CONFIDENCE);
+        let result = best_match("The Matrix", None, &hits, DEFAULT_MIN_CONFIDENCE);
         assert!(result.is_some());
     }
 
     #[test]
     fn wrong_year_by_one_still_accepted_with_lower_score() {
         let hits = vec![hit("Dune", Some(2021))];
-        let (_, score) = best_movie_match("Dune", Some(2020), &hits, DEFAULT_MIN_CONFIDENCE)
+        let (_, score) = best_match("Dune", Some(2020), &hits, DEFAULT_MIN_CONFIDENCE)
             .expect("a year off by one is accepted");
         assert!(
             (score.total_score - 0.85).abs() < 1e-9,
@@ -401,7 +378,7 @@ mod tests {
     #[test]
     fn wildly_different_title_rejected() {
         let hits = vec![hit("Completely Unrelated Film", Some(2017))];
-        let result = best_movie_match(
+        let result = best_match(
             "Blade Runner 2049",
             Some(2017),
             &hits,
@@ -416,7 +393,7 @@ mod tests {
         // year penalty should be enough to push a marginal title below the
         // total-score bar even though the title alone might not clear 0.55.
         let hits = vec![hit("The Matrix Reloaded", Some(1975))];
-        let result = best_movie_match("The Matrix", Some(2003), &hits, DEFAULT_MIN_CONFIDENCE);
+        let result = best_match("The Matrix", Some(2003), &hits, DEFAULT_MIN_CONFIDENCE);
         assert!(result.is_none());
     }
 
@@ -426,18 +403,20 @@ mod tests {
         // (0.70): it clears a lenient 0.5 bar but not a strict 0.9 one, so the
         // same candidate flips from accepted to rejected purely on the knob.
         let hits = vec![hit("The Matrix", None)];
-        let (_, score) = best_movie_match("The Matrix", None, &hits, 0.5)
+        let (_, score) = best_match("The Matrix", None, &hits, 0.5)
             .expect("should match at a lenient threshold");
         assert!((score.total_score - 0.70).abs() < 1e-9);
         assert!(
-            best_movie_match("The Matrix", None, &hits, 0.9).is_none(),
+            best_match("The Matrix", None, &hits, 0.9).is_none(),
             "the same candidate must be rejected once the bar is raised above its score"
         );
     }
 
     #[test]
     fn empty_hits_returns_none() {
-        assert!(best_movie_match("Anything", None, &[], DEFAULT_MIN_CONFIDENCE).is_none());
+        assert!(
+            best_match::<MovieSearchHit>("Anything", None, &[], DEFAULT_MIN_CONFIDENCE).is_none()
+        );
     }
 
     /// A real tie on the total: an exact title with no year (0.7 x 1.0)
@@ -466,12 +445,12 @@ mod tests {
             vec![exact.clone(), dated.clone()],
             vec![dated.clone(), exact.clone()],
         ] {
-            let (best, _) = best_movie_match(query.0, query.1, &hits, DEFAULT_MIN_CONFIDENCE)
+            let (best, _) = best_match(query.0, query.1, &hits, DEFAULT_MIN_CONFIDENCE)
                 .expect("both clear the bar");
             assert_eq!(best.external_ref.as_str(), "tmdb:exact");
 
             let shows: Vec<ShowSearchHit> = hits.iter().map(as_show).collect();
-            let (best, _) = best_show_match(query.0, query.1, &shows, DEFAULT_MIN_CONFIDENCE)
+            let (best, _) = best_match(query.0, query.1, &shows, DEFAULT_MIN_CONFIDENCE)
                 .expect("both clear the bar");
             assert_eq!(best.external_ref.as_str(), "tmdb:exact");
         }
@@ -492,11 +471,11 @@ mod tests {
             vec![quiet.clone(), popular.clone()],
             vec![popular.clone(), quiet.clone()],
         ] {
-            let (best, _) = best_movie_match("Heat", Some(1995), &hits, DEFAULT_MIN_CONFIDENCE)
+            let (best, _) = best_match("Heat", Some(1995), &hits, DEFAULT_MIN_CONFIDENCE)
                 .expect("both clear the bar");
             assert_eq!(best.external_ref.as_str(), "tmdb:popular");
             let shows: Vec<ShowSearchHit> = hits.iter().map(as_show).collect();
-            let (best, _) = best_show_match("Heat", Some(1995), &shows, DEFAULT_MIN_CONFIDENCE)
+            let (best, _) = best_match("Heat", Some(1995), &shows, DEFAULT_MIN_CONFIDENCE)
                 .expect("both clear the bar");
             assert_eq!(best.external_ref.as_str(), "tmdb:popular");
         }
@@ -516,7 +495,7 @@ mod tests {
     #[test]
     fn show_matching_uses_same_rules() {
         let hits = vec![show_hit("Arcane", Some(2021))];
-        let result = best_show_match("Arcane", Some(2021), &hits, DEFAULT_MIN_CONFIDENCE);
+        let result = best_match("Arcane", Some(2021), &hits, DEFAULT_MIN_CONFIDENCE);
         assert!(result.is_some());
     }
 
@@ -526,14 +505,14 @@ mod tests {
         candidate.title = "Kimi no Na wa.".to_string();
         candidate.original_title = Some("Your Name".to_string());
         let hits = [candidate];
-        let result = best_movie_match("Your Name", Some(2016), &hits, DEFAULT_MIN_CONFIDENCE);
+        let result = best_match("Your Name", Some(2016), &hits, DEFAULT_MIN_CONFIDENCE);
         assert!(result.is_some());
     }
 
     #[test]
     fn punctuation_and_case_ignored() {
         let hits = vec![hit("Se7en", Some(1995))];
-        let result = best_movie_match("se7en", Some(1995), &hits, DEFAULT_MIN_CONFIDENCE);
+        let result = best_match("se7en", Some(1995), &hits, DEFAULT_MIN_CONFIDENCE);
         assert!(result.is_some());
     }
 
@@ -544,7 +523,7 @@ mod tests {
             hit("Dune", Some(2021)),
             hit("Dune Part Two", Some(2024)),
         ];
-        let top = top_movie_candidates("Dune", Some(2021), &hits, 2);
+        let top = top_candidates("Dune", Some(2021), &hits, 2);
         assert_eq!(top.len(), 2);
         assert!(top[0].1.total_score >= top[1].1.total_score);
     }
@@ -558,9 +537,9 @@ mod tests {
     }
 
     #[test]
-    fn top_show_candidates_sorted() {
+    fn top_candidates_sorted() {
         let hits = vec![show_hit("Nope", Some(1980)), show_hit("Arcane", Some(2021))];
-        let top = top_show_candidates("Arcane", Some(2021), &hits, 5);
+        let top = top_candidates("Arcane", Some(2021), &hits, 5);
         assert_eq!(top.len(), 2);
         assert!(top[0].1.total_score >= top[1].1.total_score);
     }
@@ -573,12 +552,12 @@ mod tests {
         let mut movies = vec![hit("Arrival", Some(2016)), hit("Arrival", Some(2016))];
         movies[0].external_ref = ExternalMediaRef::new("tmdb", "329865");
         movies[1].external_ref = ExternalMediaRef::new("tvdb", "1105");
-        let (best, _) = best_movie_match("Arrival", Some(2016), &movies, DEFAULT_MIN_CONFIDENCE)
+        let (best, _) = best_match("Arrival", Some(2016), &movies, DEFAULT_MIN_CONFIDENCE)
             .expect("both hits clear the bar");
         assert_eq!(best.external_ref.as_str(), "tmdb:329865");
 
         movies.reverse();
-        let (best, _) = best_movie_match("Arrival", Some(2016), &movies, DEFAULT_MIN_CONFIDENCE)
+        let (best, _) = best_match("Arrival", Some(2016), &movies, DEFAULT_MIN_CONFIDENCE)
             .expect("both hits clear the bar");
         assert_eq!(best.external_ref.as_str(), "tvdb:1105");
 
@@ -588,12 +567,12 @@ mod tests {
         ];
         shows[0].external_ref = ExternalMediaRef::new("tmdb", "209867");
         shows[1].external_ref = ExternalMediaRef::new("tvdb", "424536");
-        let (best, _) = best_show_match("Frieren", Some(2023), &shows, DEFAULT_MIN_CONFIDENCE)
+        let (best, _) = best_match("Frieren", Some(2023), &shows, DEFAULT_MIN_CONFIDENCE)
             .expect("both hits clear the bar");
         assert_eq!(best.external_ref.as_str(), "tmdb:209867");
 
         shows.reverse();
-        let (best, _) = best_show_match("Frieren", Some(2023), &shows, DEFAULT_MIN_CONFIDENCE)
+        let (best, _) = best_match("Frieren", Some(2023), &shows, DEFAULT_MIN_CONFIDENCE)
             .expect("both hits clear the bar");
         assert_eq!(best.external_ref.as_str(), "tvdb:424536");
     }
@@ -609,9 +588,8 @@ mod tests {
             movies[0].popularity = Some(malformed);
             movies[1].external_ref = ExternalMediaRef::new("tvdb", "2");
             movies[1].popularity = Some(12.5);
-            let (best, _) =
-                best_movie_match("Arrival", Some(2016), &movies, DEFAULT_MIN_CONFIDENCE)
-                    .expect("both hits clear the bar");
+            let (best, _) = best_match("Arrival", Some(2016), &movies, DEFAULT_MIN_CONFIDENCE)
+                .expect("both hits clear the bar");
             assert_eq!(best.external_ref.as_str(), "tvdb:2");
 
             let mut shows = vec![
@@ -622,7 +600,7 @@ mod tests {
             shows[0].popularity = Some(3.0);
             shows[1].external_ref = ExternalMediaRef::new("tvdb", "2");
             shows[1].popularity = Some(malformed);
-            let (best, _) = best_show_match("Frieren", Some(2023), &shows, DEFAULT_MIN_CONFIDENCE)
+            let (best, _) = best_match("Frieren", Some(2023), &shows, DEFAULT_MIN_CONFIDENCE)
                 .expect("both hits clear the bar");
             assert_eq!(best.external_ref.as_str(), "tmdb:1");
         }
@@ -730,7 +708,7 @@ mod tests {
                     .filter(|scored| scored.accepted(min_confidence))
                     .map(|scored| scored.total_score)
                     .collect();
-                match best_movie_match(&query, query_year, &hits, min_confidence) {
+                match best_match(&query, query_year, &hits, min_confidence) {
                     None => prop_assert!(accepted.is_empty()),
                     Some((best, best_score)) => {
                         prop_assert!(hits.iter().any(|hit| std::ptr::eq(hit, best)));
@@ -740,9 +718,9 @@ mod tests {
                 }
                 let shows: Vec<ShowSearchHit> = hits.iter().map(as_show).collect();
                 prop_assert_eq!(
-                    best_show_match(&query, query_year, &shows, min_confidence)
+                    best_match(&query, query_year, &shows, min_confidence)
                         .map(|(best, _)| best.external_ref.clone()),
-                    best_movie_match(&query, query_year, &hits, min_confidence)
+                    best_match(&query, query_year, &hits, min_confidence)
                         .map(|(best, _)| best.external_ref.clone()),
                     "a show is ranked by the movie's rules"
                 );
@@ -755,11 +733,11 @@ mod tests {
                 hits in proptest::collection::vec(any_hit(), 0..8),
                 n in 0usize..10,
             ) {
-                let top = top_movie_candidates(&query, None, &hits, n);
+                let top = top_candidates(&query, None, &hits, n);
                 prop_assert_eq!(top.len(), n.min(hits.len()));
                 prop_assert!(top.windows(2).all(|pair| pair[0].1.total_score >= pair[1].1.total_score));
                 let shows: Vec<ShowSearchHit> = hits.iter().map(as_show).collect();
-                prop_assert_eq!(top_show_candidates(&query, None, &shows, n), top);
+                prop_assert_eq!(top_candidates(&query, None, &shows, n), top);
             }
         }
     }

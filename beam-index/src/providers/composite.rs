@@ -45,29 +45,33 @@ impl CompositeEnrichmentProvider {
     }
 }
 
-/// One provider's search in flight, as `async_trait` returns it.
-type Search<'a, T> = std::pin::Pin<
-    Box<dyn std::future::Future<Output = Result<Vec<T>, EnrichmentError>> + Send + 'a>,
->;
-
-/// Every provider's hits, in provider order. A rate limit stops the search
-/// at once -- the sweep backs off rather than ask anyone else meanwhile --
-/// and another failure only fails the search when no provider found a hit.
-async fn search_all<'a, T, F>(
-    providers: &'a [Arc<dyn EnrichmentProvider>],
-    search: F,
+/// Every source's hits, asked in turn and kept in that order: `searches`
+/// pairs each source -- named for the log -- with its search, a future that
+/// does nothing until awaited, so each runs only once the source before it
+/// has answered. (A `Vec` rather than an iterator: a lazily mapped iterator
+/// held across an `.await` keeps an `async_trait` future from being proven
+/// `Send`.) A rate limit stops the
+/// search at once -- the sweep backs off rather than ask anyone else
+/// meanwhile -- and another failure only fails the search when no source
+/// found a hit, as the last failure.
+///
+/// The composite asks its providers this way, and the cameo provider its
+/// own TMDB and AniList clients.
+pub(crate) async fn search_in_turn<S, T, F>(
+    searches: Vec<(S, F)>,
 ) -> Result<Vec<T>, EnrichmentError>
 where
-    F: Fn(&'a dyn EnrichmentProvider) -> Search<'a, T>,
+    S: std::fmt::Debug,
+    F: std::future::Future<Output = Result<Vec<T>, EnrichmentError>>,
 {
     let mut hits = Vec::new();
     let mut last_err = None;
-    for provider in providers {
-        match search(&**provider).await {
+    for (source, search) in searches {
+        match search.await {
             Ok(found) => hits.extend(found),
             Err(err @ EnrichmentError::RateLimited { .. }) => return Err(err),
             Err(err) => {
-                warn!(providers = ?provider.available_providers(), error = %err, "a provider's search failed; asking the next");
+                warn!(source = ?source, error = %err, "a provider's search failed; asking the next");
                 last_err = Some(err);
             }
         }
@@ -91,14 +95,31 @@ impl EnrichmentProvider for CompositeEnrichmentProvider {
         &self,
         query: &MediaQuery,
     ) -> Result<Vec<MovieSearchHit>, EnrichmentError> {
-        search_all(&self.providers, |provider| provider.search_movies(query)).await
+        search_in_turn(
+            self.providers
+                .iter()
+                .map(|provider| {
+                    (
+                        provider.available_providers(),
+                        provider.search_movies(query),
+                    )
+                })
+                .collect(),
+        )
+        .await
     }
 
     async fn search_shows(
         &self,
         query: &MediaQuery,
     ) -> Result<Vec<ShowSearchHit>, EnrichmentError> {
-        search_all(&self.providers, |provider| provider.search_shows(query)).await
+        search_in_turn(
+            self.providers
+                .iter()
+                .map(|provider| (provider.available_providers(), provider.search_shows(query)))
+                .collect(),
+        )
+        .await
     }
 
     async fn movie_enrichment(

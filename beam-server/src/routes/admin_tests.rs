@@ -64,9 +64,6 @@ struct StubHashService;
 
 #[async_trait::async_trait]
 impl HashService for StubHashService {
-    fn hash_sync(&self, _file: std::fs::File) -> std::io::Result<u64> {
-        unimplemented!("not called in admin route tests")
-    }
     async fn hash_async(&self, _file: std::fs::File) -> std::io::Result<u64> {
         unimplemented!("not called in admin route tests")
     }
@@ -226,10 +223,6 @@ struct GatedHashService {
 
 #[async_trait::async_trait]
 impl HashService for GatedHashService {
-    fn hash_sync(&self, file: std::fs::File) -> std::io::Result<u64> {
-        stand_in_hash(&file)
-    }
-
     async fn hash_async(&self, file: std::fs::File) -> std::io::Result<u64> {
         self.gate
             .acquire()

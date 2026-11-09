@@ -4,34 +4,6 @@ use ffmpeg_next::{
     self as ffmpeg,
     ffi::{AVChannelLayout, av_channel_layout_describe},
 };
-use serde::{Deserialize, Serialize};
-
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Resolution {
-    pub width: u32,
-    pub height: u32,
-}
-
-impl Resolution {
-    pub fn new(width: u32, height: u32) -> Self {
-        Self { width, height }
-    }
-
-    /// Get aspect ratio as a float
-    pub fn aspect_ratio(&self) -> Option<f32> {
-        if self.height == 0 {
-            return None;
-        }
-        Some(self.width as f32 / self.height as f32)
-    }
-}
-
-impl std::fmt::Debug for Resolution {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}x{}", self.width, self.height)
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SampleFormat {
     U8(SampleType),
@@ -253,32 +225,6 @@ impl From<ffmpeg::format::stream::Disposition> for Disposition {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    mod resolution {
-        use super::*;
-
-        #[test]
-        fn aspect_ratio_is_width_over_height() {
-            assert_eq!(Resolution::new(1920, 1080).aspect_ratio(), Some(16.0 / 9.0));
-            assert_eq!(Resolution::new(640, 480).aspect_ratio(), Some(4.0 / 3.0));
-        }
-
-        #[test]
-        fn a_zero_height_has_no_aspect_ratio_rather_than_an_infinity() {
-            // Probing a corrupt or audio-only stream can yield a 0-height
-            // "video" resolution; dividing by it would poison every downstream
-            // comparison with NaN/inf instead of failing visibly.
-            assert_eq!(Resolution::new(1920, 0).aspect_ratio(), None);
-            assert_eq!(Resolution::new(0, 0).aspect_ratio(), None);
-        }
-
-        #[test]
-        fn the_debug_format_is_the_conventional_wxh() {
-            // It goes into log lines and admin output, where `1920x1080` is
-            // what an operator expects to see.
-            assert_eq!(format!("{:?}", Resolution::new(1920, 1080)), "1920x1080");
-        }
-    }
 
     mod sample_format {
         use super::*;

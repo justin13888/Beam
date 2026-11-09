@@ -46,6 +46,14 @@ pub use trickplay::SqlTrickplayRepository;
 pub use user_list::SqlUserListRepository;
 pub use watch_state::SqlWatchStateRepository;
 
+/// Whether `err` is a unique-index violation.
+pub(crate) fn is_unique_violation(err: &sea_orm::DbErr) -> bool {
+    matches!(
+        err.sql_err(),
+        Some(sea_orm::SqlErr::UniqueConstraintViolation(_))
+    )
+}
+
 /// The `LIKE` pattern, escaped with `\`, that matches a stored path strictly
 /// beneath the directory `dir`: its text, wildcards escaped, then a
 /// separator and anything. The separator keeps `/a/S1` from matching

@@ -672,12 +672,9 @@ impl From<IndexError> for LibraryError {
             IndexError::PathNotFound(s) => LibraryError::PathNotFound(s),
             IndexError::ScanInProgress => LibraryError::ScanInProgress,
             // Unreachable: a cancelled scan is reported through its job,
-            // never by the call that starts it, and only the indexer's
-            // test-only string entry point parses an id. An internal error
-            // rather than a plausible 4xx if either ever changes.
-            IndexError::Cancelled | IndexError::InvalidId => {
-                LibraryError::Db(DbErr::Custom(e.to_string()))
-            }
+            // never by the call that starts it. An internal error rather
+            // than a plausible 4xx if that ever changes.
+            IndexError::Cancelled => LibraryError::Db(DbErr::Custom(e.to_string())),
         }
     }
 }

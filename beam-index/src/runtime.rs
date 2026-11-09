@@ -34,7 +34,6 @@ use crate::services::watcher::{FsEvent, FsEventKind, FsWatcher, NotifyFsWatcher,
 /// A narrow trait rather than `Arc<LocalIndexService>` so the loops below can
 /// be driven by a double: the point of these tasks is *when* and *how often*
 /// they call the indexer, which is not observable through a concrete type.
-#[cfg_attr(any(test, feature = "test-utils"), mockall::automock)]
 #[async_trait::async_trait]
 pub trait BackgroundIndexer: Send + Sync + std::fmt::Debug {
     /// Scan every library, returning the number of files added. A library
