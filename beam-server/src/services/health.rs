@@ -54,49 +54,34 @@ impl DependencyProbe for DbProbe {
 pub mod in_memory {
     use super::*;
 
-    /// Test double: reports a fixed (but at-runtime settable) database health,
-    /// so the failing branch of `/v1/health` is exercised without a real
-    /// connection drop.
+    /// Test double: reports a fixed database health, so the failing branch of
+    /// `/v1/health` is exercised without a real connection drop.
     #[derive(Debug)]
     pub struct InMemoryDependencyProbe {
-        database_healthy: std::sync::atomic::AtomicBool,
-        error_message: String,
+        /// `None` when the database check succeeds, else the error it reports.
+        failure: Option<String>,
     }
 
     impl InMemoryDependencyProbe {
         /// A probe whose database check always succeeds.
         pub fn healthy() -> Self {
-            Self {
-                database_healthy: std::sync::atomic::AtomicBool::new(true),
-                error_message: "database unreachable".to_string(),
-            }
+            Self { failure: None }
         }
 
         /// A probe whose database check always fails with `message`.
         pub fn failing(message: impl Into<String>) -> Self {
             Self {
-                database_healthy: std::sync::atomic::AtomicBool::new(false),
-                error_message: message.into(),
+                failure: Some(message.into()),
             }
-        }
-
-        /// Flip the reported database health for a running probe.
-        pub fn set_database_healthy(&self, healthy: bool) {
-            self.database_healthy
-                .store(healthy, std::sync::atomic::Ordering::SeqCst);
         }
     }
 
     #[async_trait]
     impl DependencyProbe for InMemoryDependencyProbe {
         async fn check_database(&self) -> Result<(), String> {
-            if self
-                .database_healthy
-                .load(std::sync::atomic::Ordering::SeqCst)
-            {
-                Ok(())
-            } else {
-                Err(self.error_message.clone())
+            match &self.failure {
+                None => Ok(()),
+                Some(message) => Err(message.clone()),
             }
         }
     }

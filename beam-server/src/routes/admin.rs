@@ -492,7 +492,7 @@ pub async fn get_admin_logs(
     Query(query): Query<LogsQuery>,
     Inject(state): Inject<AppState>,
 ) -> Result<Json<AdminLogConnection>, AdminListError> {
-    let internal = |e: crate::services::admin_log::AdminLogError| {
+    let internal = |e: beam_index::services::admin_log::AdminLogError| {
         AdminListError::Internal(ServerFault::new(e))
     };
     let LogsQuery { first, after } = query;

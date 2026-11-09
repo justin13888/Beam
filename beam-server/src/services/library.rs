@@ -19,9 +19,9 @@ pub struct LibraryFilePage {
     /// Whether another page follows.
     pub has_next_page: bool,
 }
-use crate::services::notification::{AdminEvent, EventCategory, NotificationService};
 use beam_index::runtime::LibraryWatchHook;
 use beam_index::services::index::{IndexError, IndexService};
+use beam_index::services::notification::{AdminEvent, EventCategory, NotificationService};
 use beam_index::services::scan::{ScanTrigger, StoppedScan};
 
 pub trait PathValidator: Send + Sync + std::fmt::Debug {

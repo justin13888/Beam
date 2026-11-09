@@ -29,18 +29,18 @@ use beam_index::services::enrichment::control::{
     EnrichmentControl, EnrichmentControlDeps, TitleNfoPins,
 };
 
-use crate::services::admin_log::{AdminLogService, LocalAdminLogService};
 use crate::services::artwork::{ArtworkCache, ArtworkCacheConfig};
-use crate::services::hash::HashService;
 use crate::services::health::InMemoryDependencyProbe;
 use crate::services::library::LibraryError;
 use crate::services::metadata::{MediaConnection, MetadataError, MetadataService, PageInfo};
-use crate::services::notification::InMemoryNotificationService;
 use crate::services::playback::{DbPlaybackService, PlaybackRepositories, PlaybackService};
 use crate::services::playback_telemetry::{PlaybackTelemetryConfig, PlaybackTelemetryService};
 use crate::services::sources::SourceCatalog;
 use crate::services::telemetry::{LibraryReportConfig, LibraryReportService};
 use crate::state::{AppServices, AppState};
+use beam_index::services::admin_log::{AdminLogService, LocalAdminLogService};
+use beam_index::services::hash::HashService;
+use beam_index::services::notification::InMemoryNotificationService;
 
 #[derive(Debug)]
 struct StubHashService;

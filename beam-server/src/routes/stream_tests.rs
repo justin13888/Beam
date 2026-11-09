@@ -34,12 +34,12 @@ use kynos::test::TestClient;
 use tempfile::TempDir;
 
 use crate::routes::stream::{download_file, head_download_file, head_stream_file, stream_file};
-use crate::services::admin_log::{AdminLogService, LocalAdminLogService};
-use crate::services::hash::HashService;
 use crate::services::library::{LibraryError, LibraryService, LocatedFile};
 use crate::services::metadata::{MediaConnection, MetadataError, MetadataService, PageInfo};
-use crate::services::notification::InMemoryNotificationService;
 use crate::state::{AppServices, AppState};
+use beam_index::services::admin_log::{AdminLogService, LocalAdminLogService};
+use beam_index::services::hash::HashService;
+use beam_index::services::notification::InMemoryNotificationService;
 
 // ─── Constants ────────────────────────────────────────────────────────────
 

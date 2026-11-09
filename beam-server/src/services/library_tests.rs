@@ -3,7 +3,6 @@ mod tests {
     use crate::services::library::{
         InMemoryPathValidator, LibraryError, LibraryService, LocalLibraryService, LocatedFile,
     };
-    use crate::services::notification::{InMemoryNotificationService, NotificationService};
     use beam_domain::models::{CreateLibrary, FileStatus, Library as DomainLibrary, MediaFile};
     use beam_domain::repositories::LibraryRepository;
     use beam_domain::repositories::file::MockFileRepository;
@@ -12,6 +11,7 @@ mod tests {
     use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
     use beam_domain::test_utils::{library, media_file};
     use beam_index::services::index::{IndexError, MockIndexService};
+    use beam_index::services::notification::{InMemoryNotificationService, NotificationService};
     use beam_index::services::scan::{ScanCoordinator, ScanTrigger, StoppedScan};
     use sea_orm::DbErr;
     use std::path::PathBuf;

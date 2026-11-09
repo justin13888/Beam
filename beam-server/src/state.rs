@@ -21,9 +21,13 @@ use beam_index::providers::composite::CompositeEnrichmentProvider;
 use beam_index::providers::telemetry::ReqwestTelemetrySink;
 use beam_index::providers::tvdb::{TvdbEnrichmentProvider, TvdbWiringConfig};
 use beam_index::runtime::LibraryWatches;
+use beam_index::services::admin_log::{AdminLogService, LocalAdminLogService};
 use beam_index::services::enrichment::control::{EnrichmentControl, EnrichmentControlDeps};
 use beam_index::services::enrichment::{EnrichmentPolicy, MetadataEnrichmentService};
+use beam_index::services::hash::{HashConfig, HashService, LocalHashService};
 use beam_index::services::index::{IndexService, LocalIndexService};
+use beam_index::services::media_info::LocalMediaInfoService;
+use beam_index::services::notification::{LocalNotificationService, NotificationService};
 use beam_index::services::watch_status::WatchStatus;
 use metrics_exporter_prometheus::PrometheusHandle;
 
@@ -34,15 +38,12 @@ use crate::{
     config::ServerConfig,
     services::{
         access::{AccessRepositories, AccessService},
-        admin_log::{AdminLogService, LocalAdminLogService},
         artwork::{ArtworkCache, ArtworkCacheConfig},
         collections::CollectionService,
-        hash::{HashConfig, HashService, LocalHashService},
         health::DependencyProbe,
         library::{LibraryService, LocalLibraryService, OsPathValidator, audit_existing_roots},
         lists::{ListDependencies, ListService},
         metadata::{DbMetadataService, MetadataRepositories, MetadataService},
-        notification::{LocalNotificationService, NotificationService},
         people::PeopleService,
         playback::{DbPlaybackService, PlaybackRepositories, PlaybackService},
         playback_telemetry::PlaybackTelemetryService,
@@ -317,8 +318,7 @@ impl AppServices {
 
         let notification_service = Arc::new(LocalNotificationService::new());
         let hash_service = Arc::new(LocalHashService::new(hash_config));
-        let media_info_service =
-            Arc::new(crate::services::media_info::LocalMediaInfoService::default());
+        let media_info_service = Arc::new(LocalMediaInfoService::default());
 
         let session_store: Arc<dyn SessionStore> = Arc::new(PgSessionStore::new(db.clone()));
 

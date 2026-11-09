@@ -50,14 +50,14 @@ use crate::routes::admin::{
     list_libraries, refresh_media_metadata, scan_library, set_admin_user_access,
     stream_admin_events, update_admin_user,
 };
-use crate::services::admin_log::{AdminLogService, LocalAdminLogService};
-use crate::services::hash::HashService;
 use crate::services::library::{InMemoryPathValidator, LibraryService, LocalLibraryService};
 use crate::services::metadata::{MediaConnection, MetadataError, MetadataService, PageInfo};
-use crate::services::notification::{
+use crate::state::{AppServices, AppState};
+use beam_index::services::admin_log::{AdminLogService, LocalAdminLogService};
+use beam_index::services::hash::HashService;
+use beam_index::services::notification::{
     AdminEvent, EventCategory, InMemoryNotificationService, NotificationService,
 };
-use crate::state::{AppServices, AppState};
 
 #[derive(Debug)]
 struct StubHashService;
