@@ -38,6 +38,7 @@ use crate::{
     config::ServerConfig,
     services::{
         access::{AccessRepositories, AccessService},
+        admin_users::{AdminUserDependencies, AdminUserService},
         artwork::{ArtworkCache, ArtworkCacheConfig},
         collections::CollectionService,
         health::DependencyProbe,
@@ -236,6 +237,21 @@ pub struct BuiltServices {
 }
 
 impl AppServices {
+    /// An administrator's operations on accounts, over this instance's user,
+    /// session, access and library stores.
+    ///
+    /// Built per call rather than kept as a field: it owns nothing but those
+    /// four handles, and deriving it means a fixture that swaps one of them
+    /// cannot leave the service reading a stale copy.
+    pub fn admin_users(&self) -> AdminUserService {
+        AdminUserService::new(AdminUserDependencies {
+            users: self.user_repo.clone(),
+            sessions: self.session_store.clone(),
+            access: self.access.clone(),
+            libraries: self.library_repo.clone(),
+        })
+    }
+
     /// Build the application's services, and beside them what the process
     /// entry point needs to spawn beam-index's background scan, watch and
     /// enrichment tasks (see [`BuiltServices`]). Test fixtures that only

@@ -35,6 +35,7 @@ use crate::routes::api_error::{
     UserAccessUpdateError,
 };
 use crate::routes::tags::Admin;
+use crate::services::admin_users::AdminUsersError;
 use crate::services::cursor;
 use crate::services::cursor::offset::OffsetList;
 use crate::services::library::LibraryError;
@@ -42,7 +43,6 @@ use crate::services::paging::page_size;
 use crate::services::playback_telemetry::ReportError;
 use crate::services::telemetry::LibraryReportPreview;
 use crate::state::AppState;
-use beam_domain::models::access::{AccessPolicy, ContentRating, LibraryAccess};
 use beam_index::services::enrichment::control::{ControlError, RefreshScope};
 
 // The service errors are one vocabulary per service; the route errors are one
@@ -70,6 +70,43 @@ impl From<ControlError> for MediaRefreshError {
             | ControlError::Provider(_)
             | ControlError::Db(_)
             | ControlError::Index(_) => Self::Internal(ServerFault::new(err)),
+        }
+    }
+}
+
+impl From<AdminUsersError> for AdminUserError {
+    fn from(err: AdminUsersError) -> Self {
+        match err {
+            AdminUsersError::UserNotFound(_) => Self::UserNotFound(err.to_string()),
+            AdminUsersError::CannotDisableSelf => Self::CannotDisableSelf(err.to_string()),
+            AdminUsersError::Internal(cause) => Self::Internal(ServerFault::new(cause)),
+            // Unreachable: changing the `disabled` flag names no access policy.
+            AdminUsersError::InvalidAccess(_) => Self::Internal(ServerFault::new(err)),
+        }
+    }
+}
+
+impl From<AdminUsersError> for UserAccessReadError {
+    fn from(err: AdminUsersError) -> Self {
+        match err {
+            AdminUsersError::UserNotFound(_) => Self::UserNotFound(err.to_string()),
+            AdminUsersError::Internal(cause) => Self::Internal(ServerFault::new(cause)),
+            // Unreachable: reading a policy changes nothing.
+            AdminUsersError::CannotDisableSelf | AdminUsersError::InvalidAccess(_) => {
+                Self::Internal(ServerFault::new(err))
+            }
+        }
+    }
+}
+
+impl From<AdminUsersError> for UserAccessUpdateError {
+    fn from(err: AdminUsersError) -> Self {
+        match err {
+            AdminUsersError::UserNotFound(_) => Self::UserNotFound(err.to_string()),
+            AdminUsersError::InvalidAccess(errors) => Self::ValidationFailed { errors },
+            AdminUsersError::Internal(cause) => Self::Internal(ServerFault::new(cause)),
+            // Unreachable: replacing a policy does not touch the `disabled` flag.
+            AdminUsersError::CannotDisableSelf => Self::Internal(ServerFault::new(err)),
         }
     }
 }
@@ -679,40 +716,12 @@ pub async fn update_admin_user(
     Inject(state): Inject<AppState>,
     Json(body): Json<UpdateAdminUserRequest>,
 ) -> Result<NoContent, AdminUserError> {
-    let internal = |e: sea_orm::DbErr| AdminUserError::Internal(ServerFault::new(e));
-
-    let target = state
-        .services
-        .user_repo
-        .find_by_id(path.id)
-        .await
-        .map_err(internal)?
-        .ok_or_else(|| AdminUserError::UserNotFound(format!("user {} not found", path.id)))?;
-
-    if body.disabled && target.id.to_string() == auth.0.user_id {
-        return Err(AdminUserError::CannotDisableSelf(
-            "cannot disable your own account".to_owned(),
-        ));
-    }
-
+    let UpdateAdminUserRequest { disabled } = body;
     state
         .services
-        .user_repo
-        .set_disabled(target.id, body.disabled)
-        .await
-        .map_err(internal)?;
-
-    if body.disabled {
-        // Revoke every live session so the disable takes effect immediately,
-        // not just at the next login attempt.
-        state
-            .services
-            .session_store
-            .delete_all_for_user(&target.id.to_string())
-            .await
-            .map_err(|e| AdminUserError::Internal(ServerFault::new(e)))?;
-    }
-
+        .admin_users()
+        .set_disabled(&auth.0.user_id, path.id, disabled)
+        .await?;
     Ok(NoContent)
 }
 
@@ -731,21 +740,7 @@ pub async fn get_admin_user_access(
     Path(path): Path<UserPath>,
     Inject(state): Inject<AppState>,
 ) -> Result<Json<UserAccess>, UserAccessReadError> {
-    let internal = |e: sea_orm::DbErr| UserAccessReadError::Internal(ServerFault::new(e));
-
-    let target = state
-        .services
-        .user_repo
-        .find_by_id(path.id)
-        .await
-        .map_err(internal)?
-        .ok_or_else(|| UserAccessReadError::UserNotFound(format!("user {} not found", path.id)))?;
-    let policy = state
-        .services
-        .access
-        .policy(target.id)
-        .await
-        .map_err(internal)?;
+    let policy = state.services.admin_users().access(path.id).await?;
     Ok(Json(UserAccess::from(policy)))
 }
 
@@ -767,63 +762,11 @@ pub async fn set_admin_user_access(
     Inject(state): Inject<AppState>,
     Json(body): Json<UserAccess>,
 ) -> Result<Json<UserAccess>, UserAccessUpdateError> {
-    let internal = |e: sea_orm::DbErr| UserAccessUpdateError::Internal(ServerFault::new(e));
-
-    let target = state
+    let policy = state
         .services
-        .user_repo
-        .find_by_id(path.id)
-        .await
-        .map_err(internal)?
-        .ok_or_else(|| {
-            UserAccessUpdateError::UserNotFound(format!("user {} not found", path.id))
-        })?;
-
-    let UserAccess {
-        all_libraries,
-        library_ids,
-        max_content_rating,
-    } = body;
-    let mut errors = Vec::new();
-    if all_libraries && !library_ids.is_empty() {
-        errors.push(FieldError {
-            pointer: "/library_ids".to_owned(),
-            detail: "must be empty when all_libraries is true".to_owned(),
-        });
-    }
-    for (index, library_id) in library_ids.iter().enumerate() {
-        if state
-            .services
-            .library_repo
-            .find_by_id(*library_id)
-            .await
-            .map_err(internal)?
-            .is_none()
-        {
-            errors.push(FieldError {
-                pointer: format!("/library_ids/{index}"),
-                detail: format!("no library has the id {library_id}"),
-            });
-        }
-    }
-    if !errors.is_empty() {
-        return Err(UserAccessUpdateError::ValidationFailed { errors });
-    }
-
-    let policy = AccessPolicy {
-        libraries: if all_libraries {
-            LibraryAccess::All
-        } else {
-            LibraryAccess::Only(library_ids.into_iter().collect())
-        },
-        max_rating: max_content_rating.map(ContentRating::from),
-    };
-    state
-        .services
-        .access
-        .replace(target.id, &policy)
-        .await
-        .map_err(internal)?;
+        .admin_users()
+        .set_access(path.id, body)
+        .await?;
     Ok(Json(UserAccess::from(policy)))
 }
 

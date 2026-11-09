@@ -1651,7 +1651,7 @@ mod tests {
     /// such a row, and the conversion is exercised directly.
     #[test]
     fn a_session_with_an_unrepresentable_timestamp_is_an_error() {
-        use crate::routes::auth::SessionSummary;
+        use crate::models::auth::SessionSummary;
         use beam_auth::utils::session_store::SessionData;
 
         let id = uuid::Uuid::nil();

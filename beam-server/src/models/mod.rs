@@ -1,4 +1,5 @@
 mod admin;
+pub mod auth;
 pub mod enrichment;
 mod library;
 pub mod lists;
@@ -11,6 +12,7 @@ pub mod search;
 pub mod telemetry;
 
 pub use admin::*;
+pub use auth::*;
 pub use enrichment::*;
 pub use library::*;
 pub use lists::*;

@@ -26,16 +26,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use beam_auth::utils::device_auth_store::{
-    Claim, DeviceAuthStore, NewDeviceAuth, generate_handle, hash_handle,
+    DeviceAuthStore, NewDeviceAuth, generate_handle, hash_handle,
 };
-use beam_auth::utils::login::{ClientContext, LoginError, MintedSession, complete_login};
+use beam_auth::utils::login::{
+    ClientContext, DevicePollError, DevicePollOutcome, LoginError, MintedSession, complete_login,
+    poll_device_login as poll_device_login_once,
+};
 use beam_auth::utils::models::User;
-use beam_auth::utils::oidc::{DevicePoll, OidcClient, OidcError};
+use beam_auth::utils::oidc::{OidcClient, OidcError};
 use beam_auth::utils::oidc_config::OidcRuntimeConfig;
 use beam_auth::utils::pending_auth_store::{PendingAuth, PendingAuthStore};
 use beam_auth::utils::repository::UserRepository;
-use beam_auth::utils::session_store::{SessionData, SessionStore};
-use chrono::{DateTime, Utc};
+use beam_auth::utils::session_store::SessionStore;
 use kynos::http::forwarded::Forwarded;
 use kynos::prelude::*;
 use kynos::response::cookie::{Cookie, SameSite};
@@ -44,6 +46,10 @@ use kynos::response::status::{InvalidLocation, Location, NoContent, Redirect};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::models::auth::{
+    CurrentUser, DeviceLoginComplete, DeviceLoginPending, DeviceLoginPoll, DeviceLoginStart,
+    DeviceLoginWait, SessionConnection, SessionSummary,
+};
 use crate::routes::api_error::{
     ERROR_BASE, INTERNAL_DETAIL, InternalError, OIDC_UNAVAILABLE_DETAIL, SESSION_COOKIE,
     ServerFault, SessionAuth,
@@ -62,73 +68,11 @@ const STATE_TTL_SECS: u64 = 600; // 10 minutes to complete the round trip
 /// not stay redeemable all day.
 pub(crate) const DEVICE_LOGIN_MAX_SECS: u64 = 1800;
 
-// ── Wire types ───────────────────────────────────────────────────────────────
-
-#[derive(Debug, Serialize, Deserialize, Schema)]
-pub struct CurrentUser {
-    pub id: Uuid,
-    pub email: Option<String>,
-    pub is_admin: bool,
-    pub display_name: String,
-    pub avatar_url: Option<String>,
-}
-
-/// Every active session of the current user: what `GET /v1/sessions`
-/// returns.
-///
-/// A connection, as every `/v1` list is, though a user has few enough
-/// sessions that it is never paged: `items` is the whole list, both of
-/// `page_info`'s `has_*_page` flags are `false`, and it carries no cursors.
-#[derive(Debug, Serialize, Deserialize, Schema)]
-pub struct SessionConnection {
-    pub items: Vec<SessionSummary>,
-    /// Always a single, complete page.
-    pub page_info: crate::models::PageInfo,
-}
-
-/// One of the current user's active sessions, as returned by `GET
-/// /sessions`. `id` is an opaque row identifier for revocation via `DELETE
-/// /sessions/{id}` -- never the session credential itself, which is hashed
-/// at rest and cannot be recovered.
-#[derive(Debug, Serialize, Deserialize, Schema)]
-pub struct SessionSummary {
-    pub id: Uuid,
-    pub device_hash: String,
-    pub ip: String,
-    /// When the session was signed in.
-    pub created_at: DateTime<Utc>,
-    /// When the session was last used, to the hour: activity slides it
-    /// forward at most once an hour.
-    pub last_active_at: DateTime<Utc>,
-}
-
-impl SessionSummary {
-    /// The wire view of one stored session.
-    ///
-    /// The store keeps whole Unix seconds, which a `DateTime` holds for any
-    /// time a session can have; one it cannot is a corrupt row, reported as
-    /// such rather than rendered as some other instant.
-    pub(crate) fn from_store(id: Uuid, data: SessionData) -> Result<Self, String> {
-        let SessionData {
-            user_id: _,
-            device_hash,
-            ip,
-            created_at,
-            last_active,
-        } = data;
-        let instant = |secs: i64| {
-            DateTime::from_timestamp(secs, 0)
-                .ok_or_else(|| format!("session {id} has an unrepresentable timestamp {secs}"))
-        };
-        Ok(Self {
-            id,
-            device_hash,
-            ip,
-            created_at: instant(created_at)?,
-            last_active_at: instant(last_active)?,
-        })
-    }
-}
+// ── Request parameters and replies ───────────────────────────────────────────
+//
+// The bodies these endpoints read and write live in `crate::models::auth`;
+// what stays here is what binds them to HTTP: query and path parameters, and
+// the reply that picks a status.
 
 /// Where the browser is sent back to after a successful login.
 #[derive(Debug, Serialize, Deserialize, Schema, QueryParams)]
@@ -144,69 +88,6 @@ pub struct CallbackQuery {
     pub code: Option<String>,
     pub error: Option<String>,
     pub error_description: Option<String>,
-}
-
-/// What `POST /v1/auth/device` answers: what to show the user, and the handle
-/// to poll with.
-///
-/// The IdP's device code is not here. Beam keeps it and polls the IdP itself,
-/// so a client can only ever turn an approval into a Beam session -- never
-/// into IdP tokens (ADR-0003's BFF property, kept for native clients).
-#[derive(Debug, Serialize, Deserialize, Schema)]
-pub struct DeviceLoginStart {
-    /// Opaque, single-flow secret the client polls `POST
-    /// /v1/auth/device/token` with. Only its SHA-256 is stored.
-    pub device_handle: String,
-    /// The code the user enters at `verification_uri`.
-    pub user_code: String,
-    /// Where the user approves the sign-in, on any device with a browser.
-    pub verification_uri: String,
-    /// `verification_uri` with the code filled in, when the IdP offers one --
-    /// suitable for a QR code.
-    pub verification_uri_complete: Option<String>,
-    /// How long the user has to approve, in seconds.
-    pub expires_in_secs: u64,
-    /// The minimum wait between polls, in seconds.
-    pub interval_secs: u32,
-}
-
-/// The body of `POST /v1/auth/device/token`.
-#[derive(Debug, Serialize, Deserialize, Schema)]
-pub struct DeviceLoginPoll {
-    /// The `device_handle` `POST /v1/auth/device` returned.
-    pub device_handle: String,
-}
-
-/// Why a device login is still waiting.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Schema)]
-#[serde(rename_all = "snake_case")]
-pub enum DeviceLoginWait {
-    /// The user has not approved yet. Poll again after `interval_secs`.
-    AuthorizationPending,
-    /// The poll came too soon. The interval has grown; wait the new
-    /// `interval_secs` before polling again.
-    SlowDown,
-}
-
-/// A device login that has not finished yet.
-#[derive(Debug, Serialize, Deserialize, Schema)]
-pub struct DeviceLoginPending {
-    pub status: DeviceLoginWait,
-    /// The minimum wait before the next poll, in seconds.
-    pub interval_secs: u32,
-}
-
-/// A device login the user approved: the session it minted.
-#[derive(Debug, Serialize, Deserialize, Schema)]
-pub struct DeviceLoginComplete {
-    /// The `beam_session` credential. Present it as the `beam_session`
-    /// cookie on every later request; it is the same opaque session a
-    /// browser login mints, with the same idle and absolute expiry.
-    pub session_token: String,
-    /// The session's hard lifetime from now, in seconds.
-    pub session_expires_in_secs: u64,
-    /// Who signed in.
-    pub user: CurrentUser,
 }
 
 /// The two answers a device-login poll can give.
@@ -857,153 +738,57 @@ pub async fn poll_device_login(
     Inject(config): Inject<OidcRuntimeConfig>,
     Json(body): Json<DeviceLoginPoll>,
 ) -> Result<WithHeaders<DeviceLoginPollReply, NoStore>, DeviceLoginPollError> {
-    let internal = |e: beam_auth::utils::device_auth_store::DeviceAuthError| {
-        DeviceLoginPollError::Internal(ServerFault::new(e))
-    };
-    let handle_hash = hash_handle(&body.device_handle);
+    let DeviceLoginPoll { device_handle } = body;
 
-    let auth = match device_auth_store
-        .claim_poll(&handle_hash)
-        .await
-        .map_err(internal)?
-    {
-        Claim::NotFound => {
-            return Err(DeviceLoginPollError::Invalid(
-                "Unknown or already-finished device login".into(),
-            ));
-        }
-        Claim::Expired => {
-            device_auth_store
-                .consume(&handle_hash)
-                .await
-                .map_err(internal)?;
-            return Err(DeviceLoginPollError::Expired(
-                "The device login expired before it was approved".into(),
-            ));
-        }
-        Claim::TooEarly { interval_secs } => {
-            // The IdP is not asked: answering for it is the point.
-            let interval_secs = device_auth_store
-                .bump_interval(&handle_hash)
-                .await
-                .map_err(internal)?
-                .unwrap_or(interval_secs);
-            return Ok(WithHeaders::new(
-                DeviceLoginPollReply::Pending(DeviceLoginPending {
-                    status: DeviceLoginWait::SlowDown,
-                    interval_secs,
-                }),
-                NoStore::new(),
-            ));
-        }
-        Claim::Claimed(auth) => auth,
-    };
-
-    let identity = match oidc_client.poll_device_token(&auth.device_code).await {
-        Ok(DevicePoll::Pending) => {
-            return Ok(WithHeaders::new(
-                DeviceLoginPollReply::Pending(DeviceLoginPending {
-                    status: DeviceLoginWait::AuthorizationPending,
-                    interval_secs: auth.interval_secs,
-                }),
-                NoStore::new(),
-            ));
-        }
-        Ok(DevicePoll::SlowDown) => {
-            let interval_secs = device_auth_store
-                .bump_interval(&handle_hash)
-                .await
-                .map_err(internal)?
-                .unwrap_or(auth.interval_secs);
-            return Ok(WithHeaders::new(
-                DeviceLoginPollReply::Pending(DeviceLoginPending {
-                    status: DeviceLoginWait::SlowDown,
-                    interval_secs,
-                }),
-                NoStore::new(),
-            ));
-        }
-        Ok(DevicePoll::Denied) => {
-            device_auth_store
-                .consume(&handle_hash)
-                .await
-                .map_err(internal)?;
-            return Err(DeviceLoginPollError::Denied(
-                "The sign-in was refused at the identity provider".into(),
-            ));
-        }
-        Ok(DevicePoll::Expired) => {
-            device_auth_store
-                .consume(&handle_hash)
-                .await
-                .map_err(internal)?;
-            return Err(DeviceLoginPollError::Expired(
-                "The device login expired before it was approved".into(),
-            ));
-        }
-        Ok(DevicePoll::Complete(identity)) => identity,
-        // The IdP could not be reached, or Beam is misconfigured against it:
-        // nothing about this flow is wrong, so it is kept for the next poll.
-        Err(
-            e @ (OidcError::Discovery(_)
-            | OidcError::Exchange(_)
-            | OidcError::DeviceFlowUnsupported),
-        ) => {
-            return Err(DeviceLoginPollError::OidcUnavailable(ServerFault::new(
-                format_args!("OIDC login unavailable: {e}"),
-            )));
-        }
-        // An answer that did not verify will not verify on a retry.
-        Err(e @ (OidcError::MissingIdToken | OidcError::ClaimsVerification(_))) => {
-            device_auth_store
-                .consume(&handle_hash)
-                .await
-                .map_err(internal)?;
-            return Err(DeviceLoginPollError::LoginFailed(format!(
-                "Login failed: {e}"
-            )));
-        }
-    };
-
-    // Ending the flow before minting is what makes an approval single-use: of
-    // two polls that both saw it approved, only the one that removes the row
-    // signs in.
-    if device_auth_store
-        .consume(&handle_hash)
-        .await
-        .map_err(internal)?
-        .is_none()
-    {
-        return Err(DeviceLoginPollError::Invalid(
-            "Unknown or already-finished device login".into(),
-        ));
-    }
-
-    let MintedSession {
-        token,
-        user,
-        absolute_ttl_secs,
-    } = complete_login(
-        &identity,
+    let outcome = poll_device_login_once(
+        &device_handle,
         &client_context(&headers, &forwarded),
+        oidc_client.as_ref(),
+        device_auth_store.as_ref(),
         user_repo.as_ref(),
         session_store.as_ref(),
         &config,
     )
     .await
     .map_err(|e| match e {
-        e @ LoginError::AccountDisabled => DeviceLoginPollError::AccountDisabled(e.to_string()),
-        LoginError::Internal(message) => DeviceLoginPollError::Internal(ServerFault::new(message)),
+        DevicePollError::Invalid => DeviceLoginPollError::Invalid(e.to_string()),
+        DevicePollError::Expired => DeviceLoginPollError::Expired(e.to_string()),
+        DevicePollError::Denied => DeviceLoginPollError::Denied(e.to_string()),
+        DevicePollError::AccountDisabled => DeviceLoginPollError::AccountDisabled(e.to_string()),
+        DevicePollError::LoginFailed(_) => DeviceLoginPollError::LoginFailed(e.to_string()),
+        DevicePollError::IdpUnavailable(_) => {
+            DeviceLoginPollError::OidcUnavailable(ServerFault::new(e))
+        }
+        DevicePollError::Internal(message) => {
+            DeviceLoginPollError::Internal(ServerFault::new(message))
+        }
     })?;
 
-    Ok(WithHeaders::new(
-        DeviceLoginPollReply::SignedIn(DeviceLoginComplete {
+    let reply = match outcome {
+        DevicePollOutcome::AuthorizationPending { interval_secs } => {
+            DeviceLoginPollReply::Pending(DeviceLoginPending {
+                status: DeviceLoginWait::AuthorizationPending,
+                interval_secs,
+            })
+        }
+        DevicePollOutcome::SlowDown { interval_secs } => {
+            DeviceLoginPollReply::Pending(DeviceLoginPending {
+                status: DeviceLoginWait::SlowDown,
+                interval_secs,
+            })
+        }
+        DevicePollOutcome::SignedIn(MintedSession {
+            token,
+            user,
+            absolute_ttl_secs,
+        }) => DeviceLoginPollReply::SignedIn(DeviceLoginComplete {
             session_token: token,
             session_expires_in_secs: absolute_ttl_secs,
             user: me_from(user),
         }),
-        NoStore::new(),
-    ))
+    };
+
+    Ok(WithHeaders::new(reply, NoStore::new()))
 }
 
 /// Returns the currently authenticated user (via the `beam_session` cookie).

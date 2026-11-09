@@ -1,4 +1,5 @@
 pub mod access;
+pub mod admin_users;
 pub mod artwork;
 pub mod collections;
 pub mod cursor;
