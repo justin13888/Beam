@@ -26,8 +26,9 @@ use crate::routes::api_error::{
     LibraryRefreshError, MatchCandidatesError, MediaEnrichmentError, ServerFault,
 };
 use crate::routes::tags::Admin;
-use crate::services::enrichment_cursor;
+use crate::services::cursor;
 use crate::services::metadata::{DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE};
+use crate::services::paging::page_size;
 use crate::state::AppState;
 
 /// What `/v1/admin/media/{id}/…` captures.
@@ -95,16 +96,11 @@ pub async fn list_enrichment(
         first,
         after,
     } = query;
-    let size = first.unwrap_or(DEFAULT_PAGE_SIZE);
-    let Some(size) = std::num::NonZeroU32::new(size).filter(|size| size.get() <= MAX_PAGE_SIZE)
-    else {
-        return Err(EnrichmentListError::InvalidPagination(format!(
-            "a page holds 1 to {MAX_PAGE_SIZE} titles, not {size}"
-        )));
-    };
+    let size = page_size(first, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, "titles")
+        .map_err(EnrichmentListError::InvalidPagination)?;
     let after = after
         .as_deref()
-        .map(enrichment_cursor::decode)
+        .map(cursor::enrichment::decode)
         .transpose()
         .map_err(|err| EnrichmentListError::InvalidCursor(err.to_string()))?;
     let has_previous_page = after.is_some();
@@ -123,7 +119,7 @@ pub async fn list_enrichment(
         .await
         .map_err(|err| EnrichmentListError::Internal(ServerFault::new(err)))?;
     let cursor_of = |item: &beam_index::services::enrichment::control::TitleEnrichment| {
-        item.position.as_ref().map(enrichment_cursor::encode)
+        item.position.as_ref().map(cursor::enrichment::encode)
     };
     let page_info = PageInfo {
         has_next_page: page.has_next_page,

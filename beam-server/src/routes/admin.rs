@@ -27,17 +27,18 @@ use crate::models::{
     LibraryTelemetryPreview, PageInfo, PlaybackTelemetryReport, RecentScan, ScanJob,
     UpdateAdminUserRequest, UserAccess, WatcherStatus,
 };
+use crate::routes::access::caller_access;
 use crate::routes::api_error::{
     AdminAuth, AdminListError, AdminUserError, InternalError, LibraryCreateError,
     LibraryFilesError, LibraryRefError, LibraryScanError, LibraryScanReadError, MediaRefreshError,
     PlaybackTelemetryReportError, ServerFault, SessionAuth, UserAccessReadError,
     UserAccessUpdateError,
 };
-use crate::routes::playback::{caller_access, page_size};
 use crate::routes::tags::Admin;
+use crate::services::cursor;
+use crate::services::cursor::offset::OffsetList;
 use crate::services::library::LibraryError;
-use crate::services::library_files_cursor;
-use crate::services::offset_cursor::{self, OffsetList};
+use crate::services::paging::page_size;
 use crate::services::playback_telemetry::ReportError;
 use crate::services::telemetry::LibraryReportPreview;
 use crate::state::AppState;
@@ -313,11 +314,11 @@ pub async fn get_library_files(
         )));
     }
     let FilesQuery { first, after } = query;
-    let first =
-        page_size(first, FILES_DEFAULT, FILES_MAX).map_err(LibraryFilesError::InvalidPagination)?;
+    let first = page_size(first, FILES_DEFAULT, FILES_MAX, "items")
+        .map_err(LibraryFilesError::InvalidPagination)?;
     let after = after
         .as_deref()
-        .map(|cursor| library_files_cursor::decode(path.id, cursor))
+        .map(|cursor| cursor::library_files::decode(path.id, cursor))
         .transpose()
         .map_err(|err| LibraryFilesError::InvalidCursor(err.to_string()))?;
     let has_previous_page = after.is_some();
@@ -327,7 +328,7 @@ pub async fn get_library_files(
         .library
         .get_library_files(path.id, after, first)
         .await?;
-    let cursor = |file: &LibraryFile| library_files_cursor::encode(path.id, &file.path, file.id);
+    let cursor = |file: &LibraryFile| cursor::library_files::encode(path.id, &file.path, file.id);
     Ok(Json(LibraryFileConnection {
         page_info: PageInfo {
             has_next_page: page.has_next_page,
@@ -496,9 +497,9 @@ pub async fn get_admin_logs(
         AdminListError::Internal(ServerFault::new(e))
     };
     let LogsQuery { first, after } = query;
-    let first =
-        page_size(first, LOGS_DEFAULT, LOGS_MAX).map_err(AdminListError::InvalidPagination)?;
-    let offset = offset_cursor::start_after(OffsetList::AdminLogs, after.as_deref())
+    let first = page_size(first, LOGS_DEFAULT, LOGS_MAX, "items")
+        .map_err(AdminListError::InvalidPagination)?;
+    let offset = cursor::offset::start_after(OffsetList::AdminLogs, after.as_deref())
         .map_err(|err| AdminListError::InvalidCursor(err.to_string()))?;
     // The log service pages by a `u32` offset; one past it has no rows.
     let logs = match u32::try_from(offset) {
@@ -513,7 +514,7 @@ pub async fn get_admin_logs(
     let total = state.services.admin_log.count().await.map_err(internal)?;
 
     Ok(Json(AdminLogConnection {
-        page_info: offset_cursor::page_info(OffsetList::AdminLogs, offset, logs.len(), total),
+        page_info: cursor::offset::page_info(OffsetList::AdminLogs, offset, logs.len(), total),
         items: logs.into_iter().map(AdminLogEntry::from).collect(),
         total,
     }))
@@ -642,9 +643,9 @@ pub async fn list_admin_users(
     let internal = |e: sea_orm::DbErr| AdminListError::Internal(ServerFault::new(e));
 
     let UsersQuery { first, after } = query;
-    let first =
-        page_size(first, USERS_DEFAULT, USERS_MAX).map_err(AdminListError::InvalidPagination)?;
-    let offset = offset_cursor::start_after(OffsetList::AdminUsers, after.as_deref())
+    let first = page_size(first, USERS_DEFAULT, USERS_MAX, "items")
+        .map_err(AdminListError::InvalidPagination)?;
+    let offset = cursor::offset::start_after(OffsetList::AdminUsers, after.as_deref())
         .map_err(|err| AdminListError::InvalidCursor(err.to_string()))?;
 
     let items = state
@@ -656,7 +657,7 @@ pub async fn list_admin_users(
     let total = state.services.user_repo.count().await.map_err(internal)?;
 
     Ok(Json(AdminUserConnection {
-        page_info: offset_cursor::page_info(OffsetList::AdminUsers, offset, items.len(), total),
+        page_info: cursor::offset::page_info(OffsetList::AdminUsers, offset, items.len(), total),
         items: items.into_iter().map(AdminUser::from).collect(),
         total,
     }))

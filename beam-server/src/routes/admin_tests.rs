@@ -658,7 +658,7 @@ async fn a_library_s_file_list_refuses_another_library_s_cursor() {
         .send()
         .await
         .json();
-    let foreign = crate::services::library_files_cursor::encode(
+    let foreign = crate::services::cursor::library_files::encode(
         uuid::Uuid::new_v4(),
         "a.mkv",
         uuid::Uuid::nil(),
@@ -1429,8 +1429,8 @@ async fn the_admin_log_refuses_a_cursor_it_did_not_issue() {
     let fixture = make_test_state();
     let client = build_client(&fixture);
     let token = seed_user_session(&fixture, true).await;
-    let users = crate::services::offset_cursor::encode(
-        crate::services::offset_cursor::OffsetList::AdminUsers,
+    let users = crate::services::cursor::offset::encode(
+        crate::services::cursor::offset::OffsetList::AdminUsers,
         0,
     );
 
@@ -2096,15 +2096,15 @@ async fn the_admin_user_list_paginates_and_reports_the_total() {
         .assert_problem_type("about:blank");
 
     // The log's cursor is not this list's.
-    let logs = crate::services::offset_cursor::encode(
-        crate::services::offset_cursor::OffsetList::AdminLogs,
+    let logs = crate::services::cursor::offset::encode(
+        crate::services::cursor::offset::OffsetList::AdminLogs,
         0,
     );
     // Neither is a forged position whose next page starts past the `bigint`
     // Postgres reads `OFFSET` as: it is the caller's 400, not a database 500.
-    let past_offset = crate::services::offset_cursor::encode(
-        crate::services::offset_cursor::OffsetList::AdminUsers,
-        crate::services::offset_cursor::MAX_AT + 1,
+    let past_offset = crate::services::cursor::offset::encode(
+        crate::services::cursor::offset::OffsetList::AdminUsers,
+        crate::services::cursor::offset::MAX_AT + 1,
     );
     for after in [logs, past_offset] {
         client

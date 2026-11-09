@@ -6,10 +6,10 @@ use kynos::prelude::*;
 use beam_domain::models::language_preferences::{LanguageCode, LanguagePreferences};
 
 use crate::models::{FieldError, LanguagePreferenceSettings};
+use crate::routes::access::parse_user_id;
 use crate::routes::api_error::{
     InternalError, LanguagePreferencesUpdateError, ServerFault, SessionAuth,
 };
-use crate::routes::playback::parse_user_id;
 use crate::routes::tags::Auth;
 use crate::state::AppState;
 

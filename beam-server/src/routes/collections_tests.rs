@@ -375,8 +375,8 @@ async fn a_cursor_the_listing_did_not_issue_is_a_400_invalid_cursor() {
     let fixture = fixture();
     let client = client(&fixture);
     let token = session(&fixture).await;
-    let people = crate::services::offset_cursor::encode(
-        crate::services::offset_cursor::OffsetList::People,
+    let people = crate::services::cursor::offset::encode(
+        crate::services::cursor::offset::OffsetList::People,
         0,
     );
 

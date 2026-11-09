@@ -4,7 +4,6 @@
 //! request's.
 
 use std::collections::HashMap;
-use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use sea_orm::DbErr;
@@ -17,9 +16,10 @@ use beam_domain::repositories::{MovieRepository, ShowRepository, UserListReposit
 
 use crate::models::search::PageInfo;
 use crate::models::{MediaMetadata, UserListConnection, UserListItem};
+use crate::services::cursor;
 use crate::services::metadata::MetadataService;
+use crate::services::paging::page_size;
 use crate::services::playback::PlaybackService;
-use crate::services::user_list_cursor;
 
 /// The page size when a request names none.
 pub const DEFAULT_PAGE_SIZE: u32 = 50;
@@ -156,17 +156,11 @@ impl ListService {
         first: Option<u32>,
         after: Option<String>,
     ) -> Result<UserListConnection, ListError> {
-        let size = first.unwrap_or(DEFAULT_PAGE_SIZE);
-        let size = NonZeroU32::new(size)
-            .filter(|size| size.get() <= MAX_PAGE_SIZE)
-            .ok_or_else(|| {
-                ListError::InvalidPagination(format!(
-                    "a page holds 1 to {MAX_PAGE_SIZE} titles, not {size}"
-                ))
-            })?;
+        let size = page_size(first, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, "titles")
+            .map_err(ListError::InvalidPagination)?;
         let after = after
             .as_deref()
-            .map(|cursor| user_list_cursor::decode(list, cursor))
+            .map(|cursor| cursor::user_list::decode(list, cursor))
             .transpose()
             .map_err(|err| ListError::InvalidCursor(err.to_string()))?;
         let has_previous_page = after.is_some();
@@ -201,7 +195,7 @@ impl ListService {
             .collect();
 
         let cursor_of =
-            |entry: &UserListEntry| user_list_cursor::encode(list, &UserListPosition::from(entry));
+            |entry: &UserListEntry| cursor::user_list::encode(list, &UserListPosition::from(entry));
         Ok(UserListConnection {
             items,
             page_info: PageInfo {

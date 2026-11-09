@@ -11,7 +11,8 @@ use crate::models::{
     SeasonDetail, SeasonMetadata, ShowDates, ShowMetadata, ShowRef, Title, UserTitleState,
     artwork_path,
 };
-use crate::services::cursor;
+use crate::services::cursor::browse;
+use crate::services::paging::page_size;
 use crate::services::people::title_credits;
 use crate::services::sources::{PrimarySource, SourceCatalog};
 use beam_domain::models::access::AccessPolicy;
@@ -138,11 +139,9 @@ impl PageRequest {
         } else {
             (PageDirection::Forward, first, after)
         };
-        let size = size.unwrap_or(DEFAULT_PAGE_SIZE);
-        let Some(size) = NonZeroU32::new(size).filter(|size| size.get() <= MAX_PAGE_SIZE) else {
-            return invalid(&format!(
-                "a page holds 1 to {MAX_PAGE_SIZE} items, not {size}"
-            ));
+        let size = match page_size(size, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, "items") {
+            Ok(size) => size,
+            Err(detail) => return invalid(&detail),
         };
         Ok(Self {
             direction,
@@ -758,7 +757,7 @@ impl MetadataService for DbMetadataService {
         } = PageRequest::from_relay(first, after, last, before)?;
         let position = cursor
             .as_deref()
-            .map(|cursor| cursor::decode(cursor, sort_by, sort_order))
+            .map(|cursor| browse::decode(cursor, sort_by, sort_order))
             .transpose()
             .map_err(|e| MetadataError::InvalidCursor(e.to_string()))?;
         let has_cursor = position.is_some();
@@ -824,7 +823,7 @@ impl MetadataService for DbMetadataService {
             })
             .collect();
         let items = self.hydrate(&titles).await?;
-        let cursor_of = |position: &CatalogPosition| cursor::encode(sort_by, sort_order, position);
+        let cursor_of = |position: &CatalogPosition| browse::encode(sort_by, sort_order, position);
         Ok(MediaConnection {
             items,
             page_info: PageInfo {

@@ -25,18 +25,14 @@
 //! gone -- its file removed, its title renamed -- still starts in the right
 //! place. A raw id could only restart from the beginning.
 
-use base64::Engine as _;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use beam_domain::models::catalog::{CatalogPosition, SortKey, TitleKind};
 
+use super::{VERSION, open, seal};
 use crate::models::search::{MediaSortField, SortOrder};
-
-/// The cursor layout this build writes and reads.
-const VERSION: u8 = 1;
 
 /// Why a cursor was refused. Every case is the caller's to fix, so each maps
 /// to one 400.
@@ -126,8 +122,7 @@ pub fn encode(sort: MediaSortField, order: SortOrder, position: &CatalogPosition
         id: position.id,
         key: key_value(&position.key),
     };
-    let json = serde_json::to_vec(&body).expect("a cursor body always serializes");
-    URL_SAFE_NO_PAD.encode(json)
+    seal(&body)
 }
 
 /// The position `cursor` names, provided it was issued for `sort` and `order`.
@@ -136,10 +131,7 @@ pub fn decode(
     sort: MediaSortField,
     order: SortOrder,
 ) -> Result<CatalogPosition, CursorError> {
-    let bytes = URL_SAFE_NO_PAD
-        .decode(cursor)
-        .map_err(|_| CursorError::Malformed)?;
-    let body: CursorBody = serde_json::from_slice(&bytes).map_err(|_| CursorError::Malformed)?;
+    let body: CursorBody = open(cursor).ok_or(CursorError::Malformed)?;
     let CursorBody {
         v,
         sort: cursor_sort,
@@ -163,5 +155,5 @@ pub fn decode(
 }
 
 #[cfg(test)]
-#[path = "cursor_tests.rs"]
-mod cursor_tests;
+#[path = "browse_tests.rs"]
+mod browse_tests;

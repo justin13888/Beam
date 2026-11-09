@@ -17,7 +17,7 @@ cameo = { workspace = true }
 http = { workspace = true }
 async-stream = "0.3"
 async-trait = { workspace = true }
-# The browse cursor is base64url JSON (services/cursor.rs).
+# Every page cursor is base64url JSON (services/cursor/mod.rs).
 base64 = "0.23.1"
 bytes = "1"
 chrono = { workspace = true, features = ["serde"] }

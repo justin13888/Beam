@@ -1,5 +1,6 @@
 //! The `/v1` route table, and the router the process serves.
 
+pub mod access;
 pub mod admin;
 pub mod api_error;
 pub mod artwork;

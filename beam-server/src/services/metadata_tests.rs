@@ -1737,7 +1737,7 @@ mod browse {
     use uuid::Uuid;
 
     use crate::models::MediaMetadata;
-    use crate::services::cursor;
+    use crate::services::cursor::browse;
     use crate::services::metadata::{
         BrowseRequest, DEFAULT_PAGE_SIZE, DbMetadataService, MAX_PAGE_SIZE, MediaConnection,
         MediaSearchFilters, MediaSortField, MetadataError, MetadataRepositories, MetadataService,
@@ -2438,7 +2438,7 @@ mod browse {
         assert_eq!(titles(&page), ["Kept"]);
         assert_eq!(
             page.page_info.end_cursor,
-            Some(cursor::encode(
+            Some(browse::encode(
                 MediaSortField::Title,
                 SortOrder::Asc,
                 &positions[1]

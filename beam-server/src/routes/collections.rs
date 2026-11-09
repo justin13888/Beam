@@ -9,10 +9,10 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::models::{CollectionConnection, CollectionDetail};
+use crate::routes::access::caller_access;
 use crate::routes::api_error::{
     CollectionListError, CollectionLookupError, ServerFault, SessionAuth,
 };
-use crate::routes::playback::caller_access;
 use crate::routes::tags::Media;
 use crate::services::collections::CollectionError;
 use crate::state::AppState;
