@@ -166,6 +166,7 @@ struct Harness {
     _dir: TempDir,
     root: PathBuf,
     library: Library,
+    library_repo: Arc<InMemoryLibraryRepository>,
     file_repo: Arc<InMemoryFileRepository>,
     movie_repo: Arc<InMemoryMovieRepository>,
     show_repo: Arc<InMemoryShowRepository>,
@@ -289,7 +290,7 @@ impl Harness {
             ),
         };
         let service = LocalIndexService::new(
-            library_repo,
+            library_repo.clone(),
             file_reads.clone(),
             movie_repo.clone(),
             show_repo.clone(),
@@ -322,6 +323,7 @@ impl Harness {
             _dir: dir,
             root,
             library,
+            library_repo,
             file_repo,
             movie_repo,
             show_repo,
@@ -2078,8 +2080,7 @@ async fn an_nfo_edited_before_a_scan_that_died_is_applied_by_the_next() {
     h.scan().await;
     h.write("Matrix/movie.nfo", MATRIX_NFO);
     // As a scan that started after the edit and was killed would leave it.
-    h.service
-        .library_repo()
+    h.library_repo
         .update_scan_progress(
             h.library.id,
             Some(chrono::Utc::now() + chrono::Duration::hours(1)),

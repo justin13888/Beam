@@ -106,6 +106,7 @@ async fn main() -> Result<()> {
     // rescan backstop). There is no separate indexer process.
     beam_index::runtime::spawn_background_indexing(
         index_service,
+        services.library_repo.clone(),
         beam_index::runtime::BackgroundIndexingConfig {
             scan_interval_secs: config.scan_interval_secs,
             watch_debounce_ms: config.watch_debounce_ms,

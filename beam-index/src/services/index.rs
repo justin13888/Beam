@@ -377,9 +377,6 @@ pub trait IndexService: Send + Sync + std::fmt::Debug {
     /// The latest scan job of `library_id` in this process, if any.
     fn scan_job(&self, library_id: Uuid) -> Option<ScanJob>;
 
-    /// Follow `library_id`'s scan jobs.
-    fn subscribe_scan(&self, library_id: Uuid) -> tokio::sync::watch::Receiver<Option<ScanJob>>;
-
     /// Stop `library_id`'s scan before the library is deleted.
     ///
     /// The library is retired first: while the returned
@@ -597,11 +594,20 @@ impl LocalIndexService {
         self
     }
 
-    /// The repository backing this service's library lookups, exposed so
-    /// callers (e.g. background maintenance tasks) can list/query libraries
-    /// without needing their own separate handle to the same repository.
-    pub fn library_repo(&self) -> &Arc<dyn LibraryRepository> {
-        &self.library_repo
+    /// Follow `library_id`'s scan jobs: the receiver holds the latest job
+    /// and sees every change to it, and each job that replaces it.
+    ///
+    /// Not on [`IndexService`]: nothing serving a request follows a job, it
+    /// reads [`IndexService::scan_job`]. This is how a test waits on a job's
+    /// state without a clock. [`NotificationService`] cannot stand in for
+    /// it: scan progress is live-only, so a subscriber that arrives after a
+    /// transition never sees it, and its events carry a phase rather than
+    /// the job's state, so a queued job is not observable there.
+    pub fn subscribe_scan(
+        &self,
+        library_id: Uuid,
+    ) -> tokio::sync::watch::Receiver<Option<ScanJob>> {
+        self.scans.subscribe(library_id)
     }
 
     /// Helper to extract and insert media streams for a file, and to replace
@@ -2592,10 +2598,6 @@ impl IndexService for LocalIndexService {
 
     fn scan_job(&self, library_id: Uuid) -> Option<ScanJob> {
         self.scans.job(library_id)
-    }
-
-    fn subscribe_scan(&self, library_id: Uuid) -> tokio::sync::watch::Receiver<Option<ScanJob>> {
-        self.scans.subscribe(library_id)
     }
 
     async fn stop_scan(&self, library_id: Uuid) -> StoppedScan {
