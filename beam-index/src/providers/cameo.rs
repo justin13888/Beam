@@ -546,7 +546,10 @@ mod tests {
         assert_eq!(enrichment.anilist_id, None);
         assert_eq!(enrichment.imdb_id.as_deref(), Some("tt0133093"));
         assert_eq!(enrichment.year, Some(1999));
-        assert!(enrichment.release_date.is_some());
+        assert_eq!(
+            enrichment.release_date,
+            chrono::NaiveDate::from_ymd_opt(1999, 3, 31)
+        );
         assert_eq!(enrichment.runtime_mins, Some(136));
         assert_eq!(enrichment.rating, Some(8.7_f32));
         assert_eq!(enrichment.collection, None, "a movie in no collection");
@@ -1108,8 +1111,10 @@ mod tests {
             anilist_enabled: true,
             metadata_language: None,
         };
-        let client = build_client(config).unwrap();
-        assert!(client.is_some());
+        let client = build_client(config)
+            .unwrap()
+            .expect("AniList is configured");
+        assert_eq!(client.provider_ids(), ["anilist"]);
     }
 
     #[test]
@@ -1121,8 +1126,8 @@ mod tests {
             anilist_enabled: false,
             metadata_language: Some("en-US".to_string()),
         };
-        let client = build_client(config).unwrap();
-        assert!(client.is_some());
+        let client = build_client(config).unwrap().expect("TMDB is configured");
+        assert_eq!(client.provider_ids(), ["tmdb"]);
     }
 
     #[test]
@@ -1153,7 +1158,7 @@ mod tests {
             anilist_enabled: false,
             metadata_language: Some("   ".to_string()),
         };
-        let client = build_client(config).unwrap();
-        assert!(client.is_some());
+        let client = build_client(config).unwrap().expect("TMDB is configured");
+        assert_eq!(client.provider_ids(), ["tmdb"]);
     }
 }

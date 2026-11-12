@@ -815,6 +815,12 @@ async fn a_renamed_file_keeps_its_row_through_a_scan() {
         (after.duration, after.status, after.classifier_version),
         (before.duration, before.status, before.classifier_version)
     );
+    assert_eq!(
+        (after.hash, after.size_bytes),
+        (before.hash, before.size_bytes),
+        "the row carries the content it followed"
+    );
+    assert_eq!(after.size_bytes, std::fs::metadata(&new).unwrap().len());
     assert!(
         h.row(&old).await.is_none(),
         "nothing is left at the old path"
@@ -983,9 +989,11 @@ async fn a_renamed_file_keeps_its_row_whichever_watcher_event_comes_first() {
             ReconcileOutcome::Done
         );
 
+        let after = h.present(&new).await;
+        assert_eq!(after.id, before.id, "old first: {old_first}");
         assert_eq!(
-            h.present(&new).await.id,
-            before.id,
+            (after.hash, after.size_bytes),
+            (before.hash, before.size_bytes),
             "old first: {old_first}"
         );
         assert!(h.row(&old).await.is_none());

@@ -16,7 +16,8 @@ use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
 use beam_domain::services::TestClock;
 
 use super::*;
-use crate::services::watcher::{FsEvent, InMemoryFsWatcher};
+use crate::services::watcher::{FsEvent, InMemoryFsWatcher, WatchError};
+use std::path::Path;
 
 /// Records every call the loops make, so a test can assert on ordering and
 /// counts rather than on a fake's internals.
@@ -542,6 +543,141 @@ async fn a_failed_reconcile_does_not_stop_the_consumer() {
     );
 
     tasks.abort();
+}
+
+/// A watcher whose event stream the test closes: [`FsWatcher::next_event`]
+/// answers what was emitted, then `None` once [`Self::close`] has run.
+#[derive(Debug)]
+struct ClosableWatcher {
+    sender: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<FsEvent>>>,
+    receiver: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<FsEvent>>,
+}
+
+impl ClosableWatcher {
+    fn new() -> Self {
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        Self {
+            sender: std::sync::Mutex::new(Some(sender)),
+            receiver: tokio::sync::Mutex::new(receiver),
+        }
+    }
+
+    fn emit(&self, path: &str) {
+        let sender = self.sender.lock().unwrap();
+        sender
+            .as_ref()
+            .expect("not closed yet")
+            .send(FsEvent {
+                library_id: Uuid::nil(),
+                path: PathBuf::from(path),
+                kind: FsEventKind::Created,
+            })
+            .unwrap();
+    }
+
+    fn close(&self) {
+        self.sender.lock().unwrap().take();
+    }
+}
+
+#[async_trait::async_trait]
+impl FsWatcher for ClosableWatcher {
+    fn watch_library(&self, _library_id: Uuid, _root: &Path) -> Result<WatchMode, WatchError> {
+        Ok(WatchMode::Native)
+    }
+
+    fn unwatch_library(&self, _library_id: Uuid) -> Result<(), WatchError> {
+        Ok(())
+    }
+
+    fn poll_once(&self) -> Vec<Uuid> {
+        Vec::new()
+    }
+
+    fn registered_libraries(&self) -> Vec<Uuid> {
+        Vec::new()
+    }
+
+    async fn next_event(&self) -> Option<FsEvent> {
+        self.receiver.lock().await.recv().await
+    }
+}
+
+/// The consumer stops once the watcher closes, wherever it is waiting: for
+/// a first event, inside a burst's debounce window -- whose events it
+/// reconciles before stopping, without waiting the window out -- and with
+/// a deferred event still to retry, which is dropped. The clock never
+/// moves, so only the close can end it.
+#[tokio::test]
+async fn the_consumer_stops_when_the_watcher_closes() {
+    struct Case {
+        name: &'static str,
+        emitted: &'static [&'static str],
+        deferred: Option<&'static str>,
+        reconciled: &'static [&'static str],
+    }
+    let cases = [
+        Case {
+            name: "waiting for a first event",
+            emitted: &[],
+            deferred: None,
+            reconciled: &[],
+        },
+        Case {
+            name: "inside a burst's debounce window",
+            emitted: &["/videos/a.mkv", "/videos/b.mkv"],
+            deferred: None,
+            reconciled: &["/videos/a.mkv", "/videos/b.mkv"],
+        },
+        Case {
+            name: "with a deferred event to retry",
+            emitted: &["/videos/a.mkv"],
+            deferred: Some("/videos/a.mkv"),
+            reconciled: &["/videos/a.mkv"],
+        },
+    ];
+    for Case {
+        name,
+        emitted,
+        deferred,
+        reconciled,
+    } in cases
+    {
+        let indexer = Arc::new(RecordingIndexer::default());
+        if let Some(path) = deferred {
+            indexer.defer_next(path, Duration::from_secs(30));
+        }
+        let clock = Arc::new(TestClock::new());
+        let watcher = Arc::new(ClosableWatcher::new());
+        for path in emitted {
+            watcher.emit(path);
+        }
+        watcher.close();
+
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            run_watch_consumer(
+                watcher,
+                indexer.clone(),
+                clock.clone(),
+                Duration::from_millis(2000),
+            ),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{name}: the consumer stops"));
+
+        let mut paths: Vec<PathBuf> = indexer
+            .reconciled()
+            .into_iter()
+            .map(|(_, path, _)| path)
+            .collect();
+        paths.sort();
+        assert_eq!(
+            paths,
+            reconciled.iter().map(PathBuf::from).collect::<Vec<_>>(),
+            "{name}"
+        );
+    }
 }
 
 /// An event the indexer defers -- a scan holds its library, or its file is

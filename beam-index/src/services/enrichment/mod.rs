@@ -1687,6 +1687,81 @@ mod tests {
         assert_eq!(report.processed, 0);
     }
 
+    /// The worker sweeps at once, then waits: a title queued meanwhile waits
+    /// for the interval, unless the worker is poked, when it is swept at once.
+    /// The injected clock never moves here, so only the poke can wake it.
+    #[tokio::test]
+    async fn a_poke_starts_the_next_sweep_without_waiting_for_the_interval() {
+        // No candidate for anything: a swept title ends unmatched.
+        let (service, movie_repo, _show_repo, state_repo, _genre_repo, clock) =
+            harness(InMemoryEnrichmentProvider::new(&["tmdb"]));
+        let queue = |title: &'static str| {
+            let movie_repo = movie_repo.clone();
+            let state_repo = state_repo.clone();
+            async move {
+                let movie = movie_repo
+                    .find_or_create_by_identity(CreateMovie::new(title.to_string(), None, None))
+                    .await
+                    .unwrap();
+                let target = EnrichmentTargetId::Movie(movie.id);
+                state_repo.ensure_pending(target).await.unwrap();
+                target
+            }
+        };
+        let status = |target: EnrichmentTargetId| {
+            let state_repo = state_repo.clone();
+            async move {
+                state_repo
+                    .find_by_target(target)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .status
+            }
+        };
+        let first = queue("Heat").await;
+        let poke = service.notify_handle();
+        let service = Arc::new(service);
+        let worker = tokio::spawn({
+            let service = service.clone();
+            async move { service.run(Duration::from_secs(3600)).await }
+        });
+
+        // Bounded only against a hang; nothing here is ordered by time.
+        let swept = |target| async move {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while status(target).await != EnrichmentStatus::Unmatched {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .is_ok()
+        };
+        assert!(swept(first).await, "the first sweep runs at once");
+        // The worker is now waiting on the interval or a poke.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while clock.waiter_count() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the worker waits on the interval");
+
+        let second = queue("Alien").await;
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            status(second).await,
+            EnrichmentStatus::Pending,
+            "unpoked, the worker waits out the interval"
+        );
+
+        poke.notify_one();
+        assert!(swept(second).await, "a poke sweeps at once");
+        worker.abort();
+    }
+
     #[tokio::test]
     async fn successful_movie_match_applies_enrichment_and_genres() {
         let hit = MovieSearchHit {
