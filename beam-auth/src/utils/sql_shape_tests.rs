@@ -1,6 +1,6 @@
 //! Hermetic assertions on the SQL these stores generate.
 //!
-//! The behavioural contracts in `contract.rs` say what the stores *do*; run
+//! The behavioural contracts in `contract/` say what the stores *do*; run
 //! against the in-memory double they cannot say anything about the statements
 //! the SQL implementations send. The `pg-integration` tier can, but it is
 //! opt-in and needs a database. `sea_orm::MockDatabase` records the statement
@@ -330,17 +330,56 @@ mod session_store {
         drop(store);
 
         let sql = statements(db);
-        assert_contains(&sql[0], r#"INSERT INTO "sessions""#);
-        assert_bound(&sql[0], "203.0.113.7");
+        assert_contains(&sql[1], r#"INSERT INTO "sessions""#);
+        assert_bound(&sql[1], "203.0.113.7");
         // A 64-character hex digest is bound; the 43-character URL-safe base64
         // token never is.
-        let values = bound_values(&sql[0]);
+        let values = bound_values(&sql[1]);
         assert!(
             values.iter().any(|v| {
                 v.len() >= 64 && v.chars().filter(|c| c.is_ascii_hexdigit()).count() >= 64
             }),
             "expected a SHA-256 digest among {values:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn creating_a_session_sweeps_sessions_past_either_deadline_before_inserting() {
+        let db = connection(empty_mock());
+        let store = PgSessionStore::with_clock(db.clone(), clock());
+        let _ = store.create(&session(Uuid::from_u128(3)), 100, 200).await;
+        drop(store);
+
+        let sql = statements(db);
+        assert_contains(&sql[0], r#"DELETE FROM "sessions""#);
+        assert_filters(&sql[0], "sessions", "idle_expires_at", "<");
+        assert_filters(&sql[0], "sessions", "absolute_expires_at", "<");
+        // Either deadline alone marks a session dead, so the two are OR-ed.
+        assert_contains(&sql[0], " OR ");
+        assert_not_bound(&sql[0], &Uuid::from_u128(3).to_string());
+        assert_contains(&sql[1], r#"INSERT INTO "sessions""#);
+    }
+
+    #[tokio::test]
+    async fn a_malformed_user_id_issues_no_statement_at_all() {
+        // Refused before the sweep, not just before the insert: a bad call
+        // must not write anything.
+        let db = connection(empty_mock());
+        let store = PgSessionStore::with_clock(db.clone(), clock());
+        let created = store
+            .create(
+                &crate::utils::session_store::SessionData {
+                    user_id: "not-a-uuid".to_string(),
+                    ..session(Uuid::from_u128(3))
+                },
+                100,
+                200,
+            )
+            .await;
+        drop(store);
+
+        assert!(created.is_err(), "{created:?}");
+        assert!(statements(db).is_empty());
     }
 
     #[tokio::test]
@@ -437,7 +476,7 @@ mod pending_auth_store {
     use crate::utils::pending_auth_store::{PendingAuthStore, SqlPendingAuthStore};
 
     #[tokio::test]
-    async fn starting_a_login_persists_the_state_nonce_and_verifier() {
+    async fn starting_a_login_sweeps_expired_states_then_persists_the_state_nonce_and_verifier() {
         let db = connection(empty_mock());
         let store = SqlPendingAuthStore::with_clock(db.clone(), clock());
         let pending = pending_auth("state-token");
@@ -445,14 +484,17 @@ mod pending_auth_store {
         drop(store);
 
         let sql = statements(db);
-        assert_contains(&sql[0], r#"INSERT INTO "pending_auths""#);
+        assert_contains(&sql[0], r#"DELETE FROM "pending_auths""#);
+        assert_filters(&sql[0], "pending_auths", "expires_at", "<");
+        assert_not_bound(&sql[0], "state-token");
+        assert_contains(&sql[1], r#"INSERT INTO "pending_auths""#);
         for value in [
             pending.state.as_str(),
             pending.nonce.as_str(),
             pending.pkce_verifier.as_str(),
             "/libraries",
         ] {
-            assert_bound(&sql[0], value);
+            assert_bound(&sql[1], value);
         }
     }
 
@@ -654,6 +696,12 @@ mod expiry_rules {
         offset(at).to_rfc3339_opts(chrono::SecondsFormat::Secs, false)
     }
 
+    /// A bound `DateTime<Utc>` -- what a filter compared against the clock
+    /// binds -- as sea-orm renders it in its debug form.
+    fn bound_utc_instant(at: DateTime<Utc>) -> String {
+        at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    }
+
     fn session_row(
         idle_expires_at: DateTime<Utc>,
         absolute_expires_at: DateTime<Utc>,
@@ -741,13 +789,37 @@ mod expiry_rules {
 
         let sql = statements(db);
         assert_bound(
-            &sql[0],
+            &sql[1],
             &bound_instant(now() + chrono::Duration::seconds(3_600)),
         );
         assert_bound(
-            &sql[0],
+            &sql[1],
             &bound_instant(now() + chrono::Duration::seconds(86_400)),
         );
+    }
+
+    #[tokio::test]
+    async fn the_session_sweep_cuts_off_at_now() {
+        // Bound against the deadlines with `<`, `now` sweeps exactly the
+        // sessions `get` already refuses. A later cutoff would delete live
+        // sessions; an earlier one would leave dead ones behind.
+        let db = connection(empty_mock());
+        let store = PgSessionStore::with_clock(db.clone(), clock());
+        let _ = store
+            .create(
+                &crate::utils::session_store::test_utils::session_for(Uuid::from_u128(2)),
+                3_600,
+                86_400,
+            )
+            .await;
+        drop(store);
+
+        let sql = statements(db);
+        let values = bound_values(&sql[0]);
+        assert_eq!(values.len(), 2, "{values:?}");
+        for value in &values {
+            assert!(value.contains(&bound_utc_instant(now())), "{values:?}");
+        }
     }
 
     #[tokio::test]
@@ -855,8 +927,28 @@ mod expiry_rules {
 
         let sql = statements(db);
         assert_bound(
-            &sql[0],
+            &sql[1],
             &bound_instant(now() + chrono::Duration::seconds(600)),
         );
+    }
+
+    #[tokio::test]
+    async fn the_pending_state_sweep_cuts_off_at_now() {
+        // `consume` refuses exactly the states whose deadline is before now,
+        // so that is the only cutoff that sweeps dead logins and no live one.
+        let db = connection(empty_mock());
+        let store = SqlPendingAuthStore::with_clock(db.clone(), clock());
+        let _ = store
+            .create(
+                &crate::utils::pending_auth_store::test_utils::pending_auth("state-token"),
+                600,
+            )
+            .await;
+        drop(store);
+
+        let sql = statements(db);
+        let values = bound_values(&sql[0]);
+        assert_eq!(values.len(), 1, "{values:?}");
+        assert!(values[0].contains(&bound_utc_instant(now())), "{values:?}");
     }
 }

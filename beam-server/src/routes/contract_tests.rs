@@ -18,6 +18,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use kynos::openapi::{SpecError, SpecVersion};
+    use kynos::router::error::RouterError;
 
     use crate::bootstrap::AllowedOrigins;
     use crate::config::ServerConfig;
@@ -65,9 +66,9 @@ mod tests {
             .validate()
             .expect("the router is describable");
 
-        let (unchecked, other): (Vec<_>, Vec<_>) = violations
-            .into_iter()
-            .partition(|violation| violation.error == SpecError::UncheckedSchema);
+        let (unchecked, other): (Vec<_>, Vec<_>) = violations.into_iter().partition(|violation| {
+            violation.error == RouterError::Spec(SpecError::UncheckedSchema)
+        });
 
         assert!(
             other.is_empty(),
@@ -287,7 +288,7 @@ mod tests {
                 .send()
                 .await
                 .assert_status(StatusCode::FORBIDDEN)
-                .assert_problem_type(crate::routes::api_error::ADMIN_REQUIRED);
+                .assert_problem_type(crate::routes::session_auth::ADMIN_REQUIRED);
         }
     }
 

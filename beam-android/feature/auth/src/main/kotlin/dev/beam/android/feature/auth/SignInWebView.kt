@@ -8,9 +8,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
+import uniffi.beam_client_core.sessionCookieName
 
-/** The cookie `beam-server` issues and reads. */
-internal const val SESSION_COOKIE: String = "beam_session"
+/** The cookie `beam-server` issues and reads, named by the core that sends it. */
+internal val SESSION_COOKIE: String = sessionCookieName()
 
 /**
  * The OIDC sign-in flow, hosted in an in-app browser.

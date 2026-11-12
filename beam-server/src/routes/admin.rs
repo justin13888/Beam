@@ -27,22 +27,23 @@ use crate::models::{
     LibraryTelemetryPreview, PageInfo, PlaybackTelemetryReport, RecentScan, ScanJob,
     UpdateAdminUserRequest, UserAccess, WatcherStatus,
 };
+use crate::routes::access::caller_access;
 use crate::routes::api_error::{
-    AdminAuth, AdminListError, AdminUserError, InternalError, LibraryCreateError,
-    LibraryFilesError, LibraryRefError, LibraryScanError, LibraryScanReadError, MediaRefreshError,
-    PlaybackTelemetryReportError, ServerFault, SessionAuth, UserAccessReadError,
-    UserAccessUpdateError,
+    AdminListError, AdminUserError, InternalError, LibraryCreateError, LibraryFilesError,
+    LibraryRefError, LibraryScanError, LibraryScanReadError, MediaRefreshError,
+    PlaybackTelemetryReportError, ServerFault, UserAccessReadError, UserAccessUpdateError,
 };
-use crate::routes::playback::{caller_access, page_size};
+use crate::routes::session_auth::{AdminAuth, SessionAuth};
 use crate::routes::tags::Admin;
+use crate::services::admin_users::AdminUsersError;
+use crate::services::cursor;
+use crate::services::cursor::offset::OffsetList;
 use crate::services::library::LibraryError;
-use crate::services::library_files_cursor;
-use crate::services::offset_cursor::{self, OffsetList};
+use crate::services::paging::page_size;
 use crate::services::playback_telemetry::ReportError;
 use crate::services::telemetry::LibraryReportPreview;
 use crate::state::AppState;
 use beam_domain::models::AdminLogCategory;
-use beam_domain::models::access::{AccessPolicy, ContentRating, LibraryAccess};
 use beam_index::services::admin_log::record_admin_action;
 use beam_index::services::enrichment::control::{ControlError, RefreshScope};
 
@@ -71,6 +72,43 @@ impl From<ControlError> for MediaRefreshError {
             | ControlError::Provider(_)
             | ControlError::Db(_)
             | ControlError::Index(_) => Self::Internal(ServerFault::new(err)),
+        }
+    }
+}
+
+impl From<AdminUsersError> for AdminUserError {
+    fn from(err: AdminUsersError) -> Self {
+        match err {
+            AdminUsersError::UserNotFound(_) => Self::UserNotFound(err.to_string()),
+            AdminUsersError::CannotDisableSelf => Self::CannotDisableSelf(err.to_string()),
+            AdminUsersError::Internal(cause) => Self::Internal(ServerFault::new(cause)),
+            // Unreachable: changing the `disabled` flag names no access policy.
+            AdminUsersError::InvalidAccess(_) => Self::Internal(ServerFault::new(err)),
+        }
+    }
+}
+
+impl From<AdminUsersError> for UserAccessReadError {
+    fn from(err: AdminUsersError) -> Self {
+        match err {
+            AdminUsersError::UserNotFound(_) => Self::UserNotFound(err.to_string()),
+            AdminUsersError::Internal(cause) => Self::Internal(ServerFault::new(cause)),
+            // Unreachable: reading a policy changes nothing.
+            AdminUsersError::CannotDisableSelf | AdminUsersError::InvalidAccess(_) => {
+                Self::Internal(ServerFault::new(err))
+            }
+        }
+    }
+}
+
+impl From<AdminUsersError> for UserAccessUpdateError {
+    fn from(err: AdminUsersError) -> Self {
+        match err {
+            AdminUsersError::UserNotFound(_) => Self::UserNotFound(err.to_string()),
+            AdminUsersError::InvalidAccess(errors) => Self::ValidationFailed { errors },
+            AdminUsersError::Internal(cause) => Self::Internal(ServerFault::new(cause)),
+            // Unreachable: replacing a policy does not touch the `disabled` flag.
+            AdminUsersError::CannotDisableSelf => Self::Internal(ServerFault::new(err)),
         }
     }
 }
@@ -174,7 +212,7 @@ async fn record_change(
         state.services.admin_log.as_ref(),
         AdminLogCategory::System,
         message,
-        &auth.0.user_id,
+        &auth.0.user_id.to_string(),
         details,
     )
     .await;
@@ -275,7 +313,7 @@ pub async fn list_libraries(
     let libraries = state
         .services
         .library
-        .get_libraries(auth.0.user_id.clone())
+        .get_libraries()
         .await
         .map_err(|e| InternalError::Internal(ServerFault::new(e)))?
         .into_iter()
@@ -337,11 +375,11 @@ pub async fn get_library_files(
         )));
     }
     let FilesQuery { first, after } = query;
-    let first =
-        page_size(first, FILES_DEFAULT, FILES_MAX).map_err(LibraryFilesError::InvalidPagination)?;
+    let first = page_size(first, FILES_DEFAULT, FILES_MAX, "items")
+        .map_err(LibraryFilesError::InvalidPagination)?;
     let after = after
         .as_deref()
-        .map(|cursor| library_files_cursor::decode(path.id, cursor))
+        .map(|cursor| cursor::library_files::decode(path.id, cursor))
         .transpose()
         .map_err(|err| LibraryFilesError::InvalidCursor(err.to_string()))?;
     let has_previous_page = after.is_some();
@@ -351,7 +389,7 @@ pub async fn get_library_files(
         .library
         .get_library_files(path.id, after, first)
         .await?;
-    let cursor = |file: &LibraryFile| library_files_cursor::encode(path.id, &file.path, file.id);
+    let cursor = |file: &LibraryFile| cursor::library_files::encode(path.id, &file.path, file.id);
     Ok(Json(LibraryFileConnection {
         page_info: PageInfo {
             has_next_page: page.has_next_page,
@@ -494,7 +532,7 @@ pub async fn refresh_media_metadata(
         .refresh(
             RefreshScope::Title(path.id),
             rematch.unwrap_or(false),
-            &auth.0.user_id,
+            &auth.0.user_id.to_string(),
         )
         .await?;
     Ok(NoContent)
@@ -541,13 +579,13 @@ pub async fn get_admin_logs(
     Query(query): Query<LogsQuery>,
     Inject(state): Inject<AppState>,
 ) -> Result<Json<AdminLogConnection>, AdminListError> {
-    let internal = |e: crate::services::admin_log::AdminLogError| {
+    let internal = |e: beam_index::services::admin_log::AdminLogError| {
         AdminListError::Internal(ServerFault::new(e))
     };
     let LogsQuery { first, after } = query;
-    let first =
-        page_size(first, LOGS_DEFAULT, LOGS_MAX).map_err(AdminListError::InvalidPagination)?;
-    let offset = offset_cursor::start_after(OffsetList::AdminLogs, after.as_deref())
+    let first = page_size(first, LOGS_DEFAULT, LOGS_MAX, "items")
+        .map_err(AdminListError::InvalidPagination)?;
+    let offset = cursor::offset::start_after(OffsetList::AdminLogs, after.as_deref())
         .map_err(|err| AdminListError::InvalidCursor(err.to_string()))?;
     // The log service pages by a `u32` offset; one past it has no rows.
     let logs = match u32::try_from(offset) {
@@ -562,7 +600,7 @@ pub async fn get_admin_logs(
     let total = state.services.admin_log.count().await.map_err(internal)?;
 
     Ok(Json(AdminLogConnection {
-        page_info: offset_cursor::page_info(OffsetList::AdminLogs, offset, logs.len(), total),
+        page_info: cursor::offset::page_info(OffsetList::AdminLogs, offset, logs.len(), total),
         items: logs.into_iter().map(AdminLogEntry::from).collect(),
         total,
     }))
@@ -636,7 +674,7 @@ pub async fn stream_admin_events(
     _auth: AdminAuth,
     Inject(state): Inject<AppState>,
 ) -> WithHeaders<
-    Sse<impl futures_core::Stream<Item = Result<Event<AdminEvent>, Infallible>>>,
+    Sse<impl kynos::response::stream::Stream<Item = Result<Event<AdminEvent>, Infallible>>>,
     StreamHeaders,
 > {
     let mut receiver = state.services.notification.subscribe();
@@ -691,9 +729,9 @@ pub async fn list_admin_users(
     let internal = |e: sea_orm::DbErr| AdminListError::Internal(ServerFault::new(e));
 
     let UsersQuery { first, after } = query;
-    let first =
-        page_size(first, USERS_DEFAULT, USERS_MAX).map_err(AdminListError::InvalidPagination)?;
-    let offset = offset_cursor::start_after(OffsetList::AdminUsers, after.as_deref())
+    let first = page_size(first, USERS_DEFAULT, USERS_MAX, "items")
+        .map_err(AdminListError::InvalidPagination)?;
+    let offset = cursor::offset::start_after(OffsetList::AdminUsers, after.as_deref())
         .map_err(|err| AdminListError::InvalidCursor(err.to_string()))?;
 
     let items = state
@@ -705,7 +743,7 @@ pub async fn list_admin_users(
     let total = state.services.user_repo.count().await.map_err(internal)?;
 
     Ok(Json(AdminUserConnection {
-        page_info: offset_cursor::page_info(OffsetList::AdminUsers, offset, items.len(), total),
+        page_info: cursor::offset::page_info(OffsetList::AdminUsers, offset, items.len(), total),
         items: items.into_iter().map(AdminUser::from).collect(),
         total,
     }))
@@ -727,53 +765,24 @@ pub async fn update_admin_user(
     Inject(state): Inject<AppState>,
     Json(body): Json<UpdateAdminUserRequest>,
 ) -> Result<NoContent, AdminUserError> {
-    let internal = |e: sea_orm::DbErr| AdminUserError::Internal(ServerFault::new(e));
-
-    let target = state
+    let UpdateAdminUserRequest { disabled } = body;
+    let revoked_sessions = state
         .services
-        .user_repo
-        .find_by_id(path.id)
-        .await
-        .map_err(internal)?
-        .ok_or_else(|| AdminUserError::UserNotFound(format!("user {} not found", path.id)))?;
-
-    if body.disabled && target.id.to_string() == auth.0.user_id {
-        return Err(AdminUserError::CannotDisableSelf(
-            "cannot disable your own account".to_owned(),
-        ));
-    }
-
-    state
-        .services
-        .user_repo
-        .set_disabled(target.id, body.disabled)
-        .await
-        .map_err(internal)?;
-
-    let revoked_sessions = if body.disabled {
-        // Revoke every live session so the disable takes effect immediately,
-        // not just at the next login attempt.
-        state
-            .services
-            .session_store
-            .delete_all_for_user(&target.id.to_string())
-            .await
-            .map_err(|e| AdminUserError::Internal(ServerFault::new(e)))?
-    } else {
-        0
-    };
+        .admin_users()
+        .set_disabled(auth.0.user_id, path.id, disabled)
+        .await?;
 
     record_change(
         &state,
         &auth,
         format!(
             "{} account {}",
-            if body.disabled { "Disabled" } else { "Enabled" },
-            target.id
+            if disabled { "Disabled" } else { "Enabled" },
+            path.id
         ),
         serde_json::json!({
-            "target_user_id": target.id,
-            "disabled": body.disabled,
+            "target_user_id": path.id,
+            "disabled": disabled,
             "revoked_sessions": revoked_sessions,
         }),
     )
@@ -797,21 +806,7 @@ pub async fn get_admin_user_access(
     Path(path): Path<UserPath>,
     Inject(state): Inject<AppState>,
 ) -> Result<Json<UserAccess>, UserAccessReadError> {
-    let internal = |e: sea_orm::DbErr| UserAccessReadError::Internal(ServerFault::new(e));
-
-    let target = state
-        .services
-        .user_repo
-        .find_by_id(path.id)
-        .await
-        .map_err(internal)?
-        .ok_or_else(|| UserAccessReadError::UserNotFound(format!("user {} not found", path.id)))?;
-    let policy = state
-        .services
-        .access
-        .policy(target.id)
-        .await
-        .map_err(internal)?;
+    let policy = state.services.admin_users().access(path.id).await?;
     Ok(Json(UserAccess::from(policy)))
 }
 
@@ -833,70 +828,18 @@ pub async fn set_admin_user_access(
     Inject(state): Inject<AppState>,
     Json(body): Json<UserAccess>,
 ) -> Result<Json<UserAccess>, UserAccessUpdateError> {
-    let internal = |e: sea_orm::DbErr| UserAccessUpdateError::Internal(ServerFault::new(e));
-
-    let target = state
+    let policy = state
         .services
-        .user_repo
-        .find_by_id(path.id)
-        .await
-        .map_err(internal)?
-        .ok_or_else(|| {
-            UserAccessUpdateError::UserNotFound(format!("user {} not found", path.id))
-        })?;
-
-    let UserAccess {
-        all_libraries,
-        library_ids,
-        max_content_rating,
-    } = body;
-    let mut errors = Vec::new();
-    if all_libraries && !library_ids.is_empty() {
-        errors.push(FieldError {
-            pointer: "/library_ids".to_owned(),
-            detail: "must be empty when all_libraries is true".to_owned(),
-        });
-    }
-    for (index, library_id) in library_ids.iter().enumerate() {
-        if state
-            .services
-            .library_repo
-            .find_by_id(*library_id)
-            .await
-            .map_err(internal)?
-            .is_none()
-        {
-            errors.push(FieldError {
-                pointer: format!("/library_ids/{index}"),
-                detail: format!("no library has the id {library_id}"),
-            });
-        }
-    }
-    if !errors.is_empty() {
-        return Err(UserAccessUpdateError::ValidationFailed { errors });
-    }
-
-    let policy = AccessPolicy {
-        libraries: if all_libraries {
-            LibraryAccess::All
-        } else {
-            LibraryAccess::Only(library_ids.into_iter().collect())
-        },
-        max_rating: max_content_rating.map(ContentRating::from),
-    };
-    state
-        .services
-        .access
-        .replace(target.id, &policy)
-        .await
-        .map_err(internal)?;
+        .admin_users()
+        .set_access(path.id, body)
+        .await?;
     let stored = UserAccess::from(policy);
     record_change(
         &state,
         &auth,
-        format!("Set the access of account {}", target.id),
+        format!("Set the access of account {}", path.id),
         serde_json::json!({
-            "target_user_id": target.id,
+            "target_user_id": path.id,
             "access": &stored,
         }),
     )
@@ -1070,6 +1013,14 @@ pub async fn get_playback_telemetry(
 #[cfg(test)]
 #[path = "admin_tests.rs"]
 mod admin_tests;
+
+#[cfg(test)]
+#[path = "admin_logs_tests.rs"]
+mod admin_logs_tests;
+
+#[cfg(test)]
+#[path = "admin_users_tests.rs"]
+mod admin_users_tests;
 
 #[cfg(test)]
 #[path = "admin_telemetry_tests.rs"]

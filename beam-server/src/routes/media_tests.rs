@@ -1,4 +1,5 @@
-//! Subcutaneous tests for the `/v1/media` browse, detail and sources routes.
+//! Subcutaneous tests for the `/v1/media` detail and sources routes, and the
+//! fixtures the browse tests in `media_browse_tests.rs` share.
 //!
 //! The router, the handlers and the session scheme are the real ones; only the
 //! metadata service below the trait line is a double, because every case these
@@ -14,16 +15,16 @@ use kynos::http::StatusCode;
 use kynos::prelude::*;
 use kynos::test::TestClient;
 
+use crate::models::search::{MediaConnection, PageInfo};
 use crate::models::{MediaMetadata, MediaSource, MediaSourceConnection, MovieMetadata, Title};
 use crate::routes::media::{browse_media, get_media_detail, get_media_sources};
 use crate::routes::test_support::make_app_state;
 use crate::services::metadata::{
-    BrowseRequest, DbMetadataService, MediaConnection, MetadataError, MetadataRepositories,
-    MetadataService, PageInfo,
+    BrowseRequest, DbMetadataService, MetadataError, MetadataRepositories, MetadataService,
 };
 use crate::state::{AppServices, AppState};
 
-const MOVIE_ID: &str = "22222222-2222-2222-2222-222222222222";
+pub(super) const MOVIE_ID: &str = "22222222-2222-2222-2222-222222222222";
 const SHOW_ID: &str = "44444444-4444-4444-4444-444444444444";
 const FILE_ID: &str = "33333333-3333-3333-3333-333333333333";
 
@@ -33,7 +34,7 @@ const FILE_ID: &str = "33333333-3333-3333-3333-333333333333";
 /// the projection of this service onto HTTP, so the interesting cases are the
 /// ones only a configurable one can produce.
 #[derive(Debug, Default)]
-struct StubMetadataService {
+pub(super) struct StubMetadataService {
     metadata: HashMap<String, MediaMetadata>,
     sources: HashMap<String, Vec<MediaSource>>,
     unsupported: HashMap<String, String>,
@@ -101,65 +102,37 @@ impl MetadataService for StubMetadataService {
 
 /// `test_support`'s state with the metadata service swapped for the one this
 /// test configured, so the stubs the media routes never touch stay shared.
-fn state_with(metadata: StubMetadataService) -> AppState {
+pub(super) fn state_with(metadata: StubMetadataService) -> AppState {
     state_with_service(Arc::new(metadata))
 }
 
 /// [`state_with`] for any metadata service, the real one included.
-fn state_with_service(metadata: Arc<dyn MetadataService>) -> AppState {
+pub(super) fn state_with_service(metadata: Arc<dyn MetadataService>) -> AppState {
     state_over(make_app_state(), metadata)
 }
 
-/// `base` with `metadata` as its metadata service, and fresh subtitle,
-/// watcher and telemetry services.
+/// `base` with `metadata` as its metadata service, every other seam shared.
 fn state_over(base: AppState, metadata: Arc<dyn MetadataService>) -> AppState {
     let access = base.services.access.clone();
     state_over_access(base, metadata, access)
 }
 
 /// [`state_over`] with the access service chosen too.
-fn state_over_access(
+pub(super) fn state_over_access(
     base: AppState,
     metadata: Arc<dyn MetadataService>,
     access: Arc<crate::services::access::AccessService>,
 ) -> AppState {
     let services = AppServices {
-        hash: base.services.hash.clone(),
         access,
-        library: base.services.library.clone(),
         metadata,
-        subtitles: crate::routes::test_support::idle_subtitles(),
-        notification: base.services.notification.clone(),
-        admin_log: base.services.admin_log.clone(),
-        user_repo: base.services.user_repo.clone(),
-        language_preferences: base.services.language_preferences.clone(),
-        playback: base.services.playback.clone(),
-        genre_repo: base.services.genre_repo.clone(),
-        library_repo: base.services.library_repo.clone(),
-        file_repo: base.services.file_repo.clone(),
-        enrichment_repo: base.services.enrichment_repo.clone(),
-        enrichment_control: base.services.enrichment_control.clone(),
-        people: base.services.people.clone(),
-        lists: base.services.lists.clone(),
-        collections: base.services.collections.clone(),
-        movie_repo: base.services.movie_repo.clone(),
-        show_repo: base.services.show_repo.clone(),
-        artwork: base.services.artwork.clone(),
-        session_store: base.services.session_store.clone(),
-        oidc_client: base.services.oidc_client.clone(),
-        pending_auth_store: base.services.pending_auth_store.clone(),
-        device_auth_store: base.services.device_auth_store.clone(),
-        oidc_config: base.services.oidc_config.clone(),
-        watch_status: Arc::new(beam_index::services::watch_status::WatchStatus::new()),
-        telemetry: crate::routes::test_support::idle_library_report(),
-        playback_telemetry: crate::routes::test_support::idle_playback_telemetry(),
-        trickplay: crate::routes::test_support::idle_trickplay(),
+        ..base.services.clone()
     };
 
     AppState::new(base.config.clone(), services, base.probe.clone(), None)
 }
 
-fn client(state: AppState) -> TestClient<AppState> {
+pub(super) fn client(state: AppState) -> TestClient<AppState> {
     let service = Router::new()
         .nest(
             "/v1",
@@ -177,7 +150,7 @@ fn client(state: AppState) -> TestClient<AppState> {
 
 /// Issues a session directly, bypassing the OIDC login flow, which is not what
 /// these tests are about.
-async fn seed_session(state: &AppState) -> String {
+pub(super) async fn seed_session(state: &AppState) -> String {
     session_for(state, uuid::Uuid::new_v4()).await
 }
 
@@ -342,73 +315,11 @@ async fn a_cookie_naming_no_session_is_not_a_session() {
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
-// ── GET /v1/media ────────────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn browsing_requires_a_session() {
-    let client = client(state_with(StubMetadataService::default()));
-
-    let response = client.get("/v1/media").send().await;
-
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-}
-
-/// `sort_by` and `sort_order` reach the browse order over the real metadata
-/// service: the same three titles come back in title order, in reverse title
-/// order, and in release order both ways -- four different orders, because
-/// the years (Blade 1990, Contact 1997, Arrival 2016) follow neither title
-/// order, so a parameter dropped on the way would show as one of the others.
-#[tokio::test]
-async fn sort_parameters_reach_the_browse_order() {
-    let library = Library::new();
-    let blade = indexed_movie_of(&library.movies, &library.files, "Blade", Some(1990))
-        .await
-        .0;
-    let arrival = indexed_movie_of(&library.movies, &library.files, "Arrival", Some(2016))
-        .await
-        .0;
-    let contact = indexed_movie_of(&library.movies, &library.files, "Contact", Some(1997))
-        .await
-        .0;
-    let (client, token) = signed_in_to(real_service(library)).await;
-
-    let order = |query: &'static str| {
-        let client = &client;
-        let token = token.clone();
-        async move {
-            let response = client
-                .get(&format!("/v1/media{query}"))
-                .cookie("beam_session", &token)
-                .send()
-                .await;
-            assert_eq!(response.status(), StatusCode::OK, "{query}");
-            response
-                .json::<MediaConnection>()
-                .items
-                .iter()
-                .map(item_id)
-                .collect::<Vec<_>>()
-        }
-    };
-
-    assert_eq!(order("").await, [arrival, blade, contact], "the default");
-    assert_eq!(
-        order("?sort_by=title&sort_order=desc").await,
-        [contact, blade, arrival]
-    );
-    assert_eq!(
-        order("?sort_by=year&sort_order=asc").await,
-        [blade, contact, arrival]
-    );
-    assert_eq!(
-        order("?sort_by=year&sort_order=desc").await,
-        [arrival, contact, blade]
-    );
-}
+// ── The real metadata service, shared with `media_browse_tests` ─────────────
 
 /// A movie titled `title` with one file behind it, through the same
 /// repository calls the indexer makes. Returns the movie's and the file's ids.
-async fn indexed_movie(
+pub(super) async fn indexed_movie(
     movies: &beam_domain::repositories::movie::in_memory::InMemoryMovieRepository,
     files: &beam_domain::repositories::file::in_memory::InMemoryFileRepository,
     title: &str,
@@ -417,7 +328,7 @@ async fn indexed_movie(
 }
 
 /// [`indexed_movie`], released in `year`.
-async fn indexed_movie_of(
+pub(super) async fn indexed_movie_of(
     movies: &beam_domain::repositories::movie::in_memory::InMemoryMovieRepository,
     files: &beam_domain::repositories::file::in_memory::InMemoryFileRepository,
     title: &str,
@@ -453,92 +364,27 @@ async fn indexed_movie_of(
     (movie.id, file.id)
 }
 
-/// Browse lists a title only while one of its files is present (issue #183):
-/// the moment its only file goes missing it leaves the listing, without
-/// waiting for a purge -- yet its own detail route still answers, so a
-/// bookmark or a continue-watching tile does not dangle while the file is
-/// away. Real metadata service, real repository doubles linked to one file
-/// store.
-#[tokio::test]
-async fn browse_omits_a_title_whose_only_file_is_missing_but_its_detail_still_resolves() {
-    use beam_domain::repositories::FileRepository;
-    use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
-    use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
-    use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
-
-    let files = Arc::new(InMemoryFileRepository::default());
-    let movies = Arc::new(InMemoryMovieRepository::with_files(files.clone()));
-    let (present, _) = indexed_movie(&movies, &files, "Arrival").await;
-    let (away, away_file) = indexed_movie(&movies, &files, "Contact").await;
-    files
-        .mark_missing(vec![away_file], chrono::Utc::now())
-        .await
-        .unwrap();
-
-    let state = state_with_service(real_service(Library {
-        movies: movies.clone(),
-        shows: Arc::new(InMemoryShowRepository::with_files(files.clone())),
-        genres: Arc::default(),
-        people: Arc::default(),
-        streams: Arc::default(),
-        sidecars: Arc::default(),
-        chapters: Arc::default(),
-        trickplay: Arc::default(),
-        files: files.clone(),
-    }));
-    let token = seed_session(&state).await;
-    let client = client(state);
-
-    let response = client
-        .get("/v1/media")
-        .cookie("beam_session", &token)
-        .send()
-        .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let body: MediaConnection = response.json();
-    let listed: Vec<uuid::Uuid> = body.items.iter().map(item_id).collect();
-    assert_eq!(listed, vec![present]);
-
-    let detail = client
-        .get(&format!("/v1/media/{away}"))
-        .cookie("beam_session", &token)
-        .send()
-        .await;
-    assert_eq!(
-        detail.status(),
-        StatusCode::OK,
-        "the hidden title still resolves"
-    );
-
-    // The file coming back puts the title back in the listing.
-    files.restore(away_file).await.unwrap();
-    let again: MediaConnection = client
-        .get("/v1/media")
-        .cookie("beam_session", &token)
-        .send()
-        .await
-        .json();
-    assert_eq!(again.items.len(), 2);
-}
-
 /// The doubles a real metadata service reads, linked to one file store so
 /// liveness is what the files say.
-struct Library {
-    files: Arc<beam_domain::repositories::file::in_memory::InMemoryFileRepository>,
-    movies: Arc<beam_domain::repositories::movie::in_memory::InMemoryMovieRepository>,
-    shows: Arc<beam_domain::repositories::show::in_memory::InMemoryShowRepository>,
-    genres: Arc<beam_domain::repositories::genre::in_memory::InMemoryGenreRepository>,
-    people: Arc<beam_domain::repositories::person::in_memory::InMemoryPersonRepository>,
-    streams: Arc<beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository>,
-    sidecars: Arc<
+pub(super) struct Library {
+    pub(super) files: Arc<beam_domain::repositories::file::in_memory::InMemoryFileRepository>,
+    pub(super) movies: Arc<beam_domain::repositories::movie::in_memory::InMemoryMovieRepository>,
+    pub(super) shows: Arc<beam_domain::repositories::show::in_memory::InMemoryShowRepository>,
+    pub(super) genres: Arc<beam_domain::repositories::genre::in_memory::InMemoryGenreRepository>,
+    pub(super) people: Arc<beam_domain::repositories::person::in_memory::InMemoryPersonRepository>,
+    pub(super) streams:
+        Arc<beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository>,
+    pub(super) sidecars: Arc<
         beam_domain::repositories::sidecar_subtitle::in_memory::InMemorySidecarSubtitleRepository,
     >,
-    chapters: Arc<beam_domain::repositories::chapter::in_memory::InMemoryChapterRepository>,
-    trickplay: Arc<beam_domain::repositories::trickplay::in_memory::InMemoryTrickplayRepository>,
+    pub(super) chapters:
+        Arc<beam_domain::repositories::chapter::in_memory::InMemoryChapterRepository>,
+    pub(super) trickplay:
+        Arc<beam_domain::repositories::trickplay::in_memory::InMemoryTrickplayRepository>,
 }
 
 impl Library {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let files =
             Arc::new(beam_domain::repositories::file::in_memory::InMemoryFileRepository::default());
         Self {
@@ -564,7 +410,7 @@ impl Library {
 
     /// A show titled `title` with one episode file, enriched with a rating
     /// and identifiers, and tagged with genres.
-    async fn indexed_show(&self, title: &str) -> uuid::Uuid {
+    pub(super) async fn indexed_show(&self, title: &str) -> uuid::Uuid {
         use beam_domain::models::{
             CreateEpisode, CreateMediaFile, CreateShow, FileStatus, MediaFileContent,
         };
@@ -621,7 +467,7 @@ impl Library {
 
 /// The real metadata service over `library`, its catalogue reading the same
 /// doubles.
-fn real_service(library: Library) -> Arc<dyn MetadataService> {
+pub(super) fn real_service(library: Library) -> Arc<dyn MetadataService> {
     real_service_over(
         &library,
         Arc::new(
@@ -635,7 +481,7 @@ fn real_service(library: Library) -> Arc<dyn MetadataService> {
     )
 }
 
-fn real_service_over(
+pub(super) fn real_service_over(
     library: &Library,
     catalog: Arc<dyn beam_domain::repositories::CatalogRepository>,
     movies: Arc<dyn beam_domain::repositories::MovieRepository>,
@@ -663,546 +509,12 @@ fn real_service_over(
     }))
 }
 
-fn item_id(item: &MediaMetadata) -> uuid::Uuid {
-    match item {
-        MediaMetadata::Movie(movie) => movie.id,
-        MediaMetadata::Show(show) => show.id,
-    }
-}
-
-async fn signed_in_to(service: Arc<dyn MetadataService>) -> (TestClient<AppState>, String) {
+pub(super) async fn signed_in_to(
+    service: Arc<dyn MetadataService>,
+) -> (TestClient<AppState>, String) {
     let state = state_with_service(service);
     let token = seed_session(&state).await;
     (client(state), token)
-}
-
-/// Following `end_cursor` from the first page visits every title once, in
-/// order, and the last page says there is nothing after it.
-#[tokio::test]
-async fn following_end_cursor_visits_every_title_once_in_order() {
-    let library = Library::new();
-    let mut expected = Vec::new();
-    for title in ["Arrival", "Blade", "Contact"] {
-        expected.push(
-            indexed_movie(&library.movies, &library.files, title)
-                .await
-                .0,
-        );
-    }
-    expected.push(library.indexed_show("Dark").await);
-    let (client, token) = signed_in_to(real_service(library)).await;
-
-    let mut seen = Vec::new();
-    let mut after: Option<String> = None;
-    loop {
-        let url = match &after {
-            Some(cursor) => format!("/v1/media?first=3&after={cursor}"),
-            None => "/v1/media?first=3".to_string(),
-        };
-        let response = client.get(&url).cookie("beam_session", &token).send().await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let page: MediaConnection = response.json();
-        assert_eq!(page.page_info.has_previous_page, after.is_some());
-        seen.extend(page.items.iter().map(item_id));
-        if !page.page_info.has_next_page {
-            break;
-        }
-        after = page.page_info.end_cursor;
-    }
-    assert_eq!(seen, expected);
-}
-
-/// `sort_by=relevance` lists the best match first and pages on through its
-/// own cursors, the cursor carrying the distance it was issued at (#247).
-#[tokio::test]
-async fn a_relevance_sort_lists_the_best_match_first_and_pages_by_cursor() {
-    let library = Library::new();
-    let mut expected = Vec::new();
-    for title in ["Matrix", "Matrix Reloaded", "The Matrix"] {
-        expected.push(
-            indexed_movie(&library.movies, &library.files, title)
-                .await
-                .0,
-        );
-    }
-    indexed_movie(&library.movies, &library.files, "Arrival").await;
-    let (client, token) = signed_in_to(real_service(library)).await;
-
-    let mut seen = Vec::new();
-    let mut after: Option<String> = None;
-    loop {
-        let mut url = "/v1/media?query=matrix&sort_by=relevance&first=1".to_string();
-        if let Some(cursor) = &after {
-            url.push_str(&format!("&after={cursor}"));
-        }
-        let response = client.get(&url).cookie("beam_session", &token).send().await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let page: MediaConnection = response.json();
-        seen.extend(page.items.iter().map(item_id));
-        if !page.page_info.has_next_page {
-            break;
-        }
-        after = page.page_info.end_cursor;
-    }
-    assert_eq!(seen, expected, "best match first, Arrival not at all");
-
-    // A relevance cursor pages only a relevance listing.
-    let response = client
-        .get(&format!(
-            "/v1/media?query=matrix&sort_by=title&after={}",
-            after.expect("a cursor past the first page")
-        ))
-        .cookie("beam_session", &token)
-        .send()
-        .await;
-    response
-        .assert_status(StatusCode::BAD_REQUEST)
-        .assert_problem_type("https://beam.justinchung.net/reference/errors/#invalid-cursor");
-}
-
-/// Relevance is closeness to a `query`; asked for without one it is the
-/// caller's error, not an arbitrary order and not the store's 500.
-#[tokio::test]
-async fn a_relevance_sort_without_a_query_is_a_400_invalid_search_query() {
-    let library = Library::new();
-    indexed_movie(&library.movies, &library.files, "Matrix").await;
-    let (client, token) = signed_in_to(real_service(library)).await;
-
-    client
-        .get("/v1/media?sort_by=relevance")
-        .cookie("beam_session", &token)
-        .send()
-        .await
-        .assert_status(StatusCode::BAD_REQUEST)
-        .assert_problem_type("https://beam.justinchung.net/reference/errors/#invalid-search-query");
-}
-
-#[tokio::test]
-async fn a_cursor_the_server_did_not_issue_is_a_400_invalid_cursor() {
-    let (client, token) = signed_in_to(real_service(Library::new())).await;
-
-    client
-        .get("/v1/media?after=bm90LWEtY3Vyc29y")
-        .cookie("beam_session", &token)
-        .send()
-        .await
-        .assert_status(StatusCode::BAD_REQUEST)
-        .assert_problem_type("https://beam.justinchung.net/reference/errors/#invalid-cursor");
-}
-
-/// Kynos percent-decodes `%00` into a NUL, which Postgres cannot bind as
-/// text: it used to fail the catalogue statement and answer 500 `#internal`.
-#[tokio::test]
-async fn a_search_text_holding_nul_is_a_400_invalid_search_query() {
-    let (client, token) = signed_in_to(real_service(Library::new())).await;
-
-    for query in ["query=%00", "query=a%00b"] {
-        client
-            .get(&format!("/v1/media?{query}"))
-            .cookie("beam_session", &token)
-            .send()
-            .await
-            .assert_status(StatusCode::BAD_REQUEST)
-            .assert_problem_type(
-                "https://beam.justinchung.net/reference/errors/#invalid-search-query",
-            );
-    }
-}
-
-#[tokio::test]
-async fn a_page_the_server_does_not_answer_is_a_400_invalid_pagination() {
-    let (client, token) = signed_in_to(real_service(Library::new())).await;
-
-    for query in ["first=2&last=2", "after=a&before=b"] {
-        client
-            .get(&format!("/v1/media?{query}"))
-            .cookie("beam_session", &token)
-            .send()
-            .await
-            .assert_status(StatusCode::BAD_REQUEST)
-            .assert_problem_type(
-                "https://beam.justinchung.net/reference/errors/#invalid-pagination",
-            );
-    }
-}
-
-/// A page size outside its published 1-100 is refused by Kynos's
-/// `QueryParams` check before the handler runs, naming the parameter.
-#[tokio::test]
-async fn a_page_size_outside_its_published_bounds_is_refused_at_the_edge() {
-    let (client, token) = signed_in_to(real_service(Library::new())).await;
-
-    for (query, parameter) in [
-        ("first=101", "first"),
-        ("first=0", "first"),
-        ("last=101", "last"),
-    ] {
-        let response = client
-            .get(&format!("/v1/media?{query}"))
-            .cookie("beam_session", &token)
-            .send()
-            .await;
-        response
-            .assert_status(StatusCode::BAD_REQUEST)
-            .assert_problem_type("about:blank");
-        let body = response.json::<serde_json::Value>();
-        assert_eq!(
-            body["detail"],
-            format!("query parameter `{parameter}` does not satisfy its schema"),
-            "{query}"
-        );
-    }
-}
-
-/// NFR-205: a database failure while browsing answered 200 with an empty
-/// page, which a client renders as "your library is empty".
-#[tokio::test]
-async fn a_database_failure_while_browsing_is_a_500_not_an_empty_page() {
-    let library = Library::new();
-    let mut catalog = beam_domain::repositories::catalog::MockCatalogRepository::new();
-    catalog
-        .expect_browse()
-        .returning(|_| Err(sea_orm::DbErr::Custom("connection reset".to_string())));
-    let movies = library.movies.clone();
-    let (client, token) =
-        signed_in_to(real_service_over(&library, Arc::new(catalog), movies)).await;
-
-    client
-        .get("/v1/media")
-        .cookie("beam_session", &token)
-        .send()
-        .await
-        .assert_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .assert_problem_type("https://beam.justinchung.net/reference/errors/#internal");
-}
-
-/// NFR-205: a database failure reading a title answered 404, telling the
-/// client the title was gone when the server had only failed to read it.
-#[tokio::test]
-async fn a_database_failure_reading_a_title_is_a_500_not_a_404() {
-    let library = Library::new();
-    let mut movies = beam_domain::repositories::movie::MockMovieRepository::new();
-    movies
-        .expect_find_by_id()
-        .returning(|_| Err(sea_orm::DbErr::Custom("connection reset".to_string())));
-    let catalog = Arc::new(beam_domain::repositories::catalog::MockCatalogRepository::new());
-    let (client, token) =
-        signed_in_to(real_service_over(&library, catalog, Arc::new(movies))).await;
-
-    client
-        .get(&format!("/v1/media/{MOVIE_ID}"))
-        .cookie("beam_session", &token)
-        .send()
-        .await
-        .assert_status(StatusCode::INTERNAL_SERVER_ERROR)
-        .assert_problem_type("https://beam.justinchung.net/reference/errors/#internal");
-}
-
-/// NFR-108: a 500's `detail` is one fixed sentence, never its cause. The
-/// cause -- here a database driver's message -- goes to the log instead, so
-/// the operator still sees what failed.
-#[tokio::test]
-async fn an_internal_failure_never_echoes_its_cause() {
-    const CAUSE: &str = "connection to 10.0.0.7:5432 reset by peer";
-    fn failing<T>() -> Result<T, sea_orm::DbErr> {
-        Err(sea_orm::DbErr::Custom(CAUSE.to_string()))
-    }
-
-    let library = Library::new();
-    let mut catalog = beam_domain::repositories::catalog::MockCatalogRepository::new();
-    catalog.expect_browse().returning(|_| failing());
-    let browse = signed_in_to(real_service_over(
-        &library,
-        Arc::new(catalog),
-        library.movies.clone(),
-    ))
-    .await;
-
-    let library = Library::new();
-    let mut movies = beam_domain::repositories::movie::MockMovieRepository::new();
-    movies.expect_find_by_id().returning(|_| failing());
-    let read = signed_in_to(real_service_over(
-        &library,
-        Arc::new(beam_domain::repositories::catalog::MockCatalogRepository::new()),
-        Arc::new(movies),
-    ))
-    .await;
-
-    let logs: Arc<std::sync::Mutex<Vec<u8>>> = Arc::default();
-    let _subscriber = tracing::subscriber::set_default(
-        tracing_subscriber::fmt()
-            .with_ansi(false)
-            .with_writer({
-                let logs = logs.clone();
-                move || LogWriter(logs.clone())
-            })
-            .finish(),
-    );
-
-    for (route, (client, token), path) in [
-        ("browse", browse, "/v1/media".to_owned()),
-        ("title", read, format!("/v1/media/{MOVIE_ID}")),
-    ] {
-        logs.lock().unwrap().clear();
-        let response = client
-            .get(&path)
-            .cookie("beam_session", &token)
-            .send()
-            .await;
-        response
-            .assert_status(StatusCode::INTERNAL_SERVER_ERROR)
-            .assert_problem_type("https://beam.justinchung.net/reference/errors/#internal");
-        let body = response.json::<serde_json::Value>();
-        assert_eq!(
-            body["detail"],
-            crate::routes::api_error::INTERNAL_DETAIL,
-            "{route}"
-        );
-        assert!(
-            !body.to_string().contains("10.0.0.7"),
-            "{route}: the cause reached the wire: {body}"
-        );
-        let logged = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
-        assert!(
-            logged.contains(CAUSE),
-            "{route}: the cause is logged for the operator: {logged}"
-        );
-    }
-}
-
-/// An access-policy store that fails every read with a cause naming a host.
-#[derive(Debug)]
-struct FailingPolicies;
-
-const POLICY_CAUSE: &str = "policy read from 10.0.0.9:5432 timed out";
-
-#[async_trait::async_trait]
-impl beam_domain::repositories::AccessPolicyRepository for FailingPolicies {
-    async fn find(
-        &self,
-        _user_id: uuid::Uuid,
-    ) -> Result<beam_domain::models::access::AccessPolicy, sea_orm::DbErr> {
-        Err(sea_orm::DbErr::Custom(POLICY_CAUSE.to_owned()))
-    }
-
-    async fn replace(
-        &self,
-        _user_id: uuid::Uuid,
-        _policy: &beam_domain::models::access::AccessPolicy,
-    ) -> Result<(), sea_orm::DbErr> {
-        Err(sea_orm::DbErr::Custom(POLICY_CAUSE.to_owned()))
-    }
-}
-
-/// NFR-108 across every route module that reads the caller's access policy:
-/// genres, media, people, collections, artwork, stream, subtitle, trickplay,
-/// playback, lists and the library reads. Each answers the fixed `detail`,
-/// keeps the cause off the wire, and logs it exactly once -- a second
-/// `ServerFault` wrapped around the one the access lookup built would log a
-/// second event carrying only the fixed sentence.
-#[tokio::test]
-async fn an_access_lookup_failure_never_echoes_its_cause_on_any_route() {
-    let library = Library::new();
-    let access = Arc::new(crate::services::access::AccessService::new(
-        crate::services::access::AccessRepositories {
-            policies: Arc::new(FailingPolicies),
-            movies: library.movies.clone(),
-            shows: library.shows.clone(),
-            files: library.files.clone(),
-        },
-    ));
-    let state = state_over_access(make_app_state(), real_service(library), access);
-    let token = seed_session(&state).await;
-    let client = TestClient::new(
-        Router::new()
-            .nest("/v1", crate::routes::rest_routes())
-            .build(state)
-            .expect("the REST router describes itself"),
-    );
-
-    let logs: Arc<std::sync::Mutex<Vec<u8>>> = Arc::default();
-    let _subscriber = tracing::subscriber::set_default(
-        tracing_subscriber::fmt()
-            .with_ansi(false)
-            .with_writer({
-                let logs = logs.clone();
-                move || LogWriter(logs.clone())
-            })
-            .finish(),
-    );
-
-    let id = uuid::Uuid::new_v4();
-    for path in [
-        "/v1/genres".to_owned(),
-        "/v1/media".to_owned(),
-        format!("/v1/media/{id}"),
-        format!("/v1/media/{id}/sources"),
-        format!("/v1/episodes/{id}"),
-        format!("/v1/seasons/{id}"),
-        "/v1/people?query=keanu".to_owned(),
-        format!("/v1/people/{id}"),
-        "/v1/collections".to_owned(),
-        format!("/v1/collections/{id}"),
-        format!("/v1/artwork/movie/{id}/poster"),
-        format!("/v1/files/{id}/stream"),
-        format!("/v1/files/{id}/download"),
-        format!("/v1/files/{id}/subtitles/{id}"),
-        format!("/v1/files/{id}/trickplay/0"),
-        format!("/v1/media/{id}/progress"),
-        "/v1/continue-watching".to_owned(),
-        "/v1/history".to_owned(),
-        "/v1/watchlist".to_owned(),
-        "/v1/favourites".to_owned(),
-        "/v1/libraries".to_owned(),
-        format!("/v1/libraries/{id}"),
-        format!("/v1/libraries/{id}/files"),
-    ] {
-        logs.lock().unwrap().clear();
-        let response = client
-            .get(&path)
-            .cookie("beam_session", &token)
-            .send()
-            .await;
-        response
-            .assert_status(StatusCode::INTERNAL_SERVER_ERROR)
-            .assert_problem_type("https://beam.justinchung.net/reference/errors/#internal");
-        let body = response.json::<serde_json::Value>();
-        assert_eq!(
-            body["detail"],
-            crate::routes::api_error::INTERNAL_DETAIL,
-            "{path}"
-        );
-        assert!(
-            !body.to_string().contains("10.0.0.9"),
-            "{path}: the cause reached the wire: {body}"
-        );
-        let logged = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
-        assert_eq!(
-            logged.matches(POLICY_CAUSE).count(),
-            1,
-            "{path}: the cause is logged once for the operator: {logged}"
-        );
-        assert!(
-            !logged.contains(crate::routes::api_error::INTERNAL_DETAIL),
-            "{path}: an event recorded only the fixed sentence: {logged}"
-        );
-    }
-}
-
-/// A `tracing` writer appending to a shared buffer.
-struct LogWriter(Arc<std::sync::Mutex<Vec<u8>>>);
-
-impl std::io::Write for LogWriter {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-/// What a browse tile needs of a show is on the wire: genres, rating,
-/// identifiers and counts -- read from the JSON itself, so a field the server
-/// computes but never serializes still fails.
-#[tokio::test]
-async fn a_browsed_show_carries_its_genres_rating_identifiers_and_counts_on_the_wire() {
-    let library = Library::new();
-    let id = library.indexed_show("Severance").await;
-    let (client, token) = signed_in_to(real_service(library)).await;
-
-    let response = client
-        .get("/v1/media?media_type=show&genre=thriller")
-        .cookie("beam_session", &token)
-        .send()
-        .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let body: serde_json::Value = response.json();
-    let show = &body["items"][0]["Show"];
-    assert_eq!(show["id"], id.to_string());
-    assert_eq!(show["genres"], serde_json::json!(["Thriller"]));
-    // On TMDB's own 0-10 scale, and the decimal it was stored as rather than
-    // the single-precision float's exact expansion (8.399999618530273).
-    assert_eq!(show["ratings"]["tmdb"], 8.4);
-    assert_eq!(show["identifiers"]["tmdb_id"], 95396);
-    assert_eq!(show["season_count"], 1);
-    assert_eq!(show["episode_count"], 1);
-    assert_eq!(body["items"].as_array().map(Vec::len), Some(1));
-}
-
-/// `min_rating` is on the scale `Ratings.tmdb` is shown on, and a title rated
-/// exactly the minimum is kept: the bound is compared in the precision the
-/// rating is stored in, so 8.4 is not 8.39999... short of itself.
-#[tokio::test]
-async fn min_rating_filters_on_the_scale_the_rating_is_shown_on() {
-    let library = Library::new();
-    let id = library.indexed_show("Severance").await;
-    let (client, token) = signed_in_to(real_service(library)).await;
-
-    for (query, expected) in [
-        ("min_rating=8.4", vec![id]),
-        ("min_rating=8.5", vec![]),
-        ("min_rating=0", vec![id]),
-    ] {
-        let body: MediaConnection = client
-            .get(&format!("/v1/media?{query}"))
-            .cookie("beam_session", &token)
-            .send()
-            .await
-            .assert_status(StatusCode::OK)
-            .json();
-        let listed: Vec<uuid::Uuid> = body.items.iter().map(item_id).collect();
-        assert_eq!(listed, expected, "{query}");
-    }
-}
-
-/// A numeric filter outside the range it can take is refused, never bound.
-/// `year_from=4294967295` used to reach the store as `-1` (a `u32` cast to
-/// the column's `i32`) and match every title; a `min_rating` off the 0-10
-/// scale, `NaN` included, would match everything or nothing silently.
-#[tokio::test]
-async fn an_out_of_range_numeric_filter_is_a_400_invalid_filter() {
-    let library = Library::new();
-    library.indexed_show("Severance").await;
-    let (client, token) = signed_in_to(real_service(library)).await;
-
-    for query in [
-        "year=4294967295",
-        "year_from=4294967295",
-        "year_to=2147483648",
-        "min_rating=NaN",
-    ] {
-        client
-            .get(&format!("/v1/media?{query}"))
-            .cookie("beam_session", &token)
-            .send()
-            .await
-            .assert_status(StatusCode::BAD_REQUEST)
-            .assert_problem_type("https://beam.justinchung.net/reference/errors/#invalid-filter");
-    }
-
-    // A rating outside its published 0-10 is Kynos's `QueryParams` check
-    // answering, before the handler's own.
-    for query in ["min_rating=10.5", "min_rating=-1", "min_rating=inf"] {
-        client
-            .get(&format!("/v1/media?{query}"))
-            .cookie("beam_session", &token)
-            .send()
-            .await
-            .assert_status(StatusCode::BAD_REQUEST)
-            .assert_problem_type("about:blank");
-    }
-
-    // The largest bounds each filter can take are answered, not refused.
-    for query in ["year_from=2147483647", "min_rating=10"] {
-        client
-            .get(&format!("/v1/media?{query}"))
-            .cookie("beam_session", &token)
-            .send()
-            .await
-            .assert_status(StatusCode::OK);
-    }
 }
 
 // ── GET /v1/media/{id}/sources ───────────────────────────────────────────────
@@ -1222,11 +534,12 @@ async fn a_playable_id_yields_its_stream_and_download_urls() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let MediaSourceConnection { items, page_info } = response.json();
-    assert_eq!(items.len(), 1);
-    assert_eq!(items[0].stream_url, format!("/v1/files/{FILE_ID}/stream"));
+    // The service's sources, as it gave them: URLs and all. That those URLs
+    // are served routes is `access_tests`'
+    // `every_url_a_source_carries_is_served_and_delivers_what_it_names`.
     assert_eq!(
-        items[0].download_url,
-        format!("/v1/files/{FILE_ID}/download")
+        serde_json::to_value(&items).unwrap(),
+        serde_json::to_value(vec![movie_source(FILE_ID)]).unwrap()
     );
     // One complete page: nothing before it, nothing after.
     assert!(!page_info.has_next_page);
@@ -1324,8 +637,19 @@ async fn sources_carry_their_tracks_and_the_subtitle_files_beside_them() {
         })
     );
     let id = sidecar.id;
+    // Where to fetch the file, as stored and as WebVTT: two distinct URLs.
+    // That each is a served route delivering this subtitle is `access_tests`'
+    // `every_url_a_source_carries_is_served_and_delivers_what_it_names`.
+    let mut sidecar_track = subtitles[1].clone();
+    let fields = sidecar_track.as_object_mut().expect("an object");
+    let url = fields.remove("url").expect("a url field");
+    let webvtt_url = fields.remove("webvtt_url").expect("a webvtt_url field");
+    assert!(
+        url.is_string() && webvtt_url.is_string() && url != webvtt_url,
+        "{url} / {webvtt_url}"
+    );
     assert_eq!(
-        subtitles[1],
+        sidecar_track,
         serde_json::json!({
             "origin": "sidecar",
             "index": null,
@@ -1337,8 +661,6 @@ async fn sources_carry_their_tracks_and_the_subtitle_files_beside_them() {
             "is_forced": false,
             "is_hearing_impaired": true,
             "is_text": true,
-            "url": format!("/v1/files/{file}/subtitles/{id}"),
-            "webvtt_url": format!("/v1/files/{file}/subtitles/{id}/webvtt"),
         })
     );
 }
@@ -1426,8 +748,23 @@ async fn sources_carry_their_chapters_markers_and_trickplay_sheets() {
             {"kind": "preview", "start_ms": 7_000_000, "end_ms": 7_030_000},
         ])
     );
+    // A URL per sheet: 150 tiles at 10 by 10 are two. That each is a served
+    // route delivering its own sheet is `access_tests`'
+    // `every_url_a_source_carries_is_served_and_delivers_what_it_names`.
+    let mut trickplay = source["trickplay"].clone();
+    let sheet_urls = trickplay
+        .as_object_mut()
+        .expect("an object")
+        .remove("sheet_urls")
+        .expect("a sheet_urls field");
+    let sheet_urls = sheet_urls.as_array().expect("an array");
+    assert_eq!(sheet_urls.len(), 2);
+    assert!(
+        sheet_urls[0].is_string() && sheet_urls[1].is_string() && sheet_urls[0] != sheet_urls[1],
+        "{sheet_urls:?}"
+    );
     assert_eq!(
-        source["trickplay"],
+        trickplay,
         serde_json::json!({
             "interval_ms": 10_000,
             "tile_width": 320,
@@ -1435,10 +772,6 @@ async fn sources_carry_their_chapters_markers_and_trickplay_sheets() {
             "columns": 10,
             "rows": 10,
             "tile_count": 150,
-            "sheet_urls": [
-                format!("/v1/files/{file}/trickplay/0"),
-                format!("/v1/files/{file}/trickplay/1"),
-            ],
         })
     );
     let part = &source["parts"][0];

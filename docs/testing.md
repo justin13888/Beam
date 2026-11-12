@@ -65,7 +65,8 @@ a divergence between the fake and production fails instead of drifting. Writing 
 these immediately found two such divergences — an in-memory session store that listed expired
 sessions the SQL one filtered out, and one that echoed the caller's `created_at` back instead of
 stamping its own. The contracts live beside the traits they constrain, in
-`beam-domain/src/repositories/contract.rs` and `beam-auth/src/utils/contract.rs`.
+`beam-domain/src/repositories/contract/` and `beam-auth/src/utils/contract/`, one file per
+contract.
 
 **Time is injected, never slept through.** Every store and service that stamps or compares a
 timestamp takes a `Clock` (`beam-domain/src/services/clock.rs`). One trait covers both time bases:
@@ -379,6 +380,19 @@ What it covers, file by file under `beam-server/tests/e2e_server/`:
 - **`playback.rs`** -- progress and continue-watching, watched state, resume across sources,
   next-up and last-part completion, and subtitle delivery including SubRip to WebVTT.
 - **`admin.rs`** -- fix-match and field locks, and the admin guards on them.
+- **`people.rs`** -- people search and a person's filmography over the SQL people store: by any
+  part of the name, paged, with `%` matched literally, and filtered by the caller's access.
+- **`artwork.rs`** -- a poster served from the artwork cache under `BEAM_DATA_DIR`, revalidated by
+  its `ETag`, a narrower size made once and cached beside it, and the art of a hidden title a `404`.
+- **`trickplay.rs`** -- the background worker's sheets of a real video, named by its sources,
+  served as JPEGs with a validator, and written under the data directory alone.
+- **`operations.rs`** -- `/metrics` under `BEAM_ENABLE_METRICS`, the search limit under
+  `BEAM_RATE_LIMIT_*` with and without `BEAM_TRUSTED_PROXIES`, and the admin event stream reporting
+  a real scan.
+- **`preferences.rs`** -- language preferences stored per viewer and choosing the subtitle track
+  `GET /v1/media/{id}/sources` starts on.
+- **`download.rs`** -- download as an attachment, whole, from an offset, as a suffix, resumed only
+  on its current validator, and refused outside the caller's libraries.
 
 **The source media is never written (FR-202).** The library is a `FixtureLibrary`
 (`beam-test-support/src/e2e/library.rs`): every directory, file and link in it is recorded as the

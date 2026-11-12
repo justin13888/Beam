@@ -133,10 +133,10 @@ one there is nothing to rank by.
 ### invalid-filter
 
 **400.** From `GET /v1/media`. A numeric filter is outside the range it can take: `year`,
-`year_from` or `year_to` above 2147483647, or a `min_rating` of `NaN`. The filter is refused
-rather than narrowed, so an out-of-range bound can never quietly match everything or nothing. A
-`min_rating` outside 0-10 (TMDB's scale, the one `ratings.tmdb` is reported on), infinities
-included, is refused before this check, as a `400` with `"type": "about:blank"`.
+`year_from` or `year_to` above 2147483647. The filter is refused rather than narrowed, so an
+out-of-range bound can never quietly match everything or nothing. A `min_rating` outside 0-10
+(TMDB's scale, the one `ratings.tmdb` is reported on), infinities and `NaN` included, is refused
+before this check, as a `400` with `"type": "about:blank"`.
 
 **What to do.** Fix the caller: send a year a title can have, and a rating between 0 and 10.
 
@@ -577,6 +577,7 @@ status code is the whole story, and for each of these there is no finer distinct
 | `413` | A request body larger than 2 MiB | Send a smaller body |
 | `415` / `422` | Unsupported request media type, or a body that does not satisfy the schema; a `422` carries `errors`, one JSON Pointer per member that broke a bound | Fix the request |
 | `416` | The requested byte range cannot be satisfied | See below |
+| `503` | On any operation that needs a session: the server could not check the session cookie because its session or account store did not answer. The session itself may be fine, so it is not a `401`. A `Retry-After` may say when to try again | Retry later; keep the session |
 
 ### 416 Range Not Satisfiable
 
@@ -601,12 +602,13 @@ dependency is unhealthy — in practice, the database.
 - **`detail` is not.** It is diagnostic text and it will change.
 - A code is never repurposed. If a condition splits into two, the new one gets a new code.
 
-<Aside type="caution" title="Native clients see only the codes they were built with">
+<Aside type="caution" title="Native clients know only the codes they were built with">
 The Android and Apple apps decode `type` against the codes the server declared when the app was
-built. A code added later — or a `429` from a proxy in front of Beam rather than from Beam — reaches
-an older app as an unreadable response rather than as its status, until the client generator can
-fall back ([getkono/spargen#268](https://github.com/getkono/spargen/issues/268)). Web clients read the
-body directly and are unaffected.
+built. A code added later — or a `429` from a proxy in front of Beam rather than from Beam — still
+reaches them as its status, with the `type` carried as sent, so falling back to `status` works.
+Apps built before the client generator kept that status
+([getkono/spargen#268](https://github.com/getkono/spargen/issues/268)) see such a response as
+unreadable instead. Web clients read the body directly and are unaffected.
 </Aside>
 
 <LinkCard

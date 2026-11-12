@@ -657,7 +657,7 @@ fn real_pixel_format_and_color_fields() {
     assert_eq!(v.video.format, PixelFormat::YUV420P);
     assert_eq!(v.video.bit_depth(), Some(8));
     // aspect_ratio came through the ffmpeg Rational conversion without error.
-    assert_eq!(v.video.resolution().width, 64);
+    assert_eq!(v.video.width, 64);
 }
 
 // ---------------------------------------------------------------------------

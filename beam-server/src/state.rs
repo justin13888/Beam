@@ -21,9 +21,13 @@ use beam_index::providers::composite::CompositeEnrichmentProvider;
 use beam_index::providers::telemetry::ReqwestTelemetrySink;
 use beam_index::providers::tvdb::{TvdbEnrichmentProvider, TvdbWiringConfig};
 use beam_index::runtime::LibraryWatches;
+use beam_index::services::admin_log::{AdminLogService, LocalAdminLogService};
 use beam_index::services::enrichment::control::{EnrichmentControl, EnrichmentControlDeps};
 use beam_index::services::enrichment::{EnrichmentPolicy, MetadataEnrichmentService};
+use beam_index::services::hash::{HashConfig, LocalHashService};
 use beam_index::services::index::{IndexService, LocalIndexService};
+use beam_index::services::media_info::LocalMediaInfoService;
+use beam_index::services::notification::{LocalNotificationService, NotificationService};
 use beam_index::services::watch_status::WatchStatus;
 use metrics_exporter_prometheus::PrometheusHandle;
 
@@ -34,15 +38,16 @@ use crate::{
     config::ServerConfig,
     services::{
         access::{AccessRepositories, AccessService},
-        admin_log::{AdminLogService, LocalAdminLogService},
+        admin_users::{AdminUserDependencies, AdminUserService},
         artwork::{ArtworkCache, ArtworkCacheConfig},
         collections::CollectionService,
-        hash::{HashConfig, HashService, LocalHashService},
         health::DependencyProbe,
-        library::{LibraryService, LocalLibraryService, OsPathValidator, audit_existing_roots},
+        library::{
+            LibraryService, LibraryServiceDependencies, LocalLibraryService, OsPathValidator,
+            audit_existing_roots,
+        },
         lists::{ListDependencies, ListService},
         metadata::{DbMetadataService, MetadataRepositories, MetadataService},
-        notification::{LocalNotificationService, NotificationService},
         people::PeopleService,
         playback::{DbPlaybackService, PlaybackRepositories, PlaybackService},
         playback_telemetry::PlaybackTelemetryService,
@@ -141,9 +146,48 @@ impl Deref for AppState {
     }
 }
 
-#[derive(Debug)]
+// ── Dependency injection ─────────────────────────────────────────────────────
+
+/// The auth dependencies the OIDC handlers reach for individually, and the
+/// admin log they record sign-in outcomes in.
+///
+/// Written out rather than derived: `AppState` keeps its fields behind
+/// `AppStateInner`, and `#[derive(Provider)]` needs public fields on the
+/// context itself. Each one mirrors an `affix_state::inject` hoop the Salvo
+/// router used to mount, with the difference that asking for something absent
+/// is now a compile error rather than a 500.
+macro_rules! provides_service {
+    ($($ty:ty => $field:ident),+ $(,)?) => {
+        $(
+            impl kynos::di::Provides<$ty> for AppState {
+                fn provide(&self) -> $ty {
+                    self.services.$field.clone()
+                }
+            }
+        )+
+    };
+}
+
+provides_service! {
+    Arc<dyn UserRepository> => user_repo,
+    Arc<dyn SessionStore> => session_store,
+    Arc<dyn OidcClient> => oidc_client,
+    Arc<dyn PendingAuthStore> => pending_auth_store,
+    Arc<dyn DeviceAuthStore> => device_auth_store,
+    Arc<dyn AdminLogService> => admin_log,
+}
+
+impl kynos::di::Provides<OidcRuntimeConfig> for AppState {
+    fn provide(&self) -> OidcRuntimeConfig {
+        self.services.oidc_config.clone()
+    }
+}
+
+/// Every field is shared (`Arc`) or plain configuration, so a clone is a
+/// second handle onto the same services -- which is what lets a test fixture
+/// swap a few of them and keep the rest (`AppServices { x, ..base.clone() }`).
+#[derive(Debug, Clone)]
 pub struct AppServices {
-    pub hash: Arc<dyn HashService>,
     /// Which libraries and content ratings each user may see (issue #263),
     /// applied by every route that reads or delivers a title.
     pub access: Arc<AccessService>,
@@ -233,6 +277,21 @@ pub struct BuiltServices {
 }
 
 impl AppServices {
+    /// An administrator's operations on accounts, over this instance's user,
+    /// session, access and library stores.
+    ///
+    /// Built per call rather than kept as a field: it owns nothing but those
+    /// four handles, and deriving it means a fixture that swaps one of them
+    /// cannot leave the service reading a stale copy.
+    pub fn admin_users(&self) -> AdminUserService {
+        AdminUserService::new(AdminUserDependencies {
+            users: self.user_repo.clone(),
+            sessions: self.session_store.clone(),
+            access: self.access.clone(),
+            libraries: self.library_repo.clone(),
+        })
+    }
+
     /// Build the application's services, and beside them what the process
     /// entry point needs to spawn beam-index's background scan, watch and
     /// enrichment tasks (see [`BuiltServices`]). Test fixtures that only
@@ -282,9 +341,13 @@ impl AppServices {
             db.clone(),
         ));
         let enrichment_repo: Arc<dyn beam_domain::repositories::EnrichmentStateRepository> =
-            Arc::new(beam_index::repositories::SqlEnrichmentStateRepository::new(
-                db.clone(),
-            ));
+            Arc::new(
+                beam_index::repositories::SqlEnrichmentStateRepository::with_seams(
+                    db.clone(),
+                    clock.clone(),
+                    Arc::new(beam_domain::services::UuidGenerator),
+                ),
+            );
         let genre_repo: Arc<dyn beam_domain::repositories::GenreRepository> = Arc::new(
             beam_index::repositories::SqlGenreRepository::new(db.clone()),
         );
@@ -313,8 +376,7 @@ impl AppServices {
 
         let notification_service = Arc::new(LocalNotificationService::new());
         let hash_service = Arc::new(LocalHashService::new(hash_config));
-        let media_info_service =
-            Arc::new(crate::services::media_info::LocalMediaInfoService::default());
+        let media_info_service = Arc::new(LocalMediaInfoService::default());
 
         let session_store: Arc<dyn SessionStore> = Arc::new(PgSessionStore::new(db.clone()));
 
@@ -556,18 +618,17 @@ impl AppServices {
         }));
 
         let services = Self {
-            hash: hash_service.clone() as Arc<dyn HashService>,
             access,
-            library: Arc::new(LocalLibraryService::new(
-                library_repo.clone(),
-                file_repo.clone(),
-                config.video_dir.clone(),
+            library: Arc::new(LocalLibraryService::new(LibraryServiceDependencies {
+                library_repo: library_repo.clone(),
+                file_repo: file_repo.clone(),
+                video_dir: config.video_dir.clone(),
                 data_dir,
-                notification_service.clone(),
-                index_service.clone() as Arc<dyn IndexService>,
-                Arc::new(OsPathValidator),
-                library_watches.clone(),
-            )),
+                notification_service: notification_service.clone(),
+                index_service: index_service.clone() as Arc<dyn IndexService>,
+                path_validator: Arc::new(OsPathValidator),
+                watch_hook: library_watches.clone(),
+            })),
             metadata,
             subtitles: Arc::new(DbSubtitleService::new(
                 library_repo.clone(),

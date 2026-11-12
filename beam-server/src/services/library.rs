@@ -19,9 +19,9 @@ pub struct LibraryFilePage {
     /// Whether another page follows.
     pub has_next_page: bool,
 }
-use crate::services::notification::{AdminEvent, EventCategory, NotificationService};
 use beam_index::runtime::LibraryWatchHook;
 use beam_index::services::index::{IndexError, IndexService};
+use beam_index::services::notification::{AdminEvent, EventCategory, NotificationService};
 use beam_index::services::scan::{ScanTrigger, StoppedScan};
 
 pub trait PathValidator: Send + Sync + std::fmt::Debug {
@@ -99,16 +99,9 @@ impl PathValidator for OsPathValidator {
     }
 }
 
-/// Test doubles. Gated behind `test-utils` so downstream crates can depend on
-/// them without them reaching a release build.
-///
-/// Collected into one module rather than left as loose `#[cfg(...)]` items so a
-/// single `#[mutants::skip]` covers the lot: cargo-mutants recognises only the
-/// literal `#[cfg(test)]` and would otherwise mutate these bodies and report the
-/// scaffolding as untested product behaviour. `mise run check:mutants-skip-fakes`
-/// enforces the attribute.
-#[mutants::skip]
-#[cfg(any(test, feature = "test-utils"))]
+/// Test doubles. No crate depends on `beam-server`, so they are plain
+/// `#[cfg(test)]`: the literal form cargo-mutants recognises and never mutates.
+#[cfg(test)]
 pub mod in_memory {
     use super::*;
 
@@ -165,7 +158,7 @@ pub mod in_memory {
 
 // Re-exported at the module root so the doubles keep the paths they had before
 // they moved into `in_memory`.
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(test)]
 pub use in_memory::{InMemoryPathValidator, InMemoryPathValidatorResult};
 
 /// What a candidate library root collides with.
@@ -339,11 +332,12 @@ impl LocatedFile {
 
 #[async_trait::async_trait]
 pub trait LibraryService: Send + Sync + std::fmt::Debug {
-    /// Get all libraries by user ID
-    /// Returns None if user is not found
-    async fn get_libraries(&self, user_id: String) -> Result<Vec<Library>, LibraryError>;
+    /// Every stored library, each with its file count. Unfiltered: narrowing
+    /// the list to what a caller may see is the caller's access policy's job.
+    async fn get_libraries(&self) -> Result<Vec<Library>, LibraryError>;
 
-    /// Get a single library by ID
+    /// A single library by ID, with its file count: `Ok(None)` when no
+    /// library has that ID.
     async fn get_library_by_id(&self, library_id: Uuid) -> Result<Option<Library>, LibraryError>;
 
     /// One page of a library's files, by stored path then id: at most
@@ -382,6 +376,11 @@ pub trait LibraryService: Send + Sync + std::fmt::Debug {
     /// cancelled and waited for first, and no new one starts (see
     /// [`IndexService::stop_scan`]); the indexer forgets the library's latest
     /// job after, and the watcher stops watching it.
+    ///
+    /// `Ok(true)` when the library was deleted; `Ok(false)` when there was no
+    /// such library to delete, which the route answers `404`. A missing
+    /// library may instead be reported as [`LibraryError::LibraryNotFound`] --
+    /// [`LocalLibraryService`] does so, and never returns `false`.
     async fn delete_library(&self, library_id: Uuid) -> Result<bool, LibraryError>;
 }
 
@@ -400,20 +399,36 @@ pub struct LocalLibraryService {
     watch_hook: Arc<dyn LibraryWatchHook>,
 }
 
+/// What [`LocalLibraryService`] is built from.
+#[derive(Debug, Clone)]
+pub struct LibraryServiceDependencies {
+    pub library_repo: Arc<dyn beam_domain::repositories::LibraryRepository>,
+    pub file_repo: Arc<dyn beam_domain::repositories::FileRepository>,
+    /// The root every library path must lie beneath.
+    pub video_dir: PathBuf,
+    /// The server's data directory. Must be canonical: it is compared
+    /// component-wise against canonical library roots.
+    pub data_dir: PathBuf,
+    pub notification_service: Arc<dyn NotificationService>,
+    pub index_service: Arc<dyn IndexService>,
+    pub path_validator: Arc<dyn PathValidator>,
+    /// Told when a library is created or deleted, so the filesystem watcher
+    /// follows at once (issue #180).
+    pub watch_hook: Arc<dyn LibraryWatchHook>,
+}
+
 impl LocalLibraryService {
-    /// `data_dir` must be canonical: it is compared component-wise against
-    /// canonical library roots.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        library_repo: Arc<dyn beam_domain::repositories::LibraryRepository>,
-        file_repo: Arc<dyn beam_domain::repositories::FileRepository>,
-        video_dir: PathBuf,
-        data_dir: PathBuf,
-        notification_service: Arc<dyn NotificationService>,
-        index_service: Arc<dyn IndexService>,
-        path_validator: Arc<dyn PathValidator>,
-        watch_hook: Arc<dyn LibraryWatchHook>,
-    ) -> Self {
+    pub fn new(dependencies: LibraryServiceDependencies) -> Self {
+        let LibraryServiceDependencies {
+            library_repo,
+            file_repo,
+            video_dir,
+            data_dir,
+            notification_service,
+            index_service,
+            path_validator,
+            watch_hook,
+        } = dependencies;
         LocalLibraryService {
             library_repo,
             file_repo,
@@ -429,7 +444,7 @@ impl LocalLibraryService {
 
 #[async_trait::async_trait]
 impl LibraryService for LocalLibraryService {
-    async fn get_libraries(&self, _user_id: String) -> Result<Vec<Library>, LibraryError> {
+    async fn get_libraries(&self) -> Result<Vec<Library>, LibraryError> {
         let domain_libraries = self.library_repo.find_all().await?;
 
         let mut result = Vec::new();
@@ -672,12 +687,9 @@ impl From<IndexError> for LibraryError {
             IndexError::PathNotFound(s) => LibraryError::PathNotFound(s),
             IndexError::ScanInProgress => LibraryError::ScanInProgress,
             // Unreachable: a cancelled scan is reported through its job,
-            // never by the call that starts it, and only the indexer's
-            // test-only string entry point parses an id. An internal error
-            // rather than a plausible 4xx if either ever changes.
-            IndexError::Cancelled | IndexError::InvalidId => {
-                LibraryError::Db(DbErr::Custom(e.to_string()))
-            }
+            // never by the call that starts it. An internal error rather
+            // than a plausible 4xx if that ever changes.
+            IndexError::Cancelled => LibraryError::Db(DbErr::Custom(e.to_string())),
         }
     }
 }
@@ -685,3 +697,7 @@ impl From<IndexError> for LibraryError {
 #[cfg(test)]
 #[path = "library_tests.rs"]
 mod library_tests;
+
+#[cfg(test)]
+#[path = "library_roots_tests.rs"]
+mod library_roots_tests;

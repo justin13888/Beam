@@ -1,17 +1,16 @@
 use std::collections::HashMap;
-use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::models::search::{MediaConnection, MediaSortField, PageInfo, SortOrder, TitleKind};
 use crate::models::{
-    ArtworkKind, ArtworkVariant, CastCredit, CollectionRef, CrewCredit, EpisodeDetail,
-    EpisodeMetadata, ExternalIdentifiers, MediaMetadata, MediaSource, MovieMetadata, Ratings,
-    SeasonDetail, SeasonMetadata, ShowDates, ShowMetadata, ShowRef, Title, UserTitleState,
-    artwork_path,
+    ArtworkKind, ArtworkVariant, CollectionRef, EpisodeDetail, EpisodeMetadata, MediaMetadata,
+    MediaSource, SeasonDetail, UserTitleState, artwork_path,
 };
-use crate::services::cursor;
+use crate::services::cursor::browse;
+use crate::services::paging::{PageDirection, PageRequest};
 use crate::services::people::title_credits;
 use crate::services::sources::{PrimarySource, SourceCatalog};
 use beam_domain::models::access::AccessPolicy;
@@ -19,13 +18,17 @@ use beam_domain::models::catalog::{
     self, CatalogFilters, CatalogPosition, CatalogQuery, CatalogSort, CatalogSortField, Seek,
     ShowChildCounts, SortDirection,
 };
+use beam_domain::models::genre::slugify;
 use beam_domain::models::watch_state::TitleRef;
-use beam_domain::repositories::genre::slugify;
 use beam_domain::repositories::{
     CatalogRepository, CollectionRepository, GenreRepository, MovieRepository, PersonRepository,
     ShowRepository,
 };
 use beam_domain::utils::next_up::{Neighbours, neighbours};
+
+mod mapping;
+
+use mapping::{MovieFiles, movie_metadata, season_metadata, show_metadata, show_ref};
 
 #[async_trait::async_trait]
 pub trait MetadataService: Send + Sync + std::fmt::Debug {
@@ -52,6 +55,10 @@ pub trait MetadataService: Send + Sync + std::fmt::Debug {
     /// id is not -- it has no files of its own; callers use its episode ids
     /// instead). An episode with no files yet resolves to an empty list
     /// rather than an error.
+    ///
+    /// Fails with [`MetadataError::Unsupported`] when `media_id` is a show's,
+    /// [`MetadataError::MediaNotFound`] when no movie, episode or show has
+    /// it, and [`MetadataError::InternalError`] when a store fails.
     async fn get_media_sources(&self, media_id: Uuid) -> Result<Vec<MediaSource>, MetadataError>;
 
     /// One episode by id, with its season, its show and its neighbours:
@@ -95,63 +102,6 @@ pub const DEFAULT_PAGE_SIZE: u32 = 20;
 /// The largest page a request may ask for: one page's hydration stays bounded.
 pub const MAX_PAGE_SIZE: u32 = 100;
 
-/// Which way a page is read from its cursor.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PageDirection {
-    /// `first`, optionally `after` a cursor.
-    Forward,
-    /// `last`, optionally `before` a cursor.
-    Backward,
-}
-
-/// A validated page request.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PageRequest {
-    pub direction: PageDirection,
-    pub size: NonZeroU32,
-    pub cursor: Option<String>,
-}
-
-impl PageRequest {
-    /// Read the four Relay parameters into one page request.
-    ///
-    /// Accepted are `first`/`after` (forwards, the default) and
-    /// `last`/`before` (backwards), each with or without its cursor. Mixing
-    /// the two directions is refused rather than guessed at, and so is a size
-    /// outside `1..=MAX_PAGE_SIZE`.
-    pub fn from_relay(
-        first: Option<u32>,
-        after: Option<String>,
-        last: Option<u32>,
-        before: Option<String>,
-    ) -> Result<Self, MetadataError> {
-        let invalid = |detail: &str| Err(MetadataError::InvalidPagination(detail.to_string()));
-        let forward = first.is_some() || after.is_some();
-        let backward = last.is_some() || before.is_some();
-        if forward && backward {
-            return invalid(
-                "`first`/`after` page forwards and `last`/`before` page backwards; send one pair",
-            );
-        }
-        let (direction, size, cursor) = if backward {
-            (PageDirection::Backward, last, before)
-        } else {
-            (PageDirection::Forward, first, after)
-        };
-        let size = size.unwrap_or(DEFAULT_PAGE_SIZE);
-        let Some(size) = NonZeroU32::new(size).filter(|size| size.get() <= MAX_PAGE_SIZE) else {
-            return invalid(&format!(
-                "a page holds 1 to {MAX_PAGE_SIZE} items, not {size}"
-            ));
-        };
-        Ok(Self {
-            direction,
-            size,
-            cursor,
-        })
-    }
-}
-
 /// Database-backed metadata service
 #[derive(Debug)]
 pub struct DbMetadataService {
@@ -181,233 +131,6 @@ pub struct MetadataRepositories {
 
 fn internal(err: impl std::fmt::Display) -> MetadataError {
     MetadataError::InternalError(err.to_string())
-}
-
-/// A provider rating as the wire carries it: on its own 0-10 scale.
-fn ratings(rating_tmdb: Option<f32>) -> Option<Ratings> {
-    rating_tmdb.map(|r| Ratings {
-        tmdb: Some(widen_rating(r)),
-    })
-}
-
-/// The stored single-precision rating as the decimal it was stored from.
-///
-/// `f64::from(7.2_f32)` is `7.199999809265137`: exact, and not the number
-/// anyone wrote down. The shortest decimal that reads back as the same `f32`
-/// is -- that is what `f32`'s `Display` prints -- so the wire carries `7.2`.
-pub(crate) fn widen_rating(rating: f32) -> f64 {
-    rating
-        .to_string()
-        .parse()
-        .unwrap_or_else(|_| f64::from(rating))
-}
-
-fn identifiers(
-    imdb_id: Option<String>,
-    tmdb_id: Option<u32>,
-    tvdb_id: Option<u32>,
-) -> Option<ExternalIdentifiers> {
-    (imdb_id.is_some() || tmdb_id.is_some() || tvdb_id.is_some()).then_some(ExternalIdentifiers {
-        imdb_id,
-        tmdb_id,
-        tvdb_id,
-    })
-}
-
-/// The parts of a movie's metadata that come from files, which browse does
-/// not read.
-#[derive(Debug, Default)]
-struct MovieFiles {
-    duration: Option<f64>,
-    file_id: Option<Uuid>,
-    source_count: Option<u32>,
-}
-
-impl From<PrimarySource> for MovieFiles {
-    fn from(primary: PrimarySource) -> Self {
-        let PrimarySource {
-            file_id,
-            duration_secs,
-            last_episode_number: _,
-            source_count,
-        } = primary;
-        Self {
-            duration: duration_secs,
-            file_id,
-            source_count: Some(source_count),
-        }
-    }
-}
-
-/// A title's cast and crew, as its detail lists them; `None` in a browse
-/// result, which does not read them.
-type Credits = Option<(Vec<CastCredit>, Vec<CrewCredit>)>;
-
-fn movie_metadata(
-    movie: beam_domain::models::Movie,
-    genres: Vec<String>,
-    files: MovieFiles,
-    credits: Credits,
-    collection: Option<CollectionRef>,
-) -> MediaMetadata {
-    let beam_domain::models::Movie {
-        id,
-        title,
-        identity_key: _,
-        pinned_ref: _,
-        pin_source: _,
-        title_localized,
-        description,
-        year,
-        release_date,
-        runtime,
-        poster_url,
-        backdrop_url,
-        tmdb_id,
-        imdb_id,
-        tvdb_id,
-        anilist_id: _,
-        rating_tmdb,
-        rating_imdb: _,
-        content_rating,
-        created_at: _,
-        updated_at: _,
-    } = movie;
-    let MovieFiles {
-        duration,
-        file_id,
-        source_count,
-    } = files;
-    let (cast, crew) = credits.unzip();
-    MediaMetadata::Movie(MovieMetadata {
-        id,
-        title: Title {
-            original: title,
-            localized: title_localized,
-            alternatives: None,
-        },
-        description,
-        year,
-        release_date,
-        runtime_mins: runtime.map(|d| (d.as_secs() / 60) as u32),
-        duration_secs: duration,
-        poster_url: poster_url
-            .map(|_| artwork_path(ArtworkKind::Movie, id, ArtworkVariant::Poster)),
-        backdrop_url: backdrop_url
-            .map(|_| artwork_path(ArtworkKind::Movie, id, ArtworkVariant::Backdrop)),
-        genres,
-        ratings: ratings(rating_tmdb),
-        content_rating,
-        identifiers: identifiers(imdb_id, tmdb_id, tvdb_id),
-        file_id,
-        source_count,
-        user_state: UserTitleState::default(),
-        cast,
-        crew,
-        collection,
-    })
-}
-
-fn show_metadata(
-    show: beam_domain::models::Show,
-    genres: Vec<String>,
-    counts: ShowChildCounts,
-    seasons: Vec<SeasonMetadata>,
-    credits: Credits,
-) -> MediaMetadata {
-    let beam_domain::models::Show {
-        id,
-        title,
-        identity_key: _,
-        pinned_ref: _,
-        pin_source: _,
-        title_localized,
-        description,
-        year,
-        poster_url,
-        backdrop_url,
-        tmdb_id,
-        imdb_id,
-        tvdb_id,
-        anilist_id: _,
-        rating_tmdb,
-        content_rating,
-        created_at: _,
-        updated_at: _,
-    } = show;
-    let ShowChildCounts {
-        seasons: season_count,
-        episodes: episode_count,
-    } = counts;
-    let (cast, crew) = credits.unzip();
-    MediaMetadata::Show(ShowMetadata {
-        id,
-        title: Title {
-            original: title,
-            localized: title_localized,
-            alternatives: None,
-        },
-        description,
-        year,
-        poster_url: poster_url.map(|_| artwork_path(ArtworkKind::Show, id, ArtworkVariant::Poster)),
-        backdrop_url: backdrop_url
-            .map(|_| artwork_path(ArtworkKind::Show, id, ArtworkVariant::Backdrop)),
-        genres,
-        ratings: ratings(rating_tmdb),
-        content_rating,
-        identifiers: identifiers(imdb_id, tmdb_id, tvdb_id),
-        season_count,
-        episode_count,
-        seasons,
-        user_state: None,
-        cast,
-        crew,
-    })
-}
-
-/// The show heading an episode's or a season's detail.
-fn show_ref(show: &beam_domain::models::Show) -> ShowRef {
-    ShowRef {
-        id: show.id,
-        title: Title {
-            original: show.title.clone(),
-            localized: show.title_localized.clone(),
-            alternatives: None,
-        },
-        poster_url: show
-            .poster_url
-            .as_ref()
-            .map(|_| artwork_path(ArtworkKind::Show, show.id, ArtworkVariant::Poster)),
-        backdrop_url: show
-            .backdrop_url
-            .as_ref()
-            .map(|_| artwork_path(ArtworkKind::Show, show.id, ArtworkVariant::Backdrop)),
-    }
-}
-
-fn season_metadata(
-    season: beam_domain::models::Season,
-    episodes: Vec<EpisodeMetadata>,
-) -> SeasonMetadata {
-    let dates = ShowDates {
-        first_aired: season.first_aired,
-        last_aired: season.last_aired,
-    };
-    SeasonMetadata {
-        id: season.id,
-        season_number: season.season_number,
-        dates,
-        episode_runtime_mins: None,
-        episodes,
-        poster_url: season
-            .poster_url
-            .as_ref()
-            .map(|_| artwork_path(ArtworkKind::Season, season.id, ArtworkVariant::Poster)),
-        genres: vec![],
-        ratings: None,
-        identifiers: None,
-        user_state: None,
-    }
 }
 
 impl DbMetadataService {
@@ -755,10 +478,19 @@ impl MetadataService for DbMetadataService {
             direction,
             size,
             cursor,
-        } = PageRequest::from_relay(first, after, last, before)?;
+        } = PageRequest::from_relay(
+            first,
+            after,
+            last,
+            before,
+            DEFAULT_PAGE_SIZE,
+            MAX_PAGE_SIZE,
+            "items",
+        )
+        .map_err(MetadataError::InvalidPagination)?;
         let position = cursor
             .as_deref()
-            .map(|cursor| cursor::decode(cursor, sort_by, sort_order))
+            .map(|cursor| browse::decode(cursor, sort_by, sort_order))
             .transpose()
             .map_err(|e| MetadataError::InvalidCursor(e.to_string()))?;
         let has_cursor = position.is_some();
@@ -824,7 +556,7 @@ impl MetadataService for DbMetadataService {
             })
             .collect();
         let items = self.hydrate(&titles).await?;
-        let cursor_of = |position: &CatalogPosition| cursor::encode(sort_by, sort_order, position);
+        let cursor_of = |position: &CatalogPosition| browse::encode(sort_by, sort_order, position);
         Ok(MediaConnection {
             items,
             page_info: PageInfo {
@@ -1002,8 +734,6 @@ pub enum MetadataError {
     Unsupported(String),
 }
 
-pub use crate::models::search::{MediaConnection, MediaSortField, PageInfo, SortOrder, TitleKind};
-
 /// Search filters for media
 #[derive(Clone, Debug, Default)]
 pub struct MediaSearchFilters {
@@ -1020,3 +750,11 @@ pub struct MediaSearchFilters {
 #[cfg(test)]
 #[path = "metadata_tests.rs"]
 mod metadata_tests;
+
+#[cfg(test)]
+#[path = "sources_tests.rs"]
+mod sources_tests;
+
+#[cfg(test)]
+#[path = "metadata_browse_tests.rs"]
+mod metadata_browse_tests;

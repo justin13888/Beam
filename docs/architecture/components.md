@@ -39,11 +39,13 @@ hard (e.g. a cookie-Secure misconfiguration is a startup error) and logs redact 
 
 - `routes/` — the HTTP layer (`health.rs`, `media.rs`, `stream.rs`, `playback.rs`, `admin.rs`,
   `auth.rs`, `genres.rs`, `middleware.rs`, `metrics_mw.rs`, `rate_limit.rs`, `api_error.rs`,
-  `tags.rs`, and `mod.rs`, which is the whole route table as one value). Thin: parse the request,
+  `session_auth.rs`, `tags.rs`, and `mod.rs`, which is the whole route table as one value). Thin: parse the request,
   call a service trait, render the response. Kynos `Request`/`Response`/extractor types never leak
   past this layer. State arrives through `Inject<T>` rather than a run-time lookup, so a missing
   dependency is a compile error and the "handler returns 500 on missing state" arm no longer exists.
-  `api_error.rs` holds the one RFC 9457 error family every operation renders through.
+  `api_error.rs` holds the one RFC 9457 error family every operation renders through;
+  `session_auth.rs` holds the `beam_session` cookie scheme (`SessionAuth`, `AdminAuth`) that both
+  enforces and documents authentication.
 - `services/` — business logic behind traits (`library.rs`, `metadata.rs`, `playback.rs`,
   `admin_log.rs`, `notification.rs`, `hash.rs`, `media_info.rs`), each with a production
   implementation and an in-memory fake for tests. `telemetry/` builds, encodes (OTLP/HTTP JSON) and
@@ -320,6 +322,13 @@ which does not cross-compile to Android.
   (`catalog/{media,library,watching,admin}.rs`, one file per API resource).
   Which episode plays next is the server's `next_episode_id`, not worked out in the core, and a
   continue-watching or history row is drawn from its own display fields with no lookup per row.
+  `CursorPager` is exported as an object, so a platform pages a list through it rather than
+  keeping its own cursor loop.
+- **`timeline.rs`, `resolution.rs`** — the arithmetic that carries a position across the parts
+  of a multi-part source, and the one rule that names a resolution (keyed on width, so a 1920x804
+  scope rip is `1080p`). The constants a platform needs to agree with the core -- the progress
+  interval, the telemetry batch size, the session cookie name -- and `BeamError.is_retryable` are
+  exported alongside them, so no client restates them.
 
 - **`ffi/`** — the UniFFI surface, a façade over the modules above. `BeamClient` lives in
   `ffi/mod.rs` with the server registry, sign-in and the shared request plumbing; each resource
@@ -335,9 +344,11 @@ A Compose app for phone and tablet, on top of `beam-client-core`. Multi-module w
 plugins in `build-logic/`: `core/{model,ffi,designsystem,ui,media,testing}` and
 `feature/{auth,home,libraries,explore,detail,player,downloads,history,settings,admin}`.
 
-- **`core:ffi`** is the only module that sees the generated UniFFI Kotlin or loads the `.so`.
-  Everything above it depends on a Kotlin interface, which is what lets every screen be tested on
-  the JVM with no native library and no JNA on the classpath.
+- **`core:ffi`** owns the generated UniFFI Kotlin and loads the `.so`. The server-facing calls
+  sit behind Kotlin repository interfaces, so a screen's tests swap the network for a fake; what
+  the core decides locally -- cursor paging, whether an error is retryable, the part timeline, the
+  resolution label -- is called directly, and the JVM tests run it against the host build of the
+  core (`beam.android.nativecore`), never a Kotlin copy of it.
 - **Navigation** is Navigation 3: the back stack is ordinary observable state, so the tabs, the
   detail pages and the player share one history. Destinations are typed keys carrying their own
   arguments, so a navigation call cannot lose or misspell one.

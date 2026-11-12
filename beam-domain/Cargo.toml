@@ -13,8 +13,8 @@ chrono = { workspace = true }
 encoding_rs = "0.8.35"
 glob = "0.3.4"
 mutants = { workspace = true }
-num = { version = "0.4.3", features = ["serde"] }
-parking_lot = "0.12.5"
+# Only the in-memory doubles take a lock, so it is a `test-utils` dependency.
+parking_lot = { version = "0.12.5", optional = true }
 regex = { workspace = true }
 # Kodi `.nfo` files (issue #184): a read-only DOM with no dependencies of its
 # own beyond memchr, that refuses a DTD and caps the node count -- so a hostile
@@ -26,7 +26,6 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 # `RealClock::sleep` needs `tokio::time`; `TestClock`'s waiters need `tokio::sync`.
 tokio = { workspace = true }
-tracing = { workspace = true }
 unicode-normalization = { workspace = true }
 uuid = { workspace = true }
 xxhash-rust = { version = "0.8.18", features = ["xxh3"] }
@@ -46,6 +45,7 @@ optional = true
 # feature in from a downstream crate's dev-dependencies -- which is what
 # cargo-mutants does when it builds each package on its own.
 mockall = "0.15.0"
+parking_lot = "0.12.5"
 proptest = "1.11.0"
 tempfile = "3.27.0"
 tokio = { workspace = true, features = ["macros", "rt"] }
@@ -59,4 +59,4 @@ entity = ["dep:beam-entity"]
 # every `cfg`-gated production path, or mutants in code that was never built are
 # reported MISSED for a reason that has nothing to do with the tests.
 mutation-testing = ["entity", "test-utils"]
-test-utils = ["dep:mockall"]
+test-utils = ["dep:mockall", "dep:parking_lot"]

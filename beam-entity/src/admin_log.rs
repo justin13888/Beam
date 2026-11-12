@@ -1,7 +1,6 @@
 use sea_orm::entity::prelude::*;
-use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "admin_log_level")]
 pub enum AdminLogLevel {
     #[sea_orm(string_value = "info")]
@@ -12,7 +11,7 @@ pub enum AdminLogLevel {
     Error,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "admin_log_category")]
 pub enum AdminLogCategory {
     #[sea_orm(string_value = "library_scan")]
@@ -25,7 +24,7 @@ pub enum AdminLogCategory {
     Enrichment,
 }
 
-#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
 #[sea_orm(table_name = "admin_logs")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]

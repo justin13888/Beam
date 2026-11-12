@@ -47,7 +47,6 @@ pub enum WatchError {
 }
 
 /// A source of filesystem-change events for indexed libraries.
-#[cfg_attr(any(test, feature = "test-utils"), mockall::automock)]
 #[async_trait::async_trait]
 pub trait FsWatcher: Send + Sync + std::fmt::Debug {
     /// Recursively watch a library's root directory, returning how it is

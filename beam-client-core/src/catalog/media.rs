@@ -412,23 +412,23 @@ pub fn browse_params(query: &BrowseQuery) -> Result<crate::api::BrowseMediaParam
         after: query.after.clone(),
         last: None,
         before: None,
-        // The query-parameter enums are generated separately from the schema
-        // enums of the same shape, so these map onto `types::SortBy` and
-        // friends rather than onto `MediaSortField`.
+        // The query parameters reuse the schema enums the server names them
+        // with, so these map onto `types::MediaSortField` and friends -- the
+        // wire's, not this crate's own enums of the same names.
         sort_by: query.sort_by.map(|field| match field {
-            MediaSortField::Title => wire::SortBy::Title,
-            MediaSortField::Year => wire::SortBy::Year,
-            MediaSortField::Rating => wire::SortBy::Rating,
-            MediaSortField::DateAdded => wire::SortBy::DateAdded,
-            MediaSortField::Runtime => wire::SortBy::Runtime,
+            MediaSortField::Title => wire::MediaSortField::Title,
+            MediaSortField::Year => wire::MediaSortField::Year,
+            MediaSortField::Rating => wire::MediaSortField::Rating,
+            MediaSortField::DateAdded => wire::MediaSortField::DateAdded,
+            MediaSortField::Runtime => wire::MediaSortField::Runtime,
         }),
         sort_order: query.sort_order.map(|order| match order {
-            SortOrder::Ascending => wire::SortOrderFe86ad6c::Asc,
-            SortOrder::Descending => wire::SortOrderFe86ad6c::Desc,
+            SortOrder::Ascending => wire::SortOrder::Asc,
+            SortOrder::Descending => wire::SortOrder::Desc,
         }),
         media_type: query.media_type.map(|kind| match kind {
-            MediaTypeFilter::Movie => wire::MediaType::Movie,
-            MediaTypeFilter::Show => wire::MediaType::Show,
+            MediaTypeFilter::Movie => wire::TitleKind::Movie,
+            MediaTypeFilter::Show => wire::TitleKind::Show,
         }),
         genre: query.genre.clone(),
         year: query.year.map(i64::from),
@@ -767,12 +767,12 @@ mod tests {
         let params = browse_params(&query).expect("a valid query");
         assert_eq!(params.first, Some(24));
         assert_eq!(params.after.as_deref(), Some("cursor"));
-        assert!(matches!(params.sort_by, Some(wire::SortBy::DateAdded)));
         assert!(matches!(
-            params.sort_order,
-            Some(wire::SortOrderFe86ad6c::Desc)
+            params.sort_by,
+            Some(wire::MediaSortField::DateAdded)
         ));
-        assert!(matches!(params.media_type, Some(wire::MediaType::Show)));
+        assert!(matches!(params.sort_order, Some(wire::SortOrder::Desc)));
+        assert!(matches!(params.media_type, Some(wire::TitleKind::Show)));
         assert_eq!(params.genre.as_deref(), Some("Drama"));
         assert_eq!(params.year, Some(1999));
         assert_eq!(params.year_from, Some(1990));

@@ -31,6 +31,10 @@ pub trait EnrichmentStateRepository: Send + Sync + std::fmt::Debug {
         target: EnrichmentTargetId,
     ) -> Result<Option<EnrichmentState>, DbErr>;
 
+    /// Terminal success: the row `id` names becomes `Enriched`, matched to
+    /// `matched_ref` with `confidence`, enriched at `now`. Its next attempt,
+    /// pending refresh and last error are cleared, and the change is stamped
+    /// at `now`. An id that names no row is a no-op, not an error.
     async fn mark_enriched(
         &self,
         id: Uuid,
@@ -39,6 +43,11 @@ pub trait EnrichmentStateRepository: Send + Sync + std::fmt::Debug {
         now: DateTime<Utc>,
     ) -> Result<(), DbErr>;
 
+    /// Terminal: no provider matched. The row `id` names becomes
+    /// `Unmatched` with `reason` as its last error; its next attempt and
+    /// enrichment time are cleared, its stored match is kept, and the change
+    /// is stamped at `now`. An id that names no row is a no-op, not an
+    /// error.
     async fn mark_unmatched(&self, id: Uuid, reason: &str, now: DateTime<Utc>)
     -> Result<(), DbErr>;
 

@@ -58,7 +58,6 @@ dependencies {
     implementation(libs.coil.network.okhttp)
     implementation(libs.okhttp)
     implementation(libs.androidx.glance.appwidget)
-    implementation(libs.androidx.glance.material3)
 
     testImplementation(projects.core.testing)
     // Renders the widget's Glance composition in a unit test, without a host.

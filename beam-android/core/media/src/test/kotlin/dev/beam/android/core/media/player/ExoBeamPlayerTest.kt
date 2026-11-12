@@ -26,6 +26,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import uniffi.beam_client_core.BeamException
 import uniffi.beam_client_core.RebufferMonitorInterface
+import uniffi.beam_client_core.SwitchTrigger
 
 /**
  * The player over a real ExoPlayer -- Media3's test build of it, on
@@ -129,6 +130,53 @@ class ExoBeamPlayerTest {
             player.stop()
         }
 
+    @Test
+    fun `switching from a later part to a whole file lands at the same moment of the film`() =
+        runTest {
+            val scope = TestScope(testScheduler)
+            playback.plans[FILE_ID] = twoPartPlan(startIndex = 1u)
+            val player = player(scope)
+            player.play(REQUEST.copy(startPositionSecs = 600.0))
+            scope.runCurrent()
+
+            player.switchSource(WHOLE_FILE_ID, SwitchTrigger.MANUAL)
+            scope.runCurrent()
+
+            assertEquals(WHOLE_FILE_ID, exoPlayer.getMediaItemAt(0).mediaId)
+            assertEquals(0, exoPlayer.currentMediaItemIndex)
+            assertEquals("part 2, 10 minutes in, is 1h 0m into the film", 3_600_000L, exoPlayer.currentPosition)
+            player.stop()
+        }
+
+    @Test
+    fun `switching from a whole file to a multi-part version lands in the part that holds the moment`() =
+        runTest {
+            val scope = TestScope(testScheduler)
+            playback.plans[MULTI_PART_ID] = twoPartPlan(startIndex = 0u)
+            val player = player(scope)
+            player.play(REQUEST.copy(fileId = WHOLE_FILE_ID, startPositionSecs = 3_600.0))
+            scope.runCurrent()
+
+            player.switchSource(MULTI_PART_ID, SwitchTrigger.MANUAL)
+            scope.runCurrent()
+
+            assertEquals(1, exoPlayer.currentMediaItemIndex)
+            assertEquals(600_000L, exoPlayer.currentPosition)
+            assertEquals(1, player.state.value.partIndex)
+            player.stop()
+        }
+
+    /** Fifty minutes, then forty-six and forty seconds. */
+    private fun twoPartPlan(startIndex: UInt) =
+        Fixtures.plan(
+            parts =
+                listOf(
+                    Fixtures.part(FILE_ID, durationSecs = 3_000.0),
+                    Fixtures.part("part-2", durationSecs = 2_800.0),
+                ),
+            startIndex = startIndex,
+        )
+
     /** A monitor that never judges rebuffering sustained; the rule is the core's, tested there. */
     private object NeverSustained : RebufferMonitorInterface {
         override fun stallStarted(nowMs: ULong): Boolean = false
@@ -142,6 +190,8 @@ class ExoBeamPlayerTest {
 
     private companion object {
         const val FILE_ID = "file-1"
+        const val WHOLE_FILE_ID = "whole-file"
+        const val MULTI_PART_ID = "multi-part"
         val REQUEST =
             PlaybackRequest(
                 mediaId = "movie-1",

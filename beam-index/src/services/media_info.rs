@@ -1,3 +1,4 @@
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
@@ -17,18 +18,23 @@ pub trait MediaInfoService: Send + Sync + std::fmt::Debug {
     ) -> Result<VideoFileMetadata, MetadataError>;
 }
 
+/// Probes a file in-process, through the linked FFmpeg libraries, on a
+/// blocking thread -- no FFmpeg process is spawned.
+///
+/// [`Default`] probes any number of files at once; [`Self::new`] bounds it.
 #[derive(Debug, Clone, Default)]
 pub struct LocalMediaInfoService {
-    /// Limit the number of concurrent FFmpeg processes.
-    /// [None] indicates no limit (unrestricted).
+    /// Limits how many probes run at once. [None] indicates no limit.
     semaphore: Option<Arc<Semaphore>>,
 }
 
 impl LocalMediaInfoService {
-    /// Creates a new service with a specific concurrency limit.
-    pub fn new(concurrent_limit: usize) -> Self {
+    /// A service that runs at most `concurrent_limit` probes at once; a
+    /// further probe waits for one to finish. The limit is never zero, which
+    /// would leave every probe waiting forever.
+    pub fn new(concurrent_limit: NonZeroUsize) -> Self {
         Self {
-            semaphore: Some(Arc::new(Semaphore::new(concurrent_limit))),
+            semaphore: Some(Arc::new(Semaphore::new(concurrent_limit.get()))),
         }
     }
 }
@@ -78,7 +84,7 @@ mod tests {
     /// probe fails, so a failing file can never use up the limit.
     #[tokio::test]
     async fn a_probe_waits_for_a_permit_and_gives_it_back_when_done() {
-        let service = LocalMediaInfoService::new(1);
+        let service = LocalMediaInfoService::new(NonZeroUsize::MIN);
         let semaphore = Arc::clone(service.semaphore.as_ref().expect("a limited service"));
         let (_dir, file) = noise();
         let held = Arc::clone(&semaphore).acquire_owned().await.unwrap();

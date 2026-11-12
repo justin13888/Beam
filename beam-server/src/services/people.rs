@@ -3,7 +3,6 @@
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use sea_orm::DbErr;
@@ -21,7 +20,9 @@ use crate::models::{
     ArtworkKind, ArtworkVariant, CastCredit, CreditedTitle, CrewCredit, FilmographyCastCredit,
     FilmographyCrewCredit, Person, PersonConnection, PersonDetail, Title, artwork_path,
 };
-use crate::services::offset_cursor::{self, OffsetList};
+use crate::services::cursor;
+use crate::services::cursor::offset::OffsetList;
+use crate::services::paging::page_size;
 
 /// The page size when a people search names none.
 pub const DEFAULT_PAGE_SIZE: u32 = 20;
@@ -174,15 +175,9 @@ impl PeopleService {
                 "query must not contain a NUL character".to_string(),
             ));
         }
-        let size = first.unwrap_or(DEFAULT_PAGE_SIZE);
-        let size = NonZeroU32::new(size)
-            .filter(|size| size.get() <= MAX_PAGE_SIZE)
-            .ok_or_else(|| {
-                PeopleError::InvalidPagination(format!(
-                    "a page holds 1 to {MAX_PAGE_SIZE} people, not {size}"
-                ))
-            })?;
-        let offset = offset_cursor::start_after(OffsetList::People, after.as_deref())
+        let size = page_size(first, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, "people")
+            .map_err(PeopleError::InvalidPagination)?;
+        let offset = cursor::offset::start_after(OffsetList::People, after.as_deref())
             .map_err(|err| PeopleError::InvalidCursor(err.to_string()))?;
 
         let people = self
@@ -192,7 +187,7 @@ impl PeopleService {
             .map_err(internal)?;
         let total = self.people.count(query, access).await.map_err(internal)?;
         Ok(PersonConnection {
-            page_info: offset_cursor::page_info(OffsetList::People, offset, people.len(), total),
+            page_info: cursor::offset::page_info(OffsetList::People, offset, people.len(), total),
             items: people
                 .into_iter()
                 .map(|person| Person {

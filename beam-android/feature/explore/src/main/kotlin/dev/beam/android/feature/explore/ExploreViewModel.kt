@@ -3,6 +3,7 @@ package dev.beam.android.feature.explore
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dev.beam.android.core.ffi.newIn
 import dev.beam.android.core.ffi.repository.CatalogRepository
 import dev.beam.android.core.ffi.toFailure
 import kotlinx.coroutines.FlowPreview
@@ -18,6 +19,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import uniffi.beam_client_core.BeamException
 import uniffi.beam_client_core.BrowseQuery
+import uniffi.beam_client_core.CursorPager
 import uniffi.beam_client_core.MediaSortField
 import uniffi.beam_client_core.MediaSummary
 import uniffi.beam_client_core.MediaTypeFilter
@@ -74,10 +76,16 @@ public class ExploreViewModel
         private val mutableState = MutableStateFlow(ExploreUiState())
         public val state: StateFlow<ExploreUiState> = mutableState.asStateFlow()
 
-        private var cursor: String? = null
+        /**
+         * The core's cursor rules: a page without a cursor keeps the position,
+         * and a title that the shifting catalog repeats on a later page is
+         * listed once.
+         */
+        private val pager = CursorPager()
         private var inFlight: Job? = null
 
         init {
+            addCloseable(pager)
             viewModelScope.launch {
                 runCatching { catalog.genres() }
                     .onSuccess { genres -> mutableState.update { it.copy(genres = genres) } }
@@ -133,7 +141,8 @@ public class ExploreViewModel
         /** Fetch the first page again, discarding what is loaded. */
         public fun reload() {
             inFlight?.cancel()
-            cursor = null
+            pager.reset()
+            pager.beginRequest()
             mutableState.update { it.copy(isLoading = true, error = null) }
             inFlight =
                 viewModelScope.launch {
@@ -145,6 +154,7 @@ public class ExploreViewModel
         public fun loadMore() {
             val current = mutableState.value
             if (!current.hasMore || current.isLoadingMore || current.isLoading) return
+            if (!pager.beginRequest()) return
 
             mutableState.update { it.copy(isLoadingMore = true) }
             inFlight =
@@ -160,7 +170,7 @@ public class ExploreViewModel
                     catalog.browse(
                         BrowseQuery(
                             first = PAGE_SIZE,
-                            after = cursor,
+                            after = pager.cursor(),
                             sortBy = current.sortBy,
                             sortOrder = current.sortOrder,
                             mediaType = current.mediaType,
@@ -172,17 +182,19 @@ public class ExploreViewModel
                             minRating = null,
                         ),
                     )
-                cursor = page.endCursor
+                val advance = pager.completeRequest(page.items.map { it.id }, page.endCursor, page.hasNextPage)
+                val fresh = page.items.newIn(advance) { it.id }
                 mutableState.update {
                     it.copy(
-                        items = if (replacing) page.items else it.items + page.items,
-                        hasMore = page.hasNextPage,
+                        items = if (replacing) fresh else it.items + fresh,
+                        hasMore = advance.hasNextPage,
                         isLoading = false,
                         isLoadingMore = false,
                         error = null,
                     )
                 }
             } catch (failure: BeamException) {
+                pager.failRequest()
                 mutableState.update {
                     it.copy(
                         isLoading = false,

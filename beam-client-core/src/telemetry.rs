@@ -38,6 +38,14 @@ use std::sync::Mutex;
 /// answers a larger batch with 422.
 pub const MAX_EVENTS_PER_REQUEST: usize = 50;
 
+/// [`MAX_EVENTS_PER_REQUEST`], for a platform that flushes once a request's
+/// worth of events is waiting rather than holding them until the next pause.
+#[uniffi::export]
+#[must_use]
+pub fn telemetry_max_events_per_request() -> u32 {
+    count(MAX_EVENTS_PER_REQUEST)
+}
+
 /// The most events held between flushes.
 ///
 /// Ten full requests. A client that cannot reach the server for a whole

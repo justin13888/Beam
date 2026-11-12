@@ -1,9 +1,8 @@
 //! Metadata enrichment queue/status entity
 
 use sea_orm::entity::prelude::*;
-use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
 #[sea_orm(table_name = "metadata_enrichment")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
@@ -30,7 +29,7 @@ pub struct Model {
     pub updated_at: DateTimeWithTimeZone,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "enrichment_status")]
 pub enum EnrichmentStatus {
     #[sea_orm(string_value = "pending")]

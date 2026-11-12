@@ -24,8 +24,8 @@ import java.io.File
  * over JNA, into the host build of `libbeam_client_core`, storing through the
  * DataStore store a phone uses. Nothing here is a double.
  *
- * Plain JUnit rather than Robolectric, whose sandbox class loader JNA's
- * native binding does not survive. The flow stays clear of secrets, the one
+ * Plain JUnit: the flow needs no Android framework class, so there is no
+ * Robolectric sandbox to start. It stays clear of secrets, the one
  * part of the store that needs the platform's `Base64`; those are covered by
  * `DataStoreKeyValueStoreTest`.
  */

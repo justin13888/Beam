@@ -4,7 +4,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.selection.selectable
@@ -420,25 +419,5 @@ private fun SwitchRow(
                 .clickable { onChange(!checked) },
     )
 }
-
-internal fun ThemeMode.label(): String =
-    when (this) {
-        ThemeMode.System -> "Follow the system"
-        ThemeMode.Light -> "Light"
-        ThemeMode.Dark -> "Dark"
-    }
-
-internal fun PaletteSource.label(): String =
-    when (this) {
-        PaletteSource.Dynamic -> "From your wallpaper"
-        PaletteSource.Brand -> "Beam's own colours"
-    }
-
-internal fun QualityPreference.label(): String =
-    when (this) {
-        QualityPreference.Best -> "Best this device can play"
-        QualityPreference.MatchScreen -> "Match this screen"
-        QualityPreference.Smallest -> "Smallest file"
-    }
 
 private const val MILLIS_PER_SECOND = 1_000L

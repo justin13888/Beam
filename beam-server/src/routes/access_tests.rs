@@ -111,10 +111,7 @@ struct FileLocator {
 
 #[async_trait::async_trait]
 impl LibraryService for FileLocator {
-    async fn get_libraries(
-        &self,
-        _user_id: String,
-    ) -> Result<Vec<crate::models::Library>, LibraryError> {
+    async fn get_libraries(&self) -> Result<Vec<crate::models::Library>, LibraryError> {
         unimplemented!("not called by the routes under test")
     }
     async fn get_library_by_id(
@@ -213,7 +210,22 @@ fn fixture() -> Fixture {
         titles,
     ));
     let sidecars = Arc::new(InMemorySidecarSubtitleRepository::default());
-    let sources = Arc::new(SourceCatalog::new(crate::services::sources::SourceRepositories {movies: movies.clone(), files: files.clone(), streams: Arc::new(InMemoryMediaStreamRepository::default()), sidecars: sidecars.clone(), chapters: Arc::new(beam_domain::repositories::chapter::in_memory::InMemoryChapterRepository::default()), trickplay: Arc::new(beam_domain::repositories::trickplay::in_memory::InMemoryTrickplayRepository::default()),}));
+    // One trickplay store behind both the sources a title lists and the
+    // service that delivers the sheets, so a sheet a source offers is one
+    // the route serves.
+    let trickplay_records = Arc::new(InMemoryTrickplayRepository::default());
+    let sources = Arc::new(SourceCatalog::new(
+        crate::services::sources::SourceRepositories {
+            movies: movies.clone(),
+            files: files.clone(),
+            streams: Arc::new(InMemoryMediaStreamRepository::default()),
+            sidecars: sidecars.clone(),
+            chapters: Arc::new(
+                beam_domain::repositories::chapter::in_memory::InMemoryChapterRepository::default(),
+            ),
+            trickplay: trickplay_records.clone(),
+        },
+    ));
     let playback = Arc::new(DbPlaybackService::new(PlaybackRepositories {
         watch_state: Arc::new(
             beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::new(
@@ -240,7 +252,6 @@ fn fixture() -> Fixture {
     }));
     // A real trickplay service over a data directory in the temp dir, so a
     // hidden file can be given a sheet the route would otherwise serve.
-    let trickplay_records = Arc::new(InMemoryTrickplayRepository::default());
     let trickplay_root = root.path().join("trickplay");
     let trickplay = Arc::new(TrickplayService::new(
         trickplay_root.clone(),
@@ -267,7 +278,6 @@ fn fixture() -> Fixture {
     ));
 
     let services = AppServices {
-        hash: base.services.hash.clone(),
         access: access_over(movies.clone(), shows.clone(), files.clone()),
         library: Arc::new(FileLocator {
             files: files.clone(),
@@ -279,16 +289,10 @@ fn fixture() -> Fixture {
             files.clone(),
             sidecars.clone(),
         )),
-        notification: base.services.notification.clone(),
-        admin_log: base.services.admin_log.clone(),
-        user_repo: base.services.user_repo.clone(),
-        language_preferences: base.services.language_preferences.clone(),
         playback: playback.clone(),
         genre_repo: genres.clone(),
         library_repo: libraries.clone(),
         file_repo: files.clone(),
-        enrichment_repo: base.services.enrichment_repo.clone(),
-        enrichment_control: base.services.enrichment_control.clone(),
         people: Arc::new(PeopleService::new(
             people.clone(),
             movies.clone(),
@@ -309,15 +313,8 @@ fn fixture() -> Fixture {
         movie_repo: movies.clone(),
         show_repo: shows.clone(),
         artwork,
-        session_store: base.services.session_store.clone(),
-        oidc_client: base.services.oidc_client.clone(),
-        pending_auth_store: base.services.pending_auth_store.clone(),
-        device_auth_store: base.services.device_auth_store.clone(),
-        oidc_config: base.services.oidc_config.clone(),
-        watch_status: Arc::new(beam_index::services::watch_status::WatchStatus::new()),
-        telemetry: crate::routes::test_support::idle_library_report(),
-        playback_telemetry: crate::routes::test_support::idle_playback_telemetry(),
         trickplay,
+        ..base.services.clone()
     };
 
     Fixture {
@@ -1111,6 +1108,117 @@ async fn a_hidden_titles_files_are_not_found_to_stream_download_or_subtitle() {
         .await
         .assert_status(StatusCode::NOT_FOUND)
         .assert_problem_type("https://beam.justinchung.net/reference/errors/#trickplay-not-found");
+}
+
+/// Every URL a source carries is one of the server's own routes, and
+/// delivers what it names: each is read off `GET /v1/media/{id}/sources` and
+/// requested as given through the served router -- the one `main` serves --
+/// so nothing here restates how the URLs are spelled. A URL that drifted
+/// from its route would 404 here; one naming the wrong file, subtitle or
+/// sheet would deliver the wrong bytes.
+#[tokio::test]
+async fn every_url_a_source_carries_is_served_and_delivers_what_it_names() {
+    const SHEET_BYTES: [&[u8]; 2] = [b"sheet zero", b"sheet one"];
+
+    let fixture = fixture();
+    let (_, titles) = fixture.catalogue().await;
+    let file = titles.kids_file;
+    let subtitle = fixture.subtitle(file).await;
+    // Two sheets, each with bytes of its own: 150 tiles at 10 by 10.
+    let hash = fixture
+        .files
+        .find_by_id(file)
+        .await
+        .expect("the file store answers")
+        .expect("the file exists")
+        .hash;
+    let sheets = fixture
+        .trickplay_root
+        .join(file.to_string())
+        .join(format!("{hash:016x}"));
+    std::fs::create_dir_all(&sheets).expect("a sheet folder");
+    for (sheet, bytes) in SHEET_BYTES.iter().enumerate() {
+        std::fs::write(sheets.join(format!("{sheet}.jpg")), bytes).expect("write a sheet");
+    }
+    fixture
+        .trickplay_records
+        .upsert(TrickplayRecord {
+            file_id: file,
+            file_hash: hash,
+            layout: Some(TrickplayLayout {
+                interval_ms: 10_000,
+                tile_width: 320,
+                tile_height: 180,
+                columns: 10,
+                rows: 10,
+                tile_count: 150,
+            }),
+            generated_at: chrono::Utc::now(),
+        })
+        .await
+        .expect("record the sheets");
+    let (token, _) = fixture.viewer().await;
+    let client = crate::routes::test_support::served_client(fixture.state.clone());
+    let get = |url: String| {
+        let client = &client;
+        let token = token.clone();
+        async move {
+            let response = client.get(&url).cookie("beam_session", &token).send().await;
+            assert_eq!(response.status(), StatusCode::OK, "GET {url}");
+            response
+        }
+    };
+
+    let sources: crate::models::MediaSourceConnection =
+        get(format!("/v1/media/{}/sources", titles.kids_movie))
+            .await
+            .json();
+    let source = &sources.items[0];
+    assert_eq!(source.file_id, file);
+
+    // The source and its one part play the same file, streamed inline and
+    // downloaded as an attachment.
+    let part = &source.parts[0];
+    assert_eq!(
+        (&part.stream_url, &part.download_url),
+        (&source.stream_url, &source.download_url)
+    );
+    let streamed = get(source.stream_url.clone()).await;
+    assert_eq!(streamed.bytes().as_ref(), FILE_BYTES);
+    assert_eq!(streamed.header("content-disposition"), None);
+    let downloaded = get(source.download_url.clone()).await;
+    assert_eq!(downloaded.bytes().as_ref(), FILE_BYTES);
+    assert!(
+        downloaded
+            .header("content-disposition")
+            .is_some_and(|value| value.starts_with("attachment")),
+        "the download URL is the download route"
+    );
+
+    // The subtitle file beside it, as stored and as WebVTT.
+    let track = source
+        .subtitle_tracks
+        .iter()
+        .find(|track| track.sidecar_id == Some(subtitle))
+        .expect("the sidecar is listed");
+    let stored = get(track.url.clone().expect("a sidecar has a URL")).await;
+    assert_eq!(
+        stored.bytes().as_ref(),
+        b"1\n00:00:01,000 --> 00:00:02,000\nHello\n"
+    );
+    let webvtt = get(track
+        .webvtt_url
+        .clone()
+        .expect("a small SubRip file has a WebVTT rendition"))
+    .await;
+    assert!(webvtt.text().starts_with("WEBVTT"), "{}", webvtt.text());
+
+    // Each trickplay sheet, in order.
+    let trickplay = source.trickplay.as_ref().expect("the sheets are offered");
+    assert_eq!(trickplay.sheet_urls.len(), SHEET_BYTES.len());
+    for (url, bytes) in trickplay.sheet_urls.iter().zip(SHEET_BYTES) {
+        assert_eq!(get(url.clone()).await.bytes().as_ref(), bytes, "{url}");
+    }
 }
 
 #[tokio::test]

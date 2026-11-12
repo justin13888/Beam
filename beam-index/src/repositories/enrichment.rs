@@ -11,17 +11,31 @@ use beam_domain::models::enrichment::{
     EnrichmentTargetId, FieldLocks,
 };
 use beam_domain::repositories::EnrichmentStateRepository;
+use beam_domain::services::{Clock, IdGenerator, RealClock, UuidGenerator};
 use beam_entity::metadata_enrichment;
 
 /// SQL-based implementation of the EnrichmentStateRepository trait.
 #[derive(Debug, Clone)]
 pub struct SqlEnrichmentStateRepository {
     db: Arc<DatabaseConnection>,
+    /// Source of the `created_at` and `updated_at` a write stamps.
+    clock: Arc<dyn Clock>,
+    /// Source of a new row's id.
+    ids: Arc<dyn IdGenerator>,
 }
 
 impl SqlEnrichmentStateRepository {
     pub fn new(db: Arc<DatabaseConnection>) -> Self {
-        Self { db }
+        Self::with_seams(db, Arc::new(RealClock), Arc::new(UuidGenerator))
+    }
+
+    /// A repository stamping writes from `clock` and ids from `ids`.
+    pub fn with_seams(
+        db: Arc<DatabaseConnection>,
+        clock: Arc<dyn Clock>,
+        ids: Arc<dyn IdGenerator>,
+    ) -> Self {
+        Self { db, clock, ids }
     }
 }
 
@@ -58,8 +72,11 @@ fn filter_condition(filter: &EnrichmentListFilter) -> sea_orm::Condition {
 }
 
 /// The `UPDATE` that queues rows for another pass, as `request_refresh`
-/// describes, before its `WHERE`.
-fn queue_update(rematch: bool) -> sea_orm::UpdateMany<metadata_enrichment::Entity> {
+/// describes, before its `WHERE`, stamped as updated at `now`.
+fn queue_update(
+    rematch: bool,
+    now: DateTime<Utc>,
+) -> sea_orm::UpdateMany<metadata_enrichment::Entity> {
     use sea_orm::ActiveEnum;
     use sea_orm::EntityTrait;
     use sea_orm::sea_query::Expr;
@@ -76,7 +93,7 @@ fn queue_update(rematch: bool) -> sea_orm::UpdateMany<metadata_enrichment::Entit
         )
         .col_expr(
             metadata_enrichment::Column::UpdatedAt,
-            Expr::value(chrono::DateTime::<chrono::FixedOffset>::from(Utc::now())),
+            Expr::value(chrono::DateTime::<chrono::FixedOffset>::from(now)),
         );
     if rematch {
         update = update.col_expr(
@@ -139,13 +156,13 @@ impl EnrichmentStateRepository for SqlEnrichmentStateRepository {
             return Ok(());
         }
 
-        let now = Utc::now();
+        let now = self.clock.now();
         let (movie_id, show_id) = match target {
             EnrichmentTargetId::Movie(id) => (Some(id), None),
             EnrichmentTargetId::Show(id) => (None, Some(id)),
         };
         let row = metadata_enrichment::ActiveModel {
-            id: Set(Uuid::new_v4()),
+            id: Set(self.ids.new_id()),
             movie_id: Set(movie_id),
             show_id: Set(show_id),
             status: Set(metadata_enrichment::EnrichmentStatus::Pending),
@@ -324,7 +341,7 @@ impl EnrichmentStateRepository for SqlEnrichmentStateRepository {
         active.force_refresh = Set(true);
         active.attempts = Set(0);
         active.next_attempt_at = Set(None);
-        active.updated_at = Set(Utc::now().into());
+        active.updated_at = Set(self.clock.now().into());
         if rematch {
             active.matched_ref = Set(None);
         }
@@ -353,7 +370,9 @@ impl EnrichmentStateRepository for SqlEnrichmentStateRepository {
     async fn request_refresh_all(&self, rematch: bool) -> Result<u64, DbErr> {
         // One statement: a library of tens of thousands of titles used to be
         // read whole and written back a row at a time.
-        let result = queue_update(rematch).exec(self.db.as_ref()).await?;
+        let result = queue_update(rematch, self.clock.now())
+            .exec(self.db.as_ref())
+            .await?;
         Ok(result.rows_affected)
     }
 
@@ -378,13 +397,13 @@ impl EnrichmentStateRepository for SqlEnrichmentStateRepository {
         use sea_orm::sea_query::OnConflict;
         use sea_orm::{EntityTrait, Set};
 
-        let now: chrono::DateTime<chrono::FixedOffset> = Utc::now().into();
+        let now: chrono::DateTime<chrono::FixedOffset> = self.clock.now().into();
         let (movie_id, show_id, conflict) = match target {
             EnrichmentTargetId::Movie(id) => (Some(id), None, metadata_enrichment::Column::MovieId),
             EnrichmentTargetId::Show(id) => (None, Some(id), metadata_enrichment::Column::ShowId),
         };
         let row = metadata_enrichment::ActiveModel {
-            id: Set(Uuid::new_v4()),
+            id: Set(self.ids.new_id()),
             movie_id: Set(movie_id),
             show_id: Set(show_id),
             status: Set(metadata_enrichment::EnrichmentStatus::Pending),

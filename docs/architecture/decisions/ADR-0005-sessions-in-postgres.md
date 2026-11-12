@@ -40,7 +40,12 @@ removing sessions from it removed the only reason it was present.
   much higher request throughput.
 - Loses Redis's native key expiry (`TTL`) as a mechanism; expiry is instead enforced by an
   `expires_at` column check on lookup plus a periodic sweep of expired rows — slightly more
-  application-level bookkeeping than "the store expires it for you."
+  application-level bookkeeping than "the store expires it for you." (Amended 2026-11-07 — see
+  issue #428 — the sweep runs on write, not on a timer: creating a session deletes every session
+  already past its idle or absolute expiry, and starting a login does the same for expired
+  `pending_auths` rows, as starting a device login already did for `device_auths`. That needs no
+  background task, no setting and no shutdown handling, and bounds growth to what accumulates
+  between two sign-ins.)
 - If Beam later needs a fast shared cache for an unrelated purpose (e.g. a hot read-through cache
   in front of catalog queries), that would be a new decision to reintroduce a cache layer — this ADR
   does not preclude that, but it does mean Redis isn't already sitting there half-used for it.

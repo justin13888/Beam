@@ -14,17 +14,14 @@ name = "beam-migration"
 path = "src/main.rs"
 
 [dependencies]
-argon2 = "0.6.0"
 async-trait = { workspace = true }
 sea-orm-migration = { workspace = true }
-tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros"] }
+tokio = { workspace = true }
 # `status` logs through the subscriber sea-orm-migration's CLI installs.
 tracing = { workspace = true }
 
 [dev-dependencies]
 beam-test-support = { path = "../beam-test-support" }
-# `sync` and `time` for the concurrent-migrator test's hand-off and timeout.
-tokio = { workspace = true }
 
 [features]
 # Opt-in tier: runs the upgrade path against a real Postgres. Never enabled by

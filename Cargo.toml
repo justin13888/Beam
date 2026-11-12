@@ -22,17 +22,29 @@ license = "AGPL-3.0-only"
 publish = false
 
 [workspace.dependencies]
-# http 1.3.x has a corrupted publish that fails to compile; pin to >=1.4
-http = ">=1.4, <2"
-argon2 = { version = "0.6.0", features = ["std"] }
+# http 1.3.x has a corrupted publish that fails to compile, so the floor is
+# past it. 1.4.2 is spargen 0.6's floor for a generated client: its E023
+# runtime-dependency check refuses anything but a caret requirement at or above
+# it.
+http = "1.4.2"
 sha2 = "0.11"
 async-trait = "0.1"
+# Metadata enrichment (ADR-0006). beam-index builds the client; beam-server
+# names its error type when deciding whether a build failure is fatal. One pin
+# so the two can never resolve different versions.
+#
+# `cache` (rusqlite, bundled) is deliberately left disabled: it pins
+# libsqlite3-sys to a version range that hard-conflicts with the one
+# sea-orm-migration's CLI tooling (via sqlx-sqlite, always compiled in
+# regardless of our postgres-only sea-orm feature selection) pins. See
+# docs/architecture/decisions/ADR-0006-cameo-enrichment.md.
+cameo = { version = "0.2.0", default-features = false, features = ["tmdb", "anilist"] }
 chrono = "0.4.45"
 confique = "0.4.0"
 ffmpeg-next = "9.0"
 jsonwebtoken = { version = "11.0.0", features = ["aws_lc_rs"] }
-# Kynos does not re-export the stream trait its `Sse` response is generic over.
-# 0.3.32 is spargen's floor for a generated streaming client: its E023
+# The stream trait the generated client's event stream is built on, named by
+# beam-client-core only. 0.3.32 is spargen's floor for a generated streaming client: its E023
 # runtime-dependency check parses the caret lower bound, so a bare "0.3"
 # reads as 0.3.0 and fails even though the lockfile resolves higher.
 futures-core = "0.3.32"
@@ -42,7 +54,7 @@ futures-core = "0.3.32"
 # subtree -- 3.1 has no way to describe a sequential body, so Kynos gates the
 # whole subtree on it rather than describe a stream inaccurately. Confined to
 # `beam-server`: no other crate may depend on this.
-kynos = { version = "0.4.0", features = [
+kynos = { version = "0.5.0", features = [
     "openapi32",
     "macros",
     "server",
@@ -109,6 +121,19 @@ tracing-subscriber = "0.3.23"
 # 1.24.0 is spargen's floor for `format: uuid` in a generated client (E023).
 uuid = { version = "1.26.0", features = ["v4", "serde"] }
 walkdir = "2.5.0"
+
+# Full DWARF for every crate is a large share of how fast target/ grows in a
+# quick edit-build loop. Workspace crates keep line tables, so their backtraces
+# and panics still carry file:line (but a debugger shows no locals); dependency
+# frames keep their symbol names but lose file:line. `cargo test` inherits both
+# settings. For full debug info, override per invocation:
+# CARGO_PROFILE_DEV_DEBUG=2 for the workspace, and/or
+# `cargo --config 'profile.dev.package."*".debug=2' ...` for dependencies.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
 
 [profile.release]
 codegen-units = 1

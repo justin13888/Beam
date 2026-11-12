@@ -8,13 +8,14 @@
 //! exactly the sheets this answers.
 
 use kynos::http::etag::ETag;
+use kynos::http::media::MediaRanges;
 use kynos::prelude::*;
-use kynos::response::range::served::{Conditions, Served};
+use kynos::response::range::served::{Conditions, Delivery, Served};
 use tracing::{error, warn};
 use uuid::Uuid;
 
-use crate::routes::api_error::{ServerFault, SessionAuth, TrickplayDeliveryError};
-use crate::routes::delivery::{AnyMedia, MediaRanges, RuntimeDelivery};
+use crate::routes::api_error::{ServerFault, TrickplayDeliveryError};
+use crate::routes::session_auth::SessionAuth;
 use crate::routes::stream::{FileByteSource, hides_file};
 use crate::routes::tags::Playback;
 use crate::services::trickplay::{LocatedSheet, SheetLookupError};
@@ -49,7 +50,7 @@ pub async fn get_trickplay_sheet(
     Path(path): Path<TrickplayPath>,
     conditions: Conditions,
     Inject(state): Inject<AppState>,
-) -> Result<RuntimeDelivery<JpegRanges>, TrickplayDeliveryError> {
+) -> Result<Delivery<JpegRanges>, TrickplayDeliveryError> {
     deliver(&state, &auth, &path, &conditions).await
 }
 
@@ -66,7 +67,7 @@ pub async fn head_trickplay_sheet(
     Path(path): Path<TrickplayPath>,
     conditions: Conditions,
     Inject(state): Inject<AppState>,
-) -> Result<RuntimeDelivery<JpegRanges>, TrickplayDeliveryError> {
+) -> Result<Delivery<JpegRanges>, TrickplayDeliveryError> {
     deliver(&state, &auth, &path, &conditions).await
 }
 
@@ -86,7 +87,7 @@ async fn deliver(
     auth: &SessionAuth,
     path: &TrickplayPath,
     conditions: &Conditions,
-) -> Result<RuntimeDelivery<JpegRanges>, TrickplayDeliveryError> {
+) -> Result<Delivery<JpegRanges>, TrickplayDeliveryError> {
     // Every caller logs its cause first (`hides_file` inside itself), so the
     // fault only summarises.
     let internal = |what: &'static str| TrickplayDeliveryError::Internal(ServerFault::logged(what));
@@ -133,7 +134,8 @@ async fn deliver(
             sheet_not_found()
         })?;
 
-    let delivery = Served::<_, AnyMedia>::new(source)
+    Served::<_, JpegRanges>::new(source)
+        .content_type("image/jpeg")
         .etag(ETag::strong(etag))
         .last_modified(modified)
         .cache_control("private, max-age=3600")
@@ -142,9 +144,7 @@ async fn deliver(
         .map_err(|err| {
             error!(?err, "failed to read a trickplay sheet");
             internal("read trickplay sheet")
-        })?;
-
-    Ok(RuntimeDelivery::new(delivery, "image/jpeg".to_owned()))
+        })
 }
 
 #[cfg(test)]

@@ -8,8 +8,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::models::{PersonConnection, PersonDetail};
-use crate::routes::api_error::{PeopleSearchError, PersonLookupError, ServerFault, SessionAuth};
-use crate::routes::playback::caller_access;
+use crate::routes::access::caller_access;
+use crate::routes::api_error::{PeopleSearchError, PersonLookupError, ServerFault};
+use crate::routes::session_auth::SessionAuth;
 use crate::routes::tags::Media;
 use crate::services::people::PeopleError;
 use crate::state::AppState;

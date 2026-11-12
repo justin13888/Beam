@@ -5,6 +5,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import uniffi.beam_client_core.StartFailureCause
 import uniffi.beam_client_core.SwitchTrigger
+import uniffi.beam_client_core.telemetryMaxEventsPerRequest
 
 /**
  * Turns what the player saw into the core's playback telemetry events.
@@ -112,7 +113,7 @@ internal class TelemetryRecorder(
     }
 
     internal companion object {
-        /** The most events the server takes in one request. */
-        const val FLUSH_AT: UInt = 50u
+        /** The most events the server takes in one request, as the core knows it. */
+        val FLUSH_AT: UInt = telemetryMaxEventsPerRequest()
     }
 }

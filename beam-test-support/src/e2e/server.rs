@@ -72,6 +72,13 @@ impl ServerProcess {
         &self.base_url
     }
 
+    /// Kill the process and reap it, as dropping it does, so its port is
+    /// free for the next one. Stopping a stopped server does nothing.
+    pub fn stop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+
     async fn wait_until_healthy(&mut self) {
         let health = format!("{}/v1/health", self.base_url);
         let http = reqwest::Client::new();
@@ -107,8 +114,7 @@ impl Drop for ServerProcess {
     fn drop(&mut self) {
         // Killed rather than signalled: the suite asserts nothing about
         // shutdown, and a server mid-drain would hold the database open.
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        self.stop();
         if std::thread::panicking() {
             eprintln!(
                 "--- beam-server log ({}) ---\n{}",

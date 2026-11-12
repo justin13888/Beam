@@ -1,5 +1,6 @@
 package dev.beam.android.core.ui
 
+import uniffi.beam_client_core.resolutionLabel
 import java.util.Locale
 import kotlin.math.roundToLong
 
@@ -64,26 +65,17 @@ public object Format {
     }
 
     /**
-     * A resolution as people name it: `4K`, `1080p`.
+     * A resolution as people name it: `4K`, `1080p`. Blank when neither
+     * dimension is known.
      *
-     * Named by height rather than by exact pixel count, because a 2.35:1 film
-     * is 3840x1600 and calling that anything but 4K would confuse everyone.
+     * The core's rule, shared with every client, which keys on width: a 2.39:1
+     * scope rip of a 1080p master is 1920x804, and naming it by its height
+     * would call it 720p.
      */
     public fun resolution(
         width: UInt?,
         height: UInt?,
-    ): String {
-        val h = height?.toInt() ?: return ""
-        val w = width?.toInt() ?: 0
-        return when {
-            w >= 3_200 || h >= 2_000 -> "4K"
-            h >= 1_400 -> "1440p"
-            h >= 900 -> "1080p"
-            h >= 600 -> "720p"
-            h >= 400 -> "480p"
-            else -> "${h}p"
-        }
-    }
+    ): String = resolutionLabel(width, height).orEmpty()
 
     /** `S2 E4`, the compact episode label used on tiles. */
     public fun episodeCode(

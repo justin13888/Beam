@@ -9,11 +9,11 @@ use uuid::Uuid;
 
 use crate::models::search::{MediaConnection, MediaSortField, SortOrder, TitleKind};
 use crate::models::{EpisodeDetail, MediaMetadata, MediaSourceConnection, SeasonDetail};
+use crate::routes::access::{caller_access, hides, media_not_found};
 use crate::routes::api_error::{
     MediaBrowseError, MediaLookupError, MediaRefLookupError, MediaSourcesError, ServerFault,
-    SessionAuth,
 };
-use crate::routes::playback::{caller_access, hides, media_not_found};
+use crate::routes::session_auth::SessionAuth;
 use crate::routes::tags::Media;
 use crate::services::metadata::{BrowseRequest, MediaSearchFilters, MetadataError};
 use crate::services::sources::apply_language_preferences;
@@ -64,7 +64,8 @@ pub struct BrowseQuery {
     /// ignoring case. Results keep the requested sort.
     pub query: Option<String>,
     /// Filter by minimum rating, on the same 0-10 scale as `Ratings.tmdb`;
-    /// an unrated title counts as 0. `NaN` is `#invalid-filter`.
+    /// an unrated title counts as 0. A value off the scale, `NaN` included,
+    /// is a 400.
     #[schema(minimum = 0, maximum = 10)]
     pub min_rating: Option<f64>,
 }
@@ -325,3 +326,7 @@ pub async fn get_season_detail(
 #[cfg(test)]
 #[path = "media_tests.rs"]
 mod media_tests;
+
+#[cfg(test)]
+#[path = "media_browse_tests.rs"]
+mod media_browse_tests;

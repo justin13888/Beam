@@ -19,26 +19,18 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use beam_auth::utils::oidc_config::OidcRuntimeConfig;
 use beam_auth::utils::{
     models::CreateUser,
-    oidc::NotConfiguredOidcClient,
-    pending_auth_store::in_memory::InMemoryPendingAuthStore,
     repository::{UserRepository, in_memory::InMemoryUserRepository},
     session_store::{SessionData, SessionStore, in_memory::InMemorySessionStore},
 };
-use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
 use kynos::http::StatusCode;
 use kynos::prelude::*;
 use kynos::test::TestClient;
 use tempfile::TempDir;
 
 use crate::routes::stream::{download_file, head_download_file, head_stream_file, stream_file};
-use crate::services::admin_log::{AdminLogService, LocalAdminLogService};
-use crate::services::hash::HashService;
 use crate::services::library::{LibraryError, LibraryService, LocatedFile};
-use crate::services::metadata::{MediaConnection, MetadataError, MetadataService, PageInfo};
-use crate::services::notification::InMemoryNotificationService;
 use crate::state::{AppServices, AppState};
 
 // ─── Constants ────────────────────────────────────────────────────────────
@@ -46,75 +38,6 @@ use crate::state::{AppServices, AppState};
 const TEST_FILE_ID: &str = "11111111-1111-1111-1111-111111111111";
 
 // ─── Stub service implementations ─────────────────────────────────────────
-
-#[derive(Debug)]
-struct StubHashService;
-
-#[async_trait::async_trait]
-impl HashService for StubHashService {
-    fn hash_sync(&self, _file: std::fs::File) -> std::io::Result<u64> {
-        unimplemented!("not called in stream route tests")
-    }
-    async fn hash_async(&self, _file: std::fs::File) -> std::io::Result<u64> {
-        unimplemented!("not called in stream route tests")
-    }
-}
-
-#[derive(Debug)]
-struct StubMetadataService;
-
-#[async_trait::async_trait]
-impl MetadataService for StubMetadataService {
-    async fn get_media_metadata(
-        &self,
-        _media_id: uuid::Uuid,
-    ) -> Result<Option<crate::models::MediaMetadata>, MetadataError> {
-        Ok(None)
-    }
-
-    async fn search_media(
-        &self,
-        _request: crate::services::metadata::BrowseRequest,
-    ) -> Result<MediaConnection, MetadataError> {
-        Ok(MediaConnection {
-            items: vec![],
-            page_info: PageInfo {
-                has_next_page: false,
-                has_previous_page: false,
-                start_cursor: None,
-                end_cursor: None,
-            },
-        })
-    }
-
-    async fn get_media_sources(
-        &self,
-        _media_id: uuid::Uuid,
-    ) -> Result<Vec<crate::models::MediaSource>, MetadataError> {
-        unimplemented!("not called in stream route tests")
-    }
-
-    async fn get_episode_detail(
-        &self,
-        _episode_id: uuid::Uuid,
-    ) -> Result<Option<crate::models::EpisodeDetail>, MetadataError> {
-        Ok(None)
-    }
-
-    async fn get_season_detail(
-        &self,
-        _season_id: uuid::Uuid,
-    ) -> Result<Option<crate::models::SeasonDetail>, MetadataError> {
-        Ok(None)
-    }
-
-    async fn get_titles(
-        &self,
-        _titles: &[beam_domain::models::watch_state::TitleRef],
-    ) -> Result<Vec<crate::models::MediaMetadata>, MetadataError> {
-        Ok(vec![])
-    }
-}
 
 /// Stub library service backed by a fixed list of files.
 ///
@@ -138,10 +61,7 @@ impl StubLibraryService {
 
 #[async_trait::async_trait]
 impl LibraryService for StubLibraryService {
-    async fn get_libraries(
-        &self,
-        _user_id: String,
-    ) -> Result<Vec<crate::models::Library>, LibraryError> {
+    async fn get_libraries(&self) -> Result<Vec<crate::models::Library>, LibraryError> {
         unimplemented!("not called in stream route tests")
     }
     async fn get_library_by_id(
@@ -207,74 +127,11 @@ fn make_test_state_over(library: StubLibraryService) -> TestFixture {
     let session_store = Arc::new(InMemorySessionStore::default());
     let user_repo = Arc::new(InMemoryUserRepository::default());
 
-    let notification = Arc::new(InMemoryNotificationService::new());
-    let admin_log: Arc<dyn AdminLogService> = Arc::new(LocalAdminLogService::new(Arc::new(
-        InMemoryAdminLogRepository::default(),
-    )));
-
     let services = AppServices {
-        hash: Arc::new(StubHashService),
-        access: crate::routes::test_support::open_access(),
         library: Arc::new(library),
-        metadata: Arc::new(StubMetadataService),
-        subtitles: crate::routes::test_support::idle_subtitles(),
-        notification,
-        admin_log,
         user_repo: user_repo.clone(),
-        language_preferences: crate::routes::test_support::idle_language_preferences(),
-        playback: crate::routes::test_support::in_memory_playback(
-            Arc::new(beam_domain::services::TestClock::new()),
-            Arc::new(beam_domain::repositories::file::in_memory::InMemoryFileRepository::default()),
-            Arc::new(beam_domain::repositories::movie::in_memory::InMemoryMovieRepository::default()),
-            Arc::new(beam_domain::repositories::show::in_memory::InMemoryShowRepository::default()),
-        ),
-        genre_repo: Arc::new(
-            beam_domain::repositories::genre::in_memory::InMemoryGenreRepository::default(),
-        ),
-        library_repo: Arc::new(
-            beam_domain::repositories::library::in_memory::InMemoryLibraryRepository::default(),
-        ),
-        file_repo: Arc::new(
-            beam_domain::repositories::file::in_memory::InMemoryFileRepository::default(),
-        ),
-        enrichment_repo: Arc::new(
-            beam_domain::repositories::enrichment::in_memory::InMemoryEnrichmentStateRepository::default(),
-        ),
-        enrichment_control: crate::routes::test_support::make_app_state()
-            .services
-            .enrichment_control
-            .clone(),
-        people: crate::routes::test_support::idle_people(
-            Arc::new(beam_domain::repositories::movie::in_memory::InMemoryMovieRepository::default()),
-            Arc::new(beam_domain::repositories::show::in_memory::InMemoryShowRepository::default()),
-        ),
-        lists: crate::routes::test_support::unused_lists(),
-        collections: crate::routes::test_support::unused_collections(),
-        movie_repo: Arc::new(
-            beam_domain::repositories::movie::in_memory::InMemoryMovieRepository::default(),
-        ),
-        show_repo: Arc::new(
-            beam_domain::repositories::show::in_memory::InMemoryShowRepository::default(),
-        ),
-        artwork: crate::routes::test_support::cold_artwork_cache(),
         session_store: session_store.clone(),
-        oidc_client: Arc::new(NotConfiguredOidcClient::new("not used in these tests")),
-        pending_auth_store: Arc::new(InMemoryPendingAuthStore::default()),
-        device_auth_store: Arc::new(
-            beam_auth::utils::device_auth_store::in_memory::InMemoryDeviceAuthStore::default(),
-        ),
-        oidc_config: OidcRuntimeConfig {
-            web_url: "http://localhost:5173".to_string(),
-            cookie_secure: false,
-            admin_claim: None,
-            admin_value: None,
-            session_idle_days: 14,
-            session_max_days: 60,
-        },
-        watch_status: Arc::new(beam_index::services::watch_status::WatchStatus::new()),
-        telemetry: crate::routes::test_support::idle_library_report(),
-        playback_telemetry: crate::routes::test_support::idle_playback_telemetry(),
-        trickplay: crate::routes::test_support::idle_trickplay(),
+        ..crate::routes::test_support::idle_services()
     };
 
     let config = crate::config::ServerConfig {

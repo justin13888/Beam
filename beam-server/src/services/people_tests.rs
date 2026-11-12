@@ -224,8 +224,8 @@ async fn search_refuses_what_it_cannot_answer() {
             "a page of {size}"
         );
     }
-    let foreign = crate::services::offset_cursor::encode(
-        crate::services::offset_cursor::OffsetList::AdminUsers,
+    let foreign = crate::services::cursor::offset::encode(
+        crate::services::cursor::offset::OffsetList::AdminUsers,
         0,
     );
     assert!(matches!(

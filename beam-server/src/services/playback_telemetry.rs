@@ -23,9 +23,8 @@ use beam_domain::repositories::{
     FileRepository, MediaStreamRepository, PlaybackTelemetryRepository,
 };
 use beam_domain::services::Clock;
-use beam_domain::utils::telemetry::{
-    UNKNOWN_LABEL, bitrate_class, file_bitrate, height_class, normalize_label,
-};
+use beam_domain::utils::playback_classes::{bitrate_class, file_bitrate, height_class};
+use beam_domain::utils::telemetry::{UNKNOWN_LABEL, normalize_label};
 use chrono::{Days, NaiveDate};
 use sea_orm::DbErr;
 use thiserror::Error;

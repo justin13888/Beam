@@ -340,6 +340,20 @@ pub async fn raw_get(
     session: Option<&str>,
     range: Option<&str>,
 ) -> reqwest::Response {
+    let range: Vec<(&str, &str)> = range.map(|range| ("range", range)).into_iter().collect();
+    raw_get_with(base, path, session, &range).await
+}
+
+/// `GET {base}{path}` outside the generated client, presenting `session` as
+/// the cookie and each of `headers` as given: for the response headers and
+/// the request headers -- `If-None-Match`, `X-Forwarded-For` -- the client
+/// does not model.
+pub async fn raw_get_with(
+    base: &str,
+    path: &str,
+    session: Option<&str>,
+    headers: &[(&str, &str)],
+) -> reqwest::Response {
     let mut request = reqwest::Client::new().get(format!("{base}{path}"));
     if let Some(session) = session {
         request = request.header(
@@ -347,13 +361,29 @@ pub async fn raw_get(
             format!("{SESSION_COOKIE}={session}"),
         );
     }
-    if let Some(range) = range {
-        request = request.header(reqwest::header::RANGE, range);
+    for (name, value) in headers {
+        request = request.header(*name, *value);
     }
     request
         .send()
         .await
         .unwrap_or_else(|e| panic!("GET {path}: {e}"))
+}
+
+/// The value of `response`'s header `name`, if it has one in text.
+pub fn header<'a>(response: &'a reqwest::Response, name: &str) -> Option<&'a str> {
+    response.headers().get(name).and_then(|v| v.to_str().ok())
+}
+
+/// The first source of the title `media`.
+pub async fn first_source(client: &api::Client, media: Uuid) -> api::types::MediaSource {
+    client
+        .get_media_sources(media)
+        .await
+        .unwrap_or_else(|e| panic!("read the sources of {media}: {e:?}"))
+        .into_inner()
+        .items
+        .remove(0)
 }
 
 /// Assert `result` was refused with `status`.

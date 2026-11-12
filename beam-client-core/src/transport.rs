@@ -14,14 +14,22 @@
 //! the problem document a failed response carried, handed back to the call
 //! that made it.
 
-use crate::api::{ExecuteFuture, Middleware, Next};
+use crate::api::{ExecuteFuture, HttpBody, Middleware, Next};
 use crate::error::BeamError;
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 
 /// The cookie `beam-server` issues and reads. Defined in
-/// `beam-server/src/routes/api_error.rs`.
+/// `beam-server/src/routes/session_auth.rs`.
 pub const SESSION_COOKIE: &str = "beam_session";
+
+/// [`SESSION_COOKIE`], for a platform that lifts the session out of a browser
+/// sign-in's cookie jar.
+#[uniffi::export]
+#[must_use]
+pub fn session_cookie_name() -> String {
+    SESSION_COOKIE.to_owned()
+}
 
 tokio::task_local! {
     /// Where the middleware leaves the problem document for the call in progress.
@@ -103,7 +111,11 @@ impl SessionMiddleware {
 }
 
 impl Middleware for SessionMiddleware {
-    fn handle<'a>(&'a self, request: reqwest::Request, next: Next<'a>) -> ExecuteFuture<'a> {
+    fn handle<'a>(
+        &'a self,
+        request: ::http::Request<HttpBody>,
+        next: Next<'a>,
+    ) -> ExecuteFuture<'a> {
         // The request goes through as the generated client built it, `Cookie`
         // header included: the credential is registered with the client, not
         // added here.
@@ -119,7 +131,7 @@ impl Middleware for SessionMiddleware {
             let response = next.run(request).await?;
             let status = response.status();
 
-            if status == reqwest::StatusCode::UNAUTHORIZED {
+            if status == ::http::StatusCode::UNAUTHORIZED {
                 unauthorized.store(true, std::sync::atomic::Ordering::SeqCst);
             }
 
@@ -131,11 +143,8 @@ impl Middleware for SessionMiddleware {
             // small by construction. The bytes are handed straight back on a
             // rebuilt response, so the generated client still decodes its own
             // typed error from exactly what the server sent.
-            let headers = response.headers().clone();
-            let body = response
-                .bytes()
-                .await
-                .map_err(crate::api::TransportError::new)?;
+            let (parts, body) = response.into_parts();
+            let body = collect(body).await?;
             // Left in the caller's slot, where `with_problem` reads it back.
             // `None` for a body that is not a document -- a proxy's HTML page
             // -- so a later failure in the same scope cannot claim an earlier
@@ -155,12 +164,28 @@ impl Middleware for SessionMiddleware {
             let parsed = ProblemDetail::parse(&body);
             let _ = PROBLEM_SLOT.try_with(|slot| *slot.lock().expect("problem slot") = parsed);
 
-            let mut rebuilt = ::http::Response::new(body);
-            *rebuilt.status_mut() = status;
-            *rebuilt.headers_mut() = headers;
-            Ok(reqwest::Response::from(rebuilt))
+            Ok(::http::Response::from_parts(parts, HttpBody::from(body)))
         })
     }
+}
+
+/// Read a response body to its end.
+///
+/// A failure partway through is the body's own [`TransportError`], classified
+/// as it was raised -- a connection that gave out is an interruption -- so the
+/// call reports it exactly as it would have without this middleware.
+async fn collect(mut body: HttpBody) -> Result<bytes::Bytes, crate::api::TransportError> {
+    use http_body::Body as _;
+
+    let mut buffered = Vec::new();
+    while let Some(frame) =
+        std::future::poll_fn(|cx| std::pin::Pin::new(&mut body).poll_frame(cx)).await
+    {
+        if let Ok(data) = frame?.into_data() {
+            buffered.extend_from_slice(&data);
+        }
+    }
+    Ok(bytes::Bytes::from(buffered))
 }
 
 /// The two members of an RFC 9457 problem document a caller acts on.
@@ -228,10 +253,11 @@ impl ProblemDetail {
 /// caller may do about it, so choosing the variant from the status needs no
 /// table for anyone to maintain. The `type` is what beam-server adds on top --
 /// *which* 404 this is -- and it is carried through opaquely rather than
-/// matched on here. It does not follow that a code added on the server reaches
-/// a caller: the generated client decodes each status's `type` as the closed
-/// set the contract lists, and one outside it arrives as `Error::Decode`,
-/// which carries no status -- getkono/spargen#268.
+/// matched on here. That is what lets a code added on the server reach a
+/// caller: the generated client decodes each status's `type` as the closed set
+/// the contract lists, and one outside it arrives as `Error::Decode`, which
+/// keeps the status, so it lands in the same variant with the new `type`
+/// carried through.
 ///
 /// `code` is `about:blank` when the response carried no problem document, and
 /// when the framework answered rather than the application: the 401 from the
@@ -368,19 +394,32 @@ impl TransportFailure {
             | Error::Redirect(_)
             | Error::InterruptedBody(_) => (FailureKind::Unreachable, None),
 
-            // A body that will not decode is permanent: the identical request
-            // produces the identical failure, so offering a retry would be a
-            // dead end. That includes a documented error status whose problem
-            // `type` the contract did not list, which `Decode` reports without
-            // its status (getkono/spargen#268).
-            Error::Protocol(_) | Error::Decode { .. } => (FailureKind::Malformed, None),
+            // An error status whose body did not decode -- a problem `type`
+            // the contract does not list, or a proxy's HTML page -- is still
+            // the answer that status gives, so the status decides, as it does
+            // for a body that did decode. A newer server's code reaches a
+            // caller as its status's variant rather than as a malformed
+            // response.
+            Error::Decode {
+                status, headers, ..
+            } if status.is_client_error() || status.is_server_error() => {
+                (FailureKind::Answered(status.as_u16()), Some(headers))
+            }
+
+            // A success body that will not decode is permanent: the identical
+            // request produces the identical failure, so offering a retry
+            // would be a dead end. So is a protocol failure, and a page link
+            // that leads back to a page already read.
+            Error::Protocol(_) | Error::Decode { .. } | Error::PaginationCycle { .. } => {
+                (FailureKind::Malformed, None)
+            }
 
             // `RequestConstruction` covers two unrelated things, and which one
             // this is is *observed* rather than guessed. The façade registers
             // the `BeamSession` scheme as a `Credential::Provider`, and a
             // provider that has no cookie answers with an [`AuthError`]; the
             // generated client carries that verbatim as this error's source
-            // (`Error::request_construction`). Downcasting to `AuthError` --
+            // (`RequestError::CredentialProvider`). Downcasting to `AuthError` --
             // a type spargen exports as part of its supported surface -- is
             // therefore a contract, where matching the message text the
             // generator may reword would not be. Anything else here is a
@@ -486,22 +525,13 @@ mod canned {
         }
     }
 
-    /// A `reqwest::Error` of the kind a refused connection produces, as far
-    /// as the generated client's `Error::from_reqwest` can tell.
-    ///
-    /// reqwest offers no constructor for a connect error, and making a real one
-    /// needs a socket. `from_reqwest` files every error that is not a timeout,
-    /// a redirect, a decode or a request-construction error under `Transport`,
-    /// which is what a refused connection is filed under too, so the status
-    /// check on a hand-built response stands in for it.
-    fn a_connection_failure() -> reqwest::Error {
-        let response = ::http::Response::builder()
-            .status(502)
-            .body(String::new())
-            .expect("a response builds");
-        reqwest::Response::from(response)
-            .error_for_status()
-            .expect_err("a 502 is an error status")
+    /// The failure a refused connection is reported as: a connection-class
+    /// [`crate::api::TransportError`], which the generated client files under
+    /// `Error::Transport`.
+    fn a_connection_failure() -> crate::api::TransportError {
+        crate::api::TransportError::connection(std::io::Error::from(
+            std::io::ErrorKind::ConnectionRefused,
+        ))
     }
 
     /// A backend that answers every request with one canned response, and
@@ -573,17 +603,21 @@ mod canned {
     }
 
     impl crate::api::HttpBackend for CannedBackend {
-        fn execute(&self, request: reqwest::Request) -> crate::api::ExecuteFuture<'_> {
+        fn execute(
+            &self,
+            request: ::http::Request<crate::api::HttpBody>,
+        ) -> crate::api::ExecuteFuture<'_> {
             self.recorded
                 .lock()
                 .expect("recorded requests")
                 .push(RecordedRequest {
                     method: request.method().clone(),
-                    url: request.url().clone(),
+                    url: reqwest::Url::parse(&request.uri().to_string())
+                        .expect("the generated client sends an absolute URI"),
                     headers: request.headers().clone(),
                     body: request
                         .body()
-                        .and_then(reqwest::Body::as_bytes)
+                        .as_bytes()
                         .map(<[u8]>::to_vec)
                         .unwrap_or_default(),
                 });
@@ -602,7 +636,7 @@ mod canned {
                 headers,
             } = answer
             else {
-                let failure = crate::api::TransportError::new(a_connection_failure());
+                let failure = a_connection_failure();
                 return Box::pin(async move { Err(failure) });
             };
             let mut response = ::http::Response::builder()
@@ -612,9 +646,9 @@ mod canned {
                 response = response.header(name, value);
             }
             let response = response
-                .body(body.to_owned())
+                .body(crate::api::HttpBody::from(body))
                 .expect("a canned response is well-formed");
-            Box::pin(async move { Ok(reqwest::Response::from(response)) })
+            Box::pin(async move { Ok(response) })
         }
     }
 
@@ -624,7 +658,10 @@ mod canned {
     pub(crate) struct SilentBackend;
 
     impl crate::api::HttpBackend for SilentBackend {
-        fn execute(&self, _request: reqwest::Request) -> crate::api::ExecuteFuture<'_> {
+        fn execute(
+            &self,
+            _request: ::http::Request<crate::api::HttpBody>,
+        ) -> crate::api::ExecuteFuture<'_> {
             Box::pin(std::future::pending())
         }
     }
@@ -665,10 +702,14 @@ mod tests {
 
     /// `drive`, for a request the test built itself, over a backend it keeps a
     /// handle to.
+    ///
+    /// The response is read to its end and handed back as a
+    /// `reqwest::Response`, so a test reads what reached the generated client
+    /// with the accessors it already has.
     async fn drive_request(
         middleware: &Arc<SessionMiddleware>,
         backend: Arc<CannedBackend>,
-        request: reqwest::Request,
+        request: ::http::Request<HttpBody>,
     ) -> reqwest::Response {
         use crate::api::{HttpBackend, MiddlewareBackend};
 
@@ -676,19 +717,19 @@ mod tests {
             backend as Arc<dyn crate::api::HttpBackend>,
             vec![Arc::clone(middleware) as Arc<dyn Middleware>],
         );
-        chain
+        let (parts, body) = chain
             .execute(request)
             .await
             .expect("the canned backend answers")
+            .into_parts();
+        let body = collect(body).await.expect("a canned body reads");
+        reqwest::Response::from(::http::Response::from_parts(parts, body))
     }
 
-    fn a_request() -> reqwest::Request {
-        reqwest::Request::new(
-            reqwest::Method::GET,
-            "http://beam.invalid/v1/media/7"
-                .parse()
-                .expect("a literal URL parses"),
-        )
+    fn a_request() -> ::http::Request<HttpBody> {
+        ::http::Request::get("http://beam.invalid/v1/media/7")
+            .body(HttpBody::empty())
+            .expect("a literal URL parses")
     }
 
     /// The credential is the generated client's to attach, so the middleware
@@ -1153,18 +1194,6 @@ mod tests {
         );
     }
 
-    /// A `reqwest::Error` without a client or a network: the status check on
-    /// a hand-built response.
-    fn a_reqwest_error() -> reqwest::Error {
-        let response = ::http::Response::builder()
-            .status(500)
-            .body(String::new())
-            .expect("a response builds");
-        reqwest::Response::from(response)
-            .error_for_status()
-            .expect_err("a 500 is an error status")
-    }
-
     /// A `reqwest::Error` that classifies as a decode failure, which
     /// `Error::from_reqwest` files under `Protocol`.
     fn a_reqwest_decode_error() -> reqwest::Error {
@@ -1208,9 +1237,13 @@ mod tests {
         assert_eq!(failure.retry_after_secs, None);
 
         let no_response: [Error<String>; 3] = [
-            Error::Transport(TransportError::new(a_reqwest_error())),
+            Error::Transport(TransportError::connection(std::io::Error::from(
+                std::io::ErrorKind::ConnectionRefused,
+            ))),
             Error::Timeout(TimeoutKind::Total),
-            Error::InterruptedBody(TransportError::new(a_reqwest_error())),
+            Error::InterruptedBody(TransportError::interrupted(std::io::Error::from(
+                std::io::ErrorKind::ConnectionReset,
+            ))),
         ];
         for error in &no_response {
             let failure = TransportFailure::of(error, None);
@@ -1223,6 +1256,41 @@ mod tests {
         assert!(matches!(protocol, Error::Protocol(_)), "{protocol:?}");
         assert_eq!(
             TransportFailure::of(&protocol, None).kind,
+            FailureKind::Malformed
+        );
+
+        // An error status whose body did not decode is still that status's
+        // answer, `Retry-After` and all.
+        let undecoded_error: Error<String> = Error::Decode {
+            status: reqwest::StatusCode::TOO_MANY_REQUESTS,
+            headers: headers_with_retry_after("7"),
+            path: "unknown variant".to_owned(),
+            body: bytes::Bytes::from_static(b"{}"),
+            truncated: false,
+        };
+        let failure = TransportFailure::of(&undecoded_error, None);
+        assert_eq!(failure.kind, FailureKind::Answered(429));
+        assert_eq!(failure.retry_after_secs, Some(7));
+
+        // A success body that did not decode, and a page link that loops, are
+        // the same failure every time.
+        let undecoded_success: Error<String> = Error::Decode {
+            status: reqwest::StatusCode::OK,
+            headers: headers_with_retry_after("7"),
+            path: "missing field".to_owned(),
+            body: bytes::Bytes::from_static(b"{}"),
+            truncated: false,
+        };
+        let failure = TransportFailure::of(&undecoded_success, None);
+        assert_eq!(failure.kind, FailureKind::Malformed);
+        assert_eq!(failure.retry_after_secs, None);
+        let cycle: Error<String> = Error::PaginationCycle {
+            url: "http://beam.invalid/v1/media?after=a"
+                .parse()
+                .expect("a literal URL parses"),
+        };
+        assert_eq!(
+            TransportFailure::of(&cycle, None).kind,
             FailureKind::Malformed
         );
 
@@ -1286,6 +1354,8 @@ mod tests {
         use crate::api::Error;
 
         let decode: Error<std::convert::Infallible> = Error::Decode {
+            status: reqwest::StatusCode::OK,
+            headers: reqwest::header::HeaderMap::new(),
             path: "$.id".to_owned(),
             body: bytes::Bytes::from_static(b"{"),
             truncated: false,

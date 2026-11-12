@@ -4,8 +4,6 @@
 //! user is always the session's, never the request body's -- one user can
 //! never read or overwrite another's state.
 
-use std::num::NonZeroU32;
-
 use beam_domain::models::access::AccessPolicy;
 use beam_domain::models::watch_state::TitleRef;
 use kynos::prelude::*;
@@ -18,12 +16,15 @@ use crate::models::playback::{
 };
 use crate::models::playback_telemetry::PlaybackTelemetryBatch;
 use crate::models::{FieldError, PageInfo};
+use crate::routes::access::{caller_access, hides, media_not_found};
 use crate::routes::api_error::{
     ContinueWatchingError, HistoryError, InternalError, MediaRefLookupError,
-    PlaybackTelemetryError, ProgressError, ServerFault, SessionAuth, TitleProgressError,
+    PlaybackTelemetryError, ProgressError, ServerFault, TitleProgressError,
 };
+use crate::routes::session_auth::SessionAuth;
 use crate::routes::tags::Playback;
-use crate::services::history_cursor;
+use crate::services::cursor;
+use crate::services::paging::page_size;
 use crate::services::playback::{
     ContinueWatchingPage, PlaybackError, PlaybackReadError, TitleStateError,
 };
@@ -159,54 +160,8 @@ pub struct HistoryQuery {
     pub after: Option<String>,
 }
 
-/// Resolves the session's user id.
-///
-/// Kept fallible rather than defaulting: every watched-state row is keyed by
-/// this value, so resolving a malformed id to the nil UUID would pool every
-/// affected user's history and progress into one shared, unowned account.
-pub(crate) fn parse_user_id(user_id: &str) -> Result<Uuid, InternalError> {
-    Uuid::parse_str(user_id)
-        .map_err(|_| InternalError::Internal(ServerFault::new("invalid user id in session")))
-}
-
-/// The session's user id and their access policy (issue #263): what every
-/// route reading or delivering a title checks the ids it is given against.
-pub(crate) async fn caller_access(
-    state: &AppState,
-    auth: &SessionAuth,
-) -> Result<(Uuid, AccessPolicy), InternalError> {
-    let user_id = parse_user_id(&auth.0.user_id)?;
-    let policy = state
-        .services
-        .access
-        .policy(user_id)
-        .await
-        .map_err(|err| InternalError::Internal(ServerFault::new(err)))?;
-    Ok((user_id, policy))
-}
-
-/// Whether `policy` hides what `id` names, a failed read as a 500.
-pub(crate) async fn hides(
-    state: &AppState,
-    policy: &AccessPolicy,
-    id: Uuid,
-) -> Result<bool, InternalError> {
-    state
-        .services
-        .access
-        .hides(policy, id)
-        .await
-        .map_err(|err| InternalError::Internal(ServerFault::new(err)))
-}
-
-/// The detail of the 404 a hidden id answers with: the one an id naming
-/// nothing gets, so the two cannot be told apart.
-pub(crate) fn media_not_found(id: Uuid) -> String {
-    format!("media {id} not found")
-}
-
 /// Which of a page's rows the policy admits, each row named by its title.
-pub(crate) async fn visible_rows<T>(
+async fn visible_rows<T>(
     state: &AppState,
     policy: &AccessPolicy,
     rows: Vec<T>,
@@ -234,14 +189,6 @@ fn row_title(media_type: crate::models::search::TitleKind, media_id: Uuid) -> Ti
         crate::models::search::TitleKind::Movie => TitleRef::Movie(media_id),
         crate::models::search::TitleKind::Show => TitleRef::Show(media_id),
     }
-}
-
-/// `first`, defaulted and held to `1..=max`.
-pub(crate) fn page_size(first: Option<u32>, default: u32, max: u32) -> Result<NonZeroU32, String> {
-    let size = first.unwrap_or(default);
-    NonZeroU32::new(size)
-        .filter(|size| size.get() <= max)
-        .ok_or_else(|| format!("a page holds 1 to {max} items, not {size}"))
 }
 
 /// Record how far through a file the caller has watched.
@@ -406,8 +353,13 @@ pub async fn get_continue_watching(
 ) -> Result<Json<ContinueWatchingConnection>, ContinueWatchingError> {
     let (user_id, policy) = caller_access(&state, &auth).await?;
     let ContinueWatchingQuery { first } = query;
-    let first = page_size(first, CONTINUE_WATCHING_DEFAULT, CONTINUE_WATCHING_MAX)
-        .map_err(ContinueWatchingError::InvalidPagination)?;
+    let first = page_size(
+        first,
+        CONTINUE_WATCHING_DEFAULT,
+        CONTINUE_WATCHING_MAX,
+        "items",
+    )
+    .map_err(ContinueWatchingError::InvalidPagination)?;
 
     let ContinueWatchingPage {
         items,
@@ -469,11 +421,11 @@ pub async fn get_history(
 ) -> Result<Json<HistoryConnection>, HistoryError> {
     let (user_id, policy) = caller_access(&state, &auth).await?;
     let HistoryQuery { first, after } = query;
-    let first =
-        page_size(first, HISTORY_DEFAULT, HISTORY_MAX).map_err(HistoryError::InvalidPagination)?;
+    let first = page_size(first, HISTORY_DEFAULT, HISTORY_MAX, "items")
+        .map_err(HistoryError::InvalidPagination)?;
     let after = after
         .as_deref()
-        .map(history_cursor::decode)
+        .map(cursor::history::decode)
         .transpose()
         .map_err(|err| HistoryError::InvalidCursor(err.to_string()))?;
     let has_previous_page = after.is_some();
@@ -496,8 +448,8 @@ pub async fn get_history(
         page_info: PageInfo {
             has_next_page: page.has_next_page,
             has_previous_page,
-            start_cursor: page.start.as_ref().map(history_cursor::encode),
-            end_cursor: page.end.as_ref().map(history_cursor::encode),
+            start_cursor: page.start.as_ref().map(cursor::history::encode),
+            end_cursor: page.end.as_ref().map(cursor::history::encode),
         },
         total: page.total,
     }))
@@ -540,41 +492,9 @@ pub async fn report_playback_telemetry(
 mod playback_tests;
 
 #[cfg(test)]
-#[path = "playback_telemetry_tests.rs"]
-mod playback_telemetry_tests;
+#[path = "continue_watching_tests.rs"]
+mod continue_watching_tests;
 
 #[cfg(test)]
-mod parse_user_id_tests {
-    use super::*;
-
-    #[test]
-    fn a_well_formed_session_user_id_parses_to_itself() {
-        let id = Uuid::from_u128(0x1234_5678_9abc_def0_1234_5678_9abc_def0);
-        assert_eq!(parse_user_id(&id.to_string()).unwrap(), id);
-    }
-
-    #[test]
-    fn a_malformed_user_id_is_an_error_not_the_nil_uuid() {
-        // Every watched-state row is keyed by this value. Defaulting to the nil
-        // UUID on a parse failure would pool every affected user's history
-        // and progress into one shared, unowned account.
-        for malformed in [
-            "",
-            "not-a-uuid",
-            "1234",
-            "00000000-0000-0000-0000-00000000000",
-        ] {
-            let error = parse_user_id(malformed)
-                .expect_err("a malformed session user id must not resolve to an account");
-            let InternalError::Internal(_) = error;
-        }
-    }
-
-    #[test]
-    fn the_nil_uuid_is_only_produced_when_it_was_actually_asked_for() {
-        assert_eq!(
-            parse_user_id(&Uuid::nil().to_string()).unwrap(),
-            Uuid::nil()
-        );
-    }
-}
+#[path = "playback_telemetry_tests.rs"]
+mod playback_telemetry_tests;

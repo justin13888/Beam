@@ -28,8 +28,10 @@ import javax.inject.Singleton
  * The core, replaced by the `:core:testing` fakes for every Hilt test in the
  * app.
  *
- * Both of `:core:ffi`'s modules go: the real repositories sit over
- * `BeamClient`, whose JNA binding Robolectric's sandbox cannot load. Each fake
+ * Both of `:core:ffi`'s modules go: the real repositories sit over a
+ * `BeamClient` that talks to a server, which a test has none of. (Robolectric
+ * can load the JNA binding -- the feature modules' suites do, through
+ * `beam.android.nativecore` -- so the native library is not the reason.) Each fake
  * is provided as itself as well as behind its interface, so a test injects the
  * same instance the screens read and drives it directly.
  *

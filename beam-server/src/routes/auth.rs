@@ -26,34 +26,36 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use beam_auth::utils::device_auth_store::{
-    Claim, DeviceAuthStore, NewDeviceAuth, generate_handle, hash_handle,
+    DeviceAuthStore, NewDeviceAuth, generate_handle, hash_handle,
 };
-use beam_auth::utils::login::{ClientContext, LoginError, MintedSession, complete_login};
+use beam_auth::utils::login::{
+    ClientContext, DevicePollError, DevicePollOutcome, LoginError, MintedSession, complete_login,
+    poll_device_login as poll_device_login_once,
+};
 use beam_auth::utils::models::User;
-use beam_auth::utils::oidc::{DevicePoll, OidcClient, OidcError};
+use beam_auth::utils::oidc::{OidcClient, OidcError};
 use beam_auth::utils::oidc_config::OidcRuntimeConfig;
 use beam_auth::utils::pending_auth_store::{PendingAuth, PendingAuthStore};
 use beam_auth::utils::repository::UserRepository;
-use beam_auth::utils::session_store::{SessionData, SessionStore};
+use beam_auth::utils::session_store::SessionStore;
 use beam_domain::models::{AdminLogCategory, AdminLogLevel};
 use beam_index::services::admin_log::{AdminLogService, record};
-use chrono::{DateTime, Utc};
-use kynos::error::rejection::HeaderRejection;
-use kynos::extract::params::header::{DecodeHeaders, HeaderParams};
-use kynos::http::HeaderMap;
 use kynos::http::forwarded::Forwarded;
 use kynos::prelude::*;
 use kynos::response::cookie::{Cookie, SameSite};
 use kynos::response::headers::WithHeaders;
-use kynos::response::status::{NoContent, Redirect};
+use kynos::response::status::{InvalidLocation, Location, NoContent, Redirect};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::routes::api_error::{
-    INTERNAL_DETAIL, InternalError, OIDC_UNAVAILABLE_DETAIL, SESSION_COOKIE, ServerFault,
-    SessionAuth,
+use crate::models::auth::{
+    CurrentUser, DeviceLoginComplete, DeviceLoginPending, DeviceLoginPoll, DeviceLoginStart,
+    DeviceLoginWait, SessionConnection, SessionSummary,
 };
-use crate::routes::middleware::optional_header;
+use crate::routes::api_error::{
+    ERROR_BASE, INTERNAL_DETAIL, InternalError, OIDC_UNAVAILABLE_DETAIL, ServerFault,
+};
+use crate::routes::session_auth::{SESSION_COOKIE, SessionAuth};
 use crate::routes::tags::Auth;
 
 const STATE_COOKIE: &str = "beam_oidc_state";
@@ -68,73 +70,11 @@ const STATE_TTL_SECS: u64 = 600; // 10 minutes to complete the round trip
 /// not stay redeemable all day.
 pub(crate) const DEVICE_LOGIN_MAX_SECS: u64 = 1800;
 
-// ── Wire types ───────────────────────────────────────────────────────────────
-
-#[derive(Debug, Serialize, Deserialize, Schema)]
-pub struct CurrentUser {
-    pub id: Uuid,
-    pub email: Option<String>,
-    pub is_admin: bool,
-    pub display_name: String,
-    pub avatar_url: Option<String>,
-}
-
-/// Every active session of the current user: what `GET /v1/sessions`
-/// returns.
-///
-/// A connection, as every `/v1` list is, though a user has few enough
-/// sessions that it is never paged: `items` is the whole list, both of
-/// `page_info`'s `has_*_page` flags are `false`, and it carries no cursors.
-#[derive(Debug, Serialize, Deserialize, Schema)]
-pub struct SessionConnection {
-    pub items: Vec<SessionSummary>,
-    /// Always a single, complete page.
-    pub page_info: crate::models::PageInfo,
-}
-
-/// One of the current user's active sessions, as returned by `GET
-/// /sessions`. `id` is an opaque row identifier for revocation via `DELETE
-/// /sessions/{id}` -- never the session credential itself, which is hashed
-/// at rest and cannot be recovered.
-#[derive(Debug, Serialize, Deserialize, Schema)]
-pub struct SessionSummary {
-    pub id: Uuid,
-    pub device_hash: String,
-    pub ip: String,
-    /// When the session was signed in.
-    pub created_at: DateTime<Utc>,
-    /// When the session was last used, to the hour: activity slides it
-    /// forward at most once an hour.
-    pub last_active_at: DateTime<Utc>,
-}
-
-impl SessionSummary {
-    /// The wire view of one stored session.
-    ///
-    /// The store keeps whole Unix seconds, which a `DateTime` holds for any
-    /// time a session can have; one it cannot is a corrupt row, reported as
-    /// such rather than rendered as some other instant.
-    pub(crate) fn from_store(id: Uuid, data: SessionData) -> Result<Self, String> {
-        let SessionData {
-            user_id: _,
-            device_hash,
-            ip,
-            created_at,
-            last_active,
-        } = data;
-        let instant = |secs: i64| {
-            DateTime::from_timestamp(secs, 0)
-                .ok_or_else(|| format!("session {id} has an unrepresentable timestamp {secs}"))
-        };
-        Ok(Self {
-            id,
-            device_hash,
-            ip,
-            created_at: instant(created_at)?,
-            last_active_at: instant(last_active)?,
-        })
-    }
-}
+// ── Request parameters and replies ───────────────────────────────────────────
+//
+// The bodies these endpoints read and write live in `crate::models::auth`;
+// what stays here is what binds them to HTTP: query and path parameters, and
+// the reply that picks a status.
 
 /// Where the browser is sent back to after a successful login.
 #[derive(Debug, Serialize, Deserialize, Schema, QueryParams)]
@@ -150,69 +90,6 @@ pub struct CallbackQuery {
     pub code: Option<String>,
     pub error: Option<String>,
     pub error_description: Option<String>,
-}
-
-/// What `POST /v1/auth/device` answers: what to show the user, and the handle
-/// to poll with.
-///
-/// The IdP's device code is not here. Beam keeps it and polls the IdP itself,
-/// so a client can only ever turn an approval into a Beam session -- never
-/// into IdP tokens (ADR-0003's BFF property, kept for native clients).
-#[derive(Debug, Serialize, Deserialize, Schema)]
-pub struct DeviceLoginStart {
-    /// Opaque, single-flow secret the client polls `POST
-    /// /v1/auth/device/token` with. Only its SHA-256 is stored.
-    pub device_handle: String,
-    /// The code the user enters at `verification_uri`.
-    pub user_code: String,
-    /// Where the user approves the sign-in, on any device with a browser.
-    pub verification_uri: String,
-    /// `verification_uri` with the code filled in, when the IdP offers one --
-    /// suitable for a QR code.
-    pub verification_uri_complete: Option<String>,
-    /// How long the user has to approve, in seconds.
-    pub expires_in_secs: u64,
-    /// The minimum wait between polls, in seconds.
-    pub interval_secs: u32,
-}
-
-/// The body of `POST /v1/auth/device/token`.
-#[derive(Debug, Serialize, Deserialize, Schema)]
-pub struct DeviceLoginPoll {
-    /// The `device_handle` `POST /v1/auth/device` returned.
-    pub device_handle: String,
-}
-
-/// Why a device login is still waiting.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Schema)]
-#[serde(rename_all = "snake_case")]
-pub enum DeviceLoginWait {
-    /// The user has not approved yet. Poll again after `interval_secs`.
-    AuthorizationPending,
-    /// The poll came too soon. The interval has grown; wait the new
-    /// `interval_secs` before polling again.
-    SlowDown,
-}
-
-/// A device login that has not finished yet.
-#[derive(Debug, Serialize, Deserialize, Schema)]
-pub struct DeviceLoginPending {
-    pub status: DeviceLoginWait,
-    /// The minimum wait before the next poll, in seconds.
-    pub interval_secs: u32,
-}
-
-/// A device login the user approved: the session it minted.
-#[derive(Debug, Serialize, Deserialize, Schema)]
-pub struct DeviceLoginComplete {
-    /// The `beam_session` credential. Present it as the `beam_session`
-    /// cookie on every later request; it is the same opaque session a
-    /// browser login mints, with the same idle and absolute expiry.
-    pub session_token: String,
-    /// The session's hard lifetime from now, in seconds.
-    pub session_expires_in_secs: u64,
-    /// Who signed in.
-    pub user: CurrentUser,
 }
 
 /// The two answers a device-login poll can give.
@@ -325,23 +202,16 @@ impl SetCookie {
 /// No 400 and no 403: the only input is a redirect path, which is sanitised
 /// rather than rejected, and nothing here is authorised.
 #[derive(Debug, thiserror::Error, kynos::ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum LoginStartError {
     /// OIDC is not configured, or discovery failed. Distinct from a 500: the
     /// server is working, the identity provider is not reachable.
     #[error("{}", OIDC_UNAVAILABLE_DETAIL)]
-    #[problem(
-        status = 503,
-        type = "https://beam.justinchung.net/reference/errors/#oidc-unavailable",
-        title = "Login unavailable"
-    )]
+    #[problem(status = 503, title = "Login unavailable")]
     OidcUnavailable(ServerFault),
 
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 
@@ -351,6 +221,7 @@ pub enum LoginStartError {
 /// first, because it is the one a caller hits by reloading the callback URL --
 /// which is the single most common way to reach this endpoint in error.
 #[derive(Debug, thiserror::Error, kynos::ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum LoginCallbackError {
     /// The round-trip cannot be matched to one this server started: the state
     /// cookie or parameter is missing, the two disagree, the pending record
@@ -369,33 +240,22 @@ pub enum LoginCallbackError {
 
     /// The identity provider refused, or the token exchange did not verify.
     #[error("{0}")]
-    #[problem(
-        status = 400,
-        type = "https://beam.justinchung.net/reference/errors/#login-failed",
-        title = "Login failed"
-    )]
+    #[problem(status = 400, title = "Login failed")]
     LoginFailed(String),
 
     /// The identity verified; the local account is disabled (issue #85).
     #[error("{0}")]
-    #[problem(
-        status = 403,
-        type = "https://beam.justinchung.net/reference/errors/#account-disabled",
-        title = "Account is disabled"
-    )]
+    #[problem(status = 403, title = "Account is disabled")]
     AccountDisabled(String),
 
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 
 /// `POST /v1/auth/device`.
 #[derive(Debug, thiserror::Error, kynos::ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum DeviceLoginStartError {
     /// The IdP's discovery document names no device authorization endpoint,
     /// so this deployment offers only the browser login. A client falls back
@@ -409,19 +269,11 @@ pub enum DeviceLoginStartError {
     Unsupported(String),
 
     #[error("{}", OIDC_UNAVAILABLE_DETAIL)]
-    #[problem(
-        status = 503,
-        type = "https://beam.justinchung.net/reference/errors/#oidc-unavailable",
-        title = "Login unavailable"
-    )]
+    #[problem(status = 503, title = "Login unavailable")]
     OidcUnavailable(ServerFault),
 
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 
@@ -430,6 +282,7 @@ pub enum DeviceLoginStartError {
 /// `Invalid` is written first so it titles the 400: it is what a client
 /// meets by polling a flow that already ended, the common mistake.
 #[derive(Debug, thiserror::Error, kynos::ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum DeviceLoginPollError {
     /// No open device login has this handle: it was never issued, or the
     /// flow already ended (signed in, denied, or expired and collected).
@@ -443,11 +296,7 @@ pub enum DeviceLoginPollError {
 
     /// The IdP's answer did not verify.
     #[error("{0}")]
-    #[problem(
-        status = 400,
-        type = "https://beam.justinchung.net/reference/errors/#login-failed",
-        title = "Login failed"
-    )]
+    #[problem(status = 400, title = "Login failed")]
     LoginFailed(String),
 
     /// The user refused the sign-in at the IdP.
@@ -461,11 +310,7 @@ pub enum DeviceLoginPollError {
 
     /// The identity verified; the local account is disabled (issue #85).
     #[error("{0}")]
-    #[problem(
-        status = 403,
-        type = "https://beam.justinchung.net/reference/errors/#account-disabled",
-        title = "Account is disabled"
-    )]
+    #[problem(status = 403, title = "Account is disabled")]
     AccountDisabled(String),
 
     /// The user did not approve in time. Start a new device login.
@@ -480,19 +325,11 @@ pub enum DeviceLoginPollError {
     /// The IdP could not be reached or refused Beam itself. The flow is kept:
     /// polling again may succeed.
     #[error("{}", OIDC_UNAVAILABLE_DETAIL)]
-    #[problem(
-        status = 503,
-        type = "https://beam.justinchung.net/reference/errors/#oidc-unavailable",
-        title = "Login unavailable"
-    )]
+    #[problem(status = 503, title = "Login unavailable")]
     OidcUnavailable(ServerFault),
 
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 
@@ -502,21 +339,14 @@ pub enum DeviceLoginPollError {
 /// means something the extractor's does not: the session verified, and the
 /// account behind it has since been deleted.
 #[derive(Debug, thiserror::Error, kynos::ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum CurrentUserError {
     #[error("{0}")]
-    #[problem(
-        status = 401,
-        type = "https://beam.justinchung.net/reference/errors/#account-removed",
-        title = "Account no longer exists"
-    )]
+    #[problem(status = 401, title = "Account no longer exists")]
     AccountRemoved(String),
 
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 
@@ -529,21 +359,14 @@ pub enum CurrentUserError {
 /// failed and sent it to sign in again. A malformed id is the `Path`
 /// extractor's 400.
 #[derive(Debug, thiserror::Error, kynos::ApiError)]
+#[problem(base = ERROR_BASE)]
 pub enum SessionRevokeError {
     #[error("{0}")]
-    #[problem(
-        status = 404,
-        type = "https://beam.justinchung.net/reference/errors/#session-not-found",
-        title = "Session not found"
-    )]
+    #[problem(status = 404, title = "Session not found")]
     SessionNotFound(String),
 
     #[error("{}", INTERNAL_DETAIL)]
-    #[problem(
-        status = 500,
-        type = "https://beam.justinchung.net/reference/errors/#internal",
-        title = "Internal server error"
-    )]
+    #[problem(status = 500, title = "Internal server error")]
     Internal(ServerFault),
 }
 
@@ -558,6 +381,21 @@ impl From<CookieEncodingError> for LoginStartError {
 
 impl From<CookieEncodingError> for LoginCallbackError {
     fn from(e: CookieEncodingError) -> Self {
+        Self::Internal(ServerFault::new(e))
+    }
+}
+
+// Likewise a redirect target that is not a field value: the IdP's URL and the
+// configured web URL are both the server's own to get right.
+
+impl From<InvalidLocation> for LoginStartError {
+    fn from(e: InvalidLocation) -> Self {
+        Self::Internal(ServerFault::new(e))
+    }
+}
+
+impl From<InvalidLocation> for LoginCallbackError {
+    fn from(e: InvalidLocation) -> Self {
         Self::Internal(ServerFault::new(e))
     }
 }
@@ -584,26 +422,11 @@ impl From<CookieEncodingError> for InternalError {
 /// The client address is not a header here at all: it is [`Forwarded`],
 /// resolved by the router's trusted-proxy policy, so a client cannot name its
 /// own address by writing `X-Forwarded-For`.
-//
-// Hand-implemented rather than derived because `#[derive(HeaderParams)]` in
-// kynos 0.4.0 has no way to set `DESCRIBED = false`: getkono/kynos#1021.
-// Once a release carries that attribute, go back to the derive with it.
-#[derive(Debug)]
+#[derive(Debug, HeaderParams)]
+#[header(described = false)]
 pub struct ClientHeaders {
+    #[header(rename = "User-Agent")]
     pub user_agent: Option<String>,
-}
-
-impl HeaderParams for ClientHeaders {
-    const NAMES: &'static [&'static str] = &["User-Agent"];
-    const DESCRIBED: bool = false;
-}
-
-impl DecodeHeaders for ClientHeaders {
-    fn decode(headers: &HeaderMap) -> Result<Self, HeaderRejection> {
-        Ok(Self {
-            user_agent: optional_header(headers, "User-Agent")?,
-        })
-    }
 }
 
 fn build_cookie(name: &str, value: String, path: &str, secure: bool, max_age: Duration) -> Cookie {
@@ -625,10 +448,19 @@ fn clearing_cookie(name: &str, path: &str) -> Cookie {
 /// same-origin-relative path (leading `/`, not `//...` or `/\...` -- both
 /// of which some browsers treat as protocol-relative and would send the
 /// user off-site). Anything else falls back to `/`.
+///
+/// The path also becomes the callback's `Location`, which refuses a control
+/// character and surrounding whitespace (RFC 9110 §5.5). A path holding either
+/// falls back to `/` here, at login, rather than failing the callback after the
+/// session is already minted -- a 500 that would orphan it with no cookie sent.
 fn sanitize_redirect_path(raw: Option<&str>) -> String {
     match raw {
         Some(path)
-            if path.starts_with('/') && !path.starts_with("//") && !path.starts_with("/\\") =>
+            if path.starts_with('/')
+                && !path.starts_with("//")
+                && !path.starts_with("/\\")
+                && !path.chars().any(char::is_control)
+                && !path.ends_with(char::is_whitespace) =>
         {
             path.to_owned()
         }
@@ -801,7 +633,7 @@ pub async fn oidc_login(
     );
 
     Ok(WithHeaders::new(
-        Redirect::to(begin.auth_url),
+        Redirect::to(Location::try_from(begin.auth_url)?),
         SetCookie::new(&cookie)?,
     ))
 }
@@ -905,8 +737,7 @@ pub async fn oidc_callback(
 
     // Every exchange failure is the same failed login. A wrong nonce among
     // them: openidconnect's verifier reports it as a claims failure like any
-    // other, so no client this server runs answers `OidcError::NonceMismatch`
-    // and it needs no answer of its own.
+    // other, so it needs no answer of its own.
     let identity = match oidc_client
         .exchange_code(&code, &pending.pkce_verifier, &pending.nonce)
         .await
@@ -978,7 +809,10 @@ pub async fn oidc_callback(
     let redirect_path = pending.redirect_path.unwrap_or_else(|| "/".to_owned());
 
     Ok(WithHeaders::new(
-        Redirect::to(format!("{}{}", config.web_url, redirect_path)),
+        Redirect::to(Location::try_from(format!(
+            "{}{}",
+            config.web_url, redirect_path
+        ))?),
         SetCookie::new(&cookie)?,
     ))
 }
@@ -1076,196 +910,118 @@ pub async fn poll_device_login(
     Inject(admin_log): Inject<Arc<dyn AdminLogService>>,
     Json(body): Json<DeviceLoginPoll>,
 ) -> Result<WithHeaders<DeviceLoginPollReply, NoStore>, DeviceLoginPollError> {
-    let internal = |e: beam_auth::utils::device_auth_store::DeviceAuthError| {
-        DeviceLoginPollError::Internal(ServerFault::new(e))
-    };
-    let handle_hash = hash_handle(&body.device_handle);
+    let DeviceLoginPoll { device_handle } = body;
     let client = client_context(&headers, &forwarded);
-    // A poll naming no open flow is one any request can make, so it is
-    // logged here and kept out of the admin log (see `record_sign_in`).
-    let unknown_flow = || {
-        tracing::warn!(
-            method = SignInMethod::Device.as_str(),
-            ip = %client.ip,
-            reason = "attempt_invalid",
-            "refused a poll of an unknown or finished device login"
-        );
-        DeviceLoginPollError::Invalid("Unknown or already-finished device login".into())
-    };
-    let failed = |reason: &'static str, error: &str| {
+    let failed = |reason: &'static str, error: String| {
         record_sign_in(
             admin_log.as_ref(),
             SignInMethod::Device,
             &client,
             SignInOutcome::Failed {
                 reason,
-                error: Some(error.to_owned()),
+                error: Some(error),
             },
         )
     };
 
-    let auth = match device_auth_store
-        .claim_poll(&handle_hash)
-        .await
-        .map_err(internal)?
-    {
-        Claim::NotFound => return Err(unknown_flow()),
-        Claim::Expired => {
-            device_auth_store
-                .consume(&handle_hash)
-                .await
-                .map_err(internal)?;
-            let detail = "The device login expired before it was approved";
-            failed("expired", detail).await;
-            return Err(DeviceLoginPollError::Expired(detail.into()));
-        }
-        Claim::TooEarly { interval_secs } => {
-            // The IdP is not asked: answering for it is the point.
-            let interval_secs = device_auth_store
-                .bump_interval(&handle_hash)
-                .await
-                .map_err(internal)?
-                .unwrap_or(interval_secs);
-            return Ok(WithHeaders::new(
-                DeviceLoginPollReply::Pending(DeviceLoginPending {
-                    status: DeviceLoginWait::SlowDown,
-                    interval_secs,
-                }),
-                NoStore::new(),
-            ));
-        }
-        Claim::Claimed(auth) => auth,
-    };
-
-    let identity = match oidc_client.poll_device_token(&auth.device_code).await {
-        Ok(DevicePoll::Pending) => {
-            return Ok(WithHeaders::new(
-                DeviceLoginPollReply::Pending(DeviceLoginPending {
-                    status: DeviceLoginWait::AuthorizationPending,
-                    interval_secs: auth.interval_secs,
-                }),
-                NoStore::new(),
-            ));
-        }
-        Ok(DevicePoll::SlowDown) => {
-            let interval_secs = device_auth_store
-                .bump_interval(&handle_hash)
-                .await
-                .map_err(internal)?
-                .unwrap_or(auth.interval_secs);
-            return Ok(WithHeaders::new(
-                DeviceLoginPollReply::Pending(DeviceLoginPending {
-                    status: DeviceLoginWait::SlowDown,
-                    interval_secs,
-                }),
-                NoStore::new(),
-            ));
-        }
-        Ok(DevicePoll::Denied) => {
-            device_auth_store
-                .consume(&handle_hash)
-                .await
-                .map_err(internal)?;
-            let detail = "The sign-in was refused at the identity provider";
-            failed("denied", detail).await;
-            return Err(DeviceLoginPollError::Denied(detail.into()));
-        }
-        Ok(DevicePoll::Expired) => {
-            device_auth_store
-                .consume(&handle_hash)
-                .await
-                .map_err(internal)?;
-            let detail = "The device login expired before it was approved";
-            failed("expired", detail).await;
-            return Err(DeviceLoginPollError::Expired(detail.into()));
-        }
-        Ok(DevicePoll::Complete(identity)) => identity,
-        // The IdP could not be reached, or Beam is misconfigured against it:
-        // nothing about this flow is wrong, so it is kept for the next poll.
-        Err(
-            e @ (OidcError::Discovery(_)
-            | OidcError::Exchange(_)
-            | OidcError::DeviceFlowUnsupported),
-        ) => {
-            return Err(DeviceLoginPollError::OidcUnavailable(ServerFault::new(
-                format_args!("OIDC login unavailable: {e}"),
-            )));
-        }
-        // An answer that did not verify will not verify on a retry.
-        Err(
-            e @ (OidcError::MissingIdToken
-            | OidcError::ClaimsVerification(_)
-            | OidcError::NonceMismatch),
-        ) => {
-            device_auth_store
-                .consume(&handle_hash)
-                .await
-                .map_err(internal)?;
-            let detail = format!("Login failed: {e}");
-            failed("verification_failed", &detail).await;
-            return Err(DeviceLoginPollError::LoginFailed(detail));
-        }
-    };
-
-    // Ending the flow before minting is what makes an approval single-use: of
-    // two polls that both saw it approved, only the one that removes the row
-    // signs in.
-    if device_auth_store
-        .consume(&handle_hash)
-        .await
-        .map_err(internal)?
-        .is_none()
-    {
-        return Err(unknown_flow());
-    }
-
-    let minted = complete_login(
-        &identity,
+    let outcome = match poll_device_login_once(
+        &device_handle,
         &client,
+        oidc_client.as_ref(),
+        device_auth_store.as_ref(),
         user_repo.as_ref(),
         session_store.as_ref(),
         &config,
     )
-    .await;
-    let MintedSession {
-        token,
-        user,
-        absolute_ttl_secs,
-    } = match minted {
-        Ok(minted) => minted,
-        Err(e @ LoginError::AccountDisabled { user_id }) => {
-            record_sign_in(
-                admin_log.as_ref(),
-                SignInMethod::Device,
-                &client,
-                SignInOutcome::AccountDisabled { user_id },
-            )
-            .await;
-            return Err(DeviceLoginPollError::AccountDisabled(e.to_string()));
-        }
-        Err(LoginError::Internal(message)) => {
-            return Err(DeviceLoginPollError::Internal(ServerFault::new(message)));
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            let detail = e.to_string();
+            return Err(match e {
+                // A poll naming no open flow is one any request can make, so
+                // it is logged here and kept out of the admin log (see
+                // `record_sign_in`).
+                DevicePollError::Invalid => {
+                    tracing::warn!(
+                        method = SignInMethod::Device.as_str(),
+                        ip = %client.ip,
+                        reason = "attempt_invalid",
+                        "refused a poll of an unknown or finished device login"
+                    );
+                    DeviceLoginPollError::Invalid(detail)
+                }
+                DevicePollError::Expired => {
+                    failed("expired", detail.clone()).await;
+                    DeviceLoginPollError::Expired(detail)
+                }
+                DevicePollError::Denied => {
+                    failed("denied", detail.clone()).await;
+                    DeviceLoginPollError::Denied(detail)
+                }
+                DevicePollError::AccountDisabled { user_id } => {
+                    record_sign_in(
+                        admin_log.as_ref(),
+                        SignInMethod::Device,
+                        &client,
+                        SignInOutcome::AccountDisabled { user_id },
+                    )
+                    .await;
+                    DeviceLoginPollError::AccountDisabled(detail)
+                }
+                DevicePollError::LoginFailed(_) => {
+                    failed("verification_failed", detail.clone()).await;
+                    DeviceLoginPollError::LoginFailed(detail)
+                }
+                // The flow is kept for the next poll: nothing about it failed.
+                DevicePollError::IdpUnavailable(_) => {
+                    DeviceLoginPollError::OidcUnavailable(ServerFault::new(e))
+                }
+                DevicePollError::Internal(message) => {
+                    DeviceLoginPollError::Internal(ServerFault::new(message))
+                }
+            });
         }
     };
-    record_sign_in(
-        admin_log.as_ref(),
-        SignInMethod::Device,
-        &client,
-        SignInOutcome::SignedIn {
-            user_id: user.id,
-            is_admin: user.is_admin,
-        },
-    )
-    .await;
 
-    Ok(WithHeaders::new(
-        DeviceLoginPollReply::SignedIn(DeviceLoginComplete {
+    if let DevicePollOutcome::SignedIn(MintedSession { user, .. }) = &outcome {
+        record_sign_in(
+            admin_log.as_ref(),
+            SignInMethod::Device,
+            &client,
+            SignInOutcome::SignedIn {
+                user_id: user.id,
+                is_admin: user.is_admin,
+            },
+        )
+        .await;
+    }
+
+    let reply = match outcome {
+        DevicePollOutcome::AuthorizationPending { interval_secs } => {
+            DeviceLoginPollReply::Pending(DeviceLoginPending {
+                status: DeviceLoginWait::AuthorizationPending,
+                interval_secs,
+            })
+        }
+        DevicePollOutcome::SlowDown { interval_secs } => {
+            DeviceLoginPollReply::Pending(DeviceLoginPending {
+                status: DeviceLoginWait::SlowDown,
+                interval_secs,
+            })
+        }
+        DevicePollOutcome::SignedIn(MintedSession {
+            token,
+            user,
+            absolute_ttl_secs,
+        }) => DeviceLoginPollReply::SignedIn(DeviceLoginComplete {
             session_token: token,
             session_expires_in_secs: absolute_ttl_secs,
             user: me_from(user),
         }),
-        NoStore::new(),
-    ))
+    };
+
+    Ok(WithHeaders::new(reply, NoStore::new()))
 }
 
 /// Returns the currently authenticated user (via the `beam_session` cookie).
@@ -1274,11 +1030,8 @@ pub async fn oidc_me(
     auth: SessionAuth,
     Inject(user_repo): Inject<Arc<dyn UserRepository>>,
 ) -> Result<Json<CurrentUser>, CurrentUserError> {
-    let user_uuid = Uuid::parse_str(&auth.0.user_id)
-        .map_err(|e| CurrentUserError::Internal(ServerFault::new(e)))?;
-
     let user = user_repo
-        .find_by_id(user_uuid)
+        .find_by_id(auth.0.user_id)
         .await
         .map_err(|e| CurrentUserError::Internal(ServerFault::new(e)))?
         .ok_or_else(|| CurrentUserError::AccountRemoved("User no longer exists".into()))?;
@@ -1329,7 +1082,7 @@ pub async fn oidc_logout_all(
     Inject(session_store): Inject<Arc<dyn SessionStore>>,
 ) -> Result<WithHeaders<NoContent, SetCookie>, InternalError> {
     let revoked = session_store
-        .delete_all_for_user(&auth.0.user_id)
+        .delete_all_for_user(&auth.0.user_id.to_string())
         .await
         .map_err(|e| InternalError::Internal(ServerFault::new(e)))?;
     tracing::info!(
@@ -1351,7 +1104,7 @@ pub async fn oidc_list_sessions(
     Inject(session_store): Inject<Arc<dyn SessionStore>>,
 ) -> Result<Json<SessionConnection>, InternalError> {
     let sessions = session_store
-        .list_for_user(&auth.0.user_id)
+        .list_for_user(&auth.0.user_id.to_string())
         .await
         .map_err(|e| InternalError::Internal(ServerFault::new(e)))?;
 
@@ -1377,7 +1130,7 @@ pub async fn oidc_delete_session(
     Inject(session_store): Inject<Arc<dyn SessionStore>>,
 ) -> Result<WithHeaders<NoContent, SessionRevoked>, SessionRevokeError> {
     let deleted = session_store
-        .delete_by_id(path.id, &auth.0.user_id)
+        .delete_by_id(path.id, &auth.0.user_id.to_string())
         .await
         .map_err(|e| SessionRevokeError::Internal(ServerFault::new(e)))?;
 
@@ -1426,10 +1179,6 @@ pub async fn oidc_delete_session(
 /// `required: false`, so the description states that a client cannot count on
 /// it. This replaced a hand-written `IntoResponse`/`Responses` pair that
 /// declared the header required on a response that usually omits it.
-///
-/// Kynos 0.4.0 describes an optional header's schema as nullable, which a
-/// header value cannot be; getkono/kynos#992 fixes that on its master, and the
-/// description corrects itself when a release carries it.
 #[derive(Schema, HeaderParams)]
 pub struct SessionRevoked {
     #[header(rename = "Set-Cookie")]
@@ -1439,6 +1188,10 @@ pub struct SessionRevoked {
 #[cfg(test)]
 #[path = "auth_tests.rs"]
 mod auth_tests;
+
+#[cfg(test)]
+#[path = "session_tests.rs"]
+mod session_tests;
 
 #[cfg(test)]
 #[path = "device_login_tests.rs"]
@@ -1469,5 +1222,20 @@ mod helper_tests {
             "/"
         );
         assert_eq!(sanitize_redirect_path(None), "/");
+    }
+
+    /// Neither can be a `Location` field value, so keeping either would fail
+    /// the callback after the session is minted.
+    #[test]
+    fn a_control_character_or_trailing_whitespace_falls_back_to_root() {
+        for unusable in ["/a ", "/a\t", "/a\r\nSet-Cookie: x=y", "/a\0", "/a\u{7f}b"] {
+            assert_eq!(sanitize_redirect_path(Some(unusable)), "/", "{unusable:?}");
+        }
+    }
+
+    /// An inner space is a field value, so it is not refused.
+    #[test]
+    fn an_inner_space_is_kept() {
+        assert_eq!(sanitize_redirect_path(Some("/a b")), "/a b");
     }
 }

@@ -39,10 +39,10 @@ use std::time::Duration;
 use tracing::{debug, warn};
 use walkdir::WalkDir;
 
-use beam_domain::utils::media_path::{DiscSetPlace, disc_set_member, disc_set_place};
-use beam_domain::utils::path_policy::{
-    DiscKind, PathDisposition, PathPolicy, disc_stream_kind, dvd_title_file,
+use beam_domain::utils::disc::{
+    DiscKind, DiscSetPlace, disc_set_member, disc_set_place, disc_stream_kind, dvd_title_file,
 };
+use beam_domain::utils::path_policy::{PathDisposition, PathPolicy};
 
 use crate::library_file::{LibraryFile, StatCursor, is_refusal};
 

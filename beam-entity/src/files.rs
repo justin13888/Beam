@@ -1,9 +1,8 @@
 //! File entity (renamed from indexed_file)
 
 use sea_orm::entity::prelude::*;
-use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
 #[sea_orm(table_name = "files")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
@@ -74,7 +73,7 @@ pub struct Model {
 /// parameter as `text`, which Postgres refuses to assign to an enum column --
 /// so every file insert and update failed at runtime while every hermetic test
 /// passed. Declared as a `DeriveActiveEnum` it is bound with the right type.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "file_status")]
 pub enum FileStatus {
     #[sea_orm(string_value = "known")]

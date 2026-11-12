@@ -192,7 +192,7 @@ that does not apply to that kind of title (a season has no backdrop, an episode 
     `after` was given; backwards, the mirror. Pass `end_cursor` as `after` for the next page and
     `start_cursor` as `before` for the previous one.
   - A cursor is opaque base64url JSON holding the sort it was issued under and the boundary
-    title's sort key, kind and id (`services/cursor.rs`). It is a **position, not an offset**:
+    title's sort key, kind and id (`services/cursor/browse.rs`). It is a **position, not an offset**:
     a page after a title that has since left the listing starts where that title was. A cursor
     that is not the server's, or was issued under another `sort_by`/`sort_order`, is
     `400 #invalid-cursor`. It is unsigned: everything in it is either public or checked.
@@ -209,9 +209,9 @@ that does not apply to that kind of title (a season has no backdrop, an episode 
   - Filters apply to movies and shows alike, `min_rating` included; `genre` matches by name or
     slug. `min_rating` is on the 0-10 scale `ratings.tmdb` is reported on, compared in the single
     precision a rating is stored in, an unrated title counting as 0. A numeric filter out of its
-    range -- a year above 2147483647 (the `year` columns are signed), a `min_rating` of `NaN` --
-    is `400 #invalid-filter`, never narrowed into a bound that matches everything; a `min_rating`
-    outside 0-10 is refused before the handler as `400 about:blank`. Only titles with a present
+    range -- a year above 2147483647 (the `year` columns are signed) -- is `400 #invalid-filter`,
+    never narrowed into a bound that matches everything; a `min_rating` outside 0-10, `NaN`
+    included, is refused before the handler as `400 about:blank`. Only titles with a present
     file are listed.
   - One page is one catalogue statement plus a fixed number of reads by id to hydrate the page
     (titles, genres, season and episode counts), whatever the library's size (NFR-301). The
@@ -229,7 +229,7 @@ that does not apply to that kind of title (a season has no backdrop, an episode 
   `GET /v1/admin/enrichment` ([#185](https://github.com/justin13888/beam/issues/185)) is the
   same shape forwards only (`first`, 1-100, default 20, and `after`), plus `total`. Its order is
   fixed -- the most recently changed row first, `updated_at` then row id, both descending -- so its
-  cursor (`services/enrichment_cursor.rs`) holds just that pair, at full precision, and is valid
+  cursor (`services/cursor/enrichment.rs`) holds just that pair, at full precision, and is valid
   under any `status`/`kind` filter. A page is one keyset statement on
   `idx_metadata_enrichment_list`, one count and one read by ids per kind to name the titles.
 
@@ -238,20 +238,20 @@ that does not apply to that kind of title (a season has no backdrop, an episode 
   The rest page the same way, forwards only:
   - `GET /v1/libraries/{id}/files` by `first` (1-500, default 100) and `after`, ordered by stored
     path then id, through `FileRepository::find_page_by_library` -- a keyset seek, so a page costs
-    one statement whatever the library's size. Its cursor (`services/library_files_cursor.rs`)
+    one statement whatever the library's size. Its cursor (`services/cursor/library_files.rs`)
     holds the root-relative path the page reported, never the absolute one (NFR-108), and its
     library's id, so another library's cursor is `400 #invalid-cursor`. No `total`: the library's
     `file_count` is it.
   - `GET /v1/watchlist` and `GET /v1/favourites` by `first` (1-100, default 50) and `after`, with
     `total`, newest addition first: `added_at` then entry id, both descending, as a keyset on
-    `idx_user_list_entries_page`. Their cursor (`services/user_list_cursor.rs`) holds that pair at
+    `idx_user_list_entries_page`. Their cursor (`services/cursor/user_list.rs`) holds that pair at
     full precision and names its list, so the watchlist's cursor is `400 #invalid-cursor` on
     favourites.
   - `GET /v1/people` and `GET /v1/collections` (`first` 1-100, default 20) with `total`, by name
     ignoring ASCII case, through the offset cursor below.
   - `GET /v1/admin/users` (`first` 1-100, default 50) and `GET /v1/admin/logs` (`first` 1-200,
     default 50) with `total`. Both read by `LIMIT`/`OFFSET` underneath, so the offset rides inside
-    an opaque cursor (`services/offset_cursor.rs`) naming its list: the other list's cursor is
+    an opaque cursor (`services/cursor/offset.rs`) naming its list: the other list's cursor is
     `400 #invalid-cursor`, and either can move to a keyset later without a client noticing. An
     entry logged while an admin pages shifts the log's later pages by one. The log's count is its
     `total`; there is no separate count operation.
@@ -297,10 +297,12 @@ that does not apply to that kind of title (a season has no backdrop, an episode 
   const-narrowed problems. A generated client therefore sees every code, and `codegen:openapi:check`
   catches a renamed one on its own. The consequence to know: spargen lowers each narrowed `type` to
   a closed set, so a native client decodes only the codes it was generated with. A code the server
-  adds later reaches an older client as an undecodable body with no status, not as the documented
-  status it arrived with ([getkono/spargen#268](https://github.com/getkono/spargen/issues/268)). The
-  same holds for a `429` whose body is not Beam's `rate-limited` problem — a reverse proxy's own rate
-  limiter, or a server older than the code — on the three operations that declare one. Two
+  adds later fails to decode, and since spargen 0.6 that failure keeps the documented status it
+  arrived with, so the core classifies it by that status and carries the new `type` through
+  ([getkono/spargen#268](https://github.com/getkono/spargen/issues/268)); a client generated before
+  that sees an undecodable body with no status. The same holds for a `429` whose body is not Beam's
+  `rate-limited` problem — a reverse proxy's own rate limiter, or a server older than the code — on
+  the three operations that declare one. Two
   framework responses stay wide on purpose: `SessionAuth`'s `403` and the range engine's `416` are
   the bare `Problem` component, so any `type` decodes there.
 
@@ -331,9 +333,11 @@ that does not apply to that kind of title (a season has no backdrop, an episode 
   with `Retry-After` and `X-RateLimit-Limit`/`-Remaining`/`-Reset`), `500`, `502` (artwork only:
   `artwork-upstream-failed`, when the metadata provider answered the image fetch unusably or not at
   all — the fault is the provider's, and `internal` is documented to mean it is Beam's), `503`
-  (health, `/v1/auth/login` when OIDC is unconfigured, and `/metrics` when metrics are disabled). A wrong
-  method on a real path returns `405`. The `416` is declared on `RuntimeDelivery<R>`
-  (`routes/delivery.rs`) — the generic delivery type file delivery and artwork both return — rather
+  (health, `/v1/auth/login` when OIDC is unconfigured, `/metrics` when metrics are disabled, and
+  every session-guarded operation when the session or account store cannot be reached to check the
+  cookie -- `SessionCookie` declares it, so the session survives an outage). A wrong
+  method on a real path returns `405`. The `416` is declared on Kynos's `Delivery<R>` — the
+  delivery type file delivery and artwork both return, over the media-type set `R` each names — rather
   than on `DeliveryError` or `ArtworkError`, because `Served::deliver` resolves an unsatisfiable
   range into a problem document and returns it as an `Ok` delivery — the handler never sees an error
   to convert. `GET /v1/health`
@@ -406,10 +410,10 @@ section describes them; when the two disagree, the test is right:
   not decode, on an operation that takes one.
 
 **R9**, no single-key `oneOf` wrapper, is not enforced yet. `MediaMetadata` is the one schema it
-would refuse -- `{"Movie": {...}}` rather than a `media_type` tag beside the fields -- and the
-tagged form waits on a spargen release that dispatches on the tag the server sends
-([getkono/spargen#403](https://github.com/getkono/spargen/issues/403),
-[#300](https://github.com/justin13888/beam/issues/300)).
+would refuse -- `{"Movie": {...}}` rather than a `media_type` tag beside the fields. spargen 0.6
+dispatches on the tag the server sends
+([getkono/spargen#403](https://github.com/getkono/spargen/issues/403)), so the tagged form is no
+longer blocked; moving to it is [#300](https://github.com/justin13888/beam/issues/300).
 
 R4-R6 read every property of every component schema and every path and query parameter. Headers
 are transport, described by Kynos rather than by Beam's types, and are not asserted

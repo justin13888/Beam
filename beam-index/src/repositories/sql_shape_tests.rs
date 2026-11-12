@@ -784,6 +784,55 @@ mod enrichment {
     use beam_domain::repositories::EnrichmentStateRepository;
 
     use crate::repositories::SqlEnrichmentStateRepository;
+    use beam_domain::models::enrichment::EnrichmentTargetId;
+    use beam_domain::services::{SequentialIdGenerator, TestClock};
+
+    /// A repository whose clock reads 2023-11-14 -- a day the wall clock
+    /// never will again -- and whose ids are sequential.
+    fn seamed(db: &Arc<DatabaseConnection>) -> SqlEnrichmentStateRepository {
+        SqlEnrichmentStateRepository::with_seams(
+            db.clone(),
+            Arc::new(TestClock::starting_at(
+                chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+            )),
+            Arc::new(SequentialIdGenerator::new()),
+        )
+    }
+
+    /// A new row's id and timestamps come from the injected seams, not the
+    /// wall clock and a random UUID.
+    #[tokio::test]
+    async fn a_new_row_is_stamped_from_the_injected_clock_and_ids() {
+        let db = connection(empty_mock());
+        let repo = seamed(&db);
+        // The mock returns no inserted row; only the statement matters here.
+        let _ = repo
+            .ensure_pending(EnrichmentTargetId::Movie(Uuid::from_u128(7)))
+            .await;
+        drop(repo);
+
+        let sql = statements(db);
+        let insert = sql
+            .iter()
+            .find(|statement| statement.sql.starts_with("INSERT"))
+            .expect("a missing row is inserted");
+        assert_bound(insert, &SequentialIdGenerator::nth(0).to_string());
+        assert_bound(insert, "2023-11-14");
+    }
+
+    /// Queueing every row for another pass stamps it as updated at the
+    /// injected clock's instant.
+    #[tokio::test]
+    async fn queueing_every_row_stamps_the_injected_clock() {
+        let db = connection(empty_mock());
+        let repo = seamed(&db);
+        let _ = repo.request_refresh_all(false).await;
+        drop(repo);
+
+        let sql = statements(db);
+        assert_contains(&sql[0], "UPDATE");
+        assert_bound(&sql[0], "2023-11-14");
+    }
 
     #[tokio::test]
     async fn fetch_due_takes_pending_rows_that_are_due_oldest_first() {
@@ -2378,17 +2427,19 @@ mod access_policy {
         assert_eq!(sql.first(), Some(&"BEGIN"), "{sql:?}");
         assert_eq!(sql.last(), Some(&"COMMIT"), "{sql:?}");
         assert!(
-            sql[1].starts_with("DELETE FROM user_library_access"),
+            sql[1].starts_with(r#"DELETE FROM "user_library_access""#),
             "the old grants go first: {sql:?}"
         );
+        assert_filters(restricting[1], "user_library_access", "user_id", "=");
+        assert_bound(restricting[1], &user.to_string());
         assert!(
-            sql[2].contains("ON CONFLICT (user_id) DO UPDATE"),
+            sql[2].contains(r#"ON CONFLICT ("user_id") DO UPDATE"#),
             "{sql:?}"
         );
         assert_bound(restricting[2], "teen");
         let grants: Vec<&&Statement> = restricting
             .iter()
-            .filter(|s| s.sql.starts_with("INSERT INTO user_library_access"))
+            .filter(|s| s.sql.starts_with(r#"INSERT INTO "user_library_access""#))
             .collect();
         assert_eq!(grants.len(), 2, "one grant per library: {sql:?}");
         for library in [kids, family] {
@@ -2404,7 +2455,7 @@ mod access_policy {
         assert!(
             lifting
                 .iter()
-                .any(|s| s.starts_with("DELETE FROM user_access_policies")),
+                .any(|s| s.starts_with(r#"DELETE FROM "user_access_policies""#)),
             "{lifting:?}"
         );
         assert!(

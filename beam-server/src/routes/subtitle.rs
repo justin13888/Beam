@@ -11,16 +11,17 @@
 
 use bytes::Bytes;
 use kynos::http::etag::ETag;
+use kynos::http::media::MediaRanges;
 use kynos::prelude::*;
-use kynos::response::range::served::{Conditions, Served};
+use kynos::response::range::served::{Conditions, Delivery, Served};
 use kynos::response::range::source::InMemory;
 use tracing::error;
 use uuid::Uuid;
 
 use beam_domain::models::sidecar::SubtitleFormat;
 
-use crate::routes::api_error::{ServerFault, SessionAuth, SubtitleDeliveryError};
-use crate::routes::delivery::{AnyMedia, MediaRanges, RuntimeDelivery};
+use crate::routes::api_error::{ServerFault, SubtitleDeliveryError};
+use crate::routes::session_auth::SessionAuth;
 use crate::routes::stream::{FileByteSource, hides_file, validator_tag};
 use crate::routes::tags::Playback;
 use crate::services::subtitle::{LocatedSubtitle, SubtitleError, WebVttRendition};
@@ -109,7 +110,7 @@ pub async fn get_subtitle(
     Path(path): Path<SubtitlePath>,
     conditions: Conditions,
     Inject(state): Inject<AppState>,
-) -> Result<RuntimeDelivery<StoredSubtitleRanges>, SubtitleDeliveryError> {
+) -> Result<Delivery<StoredSubtitleRanges>, SubtitleDeliveryError> {
     deliver_stored(&state, &auth, &path, &conditions).await
 }
 
@@ -129,7 +130,7 @@ pub async fn head_subtitle(
     Path(path): Path<SubtitlePath>,
     conditions: Conditions,
     Inject(state): Inject<AppState>,
-) -> Result<RuntimeDelivery<StoredSubtitleRanges>, SubtitleDeliveryError> {
+) -> Result<Delivery<StoredSubtitleRanges>, SubtitleDeliveryError> {
     deliver_stored(&state, &auth, &path, &conditions).await
 }
 
@@ -156,7 +157,7 @@ async fn deliver_stored(
     auth: &SessionAuth,
     path: &SubtitlePath,
     conditions: &Conditions,
-) -> Result<RuntimeDelivery<StoredSubtitleRanges>, SubtitleDeliveryError> {
+) -> Result<Delivery<StoredSubtitleRanges>, SubtitleDeliveryError> {
     refuse_hidden_file(state, auth, path.file_id).await?;
     let LocatedSubtitle {
         path: file_path,
@@ -174,7 +175,8 @@ async fn deliver_stored(
             SubtitleError::SourceFileMissing
         })?;
 
-    let delivery = Served::<_, AnyMedia>::new(source)
+    Served::<_, StoredSubtitleRanges>::new(source)
+        .content_type(stored_content_type(format))
         .etag(ETag::strong(validator_tag(modified, length)))
         .last_modified(modified)
         .cache_control("private, max-age=3600")
@@ -183,12 +185,7 @@ async fn deliver_stored(
         .map_err(|err| {
             error!(?err, "failed to read subtitle file span");
             SubtitleDeliveryError::Internal(ServerFault::logged("Failed to read subtitle file"))
-        })?;
-
-    Ok(RuntimeDelivery::new(
-        delivery,
-        stored_content_type(format).to_owned(),
-    ))
+        })
 }
 
 /// A SubRip or WebVTT subtitle file as WebVTT, which a browser's `<track>`
@@ -206,7 +203,7 @@ pub async fn get_subtitle_webvtt(
     Path(path): Path<SubtitlePath>,
     conditions: Conditions,
     Inject(state): Inject<AppState>,
-) -> Result<RuntimeDelivery<WebVttRanges>, SubtitleDeliveryError> {
+) -> Result<Delivery<WebVttRanges>, SubtitleDeliveryError> {
     deliver_webvtt(&state, &auth, &path, &conditions).await
 }
 
@@ -224,7 +221,7 @@ pub async fn head_subtitle_webvtt(
     Path(path): Path<SubtitlePath>,
     conditions: Conditions,
     Inject(state): Inject<AppState>,
-) -> Result<RuntimeDelivery<WebVttRanges>, SubtitleDeliveryError> {
+) -> Result<Delivery<WebVttRanges>, SubtitleDeliveryError> {
     deliver_webvtt(&state, &auth, &path, &conditions).await
 }
 
@@ -234,7 +231,7 @@ async fn deliver_webvtt(
     auth: &SessionAuth,
     path: &SubtitlePath,
     conditions: &Conditions,
-) -> Result<RuntimeDelivery<WebVttRanges>, SubtitleDeliveryError> {
+) -> Result<Delivery<WebVttRanges>, SubtitleDeliveryError> {
     refuse_hidden_file(state, auth, path.file_id).await?;
     let WebVttRendition {
         text,
@@ -252,21 +249,17 @@ async fn deliver_webvtt(
         "{}-vtt{WEBVTT_CONVERTER_VERSION}",
         validator_tag(modified, source_length)
     ));
-    let delivery = match Served::<_, AnyMedia>::new(InMemory::new(Bytes::from(text)))
+    match Served::<_, WebVttRanges>::new(InMemory::new(Bytes::from(text)))
+        .content_type(WEBVTT_CONTENT_TYPE)
         .etag(etag)
         .last_modified(modified)
         .cache_control("private, max-age=3600")
         .deliver(conditions)
         .await
     {
-        Ok(delivery) => delivery,
+        Ok(delivery) => Ok(delivery),
         Err(never) => match never {},
-    };
-
-    Ok(RuntimeDelivery::new(
-        delivery,
-        WEBVTT_CONTENT_TYPE.to_owned(),
-    ))
+    }
 }
 
 #[cfg(test)]

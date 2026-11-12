@@ -368,59 +368,26 @@ impl EnrichmentControl {
                 .map_or_else(|| title.title.clone(), str::to_owned),
             year: year.or(title.year),
         };
-        let hits: Vec<(String, String, Option<String>, Option<u32>)> = match title.target {
-            EnrichmentTargetId::Movie(_) => self
-                .deps
-                .provider
-                .search_movies(&query)
-                .await
-                .map_err(provider_error)?
-                .into_iter()
-                .map(|hit| {
-                    (
-                        hit.external_ref.to_string(),
-                        hit.title,
-                        hit.original_title,
-                        hit.year,
-                    )
-                })
-                .collect(),
-            EnrichmentTargetId::Show(_) => self
-                .deps
-                .provider
-                .search_shows(&query)
-                .await
-                .map_err(provider_error)?
-                .into_iter()
-                .map(|hit| {
-                    (
-                        hit.external_ref.to_string(),
-                        hit.title,
-                        hit.original_title,
-                        hit.year,
-                    )
-                })
-                .collect(),
+        let mut candidates: Vec<MatchCandidate> = match title.target {
+            EnrichmentTargetId::Movie(_) => {
+                let hits = self
+                    .deps
+                    .provider
+                    .search_movies(&query)
+                    .await
+                    .map_err(provider_error)?;
+                candidates_of(&query, &hits)
+            }
+            EnrichmentTargetId::Show(_) => {
+                let hits = self
+                    .deps
+                    .provider
+                    .search_shows(&query)
+                    .await
+                    .map_err(provider_error)?;
+                candidates_of(&query, &hits)
+            }
         };
-        let mut candidates: Vec<MatchCandidate> = hits
-            .into_iter()
-            .map(|(external_ref, title, original_title, year)| {
-                let score = matcher::score(
-                    &query.title,
-                    query.year,
-                    &title,
-                    original_title.as_deref(),
-                    year,
-                );
-                MatchCandidate {
-                    external_ref,
-                    title,
-                    original_title,
-                    year,
-                    score: score.total_score.clamp(0.0, 1.0),
-                }
-            })
-            .collect();
         // Best first; a tie keeps the provider's order.
         candidates.sort_by(|a, b| b.score.total_cmp(&a.score));
         candidates.truncate(MAX_CANDIDATES);
@@ -680,6 +647,20 @@ impl EnrichmentControl {
         )
         .await;
     }
+}
+
+/// Each of `hits` as a candidate an administrator can pick, scored against
+/// `query` the way the sweep scores it, in the provider's order.
+fn candidates_of<H: matcher::SearchHit>(query: &MediaQuery, hits: &[H]) -> Vec<MatchCandidate> {
+    matcher::score_hits(&query.title, query.year, hits)
+        .map(|(hit, score)| MatchCandidate {
+            external_ref: hit.external_ref().to_string(),
+            title: hit.title().to_owned(),
+            original_title: hit.original_title().map(str::to_owned),
+            year: hit.year(),
+            score: score.total_score.clamp(0.0, 1.0),
+        })
+        .collect()
 }
 
 fn no_providers() -> ControlError {

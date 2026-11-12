@@ -9,7 +9,7 @@
 
 pub mod queue;
 
-pub use queue::{ProgressQueue, QueuedProgress};
+pub use queue::{ProgressQueue, QueuedProgress, SendFailure};
 
 use crate::clock::Clock;
 use std::collections::HashMap;
@@ -21,6 +21,15 @@ use std::sync::{Arc, Mutex};
 /// The two clients drifting apart here would make resume behaviour differ by
 /// platform for no reason a user could understand.
 pub const REPORT_INTERVAL_SECS: i64 = 15;
+
+/// [`REPORT_INTERVAL_SECS`], for a platform player that samples its position
+/// on a timer: sampling more often only produces reports the throttle holds
+/// back, and less often loses resume granularity the throttle would allow.
+#[uniffi::export]
+#[must_use]
+pub fn progress_report_interval_secs() -> i64 {
+    REPORT_INTERVAL_SECS
+}
 
 /// What happened to a reported position.
 #[derive(Debug, Clone, PartialEq, uniffi::Enum)]

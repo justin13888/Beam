@@ -11,8 +11,9 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::utils::admin_claim::admin_claim_matches;
+use crate::utils::device_auth_store::{Claim, DeviceAuthError, DeviceAuthStore, hash_handle};
 use crate::utils::models::{CreateUser, User};
-use crate::utils::oidc::OidcIdentity;
+use crate::utils::oidc::{DevicePoll, OidcClient, OidcError, OidcIdentity};
 use crate::utils::oidc_config::OidcRuntimeConfig;
 use crate::utils::repository::UserRepository;
 use crate::utils::session_store::{SessionData, SessionStore};
@@ -39,13 +40,16 @@ pub struct MintedSession {
     pub absolute_ttl_secs: u64,
 }
 
+/// What a disabled account is told, by either sign-in path.
+const ACCOUNT_DISABLED_MESSAGE: &str = "This account has been disabled. Contact an administrator.";
+
 #[derive(Debug, Error)]
 pub enum LoginError {
     /// The identity verified; the local account is disabled (issue #85).
     ///
     /// Carries the account's id so the refusal can be recorded against it; the
     /// message a caller sees names nobody.
-    #[error("This account has been disabled. Contact an administrator.")]
+    #[error("{}", ACCOUNT_DISABLED_MESSAGE)]
     AccountDisabled { user_id: uuid::Uuid },
     #[error("{0}")]
     Internal(String),
@@ -174,12 +178,159 @@ pub async fn complete_login(
     })
 }
 
+/// What one poll of a device login (RFC 8628) came to, when it did not fail.
+#[derive(Debug, Clone)]
+pub enum DevicePollOutcome {
+    /// The user has not approved yet. Poll again after `interval_secs`.
+    AuthorizationPending { interval_secs: u32 },
+    /// The poll came too soon, by Beam's own pacing or the IdP's: the
+    /// interval has grown to `interval_secs`.
+    SlowDown { interval_secs: u32 },
+    /// The user approved; the flow is over and this session was minted.
+    SignedIn(MintedSession),
+}
+
+/// Why a device-login poll ended without a session or a "keep waiting".
+///
+/// Each message is the one the transport reports, so an adapter maps a
+/// variant to its status and passes the `Display` text through.
+#[derive(Debug, Error)]
+pub enum DevicePollError {
+    /// No open device login has this handle: it was never issued, or the
+    /// flow already ended -- including by a concurrent poll that won the
+    /// approval.
+    #[error("Unknown or already-finished device login")]
+    Invalid,
+    /// The flow outlived its lifetime, by Beam's clock or the IdP's. The
+    /// flow is ended.
+    #[error("The device login expired before it was approved")]
+    Expired,
+    /// The user refused at the IdP. The flow is ended.
+    #[error("The sign-in was refused at the identity provider")]
+    Denied,
+    /// The identity verified; the local account is disabled (issue #85).
+    ///
+    /// Carries the account's id, as [`LoginError::AccountDisabled`] does.
+    #[error("{}", ACCOUNT_DISABLED_MESSAGE)]
+    AccountDisabled { user_id: uuid::Uuid },
+    /// The IdP's answer did not verify, and will not on a retry. The flow is
+    /// ended.
+    #[error("Login failed: {0}")]
+    LoginFailed(OidcError),
+    /// The IdP could not be reached, or refused Beam itself. The flow is kept:
+    /// polling again may succeed.
+    #[error("OIDC login unavailable: {0}")]
+    IdpUnavailable(OidcError),
+    /// A store failed.
+    #[error("{0}")]
+    Internal(String),
+}
+
+impl From<DeviceAuthError> for DevicePollError {
+    fn from(err: DeviceAuthError) -> Self {
+        Self::Internal(err.to_string())
+    }
+}
+
+/// Polls the device login `device_handle` names, once.
+///
+/// Reaches the IdP at most once, and not at all when the poll comes sooner
+/// than the flow's interval allows -- that answers
+/// [`DevicePollOutcome::SlowDown`] and grows the interval, as RFC 8628
+/// section 3.5 has the IdP do. On approval the flow is ended *before* the
+/// session is minted, which is what makes an approval single-use, and the
+/// session is minted by [`complete_login`] exactly as a browser login's is.
+///
+/// # Errors
+///
+/// See [`DevicePollError`]: every variant but `IdpUnavailable` and
+/// `Internal` means the flow is over.
+pub async fn poll_device_login(
+    device_handle: &str,
+    client: &ClientContext,
+    oidc_client: &dyn OidcClient,
+    device_auth_store: &dyn DeviceAuthStore,
+    user_repo: &dyn UserRepository,
+    session_store: &dyn SessionStore,
+    config: &OidcRuntimeConfig,
+) -> Result<DevicePollOutcome, DevicePollError> {
+    let handle_hash = hash_handle(device_handle);
+
+    let auth = match device_auth_store.claim_poll(&handle_hash).await? {
+        Claim::NotFound => return Err(DevicePollError::Invalid),
+        Claim::Expired => {
+            device_auth_store.consume(&handle_hash).await?;
+            return Err(DevicePollError::Expired);
+        }
+        Claim::TooEarly { interval_secs } => {
+            // The IdP is not asked: answering for it is the point.
+            let interval_secs = device_auth_store
+                .bump_interval(&handle_hash)
+                .await?
+                .unwrap_or(interval_secs);
+            return Ok(DevicePollOutcome::SlowDown { interval_secs });
+        }
+        Claim::Claimed(auth) => auth,
+    };
+
+    let identity = match oidc_client.poll_device_token(&auth.device_code).await {
+        Ok(DevicePoll::Pending) => {
+            return Ok(DevicePollOutcome::AuthorizationPending {
+                interval_secs: auth.interval_secs,
+            });
+        }
+        Ok(DevicePoll::SlowDown) => {
+            let interval_secs = device_auth_store
+                .bump_interval(&handle_hash)
+                .await?
+                .unwrap_or(auth.interval_secs);
+            return Ok(DevicePollOutcome::SlowDown { interval_secs });
+        }
+        Ok(DevicePoll::Denied) => {
+            device_auth_store.consume(&handle_hash).await?;
+            return Err(DevicePollError::Denied);
+        }
+        Ok(DevicePoll::Expired) => {
+            device_auth_store.consume(&handle_hash).await?;
+            return Err(DevicePollError::Expired);
+        }
+        Ok(DevicePoll::Complete(identity)) => identity,
+        // The IdP could not be reached, or Beam is misconfigured against it:
+        // nothing about this flow is wrong, so it is kept for the next poll.
+        Err(
+            e @ (OidcError::Discovery(_)
+            | OidcError::Exchange(_)
+            | OidcError::DeviceFlowUnsupported),
+        ) => return Err(DevicePollError::IdpUnavailable(e)),
+        // An answer that did not verify will not verify on a retry.
+        Err(e @ (OidcError::MissingIdToken | OidcError::ClaimsVerification(_))) => {
+            device_auth_store.consume(&handle_hash).await?;
+            return Err(DevicePollError::LoginFailed(e));
+        }
+    };
+
+    // Ending the flow before minting is what makes an approval single-use: of
+    // two polls that both saw it approved, only the one that removes the row
+    // signs in.
+    if device_auth_store.consume(&handle_hash).await?.is_none() {
+        return Err(DevicePollError::Invalid);
+    }
+
+    let minted = complete_login(&identity, client, user_repo, session_store, config)
+        .await
+        .map_err(|e| match e {
+            LoginError::AccountDisabled { user_id } => DevicePollError::AccountDisabled { user_id },
+            LoginError::Internal(message) => DevicePollError::Internal(message),
+        })?;
+    Ok(DevicePollOutcome::SignedIn(minted))
+}
+
 /// The session's device fingerprint: the SHA-256 of the `User-Agent`.
 #[must_use]
 pub fn device_hash(user_agent: Option<&str>) -> String {
     // Session rows are compared by equality against this string, so it is
-    // produced by the crate's one encoder rather than a local `{:x}`.
-    crate::utils::hex::encode_lower(&Sha256::digest(user_agent.unwrap_or("").as_bytes()))
+    // produced by the workspace's one encoder rather than a local `{:x}`.
+    beam_domain::utils::hex::encode_lower(&Sha256::digest(user_agent.unwrap_or("").as_bytes()))
 }
 
 /// Picks a display name when the IdP doesn't release a `name` claim: the
@@ -187,7 +338,11 @@ pub fn device_hash(user_agent: Option<&str>) -> String {
 /// placeholder. Real IdPs (including Dex) send `name`, so this is a rare
 /// fallback, not the common case.
 #[must_use]
-pub fn derive_display_name(name: Option<&str>, email: Option<&str>, subject: &str) -> String {
+pub(crate) fn derive_display_name(
+    name: Option<&str>,
+    email: Option<&str>,
+    subject: &str,
+) -> String {
     if let Some(name) = name
         && !name.is_empty()
     {
@@ -557,6 +712,80 @@ mod tests {
         );
         assert_eq!(derive_display_name(Some(""), None, "sub"), "user-sub");
         assert_eq!(derive_display_name(None, None, "sub"), "user-sub");
+    }
+
+    /// A device store in which another poll of the same flow wins the race:
+    /// it ends the flow just after this poll was let through to the IdP.
+    #[derive(Debug)]
+    struct RacedDeviceFlows(crate::utils::device_auth_store::in_memory::InMemoryDeviceAuthStore);
+
+    #[async_trait::async_trait]
+    impl DeviceAuthStore for RacedDeviceFlows {
+        async fn create(
+            &self,
+            auth: &crate::utils::device_auth_store::NewDeviceAuth,
+        ) -> Result<(), DeviceAuthError> {
+            self.0.create(auth).await
+        }
+        async fn claim_poll(&self, handle_hash: &str) -> Result<Claim, DeviceAuthError> {
+            let claim = self.0.claim_poll(handle_hash).await?;
+            self.0.consume(handle_hash).await?;
+            Ok(claim)
+        }
+        async fn bump_interval(&self, handle_hash: &str) -> Result<Option<u32>, DeviceAuthError> {
+            self.0.bump_interval(handle_hash).await
+        }
+        async fn consume(
+            &self,
+            handle_hash: &str,
+        ) -> Result<Option<crate::utils::device_auth_store::DeviceAuth>, DeviceAuthError> {
+            self.0.consume(handle_hash).await
+        }
+    }
+
+    /// Of two polls that both saw the approval, only the one that ends the
+    /// flow signs in: the loser is told the flow is over, and nobody is
+    /// provisioned or given a session on its account.
+    #[tokio::test]
+    async fn an_approval_another_poll_already_redeemed_signs_nobody_in() {
+        let world = world();
+        let flows = RacedDeviceFlows(
+            crate::utils::device_auth_store::in_memory::InMemoryDeviceAuthStore::new(
+                world.clock.clone(),
+            ),
+        );
+        flows
+            .create(&crate::utils::device_auth_store::NewDeviceAuth {
+                handle_hash: hash_handle("handle"),
+                device_code: "device-code".to_owned(),
+                user_code: "BCDF-GHJK".to_owned(),
+                verification_uri: "https://idp.test/device".to_owned(),
+                verification_uri_complete: None,
+                interval_secs: 5,
+                expires_in_secs: 600,
+            })
+            .await
+            .unwrap();
+        let idp = crate::utils::oidc::fake::FakeOidcClient::default()
+            .with_device_script(vec![Ok(DevicePoll::Complete(identity(json!({}))))]);
+
+        let outcome = poll_device_login(
+            "handle",
+            &client(),
+            &idp,
+            &flows,
+            &world.users,
+            &world.sessions,
+            &config(None),
+        )
+        .await;
+
+        assert!(
+            matches!(outcome, Err(DevicePollError::Invalid)),
+            "{outcome:?}"
+        );
+        assert_eq!(idp.device_poll_count(), 1, "the IdP was asked once");
+        assert_eq!(world.users.count().await.unwrap(), 0);
     }
 
     #[test]

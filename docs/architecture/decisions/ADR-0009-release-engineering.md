@@ -51,6 +51,17 @@ per-crate versions would carry no information.
 `ghcr.io/justin13888/beam-web` (tagged `vX.Y.Z`, `X.Y`, and `latest`), attaches `openapi.json`,
 `beam-web-dist.tar.gz`, and `SHA256SUMS`, and deploys the docs site.
 
+**Beam stays on `0.x` until leaving it is decided.** (Amended — issue #427.) Beam is pre-alpha and
+its migrations may be destructive, so a `1.0.0` would promise a stability it does not have. The
+`"."` package in `release-please-config.json` sets `bump-minor-pre-major` and
+`bump-patch-for-minor-pre-major`: below `1.0.0`, a breaking change (`feat!`, `fix!`, or a
+`BREAKING CHANGE:` footer) bumps the minor version and a `feat` bumps the patch version, so no
+commit can carry the version to `1.0.0` on its own. Without them, the first `!` commit on `master`
+made the pending release pull request propose `1.0.0`. Leaving `0.x` is a deliberate decision,
+recorded by amending this ADR: it is made by landing a commit with a `Release-As: 1.0.0` footer,
+and once the version is `1.0.0` or above both settings stop applying and ordinary semantic
+versioning resumes.
+
 ## Consequences
 
 Container images are built on **native** runners (`ubuntu-latest` and `ubuntu-24.04-arm`) rather
@@ -82,6 +93,10 @@ unless every job either succeeded or was skipped.
   `Cargo.lock` sync push needs it for the same reason.
 - **A bootstrap tag** matching `.release-please-manifest.json` (`v0.1.0`), so release-please has a
   baseline rather than walking the entire history.
+
+A release branch release-please opened before a change to `release-please-config.json`
+(`release-please--branches--master--components--beam`) carries what the old configuration
+proposed; delete it so the next run regenerates it from scratch under the new one.
 
 Optionally, `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` enable the docs deploy. Cloudflare
 Pages' Git integration triggers only on branch pushes, never on tags or Releases, so a released docs

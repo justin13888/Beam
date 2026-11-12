@@ -1,11 +1,11 @@
 //! The `/v1` route table, and the router the process serves.
 
+pub mod access;
 pub mod admin;
 pub mod api_error;
 pub mod artwork;
 pub mod auth;
 pub mod collections;
-pub mod delivery;
 pub mod enrichment;
 pub mod genres;
 pub mod health;
@@ -17,6 +17,7 @@ pub mod middleware;
 pub mod people;
 pub mod playback;
 pub mod rate_limit;
+pub mod session_auth;
 pub mod stream;
 pub mod subtitle;
 pub mod tags;

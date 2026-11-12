@@ -3,6 +3,8 @@ package dev.beam.android.core.ffi
 import android.media.MediaCodecInfo
 import android.media.MediaCodecInfo.CodecProfileLevel
 import android.media.MediaFormat
+import android.view.Display
+import android.view.WindowManager
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -10,8 +12,11 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import org.robolectric.Shadows.shadowOf
+import org.robolectric.shadow.api.Shadow
 import org.robolectric.shadows.MediaCodecInfoBuilder
 import org.robolectric.shadows.ShadowMediaCodecList
+import org.robolectric.util.ReflectionHelpers
 
 /**
  * What the device says it can decode, read from a codec list Robolectric
@@ -222,6 +227,94 @@ class DeviceProfilesTest {
         assertEquals(null, aac.maxBitrateBps)
         assertTrue("an audio decoder is not a video one", profile.videoDecoders.isEmpty())
         assertTrue(profile.allowSoftwareDecode)
+    }
+
+    @Test
+    fun `a display that renders an hdr format reports hdr`() {
+        val context = RuntimeEnvironment.getApplication()
+        assertFalse(
+            "a display with no HDR types renders none",
+            DeviceProfiles.build(context, allowSoftwareDecode = false).displaySupportsHdr,
+        )
+
+        val display = context.getSystemService(WindowManager::class.java).defaultDisplay
+        shadowOf(display).setDisplayHdrCapabilities(
+            display.displayId,
+            1_000f,
+            500f,
+            0.5f,
+            Display.HdrCapabilities.HDR_TYPE_HDR10,
+        )
+
+        assertTrue(DeviceProfiles.build(context, allowSoftwareDecode = false).displaySupportsHdr)
+    }
+
+    @Test
+    fun `an hdr type the user disabled does not count`() {
+        val context = RuntimeEnvironment.getApplication()
+        val display = hdr10Display()
+        assertTrue(DeviceProfiles.build(context, allowSoftwareDecode = false).displaySupportsHdr)
+
+        // The panel still lists HDR10 in its mode; only the user's setting
+        // takes it away, and that setting is what the profile must honour.
+        changeDisplayInfo(display, "userDisabledHdrTypes", intArrayOf(Display.HdrCapabilities.HDR_TYPE_HDR10))
+
+        assertTrue(display.mode.supportedHdrTypes.isNotEmpty())
+        assertFalse(DeviceProfiles.build(context, allowSoftwareDecode = false).displaySupportsHdr)
+    }
+
+    @Test
+    fun `a display forced to sdr reports no hdr`() {
+        val context = RuntimeEnvironment.getApplication()
+        val display = hdr10Display()
+        assertTrue(DeviceProfiles.build(context, allowSoftwareDecode = false).displaySupportsHdr)
+
+        changeDisplayInfo(display, "isForceSdr", true)
+
+        assertTrue(display.mode.supportedHdrTypes.isNotEmpty())
+        assertFalse(DeviceProfiles.build(context, allowSoftwareDecode = false).displaySupportsHdr)
+    }
+
+    private fun hdr10Display(): Display {
+        val display =
+            RuntimeEnvironment.getApplication().getSystemService(WindowManager::class.java).defaultDisplay
+        shadowOf(display).setDisplayHdrCapabilities(
+            display.displayId,
+            1_000f,
+            500f,
+            0.5f,
+            Display.HdrCapabilities.HDR_TYPE_HDR10,
+        )
+        return display
+    }
+
+    /**
+     * Sets a hidden `DisplayInfo` field the way the system server would.
+     *
+     * Robolectric's public display shadows cannot reach the user's HDR
+     * settings, so this writes the field on the info `DisplayManagerGlobal`
+     * holds and hands it back through the shadow's own `changeDisplay`.
+     */
+    private fun changeDisplayInfo(
+        display: Display,
+        field: String,
+        value: Any,
+    ) {
+        val globalClass = Class.forName("android.hardware.display.DisplayManagerGlobal")
+        val global = globalClass.getMethod("getInstance").invoke(null)
+        val info =
+            globalClass
+                .getMethod(
+                    "getDisplayInfo",
+                    Int::class.javaPrimitiveType,
+                ).invoke(global, display.displayId)
+        info.javaClass.getField(field).set(info, value)
+        ReflectionHelpers.callInstanceMethod<Any>(
+            Shadow.extract<Any>(global),
+            "changeDisplay",
+            ReflectionHelpers.ClassParameter.from(Int::class.javaPrimitiveType, display.displayId),
+            ReflectionHelpers.ClassParameter.from(info.javaClass, info),
+        )
     }
 
     private fun codec(

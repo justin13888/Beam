@@ -26,15 +26,27 @@ mod common;
 
 #[path = "e2e_server/admin.rs"]
 mod admin;
+#[path = "e2e_server/artwork.rs"]
+mod artwork;
 #[path = "e2e_server/catalog.rs"]
 mod catalog;
+#[path = "e2e_server/download.rs"]
+mod download;
 #[path = "e2e_server/metadata.rs"]
 mod metadata;
+#[path = "e2e_server/operations.rs"]
+mod operations;
+#[path = "e2e_server/people.rs"]
+mod people;
 #[path = "e2e_server/playback.rs"]
 mod playback;
+#[path = "e2e_server/preferences.rs"]
+mod preferences;
 #[path = "e2e_server/reconciliation.rs"]
 mod reconciliation;
 #[path = "e2e_server/scan.rs"]
 mod scan;
 #[path = "e2e_server/sign_in.rs"]
 mod sign_in;
+#[path = "e2e_server/trickplay.rs"]
+mod trickplay;

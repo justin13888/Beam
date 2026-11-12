@@ -200,7 +200,7 @@ impl ShowRepository for SqlShowRepository {
             .await;
         match result {
             Ok(result) => Ok(result.rows_affected == 1),
-            Err(err) if super::movie::is_unique_violation(&err) => Ok(false),
+            Err(err) if super::is_unique_violation(&err) => Ok(false),
             Err(err) => Err(err),
         }
     }
@@ -263,7 +263,7 @@ impl ShowRepository for SqlShowRepository {
         }
         match update.exec(self.db.as_ref()).await {
             Ok(result) => Ok(result.rows_affected == 1),
-            Err(err) if super::movie::is_unique_violation(&err) => Ok(false),
+            Err(err) if super::is_unique_violation(&err) => Ok(false),
             Err(err) => Err(err),
         }
     }
@@ -336,7 +336,7 @@ impl ShowRepository for SqlShowRepository {
             .await;
         match result {
             Ok(result) => Ok(result.rows_affected == 1),
-            Err(err) if super::movie::is_unique_violation(&err) => Ok(false),
+            Err(err) if super::is_unique_violation(&err) => Ok(false),
             Err(err) => Err(err),
         }
     }

@@ -14,7 +14,7 @@ and the outcomes section listing what shipped differently from the plan.
 | Contract and OpenAPI 3.2 | Met |
 | HTTP runtime | Met |
 | Server-Sent Events | Met |
-| Ranged media delivery | Met, with one open gap: a media type chosen at request time ([getkono/kynos#1115](https://github.com/getkono/kynos/issues/1115)) |
+| Ranged media delivery | Met; the last gap, a media type chosen at request time ([getkono/kynos#1115](https://github.com/getkono/kynos/issues/1115)), closed with Kynos 0.5.0 |
 | Cookies, rate limiting, and testing | Met, differently: Beam supplies the token bucket through Kynos's policy seam, and the route/document conformance test is obsolete by construction |
 | Browser toolchain | Met for the document, not for SSE: `openapi-typescript` reads 3.2 once `@redocly/openapi-core` is at 1.34.22, with no fork; it does not model `itemSchema`, so there is no typed subscription |
 | `spargen` | Met at 0.4.0 |
@@ -122,9 +122,10 @@ the stream is committed rather than arriving after a 200 is on the wire. Retenti
 Beam's: a `RecvError::Lagged` is logged and skipped, because a dashboard that died because it
 blinked is worse than one that missed a row.
 
-One rough edge: Kynos does not re-export the stream trait its `Sse` response is generic over, so
-`beam-server` depends on `futures-core` directly. Filed upstream as
-[getkono/kynos#1116](https://github.com/getkono/kynos/issues/1116).
+One rough edge, since closed: Kynos did not re-export the stream trait its `Sse` response is
+generic over, so `beam-server` depended on `futures-core` directly
+([getkono/kynos#1116](https://github.com/getkono/kynos/issues/1116)). Kynos 0.5.0 re-exports it as
+`kynos::response::stream::Stream`, and the direct dependency is gone.
 
 ### Ranged media delivery
 
@@ -139,7 +140,7 @@ One rough edge: Kynos does not re-export the stream trait its `Sse` response is 
 - Safe filename encoding. Beam continues to own authorization, domain lookup, library-root
   validation, and byte-source implementations.
 
-**Status: met, with one open gap.** `routes/stream.rs` serves both endpoints through a Kynos
+**Status: met.** `routes/stream.rs` serves both endpoints through a Kynos
 `ByteSource`, which is what let roughly a thousand lines of hand-rolled range parsing,
 conditional-request evaluation and header assembly go. `HEAD /v1/files/{file_id}/stream` and `HEAD /v1/files/{file_id}/download` are
 now declared operations rather than an undocumented side effect of a GET handler. Authorization,
@@ -147,14 +148,14 @@ domain lookup and library-root containment stay in Beam, and one status was corr
 through: a file resolving outside its library root is a `403`, not the `401` the Salvo
 implementation collapsed it into (#123).
 
-One gap is open. Kynos's `Served` and `Delivery` take the media type from a `const`, and Beam's
-content type is only known per request: the container the indexer detected for a source file, or
-the format a provider returned for a poster. `routes/delivery.rs` (`RuntimeDelivery`) delivers as a
-placeholder type, relabels `Content-Type` on the 200 and 206, and adds the media-type ranges the
-operation answers with (`video/*`, `image/*`) to the description `Delivery` emits. That last step
-edits the emitted description, which is what CLAUDE.md rule 3 forbids keeping once upstream can say
-it. It is filed as [getkono/kynos#1115](https://github.com/getkono/kynos/issues/1115), and the
-wrapper goes when a release carries the fix.
+One gap stayed open until Kynos 0.5.0. Kynos's `Served` and `Delivery` took the media type from a
+`const`, and Beam's content type is only known per request: the container the indexer detected for
+a source file, or the format a provider returned for a poster. A local `RuntimeDelivery` wrapper
+relabelled `Content-Type` on the 200 and 206 and edited the media-type ranges into the emitted
+description, which CLAUDE.md rule 3 allows only until upstream can say it
+([getkono/kynos#1115](https://github.com/getkono/kynos/issues/1115)). Kynos 0.5.0 can: each
+delivery names its set with `MediaRanges` (`video/*`, `image/*`) and gives the per-request type to
+`Served::content_type`, and the wrapper is gone.
 
 ### Cookies, rate limiting, and testing
 

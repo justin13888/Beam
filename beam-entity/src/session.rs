@@ -1,5 +1,4 @@
 use sea_orm::entity::prelude::*;
-use serde::{Deserialize, Serialize};
 
 /// A user session, shared by the legacy password-JWT-refresh flow and the
 /// OIDC BFF cookie flow (see ADR-0003/ADR-0005).
@@ -11,7 +10,7 @@ use serde::{Deserialize, Serialize};
 /// hex digest, in `token_hash`. Expiry is two-tiered: `idle_expires_at`
 /// slides forward on activity (via `touch`) up to the hard
 /// `absolute_expires_at` ceiling, which `touch` never extends past.
-#[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "sessions")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
