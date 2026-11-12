@@ -92,7 +92,8 @@ impl AdminUserService {
     /// Sets the `disabled` flag of the account `id` names, on behalf of the
     /// administrator whose user id is `actor`. Disabling revokes every
     /// session of the account, so it takes effect immediately rather than
-    /// at the next login.
+    /// at the next login. Answers how many sessions were revoked: none when
+    /// enabling.
     ///
     /// # Errors
     ///
@@ -105,7 +106,7 @@ impl AdminUserService {
         actor: Uuid,
         id: Uuid,
         disabled: bool,
-    ) -> Result<(), AdminUsersError> {
+    ) -> Result<u64, AdminUsersError> {
         let target = self.target(id).await?;
 
         if disabled && target.id == actor {
@@ -114,16 +115,15 @@ impl AdminUserService {
 
         self.users.set_disabled(target.id, disabled).await?;
 
-        if disabled {
-            // Revoke every live session so the disable takes effect
-            // immediately, not just at the next login attempt.
-            self.sessions
-                .delete_all_for_user(&target.id.to_string())
-                .await
-                .map_err(|e| AdminUsersError::Internal(e.to_string()))?;
+        if !disabled {
+            return Ok(0);
         }
-
-        Ok(())
+        // Revoke every live session so the disable takes effect immediately,
+        // not just at the next login attempt.
+        self.sessions
+            .delete_all_for_user(&target.id.to_string())
+            .await
+            .map_err(|e| AdminUsersError::Internal(e.to_string()))
     }
 
     /// The access policy of the account `id` names.

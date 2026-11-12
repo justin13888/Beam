@@ -1357,3 +1357,114 @@ async fn registering_a_root_that_holds_the_data_directory_is_400_and_changes_not
         .items;
     assert!(listed.is_empty(), "the rejected library was not stored");
 }
+
+// ─── Admin change records (NFR-403) ─────────────────────────────────────────
+
+/// Every `System` entry in the fixture's admin log, oldest first, as its
+/// message and details.
+pub(super) async fn change_records(fixture: &TestFixture) -> Vec<(String, Value)> {
+    let mut entries = fixture
+        .state
+        .services
+        .admin_log
+        .get_logs_by_category(beam_domain::models::AdminLogCategory::System, 100, 0)
+        .await
+        .unwrap();
+    entries.reverse();
+    entries
+        .into_iter()
+        .map(|entry| (entry.message, entry.details.unwrap_or(Value::Null)))
+        .collect()
+}
+
+/// The seeded admin's user id, as the records name it.
+pub(super) async fn admin_id(fixture: &TestFixture) -> String {
+    fixture
+        .user_repo
+        .find_by_oidc_identity("https://test.example", "admin-subj")
+        .await
+        .unwrap()
+        .expect("the admin was seeded")
+        .id
+        .to_string()
+}
+
+/// Registering, scanning and deleting a library each leave one record naming
+/// the administrator and the library -- and never its root path. A refused
+/// change leaves none.
+#[tokio::test]
+async fn an_admin_mutation_writes_an_admin_log_entry_for_each_library_change() {
+    let fixture = make_scan_test_state(Gate::Open);
+    let client = build_client(&fixture);
+    let admin_token = seed_user_session(&fixture, true).await;
+    let regular_token = seed_user_session(&fixture, false).await;
+    let admin = admin_id(&fixture).await;
+
+    // Refused: by validation, and by the admin gate.
+    client
+        .post("/v1/admin/libraries")
+        .cookie("beam_session", &admin_token)
+        .json(&CreateLibraryRequest {
+            name: " ".to_string(),
+            root_path: "movies".to_string(),
+        })
+        .send()
+        .await
+        .assert_status(StatusCode::UNPROCESSABLE_ENTITY);
+    client
+        .post("/v1/admin/libraries")
+        .cookie("beam_session", &regular_token)
+        .json(&CreateLibraryRequest {
+            name: "Movies".to_string(),
+            root_path: "movies".to_string(),
+        })
+        .send()
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+    assert!(change_records(&fixture).await.is_empty());
+
+    let (_, library_id) = create_movies_library(&client, &admin_token).await;
+    client
+        .post(&format!("/v1/admin/libraries/{library_id}/scan"))
+        .cookie("beam_session", &admin_token)
+        .send()
+        .await
+        .assert_status(StatusCode::ACCEPTED);
+    wait_for_scan(&fixture, library_id, finished).await;
+    client
+        .delete(&format!("/v1/admin/libraries/{library_id}"))
+        .cookie("beam_session", &admin_token)
+        .send()
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    // A delete of what is already gone changes nothing, and records nothing.
+    client
+        .delete(&format!("/v1/admin/libraries/{library_id}"))
+        .cookie("beam_session", &admin_token)
+        .send()
+        .await
+        .assert_status(StatusCode::NOT_FOUND);
+
+    let records = change_records(&fixture).await;
+    let messages: Vec<&str> = records
+        .iter()
+        .map(|(message, _)| message.as_str())
+        .collect();
+    assert_eq!(
+        messages,
+        vec![
+            "Created library \"Movies\"".to_owned(),
+            format!("Started a scan of library {library_id}"),
+            format!("Deleted library {library_id}"),
+        ]
+    );
+    let root = fixture.library_root().to_string_lossy().into_owned();
+    for (message, details) in &records {
+        assert_eq!(details["admin_user_id"], admin, "{message}");
+        assert_eq!(details["library_id"], library_id.to_string(), "{message}");
+        assert!(
+            !details.to_string().contains(&root) && !message.contains(&root),
+            "{message}: the root path reached the admin log"
+        );
+    }
+}

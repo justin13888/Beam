@@ -40,11 +40,17 @@ pub struct MintedSession {
     pub absolute_ttl_secs: u64,
 }
 
+/// What a disabled account is told, by either sign-in path.
+const ACCOUNT_DISABLED_MESSAGE: &str = "This account has been disabled. Contact an administrator.";
+
 #[derive(Debug, Error)]
 pub enum LoginError {
     /// The identity verified; the local account is disabled (issue #85).
-    #[error("This account has been disabled. Contact an administrator.")]
-    AccountDisabled,
+    ///
+    /// Carries the account's id so the refusal can be recorded against it; the
+    /// message a caller sees names nobody.
+    #[error("{}", ACCOUNT_DISABLED_MESSAGE)]
+    AccountDisabled { user_id: uuid::Uuid },
     #[error("{0}")]
     Internal(String),
 }
@@ -93,13 +99,20 @@ pub async fn complete_login(
             // already-provisioned account can be disabled -- JIT-provisioned
             // new users below are always created enabled.
             if existing.disabled {
-                return Err(LoginError::AccountDisabled);
+                return Err(LoginError::AccountDisabled {
+                    user_id: existing.id,
+                });
             }
             if existing.is_admin != is_admin {
                 user_repo
                     .set_admin(existing.id, is_admin)
                     .await
                     .map_err(internal)?;
+                tracing::info!(
+                    user_id = %existing.id,
+                    is_admin,
+                    "the identity provider's admin claim changed this account's admin status"
+                );
             }
             if existing.display_name != display_name || existing.avatar_url != identity.picture {
                 user_repo
@@ -118,17 +131,25 @@ pub async fn complete_login(
                 ..existing
             }
         }
-        None => user_repo
-            .create(CreateUser {
-                oidc_issuer: identity.issuer.clone(),
-                oidc_subject: identity.subject.clone(),
-                email: identity.email.clone(),
-                display_name,
-                avatar_url: identity.picture.clone(),
-                is_admin,
-            })
-            .await
-            .map_err(|e| LoginError::Internal(format!("Failed to provision user: {e}")))?,
+        None => {
+            let created = user_repo
+                .create(CreateUser {
+                    oidc_issuer: identity.issuer.clone(),
+                    oidc_subject: identity.subject.clone(),
+                    email: identity.email.clone(),
+                    display_name,
+                    avatar_url: identity.picture.clone(),
+                    is_admin,
+                })
+                .await
+                .map_err(|e| LoginError::Internal(format!("Failed to provision user: {e}")))?;
+            tracing::info!(
+                user_id = %created.id,
+                is_admin = created.is_admin,
+                "provisioned an account on its first sign-in"
+            );
+            created
+        }
     };
 
     let idle_ttl_secs = config.idle_ttl_secs();
@@ -188,8 +209,10 @@ pub enum DevicePollError {
     #[error("The sign-in was refused at the identity provider")]
     Denied,
     /// The identity verified; the local account is disabled (issue #85).
-    #[error("{}", LoginError::AccountDisabled)]
-    AccountDisabled,
+    ///
+    /// Carries the account's id, as [`LoginError::AccountDisabled`] does.
+    #[error("{}", ACCOUNT_DISABLED_MESSAGE)]
+    AccountDisabled { user_id: uuid::Uuid },
     /// The IdP's answer did not verify, and will not on a retry. The flow is
     /// ended.
     #[error("Login failed: {0}")]
@@ -296,7 +319,7 @@ pub async fn poll_device_login(
     let minted = complete_login(&identity, client, user_repo, session_store, config)
         .await
         .map_err(|e| match e {
-            LoginError::AccountDisabled => DevicePollError::AccountDisabled,
+            LoginError::AccountDisabled { user_id } => DevicePollError::AccountDisabled { user_id },
             LoginError::Internal(message) => DevicePollError::Internal(message),
         })?;
     Ok(DevicePollOutcome::SignedIn(minted))
@@ -468,7 +491,10 @@ mod tests {
         )
         .await;
 
-        assert!(matches!(refused, Err(LoginError::AccountDisabled)));
+        assert!(matches!(
+            refused,
+            Err(LoginError::AccountDisabled { user_id }) if user_id == first.user.id
+        ));
         let sessions = world
             .sessions
             .list_for_user(&first.user.id.to_string())

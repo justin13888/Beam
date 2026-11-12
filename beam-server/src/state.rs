@@ -148,7 +148,8 @@ impl Deref for AppState {
 
 // ── Dependency injection ─────────────────────────────────────────────────────
 
-/// The auth dependencies the OIDC handlers reach for individually.
+/// The auth dependencies the OIDC handlers reach for individually, and the
+/// admin log they record sign-in outcomes in.
 ///
 /// Written out rather than derived: `AppState` keeps its fields behind
 /// `AppStateInner`, and `#[derive(Provider)]` needs public fields on the
@@ -173,6 +174,7 @@ provides_service! {
     Arc<dyn OidcClient> => oidc_client,
     Arc<dyn PendingAuthStore> => pending_auth_store,
     Arc<dyn DeviceAuthStore> => device_auth_store,
+    Arc<dyn AdminLogService> => admin_log,
 }
 
 impl kynos::di::Provides<OidcRuntimeConfig> for AppState {
