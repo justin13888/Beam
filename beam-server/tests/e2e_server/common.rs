@@ -235,32 +235,32 @@ pub async fn browse(client: &api::Client, query: Option<&str>) -> Vec<Title> {
 pub fn title_of(item: &api::types::MediaMetadata) -> Title {
     match item {
         api::types::MediaMetadata::MediaMetadataVariant1(movie) => Title {
-            id: movie.movie.id,
-            name: movie.movie.title.original.clone(),
-            year: movie.movie.year,
+            id: movie.id,
+            name: movie.title.original.clone(),
+            year: movie.year,
             is_show: false,
         },
         api::types::MediaMetadata::MediaMetadataVariant0(show) => Title {
-            id: show.show.id,
-            name: show.show.title.original.clone(),
-            year: show.show.year,
+            id: show.id,
+            name: show.title.original.clone(),
+            year: show.year,
             is_show: true,
         },
     }
 }
 
 /// The movie a detail response describes.
-pub fn movie_of(item: api::types::MediaMetadata) -> api::types::MovieMetadata {
+pub fn movie_of(item: api::types::MediaMetadata) -> api::types::MediaMetadataVariant1 {
     match item {
-        api::types::MediaMetadata::MediaMetadataVariant1(movie) => movie.movie,
+        api::types::MediaMetadata::MediaMetadataVariant1(movie) => *movie,
         other => panic!("expected a movie, got {other:?}"),
     }
 }
 
 /// The show a detail response describes.
-pub fn show_of(item: api::types::MediaMetadata) -> api::types::ShowMetadata {
+pub fn show_of(item: api::types::MediaMetadata) -> api::types::MediaMetadataVariant0 {
     match item {
-        api::types::MediaMetadata::MediaMetadataVariant0(show) => show.show,
+        api::types::MediaMetadata::MediaMetadataVariant0(show) => *show,
         other => panic!("expected a show, got {other:?}"),
     }
 }
