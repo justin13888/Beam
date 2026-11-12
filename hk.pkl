@@ -210,6 +210,16 @@ hooks {
                 glob = List("*.rs")
                 check = "mise run check:mutants-skip-fakes"
             }
+            // Milliseconds: `git ls-files` and a line count per Rust or Kotlin
+            // file. Fires when a governed file or the baseline changes, so a file
+            // that crossed its limit, or a baseline entry made stale by a split,
+            // is caught before the push rather than by ci.yml's file-size job.
+            // The shrink-only comparison runs against the merge base with
+            // origin/master here; see scripts/check-file-size.sh (#362).
+            ["file-size"] {
+                glob = List("*.rs", "*.kt", "*.kts", "scripts/file-size-baseline.txt")
+                check = "mise run check:file-size"
+            }
             // Every JS task depends on `deps:js`, so a fresh worktree -- which has
             // no node_modules -- provisions itself. But the three JS steps below
             // run in parallel, and overlapping `bun install`s fail (ENOTEMPTY over
