@@ -14,6 +14,7 @@
 mod admin;
 mod library;
 mod media;
+mod preferences;
 mod watching;
 
 pub use admin::{
@@ -27,6 +28,7 @@ pub use media::{
     BrowseQuery, EpisodeSummary, MediaDetail, MediaKind, MediaPage, MediaSortField, MediaSummary,
     MediaTypeFilter, SeasonSummary, SortOrder, browse_params,
 };
+pub use preferences::{LanguagePreferences, SubtitleMode};
 pub use watching::{ContinueWatchingEntry, HistoryEntry, HistoryPage, progress_fraction};
 
 use crate::servers::ServerRecord;

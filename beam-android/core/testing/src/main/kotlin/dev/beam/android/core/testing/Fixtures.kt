@@ -30,6 +30,7 @@ import uniffi.beam_client_core.SeasonSummary
 import uniffi.beam_client_core.ServerSummary
 import uniffi.beam_client_core.SessionState
 import uniffi.beam_client_core.SourceSwitchRow
+import uniffi.beam_client_core.StartTracks
 import uniffi.beam_client_core.SubtitleOrigin
 import uniffi.beam_client_core.SubtitleTrackView
 import uniffi.beam_client_core.SwitchTrigger
@@ -281,12 +282,14 @@ public object Fixtures {
         fileId: String = "file-1",
         durationSecs: Double? = 3_000.0,
         sidecars: List<SubtitleTrackView> = emptyList(),
+        startTracks: StartTracks? = null,
     ): PlaybackPart =
         PlaybackPart(
             fileId = fileId,
             url = "https://beam.test/v1/files/$fileId/stream",
             durationSecs = durationSecs,
             sidecarSubtitles = sidecars,
+            startTracks = startTracks,
         )
 
     /** A subtitle file beside a media file. */

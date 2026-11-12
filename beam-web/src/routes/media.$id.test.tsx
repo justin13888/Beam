@@ -23,6 +23,8 @@ vi.mock("@/components/VideoPlayer", () => ({
 			data-src={props.src as string}
 			data-autoplay={String(props.autoPlay)}
 			data-start={String(props.startTime)}
+			data-default-audio={String(props.defaultAudioTrackIndex)}
+			data-text-tracks={JSON.stringify(props.textTracks)}
 		>
 			{props.title as string}
 			<button
@@ -492,6 +494,103 @@ describe("/media/$id (multi-part)", () => {
 
 		await waitFor(() => expect(currentStreamSrc()).toContain("/cd2/stream"));
 		expect(screen.getByText("Part 2 of 2")).toBeInTheDocument();
+	});
+});
+
+describe("/media/$id (default tracks)", () => {
+	type SubtitleTrack = components["schemas"]["SubtitleTrack"];
+
+	function sidecar(id: string, overrides: Partial<SubtitleTrack> = {}) {
+		return {
+			origin: "sidecar" as const,
+			index: null,
+			sidecar_id: id,
+			codec: "subrip",
+			language: "spa",
+			title: `Sidecar ${id}`,
+			is_default: false,
+			is_forced: false,
+			is_hearing_impaired: false,
+			is_text: true,
+			url: `/v1/files/f/subtitles/${id}`,
+			webvtt_url: `/v1/files/f/subtitles/${id}/webvtt`,
+			...overrides,
+		};
+	}
+
+	function textTracks(): { id: string; isDefault: boolean; src: string }[] {
+		return JSON.parse(
+			screen.getByTestId("video-player").getAttribute("data-text-tracks") ??
+				"[]",
+		);
+	}
+
+	it("starts on the audio and subtitle file the server names for the viewer", async () => {
+		const embedded: SubtitleTrack = {
+			...sidecar("unused"),
+			origin: "embedded",
+			index: 3,
+			sidecar_id: null,
+			url: null,
+			webvtt_url: null,
+		};
+		serveMedia({ media_type: "movie", ...movie }, [
+			{
+				...source("file-hd", 1080, "h264"),
+				// The server counts the file's own stream first: index 2 is the
+				// second sidecar.
+				subtitle_tracks: [embedded, sidecar("s1"), sidecar("s2")],
+				default_audio_track_index: 1,
+				default_subtitle_track_index: 2,
+			},
+		]);
+		renderRoute("/media/movie-1");
+
+		await waitFor(() =>
+			expect(screen.getByTestId("video-player")).toHaveAttribute(
+				"data-default-audio",
+				"1",
+			),
+		);
+		// The embedded stream is out of a browser's reach, so it is not listed.
+		expect(textTracks().map((t) => [t.id, t.isDefault])).toEqual([
+			["s1", false],
+			["s2", true],
+		]);
+		// Resolved against the stream server, and as WebVTT where offered.
+		expect(textTracks()[1].src).toMatch(
+			/^https?:\/\/.+\/v1\/files\/f\/subtitles\/s2\/webvtt$/,
+		);
+	});
+
+	it("starts each part on the subtitle file the server names for that part", async () => {
+		const parts = [1, 2].map((number) => ({
+			file_id: `cd${number}`,
+			part_number: number,
+			size_bytes: 512,
+			duration_secs: 100,
+			subtitle_tracks: [sidecar(`p${number}`)],
+			default_subtitle_track_index: number === 2 ? 0 : null,
+			stream_url: `/v1/files/cd${number}/stream`,
+			download_url: `/v1/files/cd${number}/download`,
+		}));
+		serveMedia({ media_type: "movie", ...movie }, [
+			{ ...source("cd1", 480, "h264"), parts },
+		]);
+		const user = userEvent.setup();
+		renderRoute("/media/movie-1");
+
+		await waitFor(() => expect(currentStreamSrc()).toContain("/cd1/stream"));
+		expect(textTracks().map((t) => [t.id, t.isDefault])).toEqual([
+			["p1", false],
+		]);
+
+		await user.click(screen.getByRole("button", { name: "Finish playback" }));
+
+		await waitFor(() => expect(currentStreamSrc()).toContain("/cd2/stream"));
+		expect(textTracks().map((t) => [t.id, t.isDefault])).toEqual([
+			["p2", true],
+		]);
 	});
 });
 

@@ -8,6 +8,7 @@ use crate::transport::CannedBackend;
 mod admin;
 mod catalog;
 mod playback;
+mod preferences;
 mod progress;
 mod telemetry;
 

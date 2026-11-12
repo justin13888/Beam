@@ -20,6 +20,7 @@ import {
 	softwareDecodeDetail,
 } from "@/lib/playback-capability";
 import { apiError } from "@/lib/problem";
+import { sidecarTextTracks } from "@/lib/startTracks";
 import { nextPlayableEpisode } from "@/lib/upNext";
 import { formatDuration } from "@/lib/utils";
 
@@ -217,6 +218,8 @@ export function MediaDetailPage({
 						size_bytes: selectedSource.size_bytes,
 						duration_secs: selectedSource.duration_secs,
 						subtitle_tracks: selectedSource.subtitle_tracks,
+						default_subtitle_track_index:
+							selectedSource.default_subtitle_track_index,
 						stream_url: selectedSource.stream_url,
 						download_url: selectedSource.download_url,
 					},
@@ -272,6 +275,18 @@ export function MediaDetailPage({
 			? savedProgress.position_secs
 			: 0;
 	const playingFileId = currentPart?.file_id ?? unjudgedFileId;
+	// The subtitle files beside the part, and the tracks the server named for
+	// this viewer to start on (issue #329). The viewer's own pick in the
+	// player's menus wins for the rest of the part.
+	const textTracks = currentPart
+		? sidecarTextTracks(
+				currentPart.subtitle_tracks,
+				currentPart.default_subtitle_track_index,
+				absoluteUrl,
+			)
+		: [];
+	const defaultAudioTrackIndex =
+		selectedSource?.default_audio_track_index ?? null;
 
 	const { report, reset: resetBeacon } = usePlaybackBeacon(playingFileId);
 
@@ -447,6 +462,8 @@ export function MediaDetailPage({
 							selectedVerdict?.playable ? selectedVerdict.mimeType : undefined
 						}
 						poster={posterUrl}
+						textTracks={textTracks}
+						defaultAudioTrackIndex={defaultAudioTrackIndex}
 						startTime={resumePosition}
 						autoPlay={autoPlayNext}
 						onProgress={(currentTime, duration) => {
