@@ -79,4 +79,23 @@ describe("playerHandlers", () => {
 			expect(onEnded).toHaveBeenCalledWith(0);
 		});
 	});
+
+	describe("loadedMetadata", () => {
+		it("starts on the audio track the server named", () => {
+			const audioTracks = [{ enabled: true }, { enabled: false }];
+			playerHandlers({ defaultAudioTrackIndex: 1 }).loadedMetadata({
+				audioTracks,
+			});
+			expect(audioTracks.map((t) => t.enabled)).toEqual([false, true]);
+		});
+
+		it("is a no-op where the browser exposes no audio tracks", () => {
+			expect(() =>
+				playerHandlers({ defaultAudioTrackIndex: 1 }).loadedMetadata({}),
+			).not.toThrow();
+			expect(() =>
+				playerHandlers({ defaultAudioTrackIndex: 1 }).loadedMetadata(null),
+			).not.toThrow();
+		});
+	});
 });

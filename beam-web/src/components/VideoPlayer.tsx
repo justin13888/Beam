@@ -2,11 +2,13 @@ import "@vidstack/react/player/styles/default/theme.css";
 import "@vidstack/react/player/styles/default/layouts/video.css";
 
 import {
+	isVideoProvider,
 	MediaPlayer,
 	type MediaPlayerInstance,
 	MediaProvider,
 	type PlayerSrc,
 	Poster,
+	Track,
 	VIDEO_TYPES,
 } from "@vidstack/react";
 import {
@@ -14,6 +16,11 @@ import {
 	defaultLayoutIcons,
 } from "@vidstack/react/player/layouts/default";
 import { useRef } from "react";
+import {
+	type AudioTrackListLike,
+	enableAudioTrack,
+	type SidecarTextTrack,
+} from "@/lib/startTracks";
 
 /** The slice of Vidstack's player instance this wrapper's callbacks read. */
 export interface PlayerLike {
@@ -31,14 +38,22 @@ export interface PlayerLike {
  */
 export function playerHandlers({
 	startTime = 0,
+	defaultAudioTrackIndex,
 	onProgress,
 	onEnded,
 }: {
 	startTime?: number;
+	defaultAudioTrackIndex?: number | null;
 	onProgress?: (currentTime: number, duration: number) => void;
 	onEnded?: (duration: number) => void;
 }) {
 	return {
+		/** Start on the audio track the server named for the viewer (issue
+		 * #329), once the element knows the file's tracks -- where the browser
+		 * exposes them at all. */
+		loadedMetadata(media: { audioTracks?: AudioTrackListLike } | null) {
+			enableAudioTrack(media?.audioTracks, defaultAudioTrackIndex);
+		},
 		/** Seek to the resume position once the source can play. A zero or
 		 * negative `startTime` means "from the beginning" and must not seek --
 		 * assigning `currentTime = 0` on some providers restarts a stream that
@@ -94,6 +109,11 @@ export interface VideoPlayerProps {
 	/** Fired when playback reaches the end, with the final duration. */
 	onEnded?: (duration: number) => void;
 	onError?: () => void;
+	/** The subtitle files beside the file, the one marked default shown from
+	 * the start (`lib/startTracks.ts`). */
+	textTracks?: SidecarTextTrack[];
+	/** Which of the file's audio tracks to start on, as the server named it. */
+	defaultAudioTrackIndex?: number | null;
 	className?: string;
 }
 
@@ -112,10 +132,17 @@ export function VideoPlayer({
 	onProgress,
 	onEnded,
 	onError,
+	textTracks = [],
+	defaultAudioTrackIndex,
 	className,
 }: VideoPlayerProps) {
 	const player = useRef<MediaPlayerInstance>(null);
-	const handlers = playerHandlers({ startTime, onProgress, onEnded });
+	const handlers = playerHandlers({
+		startTime,
+		defaultAudioTrackIndex,
+		onProgress,
+		onEnded,
+	});
 
 	return (
 		<MediaPlayer
@@ -126,6 +153,14 @@ export function VideoPlayer({
 			autoPlay={autoPlay}
 			playsInline
 			className={className}
+			onLoadedMetadata={() => {
+				const provider = player.current?.provider;
+				handlers.loadedMetadata(
+					isVideoProvider(provider)
+						? (provider.video as { audioTracks?: AudioTrackListLike })
+						: null,
+				);
+			}}
 			onCanPlay={() => handlers.canPlay(player.current)}
 			onTimeUpdate={() => handlers.timeUpdate(player.current)}
 			onEnded={() => handlers.ended(player.current)}
@@ -133,6 +168,18 @@ export function VideoPlayer({
 		>
 			<MediaProvider>
 				{poster && <Poster className="vds-poster" src={poster} alt={title} />}
+				{textTracks.map((track) => (
+					<Track
+						key={track.id}
+						id={track.id}
+						src={track.src}
+						type={track.type}
+						kind="subtitles"
+						label={track.label}
+						language={track.language}
+						default={track.isDefault}
+					/>
+				))}
 			</MediaProvider>
 			<DefaultVideoLayout icons={defaultLayoutIcons} />
 		</MediaPlayer>
