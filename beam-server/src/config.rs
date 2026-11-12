@@ -98,6 +98,7 @@ pub struct ServerConfig {
 
     /// Interval between periodic full rescans of every library, in seconds.
     /// Acts as the backstop that catches changes the filesystem watcher missed.
+    /// Must be at least 1.
     #[config(env = "BEAM_SCAN_INTERVAL_SECS", default = 3600)]
     pub scan_interval_secs: u64,
 
@@ -798,6 +799,15 @@ impl ServerConfig {
         if self.rate_limit_device_poll_per_minute == 0 {
             return Err(ConfigError::InvalidValue(
                 "BEAM_RATE_LIMIT_DEVICE_POLL_PER_MINUTE".to_string(),
+                "must be at least 1".to_string(),
+            ));
+        }
+
+        // Zero would rescan every library back to back, never sleeping
+        // between full scans.
+        if self.scan_interval_secs == 0 {
+            return Err(ConfigError::InvalidValue(
+                "BEAM_SCAN_INTERVAL_SECS".to_string(),
                 "must be at least 1".to_string(),
             ));
         }
