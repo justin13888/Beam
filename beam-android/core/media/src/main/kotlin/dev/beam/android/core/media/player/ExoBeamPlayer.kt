@@ -102,6 +102,21 @@ internal class ExoBeamPlayer(
     /** Whether a reported stall is still open. */
     private var isStalled = false
 
+    /**
+     * The part whose server-named start tracks have been applied, so they are
+     * applied once per part: when its tracks first arrive, and never again
+     * over a choice made since.
+     */
+    private var startTracksAppliedTo: String? = null
+
+    /**
+     * Whether the viewer has picked an audio or a subtitle track during this
+     * title's playback. Their pick wins over what the server names for every
+     * later part and source switch, until another title starts.
+     */
+    private var viewerPickedAudio = false
+    private var viewerPickedSubtitle = false
+
     init {
         exoPlayer.addListener(this)
         // A television reports as one, so the operator's counts can tell a
@@ -115,6 +130,9 @@ internal class ExoBeamPlayer(
     }
 
     override suspend fun play(request: PlaybackRequest) {
+        // A new title starts on the tracks the server names for it.
+        viewerPickedAudio = false
+        viewerPickedSubtitle = false
         // The resume position is within the file the request names, which for
         // a multi-part movie is the part the viewer was last in.
         val started =
@@ -166,10 +184,12 @@ internal class ExoBeamPlayer(
     }
 
     override fun selectAudioTrack(id: String) {
+        viewerPickedAudio = true
         applyOverride(C.TRACK_TYPE_AUDIO, id)
     }
 
     override fun selectSubtitleTrack(id: String?) {
+        viewerPickedSubtitle = true
         if (id == null) {
             exoPlayer.trackSelectionParameters =
                 exoPlayer.trackSelectionParameters
@@ -229,6 +249,7 @@ internal class ExoBeamPlayer(
         exoPlayer.clearMediaItems()
         currentFileId = null
         loadedParts = null
+        startTracksAppliedTo = null
         mutableState.value = PlaybackUiState()
         recorder.end()
     }
@@ -304,6 +325,7 @@ internal class ExoBeamPlayer(
         // recognised as this start rather than a move to the next part.
         currentFileId = startPart.fileId
         loadedParts = plan.parts
+        startTracksAppliedTo = null
         exoPlayer.setMediaSources(sources, startIndex, startOffsetMs)
         exoPlayer.prepare()
 
@@ -377,13 +399,62 @@ internal class ExoBeamPlayer(
                     }
             } ?: return
         val index = (0 until group.length).first { trackId(group, it) == id }
+        // The override names this file's track group, which the next part or
+        // source does not have; its language is what carries the viewer's
+        // pick over to them.
+        val language = group.getTrackFormat(index).language
 
         exoPlayer.trackSelectionParameters =
             exoPlayer.trackSelectionParameters
                 .buildUpon()
                 .setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, index))
-                .build()
+                .apply {
+                    if (trackType == C.TRACK_TYPE_AUDIO) {
+                        setPreferredAudioLanguage(language)
+                    } else {
+                        setPreferredTextLanguage(language)
+                    }
+                }.build()
         publishTracks(exoPlayer.currentTracks)
+    }
+
+    /**
+     * Start the part playing on the tracks the server named for the viewer,
+     * once, as its tracks first arrive. A type the viewer has picked a track
+     * of in this title is left as they picked it.
+     */
+    private fun applyStartTracks(tracks: Tracks) {
+        if (tracks.isEmpty) return
+        val part = loadedParts?.getOrNull(exoPlayer.currentMediaItemIndex) ?: return
+        if (startTracksAppliedTo == part.fileId) return
+        startTracksAppliedTo = part.fileId
+        val start = part.startTracks ?: return
+
+        val parameters = exoPlayer.trackSelectionParameters.buildUpon()
+        if (!viewerPickedAudio) {
+            val audio = tracks.startAudio(start)
+            if (audio is StartChoice.Select) {
+                parameters.setOverrideForType(TrackSelectionOverride(audio.group.mediaTrackGroup, audio.index))
+            }
+        }
+        if (!viewerPickedSubtitle) {
+            when (val subtitle = tracks.startSubtitle(start)) {
+                StartChoice.Keep -> {
+                    Unit
+                }
+
+                StartChoice.Off -> {
+                    parameters.clearOverridesOfType(C.TRACK_TYPE_TEXT).setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+                }
+
+                is StartChoice.Select -> {
+                    parameters
+                        .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                        .setOverrideForType(TrackSelectionOverride(subtitle.group.mediaTrackGroup, subtitle.index))
+                }
+            }
+        }
+        exoPlayer.trackSelectionParameters = parameters.build()
     }
 
     private fun startPositionTicker() {
@@ -523,6 +594,7 @@ internal class ExoBeamPlayer(
     }
 
     override fun onTracksChanged(tracks: Tracks) {
+        applyStartTracks(tracks)
         publishTracks(tracks)
     }
 
