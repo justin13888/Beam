@@ -321,6 +321,21 @@ jobs:
       - uses: jdx/mise-action@v4
       - run: mise run check:mutants-skip-fakes
 
+  # Not path-filtered: it reads only tracked files and git, and a skip here
+  # would let a file grow past its limit on a change no filter anticipated.
+  file-size:
+    name: File length within limit or baseline
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The base revision's baseline is read to refuse additions to it.
+          fetch-depth: 0
+      - uses: jdx/mise-action@v4
+      - env:
+          BEAM_FILE_SIZE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: mise run check:file-size
+
   rust-deny:
     name: Supply-chain audit
     needs: [changes]
@@ -855,6 +870,7 @@ jobs:
       - helm-chart
       - hook-git-env
       - mutants-skip-fakes
+      - file-size
       - rust-deny
       - rust-clippy
       - rust-test
