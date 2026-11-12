@@ -117,6 +117,15 @@ internal class ExoBeamPlayer(
     private var viewerPickedAudio = false
     private var viewerPickedSubtitle = false
 
+    /**
+     * The track selection the player was built with. A viewer's pick and the
+     * start tracks applied for one title leave overrides, preferred languages
+     * and a disabled subtitle type behind in the player's parameters; a new
+     * title starts from these instead, so a title with no start tracks, or
+     * none that match, gets the player's own choice and not the last title's.
+     */
+    private val baseTrackSelection = exoPlayer.trackSelectionParameters
+
     init {
         exoPlayer.addListener(this)
         // A television reports as one, so the operator's counts can tell a
@@ -133,6 +142,7 @@ internal class ExoBeamPlayer(
         // A new title starts on the tracks the server names for it.
         viewerPickedAudio = false
         viewerPickedSubtitle = false
+        exoPlayer.trackSelectionParameters = baseTrackSelection
         // The resume position is within the file the request names, which for
         // a multi-part movie is the part the viewer was last in.
         val started =

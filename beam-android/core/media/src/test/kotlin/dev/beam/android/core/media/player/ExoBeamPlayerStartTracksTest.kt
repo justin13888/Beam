@@ -136,6 +136,47 @@ class ExoBeamPlayerStartTracksTest {
             player.stop()
         }
 
+    @Test
+    fun `a new title starts free of the last title's picks and languages`() =
+        runTest {
+            val scope = TestScope(testScheduler)
+            playback.plans[FILE_ID] =
+                Fixtures.plan(
+                    parts =
+                        listOf(
+                            Fixtures.part(FILE_ID, startTracks = StartTracks(1u, StartSubtitle.Embedded(0u))),
+                        ),
+                )
+            playback.plans[NEXT_FILE_ID] =
+                Fixtures.plan(parts = listOf(Fixtures.part(NEXT_FILE_ID, startTracks = null)))
+            val player = player(scope)
+            player.play(REQUEST)
+            scope.runCurrent()
+            player.onTracksChanged(tracks)
+            // The viewer turns subtitles off. A pick of French audio would also
+            // leave French preferred; the test player reports no current
+            // tracks for `selectAudioTrack` to find, so that is set directly.
+            player.selectSubtitleTrack(null)
+            exoPlayer.trackSelectionParameters =
+                exoPlayer.trackSelectionParameters
+                    .buildUpon()
+                    .setPreferredAudioLanguage("fre")
+                    .setPreferredTextLanguage("eng")
+                    .build()
+
+            // The next title, played offline, carries no start tracks.
+            player.play(REQUEST.copy(mediaId = "movie-2", fileId = NEXT_FILE_ID))
+            scope.runCurrent()
+            player.onTracksChanged(tracks)
+
+            val parameters = exoPlayer.trackSelectionParameters
+            assertTrue(parameters.overrides.isEmpty())
+            assertTrue(parameters.preferredAudioLanguages.isEmpty())
+            assertTrue(parameters.preferredTextLanguages.isEmpty())
+            assertFalse(C.TRACK_TYPE_TEXT in parameters.disabledTrackTypes)
+            player.stop()
+        }
+
     private fun group(
         id: String,
         mimeType: String,
@@ -168,6 +209,7 @@ class ExoBeamPlayerStartTracksTest {
 
     private companion object {
         const val FILE_ID = "file-1"
+        const val NEXT_FILE_ID = "file-2"
         val REQUEST =
             PlaybackRequest(
                 mediaId = "movie-1",
