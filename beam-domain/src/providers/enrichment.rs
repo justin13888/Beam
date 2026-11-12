@@ -407,6 +407,16 @@ pub mod test_utils {
         pub fn invalidated_refs(&self) -> Vec<String> {
             self.invalidated.lock().unwrap().clone()
         }
+
+        /// `NotConfigured` for an id of a provider this one is not, as the
+        /// trait asks of every implementation.
+        fn owns(&self, id: &ExternalMediaRef) -> Result<(), EnrichmentError> {
+            if self.providers.iter().any(|name| name == id.provider()) {
+                Ok(())
+            } else {
+                Err(EnrichmentError::NotConfigured)
+            }
+        }
     }
 
     impl std::fmt::Debug for InMemoryEnrichmentProvider {
@@ -462,6 +472,7 @@ pub mod test_utils {
             &self,
             id: &ExternalMediaRef,
         ) -> Result<MovieEnrichment, EnrichmentError> {
+            self.owns(id)?;
             self.movie_details
                 .get(id.as_str())
                 .cloned()
@@ -472,6 +483,7 @@ pub mod test_utils {
             &self,
             id: &ExternalMediaRef,
         ) -> Result<ShowEnrichment, EnrichmentError> {
+            self.owns(id)?;
             self.show_details
                 .get(id.as_str())
                 .cloned()
@@ -483,6 +495,7 @@ pub mod test_utils {
             show: &ExternalMediaRef,
             season_number: u32,
         ) -> Result<SeasonEnrichment, EnrichmentError> {
+            self.owns(show)?;
             self.season_details
                 .get(&(show.as_str().to_string(), season_number))
                 .cloned()

@@ -740,3 +740,50 @@ async fn an_endless_episode_listing_stops_at_the_page_cap() {
     assert_eq!(pages, MAX_EPISODE_PAGES as usize);
     assert!(!season.episodes.is_empty());
 }
+
+/// The shared contract, against a stand-in for TheTVDB that knows one
+/// movie, one show and its first season, and answers anything else as
+/// TheTVDB does: an empty search, and a 404 for an id it does not have.
+mod contract {
+    use super::*;
+    use crate::providers::contract::{ContractSubject, enrichment_provider_contract};
+
+    async fn setup() -> ContractSubject {
+        let (base, _received) = stand_in(Arc::new(|request: &Received| {
+            match request.target.as_str() {
+                "/v4/login" => login("token"),
+                "/v4/search?query=Contract+Movie&type=movie&limit=20" => {
+                    ok(serde_json::json!({"data": [{"tvdb_id": "11", "name": "Contract Movie"}]}))
+                }
+                "/v4/search?query=Contract+Show&type=series&limit=20" => {
+                    ok(serde_json::json!({"data": [{"tvdb_id": "22", "name": "Contract Show"}]}))
+                }
+                target if target.starts_with("/v4/search?") => ok(serde_json::json!({"data": []})),
+                "/v4/movies/11/extended?meta=translations" => {
+                    ok(serde_json::json!({"data": {"id": 11, "name": "Contract Movie"}}))
+                }
+                "/v4/series/22/extended?meta=translations" => {
+                    ok(serde_json::json!({"data": {"id": 22, "name": "Contract Show"}}))
+                }
+                "/v4/series/22/episodes/default/eng?page=0" => ok(serde_json::json!({
+                    "data": {"episodes": [{"seasonNumber": 1, "number": 1, "name": "Pilot"}]},
+                    "links": {"next": null}
+                })),
+                _ => (404, Vec::new(), "{}".to_string()),
+            }
+        }))
+        .await;
+        ContractSubject {
+            provider: Arc::new(provider(base, Arc::new(TestClock::new()))),
+            name: "tvdb",
+            movie: ExternalMediaRef::new("tvdb", "11"),
+            movie_title: "Contract Movie",
+            show: ExternalMediaRef::new("tvdb", "22"),
+            show_title: "Contract Show",
+            season: 1,
+            unknown: ExternalMediaRef::new("tvdb", "99"),
+        }
+    }
+
+    enrichment_provider_contract!(setup);
+}
