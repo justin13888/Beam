@@ -23,7 +23,9 @@ use std::time::Duration;
 
 use tracing::{info, warn};
 
-use beam_domain::models::enrichment::{EnrichmentState, EnrichmentTargetId, MetadataField};
+use beam_domain::models::enrichment::{
+    EnrichmentState, EnrichmentTargetId, FieldLocks, MetadataField,
+};
 use beam_domain::models::{CreateAdminLog, ProviderPin};
 use beam_domain::providers::enrichment::{
     EnrichmentError, EnrichmentProvider, EpisodeEnrichment, ExternalMediaRef, MediaQuery,
@@ -405,8 +407,8 @@ impl MetadataEnrichmentService {
 
     async fn process_row(&self, row: &EnrichmentState) -> ProcessOutcome {
         let (outcome, title) = match row.target {
-            EnrichmentTargetId::Movie(id) => self.process_movie(row, id).await,
-            EnrichmentTargetId::Show(id) => self.process_show(row, id).await,
+            EnrichmentTargetId::Movie(id) => self.process::<Movies>(row, id).await,
+            EnrichmentTargetId::Show(id) => self.process::<Shows>(row, id).await,
         };
         self.announce(row, &outcome, title).await;
         outcome
@@ -460,86 +462,42 @@ impl MetadataEnrichmentService {
         self.notifications.publish(event);
     }
 
-    /// Search for `movie` by its title and year and fetch the best match,
+    /// Search for `title` by its name and year and fetch the best match,
     /// which must not contradict `pin`. `Err` is the outcome, already
     /// recorded, when the search settles the row without a match.
-    async fn search_movie(
+    async fn search<K: TitleResolver>(
         &self,
         row: &EnrichmentState,
-        movie_id: uuid::Uuid,
-        movie: &beam_domain::models::Movie,
+        title_id: uuid::Uuid,
+        title: &K::Title,
         pin: Option<&ProviderPin>,
-    ) -> Result<Fetched<MovieEnrichment>, ProcessOutcome> {
+    ) -> Result<Fetched<K::Enrichment>, ProcessOutcome> {
+        let name = K::title(title);
+        let year = K::year(title);
         let query = MediaQuery {
-            title: movie.title.clone(),
-            year: movie.year,
+            title: name.to_string(),
+            year,
         };
-        let hits = match self.provider.search_movies(&query).await {
+        let hits = match K::search(&*self.provider, &query).await {
             Ok(hits) => hits,
             Err(err) => return Err(self.handle_error(row, err).await),
         };
-        let Some((hit, score)) =
-            matcher::best_match(&movie.title, movie.year, &hits, self.policy.min_confidence)
+        let Some((hit, score)) = matcher::best_match(name, year, &hits, self.policy.min_confidence)
         else {
-            self.log_unmatched_movie(row.id, &movie.title, movie.year, &hits)
-                .await;
+            self.log_unmatched::<K>(row.id, name, year, &hits).await;
             return Err(self
                 .mark_unmatched(row, "no candidate cleared the match threshold")
                 .await);
         };
-        let ref_id = hit.external_ref.clone();
-        let enrichment = match self.provider.movie_enrichment(&ref_id).await {
+        let ref_id = matcher::SearchHit::external_ref(hit).clone();
+        let enrichment = match K::fetch(&*self.provider, &ref_id).await {
             Ok(enrichment) => enrichment,
             Err(err) => return Ok(Err(err)),
         };
-        if let Some(reason) =
-            pin.and_then(|pin| contradiction(pin, MatchIds::of_movie(&enrichment)))
-        {
+        if let Some(reason) = pin.and_then(|pin| contradiction(pin, K::match_ids(&enrichment))) {
             warn!(
-                movie_id = %movie_id,
-                candidate = %ref_id,
-                reason,
-                "the best match contradicts the NFO's pin"
-            );
-            return Err(self.mark_unmatched(row, &reason).await);
-        }
-        Ok(Ok((ref_id, enrichment, score.total_score as f32)))
-    }
-
-    /// [`Self::search_movie`], for a show.
-    async fn search_show(
-        &self,
-        row: &EnrichmentState,
-        show_id: uuid::Uuid,
-        show: &beam_domain::models::Show,
-        pin: Option<&ProviderPin>,
-    ) -> Result<Fetched<ShowEnrichment>, ProcessOutcome> {
-        let query = MediaQuery {
-            title: show.title.clone(),
-            year: show.year,
-        };
-        let hits = match self.provider.search_shows(&query).await {
-            Ok(hits) => hits,
-            Err(err) => return Err(self.handle_error(row, err).await),
-        };
-        let Some((hit, score)) =
-            matcher::best_match(&show.title, show.year, &hits, self.policy.min_confidence)
-        else {
-            self.log_unmatched_show(row.id, &show.title, show.year, &hits)
-                .await;
-            return Err(self
-                .mark_unmatched(row, "no candidate cleared the match threshold")
-                .await);
-        };
-        let ref_id = hit.external_ref.clone();
-        let enrichment = match self.provider.show_enrichment(&ref_id).await {
-            Ok(enrichment) => enrichment,
-            Err(err) => return Ok(Err(err)),
-        };
-        if let Some(reason) = pin.and_then(|pin| contradiction(pin, MatchIds::of_show(&enrichment)))
-        {
-            warn!(
-                show_id = %show_id,
+                kind = K::NOUN,
+                title_id = %title_id,
                 candidate = %ref_id,
                 reason,
                 "the best match contradicts the NFO's pin"
@@ -563,24 +521,26 @@ impl MetadataEnrichmentService {
         }
     }
 
-    async fn process_movie(
+    /// Resolve the title `row` targets, returning the outcome and, when the
+    /// title still exists, its display title.
+    async fn process<K: TitleResolver>(
         &self,
         row: &EnrichmentState,
-        movie_id: uuid::Uuid,
+        title_id: uuid::Uuid,
     ) -> (ProcessOutcome, Option<String>) {
-        let Ok(Some(movie)) = self.movie_repo.find_by_id(movie_id).await else {
-            self.terminal_failure(row, "movie no longer exists").await;
+        let Some(title) = K::find(self, title_id).await else {
+            self.terminal_failure(row, K::GONE).await;
             return (ProcessOutcome::Failed, None);
         };
-        let title = Some(movie.title.clone());
-        (self.resolve_movie(row, movie_id, movie).await, title)
+        let name = Some(K::title(&title).to_string());
+        (self.resolve::<K>(row, title_id, title).await, name)
     }
 
-    async fn resolve_movie(
+    async fn resolve<K: TitleResolver>(
         &self,
         row: &EnrichmentState,
-        movie_id: uuid::Uuid,
-        movie: beam_domain::models::Movie,
+        title_id: uuid::Uuid,
+        title: K::Title,
     ) -> ProcessOutcome {
         let external_ref = if row.force_refresh {
             row.matched_ref.as_deref().and_then(ExternalMediaRef::parse)
@@ -600,19 +560,19 @@ impl MetadataEnrichmentService {
         // a dead match equal to the pin, the pin fetched in place of a dead
         // match, or the pin when no match is refreshed -- is retried with
         // backoff (FR-304, FR-313).
-        let (pin, pinned_ref) = self.pin_of(movie.pinned_ref.as_deref());
+        let (pin, pinned_ref) = self.pin_of(K::pinned_ref(&title));
         let mut by_id = external_ref.clone().or_else(|| pinned_ref.clone());
         let resolved = match (external_ref, pinned_ref) {
             (Some(ref_id), pinned_ref) => {
                 self.provider.invalidate(&ref_id).await;
-                match self.provider.movie_enrichment(&ref_id).await {
+                match K::fetch(&*self.provider, &ref_id).await {
                     // The match of a title no pin holds, gone from the
                     // provider: it is searched for again, as a title never
                     // matched is, rather than asked for by a dead id.
                     Err(EnrichmentError::NotFound) if pinned_ref.is_none() => {
                         self.forget_match(row, &ref_id).await;
                         by_id = None;
-                        match self.search_movie(row, movie_id, &movie, pin.as_ref()).await {
+                        match self.search::<K>(row, title_id, &title, pin.as_ref()).await {
                             Ok(fetched) => fetched,
                             Err(outcome) => return outcome,
                         }
@@ -627,20 +587,17 @@ impl MetadataEnrichmentService {
                         self.forget_match(row, &ref_id).await;
                         let pinned_ref = pinned_ref.unwrap_or(ref_id);
                         by_id = Some(pinned_ref.clone());
-                        self.provider
-                            .movie_enrichment(&pinned_ref)
+                        K::fetch(&*self.provider, &pinned_ref)
                             .await
                             .map(|e| (pinned_ref, e, 1.0))
                     }
                     fetched => fetched.map(|e| (ref_id, e, row.match_confidence.unwrap_or(1.0))),
                 }
             }
-            (None, Some(ref_id)) => self
-                .provider
-                .movie_enrichment(&ref_id)
+            (None, Some(ref_id)) => K::fetch(&*self.provider, &ref_id)
                 .await
                 .map(|e| (ref_id, e, 1.0)),
-            (None, None) => match self.search_movie(row, movie_id, &movie, pin.as_ref()).await {
+            (None, None) => match self.search::<K>(row, title_id, &title, pin.as_ref()).await {
                 Ok(fetched) => fetched,
                 Err(outcome) => return outcome,
             },
@@ -648,141 +605,19 @@ impl MetadataEnrichmentService {
 
         match resolved {
             Ok((ref_id, enrichment, confidence)) => {
-                let genres = enrichment.genres.clone();
                 let locks = &row.locked_fields;
-                if let Err(err) = self
-                    .movie_repo
-                    .apply_enrichment(movie_id, &enrichment, locks)
-                    .await
-                {
-                    warn!(error = %err, movie_id = %movie_id, "failed to persist movie enrichment");
+                if let Err(err) = K::apply(self, title_id, &enrichment, locks).await {
+                    warn!(
+                        error = %err,
+                        kind = K::NOUN,
+                        title_id = %title_id,
+                        "failed to persist a title's enrichment"
+                    );
                     return self
                         .mark_unmatched(row, "failed to persist enrichment")
                         .await;
                 }
-                if !locks.is_locked(MetadataField::Genres) {
-                    let _ = self.genre_repo.set_movie_genres(movie_id, &genres).await;
-                }
-                // Best-effort, as genres are: a title whose credits failed to
-                // store is still enriched, and keeps the credits it had.
-                if let Some(credits) = &enrichment.credits
-                    && let Err(err) = self.person_repo.set_movie_credits(movie_id, credits).await
-                {
-                    warn!(error = %err, movie_id = %movie_id, "failed to persist movie credits");
-                }
-                // Best-effort too: a movie whose collection failed to store
-                // is still enriched, and stays in the one it was in.
-                if let Err(err) = self
-                    .collection_repo
-                    .set_movie_collection(movie_id, enrichment.collection.as_ref())
-                    .await
-                {
-                    warn!(error = %err, movie_id = %movie_id, "failed to persist movie collection");
-                }
-                self.mark_enriched(row, ref_id.as_str(), confidence).await
-            }
-            Err(EnrichmentError::NotFound) if by_id.is_some() => {
-                self.missing_by_id(row, by_id.as_ref()).await
-            }
-            Err(err) => self.handle_error(row, err).await,
-        }
-    }
-
-    async fn process_show(
-        &self,
-        row: &EnrichmentState,
-        show_id: uuid::Uuid,
-    ) -> (ProcessOutcome, Option<String>) {
-        let Ok(Some(show)) = self.show_repo.find_by_id(show_id).await else {
-            self.terminal_failure(row, "show no longer exists").await;
-            return (ProcessOutcome::Failed, None);
-        };
-        let title = Some(show.title.clone());
-        (self.resolve_show(row, show_id, show).await, title)
-    }
-
-    async fn resolve_show(
-        &self,
-        row: &EnrichmentState,
-        show_id: uuid::Uuid,
-        show: beam_domain::models::Show,
-    ) -> ProcessOutcome {
-        let external_ref = if row.force_refresh {
-            row.matched_ref.as_deref().and_then(ExternalMediaRef::parse)
-        } else {
-            None
-        };
-
-        // As for a movie: a refresh of a match already made, else the pin an
-        // NFO or an administrator set, else a search.
-        let (pin, pinned_ref) = self.pin_of(show.pinned_ref.as_deref());
-        let mut by_id = external_ref.clone().or_else(|| pinned_ref.clone());
-        let resolved = match (external_ref, pinned_ref) {
-            (Some(ref_id), pinned_ref) => {
-                self.provider.invalidate(&ref_id).await;
-                match self.provider.show_enrichment(&ref_id).await {
-                    // As for a movie: a lost match of an unpinned show is
-                    // searched for again.
-                    Err(EnrichmentError::NotFound) if pinned_ref.is_none() => {
-                        self.forget_match(row, &ref_id).await;
-                        by_id = None;
-                        match self.search_show(row, show_id, &show, pin.as_ref()).await {
-                            Ok(fetched) => fetched,
-                            Err(outcome) => return outcome,
-                        }
-                    }
-                    // As for a movie: a pinned show's lost match falls back
-                    // to the pin.
-                    Err(EnrichmentError::NotFound)
-                        if pinned_ref.as_ref().is_some_and(|pin| *pin != ref_id) =>
-                    {
-                        self.forget_match(row, &ref_id).await;
-                        let pinned_ref = pinned_ref.unwrap_or(ref_id);
-                        by_id = Some(pinned_ref.clone());
-                        self.provider
-                            .show_enrichment(&pinned_ref)
-                            .await
-                            .map(|e| (pinned_ref, e, 1.0))
-                    }
-                    fetched => fetched.map(|e| (ref_id, e, row.match_confidence.unwrap_or(1.0))),
-                }
-            }
-            (None, Some(ref_id)) => self
-                .provider
-                .show_enrichment(&ref_id)
-                .await
-                .map(|e| (ref_id, e, 1.0)),
-            (None, None) => match self.search_show(row, show_id, &show, pin.as_ref()).await {
-                Ok(fetched) => fetched,
-                Err(outcome) => return outcome,
-            },
-        };
-
-        match resolved {
-            Ok((ref_id, enrichment, confidence)) => {
-                let genres = enrichment.genres.clone();
-                let locks = &row.locked_fields;
-                if let Err(err) = self
-                    .show_repo
-                    .apply_enrichment(show_id, &enrichment, locks)
-                    .await
-                {
-                    warn!(error = %err, show_id = %show_id, "failed to persist show enrichment");
-                    return self
-                        .mark_unmatched(row, "failed to persist enrichment")
-                        .await;
-                }
-                if !locks.is_locked(MetadataField::Genres) {
-                    let _ = self.genre_repo.set_show_genres(show_id, &genres).await;
-                }
-                // As for a movie: best-effort.
-                if let Some(credits) = &enrichment.credits
-                    && let Err(err) = self.person_repo.set_show_credits(show_id, credits).await
-                {
-                    warn!(error = %err, show_id = %show_id, "failed to persist show credits");
-                }
-
-                self.enrich_seasons(show_id, &ref_id).await;
+                K::after_match(self, title_id, &enrichment, &ref_id, locks).await;
                 self.mark_enriched(row, ref_id.as_str(), confidence).await
             }
             Err(EnrichmentError::NotFound) if by_id.is_some() => {
@@ -1006,12 +841,12 @@ impl MetadataEnrichmentService {
             .await;
     }
 
-    async fn log_unmatched_movie(
+    async fn log_unmatched<K: TitleResolver>(
         &self,
         row_id: uuid::Uuid,
         title: &str,
         year: Option<u32>,
-        hits: &[beam_domain::providers::enrichment::MovieSearchHit],
+        hits: &[K::Hit],
     ) {
         let top = matcher::top_candidates(title, year, hits, 3);
         let details = serde_json::json!({ "row_id": row_id.to_string(), "title": title, "year": year, "candidates": top.iter().map(|(label, score)| serde_json::json!({ "candidate": label, "score": score.total_score })).collect::<Vec<_>>() });
@@ -1020,30 +855,228 @@ impl MetadataEnrichmentService {
             .create(CreateAdminLog {
                 level: beam_domain::models::AdminLogLevel::Warning,
                 category: beam_domain::models::AdminLogCategory::Enrichment,
-                message: format!("No enrichment match found for movie \"{title}\""),
+                message: format!("No enrichment match found for {} \"{title}\"", K::NOUN),
                 details: Some(details),
             })
             .await;
     }
+}
 
-    async fn log_unmatched_show(
-        &self,
-        row_id: uuid::Uuid,
-        title: &str,
-        year: Option<u32>,
-        hits: &[beam_domain::providers::enrichment::ShowSearchHit],
+/// One kind of title the sweep enriches, and the steps of enriching it that
+/// differ by kind. Which id is fetched -- a refresh of the match already
+/// made, else the pin, else a search -- is
+/// [`MetadataEnrichmentService::resolve`]'s, the same for every kind.
+trait TitleResolver {
+    /// The stored title.
+    type Title: Send + Sync;
+    /// What a provider knows of one.
+    type Enrichment: Send + Sync;
+    /// One result of a search for one.
+    type Hit: matcher::SearchHit + Send + Sync;
+    /// The kind's name in messages.
+    const NOUN: &'static str;
+    /// Why a row whose title no longer exists failed.
+    const GONE: &'static str;
+
+    fn title(title: &Self::Title) -> &str;
+    fn year(title: &Self::Title) -> Option<u32>;
+    fn pinned_ref(title: &Self::Title) -> Option<&str>;
+    /// The provider ids `enrichment` reports, which a pin is checked against.
+    fn match_ids(enrichment: &Self::Enrichment) -> MatchIds<'_>;
+
+    /// The title `id`, `None` when it no longer exists or cannot be read.
+    fn find(
+        service: &MetadataEnrichmentService,
+        id: uuid::Uuid,
+    ) -> impl Future<Output = Option<Self::Title>> + Send;
+    fn search(
+        provider: &dyn EnrichmentProvider,
+        query: &MediaQuery,
+    ) -> impl Future<Output = Result<Vec<Self::Hit>, EnrichmentError>> + Send;
+    fn fetch(
+        provider: &dyn EnrichmentProvider,
+        id: &ExternalMediaRef,
+    ) -> impl Future<Output = Result<Self::Enrichment, EnrichmentError>> + Send;
+    /// Store `enrichment` over the title's unlocked fields. A failure
+    /// leaves the title unmatched.
+    fn apply(
+        service: &MetadataEnrichmentService,
+        id: uuid::Uuid,
+        enrichment: &Self::Enrichment,
+        locks: &FieldLocks,
+    ) -> impl Future<Output = Result<(), sea_orm::DbErr>> + Send;
+    /// What a stored match brings beside the title's own fields -- genres,
+    /// credits, and a movie's collection or a show's seasons -- each
+    /// best-effort: a title whose genres, credits, collection or seasons
+    /// fail to store is still enriched, and keeps what it had.
+    fn after_match(
+        service: &MetadataEnrichmentService,
+        id: uuid::Uuid,
+        enrichment: &Self::Enrichment,
+        ref_id: &ExternalMediaRef,
+        locks: &FieldLocks,
+    ) -> impl Future<Output = ()> + Send;
+}
+
+/// Movies, for [`TitleResolver`].
+struct Movies;
+
+impl TitleResolver for Movies {
+    type Title = beam_domain::models::Movie;
+    type Enrichment = MovieEnrichment;
+    type Hit = beam_domain::providers::enrichment::MovieSearchHit;
+    const NOUN: &'static str = "movie";
+    const GONE: &'static str = "movie no longer exists";
+
+    fn title(title: &Self::Title) -> &str {
+        &title.title
+    }
+
+    fn year(title: &Self::Title) -> Option<u32> {
+        title.year
+    }
+
+    fn pinned_ref(title: &Self::Title) -> Option<&str> {
+        title.pinned_ref.as_deref()
+    }
+
+    fn match_ids(enrichment: &Self::Enrichment) -> MatchIds<'_> {
+        MatchIds::of_movie(enrichment)
+    }
+
+    async fn find(service: &MetadataEnrichmentService, id: uuid::Uuid) -> Option<Self::Title> {
+        service.movie_repo.find_by_id(id).await.ok().flatten()
+    }
+
+    async fn search(
+        provider: &dyn EnrichmentProvider,
+        query: &MediaQuery,
+    ) -> Result<Vec<Self::Hit>, EnrichmentError> {
+        provider.search_movies(query).await
+    }
+
+    async fn fetch(
+        provider: &dyn EnrichmentProvider,
+        id: &ExternalMediaRef,
+    ) -> Result<Self::Enrichment, EnrichmentError> {
+        provider.movie_enrichment(id).await
+    }
+
+    async fn apply(
+        service: &MetadataEnrichmentService,
+        id: uuid::Uuid,
+        enrichment: &Self::Enrichment,
+        locks: &FieldLocks,
+    ) -> Result<(), sea_orm::DbErr> {
+        service
+            .movie_repo
+            .apply_enrichment(id, enrichment, locks)
+            .await
+    }
+
+    async fn after_match(
+        service: &MetadataEnrichmentService,
+        id: uuid::Uuid,
+        enrichment: &Self::Enrichment,
+        _ref_id: &ExternalMediaRef,
+        locks: &FieldLocks,
     ) {
-        let top = matcher::top_candidates(title, year, hits, 3);
-        let details = serde_json::json!({ "row_id": row_id.to_string(), "title": title, "year": year, "candidates": top.iter().map(|(label, score)| serde_json::json!({ "candidate": label, "score": score.total_score })).collect::<Vec<_>>() });
-        let _ = self
-            .admin_log
-            .create(CreateAdminLog {
-                level: beam_domain::models::AdminLogLevel::Warning,
-                category: beam_domain::models::AdminLogCategory::Enrichment,
-                message: format!("No enrichment match found for show \"{title}\""),
-                details: Some(details),
-            })
-            .await;
+        if !locks.is_locked(MetadataField::Genres) {
+            let _ = service
+                .genre_repo
+                .set_movie_genres(id, &enrichment.genres)
+                .await;
+        }
+        if let Some(credits) = &enrichment.credits
+            && let Err(err) = service.person_repo.set_movie_credits(id, credits).await
+        {
+            warn!(error = %err, movie_id = %id, "failed to persist movie credits");
+        }
+        if let Err(err) = service
+            .collection_repo
+            .set_movie_collection(id, enrichment.collection.as_ref())
+            .await
+        {
+            warn!(error = %err, movie_id = %id, "failed to persist movie collection");
+        }
+    }
+}
+
+/// Shows, for [`TitleResolver`].
+struct Shows;
+
+impl TitleResolver for Shows {
+    type Title = beam_domain::models::Show;
+    type Enrichment = ShowEnrichment;
+    type Hit = beam_domain::providers::enrichment::ShowSearchHit;
+    const NOUN: &'static str = "show";
+    const GONE: &'static str = "show no longer exists";
+
+    fn title(title: &Self::Title) -> &str {
+        &title.title
+    }
+
+    fn year(title: &Self::Title) -> Option<u32> {
+        title.year
+    }
+
+    fn pinned_ref(title: &Self::Title) -> Option<&str> {
+        title.pinned_ref.as_deref()
+    }
+
+    fn match_ids(enrichment: &Self::Enrichment) -> MatchIds<'_> {
+        MatchIds::of_show(enrichment)
+    }
+
+    async fn find(service: &MetadataEnrichmentService, id: uuid::Uuid) -> Option<Self::Title> {
+        service.show_repo.find_by_id(id).await.ok().flatten()
+    }
+
+    async fn search(
+        provider: &dyn EnrichmentProvider,
+        query: &MediaQuery,
+    ) -> Result<Vec<Self::Hit>, EnrichmentError> {
+        provider.search_shows(query).await
+    }
+
+    async fn fetch(
+        provider: &dyn EnrichmentProvider,
+        id: &ExternalMediaRef,
+    ) -> Result<Self::Enrichment, EnrichmentError> {
+        provider.show_enrichment(id).await
+    }
+
+    async fn apply(
+        service: &MetadataEnrichmentService,
+        id: uuid::Uuid,
+        enrichment: &Self::Enrichment,
+        locks: &FieldLocks,
+    ) -> Result<(), sea_orm::DbErr> {
+        service
+            .show_repo
+            .apply_enrichment(id, enrichment, locks)
+            .await
+    }
+
+    async fn after_match(
+        service: &MetadataEnrichmentService,
+        id: uuid::Uuid,
+        enrichment: &Self::Enrichment,
+        ref_id: &ExternalMediaRef,
+        locks: &FieldLocks,
+    ) {
+        if !locks.is_locked(MetadataField::Genres) {
+            let _ = service
+                .genre_repo
+                .set_show_genres(id, &enrichment.genres)
+                .await;
+        }
+        if let Some(credits) = &enrichment.credits
+            && let Err(err) = service.person_repo.set_show_credits(id, credits).await
+        {
+            warn!(error = %err, show_id = %id, "failed to persist show credits");
+        }
+        service.enrich_seasons(id, ref_id).await;
     }
 }
 
