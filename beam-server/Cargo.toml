@@ -9,16 +9,15 @@ default-run = "beam-server"
 [dependencies]
 beam-auth = { path = "../beam-auth", features = ["utils", "oidc"] }
 beam-domain = { path = "../beam-domain" }
-beam-entity = { path = "../beam-entity" }
 beam-index = { path = "../beam-index" }
 beam-migration = { path = "../beam-migration" }
 # Only for the enrichment-provider decision's error type; the client itself is
 # built by beam-index.
-cameo = { version = "0.2.0", default-features = false, features = ["tmdb", "anilist"] }
+cameo = { workspace = true }
 http = { workspace = true }
 async-stream = "0.3"
 async-trait = { workspace = true }
-# The browse cursor is base64url JSON (services/cursor.rs).
+# Every page cursor is base64url JSON (services/cursor/mod.rs).
 base64 = "0.23.1"
 bytes = "1"
 chrono = { workspace = true, features = ["serde"] }
@@ -35,12 +34,10 @@ kynos = { workspace = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 mutants = { workspace = true }
-rand = { workspace = true }
 sea-orm = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
-tempfile = "3.27.0"
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true, features = ["log", "release_max_level_debug"] }
@@ -48,7 +45,9 @@ tracing-subscriber = { workspace = true, features = ["json", "env-filter"] }
 uuid = { workspace = true }
 
 [dev-dependencies]
-futures = "0.3.34"
+# The admin log category's stored spelling, read back in models/admin.rs tests.
+beam-entity = { path = "../beam-entity" }
+tempfile = "3.27.0"
 # Adds the in-process `TestClient` and the contract-conformance assertions.
 kynos = { workspace = true, features = ["test-util"] }
 beam-auth = { path = "../beam-auth", features = ["test-utils"] }
@@ -67,7 +66,6 @@ proptest = "1.11.0"
 rustix = { version = "1.1", features = ["fs"] }
 
 [features]
-test-utils = ["beam-domain/test-utils", "beam-index/test-utils"]
 # The server end-to-end tier (#191): `tests/e2e_server.rs` against a composed
 # Postgres and Dex. Off by default so `cargo test --workspace` needs no
 # infrastructure (NFR-201); `mise run e2e:server` turns it on.
@@ -79,4 +77,7 @@ vendored-ffmpeg = ["beam-index/vendored-ffmpeg"]
 # feature name that is valid everywhere -- and the set it selects has to compile
 # every `cfg`-gated production path, or mutants in code that was never built are
 # reported MISSED for a reason that has nothing to do with the tests.
-mutation-testing = ["vendored-ffmpeg", "test-utils"]
+#
+# No `test-utils`: no crate depends on beam-server, so its doubles are plain
+# `#[cfg(test)]` and the dev-dependencies already enable the sibling crates'.
+mutation-testing = ["vendored-ffmpeg"]

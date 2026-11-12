@@ -31,9 +31,9 @@ use kynos::test::{TestClient, TestResponse};
 use serde_json::{Value, json};
 
 use crate::bootstrap::AllowedOrigins;
-use crate::routes::api_error::SESSION_COOKIE;
 use crate::routes::auth::DEVICE_LOGIN_MAX_SECS;
 use crate::routes::create_router;
+use crate::routes::session_auth::SESSION_COOKIE;
 use crate::routes::test_support::make_app_state_full;
 use crate::services::health::InMemoryDependencyProbe;
 use crate::state::{AppServices, AppState};
@@ -125,36 +125,13 @@ fn build(
     let session_dyn: Arc<dyn SessionStore> = sessions.clone();
     let users_dyn: Arc<dyn UserRepository> = users.clone();
     let services = AppServices {
-        hash: base.services.hash.clone(),
-        access: base.services.access.clone(),
-        library: base.services.library.clone(),
-        metadata: base.services.metadata.clone(),
-        subtitles: base.services.subtitles.clone(),
-        notification: base.services.notification.clone(),
-        admin_log: base.services.admin_log.clone(),
         user_repo: users_dyn,
         language_preferences: crate::routes::test_support::idle_language_preferences(),
-        playback: base.services.playback.clone(),
-        genre_repo: base.services.genre_repo.clone(),
-        library_repo: base.services.library_repo.clone(),
-        file_repo: base.services.file_repo.clone(),
-        enrichment_repo: base.services.enrichment_repo.clone(),
-        enrichment_control: base.services.enrichment_control.clone(),
-        people: base.services.people.clone(),
-        lists: base.services.lists.clone(),
-        collections: base.services.collections.clone(),
-        movie_repo: base.services.movie_repo.clone(),
-        show_repo: base.services.show_repo.clone(),
-        artwork: base.services.artwork.clone(),
         session_store: session_dyn,
         oidc_client: oidc,
-        pending_auth_store: base.services.pending_auth_store.clone(),
         device_auth_store: flows.clone(),
         oidc_config: oidc_config.clone(),
-        watch_status: base.services.watch_status.clone(),
-        telemetry: base.services.telemetry.clone(),
-        playback_telemetry: base.services.playback_telemetry.clone(),
-        trickplay: base.services.trickplay.clone(),
+        ..base.services.clone()
     };
     let state = AppState::with_clock(
         base.config.clone(),

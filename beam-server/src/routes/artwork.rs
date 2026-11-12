@@ -33,8 +33,9 @@ use tracing::error;
 use uuid::Uuid;
 
 use crate::models::media::{ArtworkKind, ArtworkSize, ArtworkVariant};
-use crate::routes::api_error::{ArtworkError, ServerFault, SessionAuth};
-use crate::routes::playback::{caller_access, hides};
+use crate::routes::access::{caller_access, hides};
+use crate::routes::api_error::{ArtworkError, ServerFault};
+use crate::routes::session_auth::SessionAuth;
 use crate::routes::tags::Media;
 use crate::state::AppState;
 

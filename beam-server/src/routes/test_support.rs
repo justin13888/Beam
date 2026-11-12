@@ -29,38 +29,25 @@ use beam_index::services::enrichment::control::{
     EnrichmentControl, EnrichmentControlDeps, TitleNfoPins,
 };
 
-use crate::services::admin_log::{AdminLogService, LocalAdminLogService};
+use crate::models::search::{MediaConnection, PageInfo};
 use crate::services::artwork::{ArtworkCache, ArtworkCacheConfig};
-use crate::services::hash::HashService;
 use crate::services::health::InMemoryDependencyProbe;
 use crate::services::library::LibraryError;
-use crate::services::metadata::{MediaConnection, MetadataError, MetadataService, PageInfo};
-use crate::services::notification::InMemoryNotificationService;
+use crate::services::metadata::{MetadataError, MetadataService};
 use crate::services::playback::{DbPlaybackService, PlaybackRepositories, PlaybackService};
 use crate::services::playback_telemetry::{PlaybackTelemetryConfig, PlaybackTelemetryService};
 use crate::services::sources::SourceCatalog;
 use crate::services::telemetry::{LibraryReportConfig, LibraryReportService};
 use crate::state::{AppServices, AppState};
-
-#[derive(Debug)]
-struct StubHashService;
-
-#[async_trait::async_trait]
-impl HashService for StubHashService {
-    async fn hash_async(&self, _file: std::fs::File) -> std::io::Result<u64> {
-        unimplemented!("not called in routing tests")
-    }
-}
+use beam_index::services::admin_log::{AdminLogService, LocalAdminLogService};
+use beam_index::services::notification::InMemoryNotificationService;
 
 #[derive(Debug)]
 struct StubLibraryService;
 
 #[async_trait::async_trait]
 impl crate::services::library::LibraryService for StubLibraryService {
-    async fn get_libraries(
-        &self,
-        _user_id: String,
-    ) -> Result<Vec<crate::models::Library>, LibraryError> {
+    async fn get_libraries(&self) -> Result<Vec<crate::models::Library>, LibraryError> {
         unimplemented!("not called in routing tests")
     }
     async fn get_library_by_id(
@@ -108,7 +95,7 @@ impl crate::services::library::LibraryService for StubLibraryService {
 }
 
 #[derive(Debug, Default)]
-struct StubMetadataService;
+pub(crate) struct StubMetadataService;
 
 #[async_trait::async_trait]
 impl MetadataService for StubMetadataService {
@@ -537,38 +524,7 @@ pub(crate) fn state_with_language_preferences(
 /// fails, say, to drive a route's NFR-205 path -- every other one shared.
 pub(crate) fn state_with(adjust: impl FnOnce(&mut AppServices)) -> AppState {
     let base = make_app_state();
-    let mut services = AppServices {
-        hash: base.services.hash.clone(),
-        access: base.services.access.clone(),
-        library: base.services.library.clone(),
-        metadata: base.services.metadata.clone(),
-        subtitles: base.services.subtitles.clone(),
-        notification: base.services.notification.clone(),
-        admin_log: base.services.admin_log.clone(),
-        user_repo: base.services.user_repo.clone(),
-        language_preferences: base.services.language_preferences.clone(),
-        playback: base.services.playback.clone(),
-        genre_repo: base.services.genre_repo.clone(),
-        library_repo: base.services.library_repo.clone(),
-        file_repo: base.services.file_repo.clone(),
-        enrichment_repo: base.services.enrichment_repo.clone(),
-        enrichment_control: base.services.enrichment_control.clone(),
-        people: base.services.people.clone(),
-        lists: base.services.lists.clone(),
-        collections: base.services.collections.clone(),
-        movie_repo: base.services.movie_repo.clone(),
-        show_repo: base.services.show_repo.clone(),
-        artwork: base.services.artwork.clone(),
-        session_store: base.services.session_store.clone(),
-        oidc_client: base.services.oidc_client.clone(),
-        pending_auth_store: base.services.pending_auth_store.clone(),
-        device_auth_store: base.services.device_auth_store.clone(),
-        oidc_config: base.services.oidc_config.clone(),
-        watch_status: base.services.watch_status.clone(),
-        telemetry: base.services.telemetry.clone(),
-        playback_telemetry: base.services.playback_telemetry.clone(),
-        trickplay: base.services.trickplay.clone(),
-    };
+    let mut services = base.services.clone();
     adjust(&mut services);
     AppState::new(base.config.clone(), services, base.probe.clone(), None)
 }
@@ -630,6 +586,50 @@ fn make_app_state_with_services(
     playback_telemetry: Arc<PlaybackTelemetryService>,
     enrichment_provider: Arc<dyn EnrichmentProvider>,
 ) -> AppState {
+    let services = services_over(
+        clock.clone(),
+        telemetry,
+        playback_telemetry,
+        enrichment_provider,
+    );
+
+    let config = crate::config::ServerConfig {
+        video_dir: PathBuf::from("/tmp"),
+        data_dir: PathBuf::from("/tmp"),
+        database_url: "postgres://unused:unused@localhost/unused".to_string(),
+        watch_enabled: false,
+        anilist_enabled: false,
+        cookie_secure: Some(false),
+        ..Default::default()
+    };
+
+    let mut config = config;
+    adjust(&mut config);
+
+    AppState::with_clock(config, services, probe, clock, metrics)
+}
+
+/// The services of [`make_app_state`]: every one a stub or an idle in-memory
+/// fake, on the real clock. A fixture that wires a few seams of its own and
+/// needs none of the rest writes `AppServices { library, ..idle_services() }`.
+pub(crate) fn idle_services() -> AppServices {
+    services_over(
+        Arc::new(beam_domain::services::RealClock),
+        idle_library_report(),
+        idle_playback_telemetry(),
+        Arc::new(NoopEnrichmentProvider),
+    )
+}
+
+/// The one place the test suite spells out every [`AppServices`] field.
+/// Fixtures vary it with struct-update syntax over [`idle_services`] or over
+/// a `make_app_state*` state's `services.clone()`.
+fn services_over(
+    clock: Arc<dyn beam_domain::services::Clock>,
+    telemetry: Arc<LibraryReportService>,
+    playback_telemetry: Arc<PlaybackTelemetryService>,
+    enrichment_provider: Arc<dyn EnrichmentProvider>,
+) -> AppServices {
     let notification = Arc::new(InMemoryNotificationService::new());
     let admin_log: Arc<dyn AdminLogService> = Arc::new(LocalAdminLogService::new(Arc::new(
         InMemoryAdminLogRepository::default(),
@@ -671,8 +671,7 @@ fn make_app_state_with_services(
         playback.clone(),
     );
     let collections = idle_collections(metadata.clone(), playback.clone());
-    let services = AppServices {
-        hash: Arc::new(StubHashService),
+    AppServices {
         access: open_access(),
         library: Arc::new(StubLibraryService),
         metadata,
@@ -713,20 +712,5 @@ fn make_app_state_with_services(
         telemetry,
         playback_telemetry,
         trickplay: idle_trickplay(),
-    };
-
-    let config = crate::config::ServerConfig {
-        video_dir: PathBuf::from("/tmp"),
-        data_dir: PathBuf::from("/tmp"),
-        database_url: "postgres://unused:unused@localhost/unused".to_string(),
-        watch_enabled: false,
-        anilist_enabled: false,
-        cookie_secure: Some(false),
-        ..Default::default()
-    };
-
-    let mut config = config;
-    adjust(&mut config);
-
-    AppState::with_clock(config, services, probe, clock, metrics)
+    }
 }

@@ -11,16 +11,13 @@
 //! is scoped to the caller's own entries. It names its list, so the
 //! watchlist's cursor is refused by favourites, and so is any other list's.
 
-use base64::Engine as _;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use beam_domain::models::user_list::{UserList, UserListPosition};
 
-/// The cursor layout this build writes and reads.
-const VERSION: u8 = 1;
+use super::{VERSION, open, seal};
 
 /// Why a cursor was refused: every case is the caller's to fix.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -53,21 +50,17 @@ pub fn encode(list: UserList, position: &UserListPosition) -> String {
             .to_rfc3339_opts(SecondsFormat::AutoSi, true),
         id: position.id,
     };
-    let json = serde_json::to_vec(&body).expect("a cursor body always serializes");
-    URL_SAFE_NO_PAD.encode(json)
+    seal(&body)
 }
 
 /// The position `cursor` names in `list`.
 pub fn decode(list: UserList, cursor: &str) -> Result<UserListPosition, CursorError> {
-    let bytes = URL_SAFE_NO_PAD
-        .decode(cursor)
-        .map_err(|_| CursorError::Malformed)?;
     let CursorBody {
         v,
         list: issuer,
         added_at,
         id,
-    } = serde_json::from_slice(&bytes).map_err(|_| CursorError::Malformed)?;
+    } = open(cursor).ok_or(CursorError::Malformed)?;
     if v != VERSION {
         return Err(CursorError::WrongVersion);
     }
@@ -83,6 +76,8 @@ pub fn decode(list: UserList, cursor: &str) -> Result<UserListPosition, CursorEr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use proptest::prelude::*;
 
     proptest! {
@@ -111,7 +106,7 @@ mod tests {
         let encode_json = |json: &str| URL_SAFE_NO_PAD.encode(json.as_bytes());
         let id = Uuid::nil();
         let at = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
-        let history = crate::services::history_cursor::encode(
+        let history = crate::services::cursor::history::encode(
             &beam_domain::models::watch_state::HistoryPosition {
                 last_played_at: at,
                 id,

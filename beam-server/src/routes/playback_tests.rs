@@ -1,6 +1,7 @@
 //! Subcutaneous tests for watched state (issue #188): progress reports,
-//! title progress, watched marks, continue-watching, history, and the state
-//! laid over the detail routes.
+//! title progress, watched marks, history, and the state laid over the detail
+//! routes. The continue-watching tests are in `continue_watching_tests.rs`,
+//! over the fixture here.
 //!
 //! The playback and metadata services here are the real ones over in-memory
 //! stores, seeded through the repositories' own traits, because what these
@@ -32,7 +33,7 @@ use crate::models::playback::{
     ContinueWatchingConnection, ContinueWatchingReason, HistoryConnection, ReportProgressRequest,
     UserTitleState,
 };
-use crate::models::{EpisodeDetail, MediaConnection, MediaMetadata, SeasonDetail, TitleKind};
+use crate::models::{EpisodeDetail, MediaConnection, MediaMetadata, SeasonDetail};
 use crate::routes::media::{browse_media, get_episode_detail, get_media_detail, get_season_detail};
 use crate::routes::playback::{
     clear_title_progress, dismiss_continue_watching, get_continue_watching, get_history,
@@ -40,15 +41,15 @@ use crate::routes::playback::{
 };
 use crate::routes::test_support::make_app_state;
 use crate::services::metadata::{DbMetadataService, MetadataRepositories};
-use crate::services::playback::{CANDIDATE_CEILING, DbPlaybackService, PlaybackRepositories};
+use crate::services::playback::{DbPlaybackService, PlaybackRepositories};
 use crate::services::sources::SourceCatalog;
 use crate::state::{AppServices, AppState};
 
 /// A state whose playback and metadata services are real, over the stores
 /// kept here so a test can seed titles and files through them.
-struct Fixture {
+pub(super) struct Fixture {
     state: AppState,
-    files: Arc<InMemoryFileRepository>,
+    pub(super) files: Arc<InMemoryFileRepository>,
     movies: Arc<InMemoryMovieRepository>,
     shows: Arc<InMemoryShowRepository>,
     /// What `last_played_at` is stamped from, so a test orders plays by
@@ -57,7 +58,7 @@ struct Fixture {
     library_id: Uuid,
 }
 
-fn fixture() -> Fixture {
+pub(super) fn fixture() -> Fixture {
     let base = make_app_state();
     let files = Arc::new(InMemoryFileRepository::default());
     let movies = Arc::new(InMemoryMovieRepository::with_files(files.clone()));
@@ -98,36 +99,16 @@ fn fixture() -> Fixture {
     }));
 
     let services = AppServices {
-        hash: base.services.hash.clone(),
-        access: base.services.access.clone(),
-        library: base.services.library.clone(),
         metadata,
-        subtitles: base.services.subtitles.clone(),
-        notification: base.services.notification.clone(),
-        admin_log: base.services.admin_log.clone(),
-        user_repo: base.services.user_repo.clone(),
-        language_preferences: base.services.language_preferences.clone(),
         playback,
         genre_repo: genres,
-        library_repo: base.services.library_repo.clone(),
         file_repo: files.clone(),
-        enrichment_repo: base.services.enrichment_repo.clone(),
-        enrichment_control: base.services.enrichment_control.clone(),
         people: crate::routes::test_support::idle_people(movies.clone(), shows.clone()),
         lists: crate::routes::test_support::unused_lists(),
         collections: crate::routes::test_support::unused_collections(),
         movie_repo: movies.clone(),
         show_repo: shows.clone(),
-        artwork: base.services.artwork.clone(),
-        session_store: base.services.session_store.clone(),
-        oidc_client: base.services.oidc_client.clone(),
-        pending_auth_store: base.services.pending_auth_store.clone(),
-        device_auth_store: base.services.device_auth_store.clone(),
-        oidc_config: base.services.oidc_config.clone(),
-        watch_status: Arc::new(beam_index::services::watch_status::WatchStatus::new()),
-        telemetry: crate::routes::test_support::idle_library_report(),
-        playback_telemetry: crate::routes::test_support::idle_playback_telemetry(),
-        trickplay: crate::routes::test_support::idle_trickplay(),
+        ..base.services.clone()
     };
 
     Fixture {
@@ -140,7 +121,7 @@ fn fixture() -> Fixture {
     }
 }
 
-fn client(fixture: &Fixture) -> TestClient<AppState> {
+pub(super) fn client(fixture: &Fixture) -> TestClient<AppState> {
     let service = Router::new()
         .nest(
             "/v1",
@@ -166,7 +147,7 @@ fn client(fixture: &Fixture) -> TestClient<AppState> {
 
 /// A session for a new user. Every row is keyed by the user, so one token
 /// is one viewer.
-async fn session(fixture: &Fixture) -> String {
+pub(super) async fn session(fixture: &Fixture) -> String {
     fixture
         .state
         .services
@@ -187,7 +168,7 @@ async fn session(fixture: &Fixture) -> String {
 }
 
 impl Fixture {
-    async fn movie(&self, title: &str) -> Uuid {
+    pub(super) async fn movie(&self, title: &str) -> Uuid {
         let movie = self
             .movies
             .find_or_create_by_identity(CreateMovie::new(title, None, None))
@@ -201,7 +182,12 @@ impl Fixture {
         movie.id
     }
 
-    async fn file(&self, content: MediaFileContent, size_bytes: u64, duration_secs: u64) -> Uuid {
+    pub(super) async fn file(
+        &self,
+        content: MediaFileContent,
+        size_bytes: u64,
+        duration_secs: u64,
+    ) -> Uuid {
         let unique = Uuid::new_v4();
         self.files
             .create(CreateMediaFile {
@@ -218,7 +204,7 @@ impl Fixture {
 
     /// A file of `movie_id`, `size_bytes` large -- the larger is primary --
     /// lasting 100 seconds.
-    async fn movie_file(&self, movie_id: Uuid, size_bytes: u64) -> Uuid {
+    pub(super) async fn movie_file(&self, movie_id: Uuid, size_bytes: u64) -> Uuid {
         let entry = self
             .movies
             .find_or_create_entry(CreateMovieEntry {
@@ -255,7 +241,7 @@ impl Fixture {
         parts
     }
 
-    async fn show(&self, title: &str) -> Uuid {
+    pub(super) async fn show(&self, title: &str) -> Uuid {
         let show = self
             .shows
             .find_or_create_by_identity(CreateShow::new(title, None))
@@ -268,7 +254,7 @@ impl Fixture {
     }
 
     /// Episode `number` of season `season` of `show_id`, with no file.
-    async fn bare_episode(&self, show_id: Uuid, season: u32, number: u32) -> Uuid {
+    pub(super) async fn bare_episode(&self, show_id: Uuid, season: u32, number: u32) -> Uuid {
         let season = self
             .shows
             .find_or_create_season(show_id, season)
@@ -289,7 +275,7 @@ impl Fixture {
 
     /// Episode `number` of season `season` with one 100-second file; returns
     /// `(episode, file)`.
-    async fn episode(&self, show_id: Uuid, season: u32, number: u32) -> (Uuid, Uuid) {
+    pub(super) async fn episode(&self, show_id: Uuid, season: u32, number: u32) -> (Uuid, Uuid) {
         let episode = self.bare_episode(show_id, season, number).await;
         let file = self
             .file(MediaFileContent::episode(episode), 1024, 100)
@@ -297,7 +283,7 @@ impl Fixture {
         (episode, file)
     }
 
-    fn later(&self) {
+    pub(super) fn later(&self) {
         self.clock.advance(Duration::from_secs(60));
     }
 }
@@ -321,12 +307,21 @@ async fn report(
 }
 
 /// Report `position_secs` of a 100-second file, which must be accepted.
-async fn watch(client: &TestClient<AppState>, token: &str, file_id: Uuid, position_secs: f64) {
+pub(super) async fn watch(
+    client: &TestClient<AppState>,
+    token: &str,
+    file_id: Uuid,
+    position_secs: f64,
+) {
     let response = report(client, token, file_id, position_secs, Some(100.0)).await;
     assert_eq!(response.status(), StatusCode::OK, "{}", response.text());
 }
 
-async fn progress(client: &TestClient<AppState>, token: &str, id: Uuid) -> UserTitleState {
+pub(super) async fn progress(
+    client: &TestClient<AppState>,
+    token: &str,
+    id: Uuid,
+) -> UserTitleState {
     let response = client
         .get(&format!("/v1/media/{id}/progress"))
         .cookie("beam_session", token)
@@ -336,7 +331,7 @@ async fn progress(client: &TestClient<AppState>, token: &str, id: Uuid) -> UserT
     response.json()
 }
 
-async fn continue_watching(
+pub(super) async fn continue_watching(
     client: &TestClient<AppState>,
     token: &str,
 ) -> ContinueWatchingConnection {
@@ -359,7 +354,7 @@ async fn history(client: &TestClient<AppState>, token: &str, query: &str) -> His
     response.json()
 }
 
-async fn set_watched(
+pub(super) async fn set_watched(
     client: &TestClient<AppState>,
     token: &str,
     id: Uuid,
@@ -813,362 +808,6 @@ async fn one_viewers_state_is_never_anothers() {
     );
     assert!(continue_watching(&client, &bob).await.items.is_empty());
     assert_eq!(history(&client, &bob, "").await.total, 0);
-}
-
-// ── Continue-watching ────────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn a_finished_episode_offers_the_next_with_what_the_row_displays() {
-    let fixture = fixture();
-    let show = fixture.show("Dark").await;
-    let (_, f1) = fixture.episode(show, 1, 1).await;
-    let (e2, _) = fixture.episode(show, 1, 2).await;
-    // A second, larger source of E2: the primary, which a next-up plays.
-    let e2_primary = fixture
-        .file(MediaFileContent::episode(e2), 9_000, 100)
-        .await;
-    let client = client(&fixture);
-    let token = session(&fixture).await;
-
-    watch(&client, &token, f1, 99.0).await;
-
-    let shelf = continue_watching(&client, &token).await;
-    assert_eq!(shelf.items.len(), 1);
-    let item = &shelf.items[0];
-    assert_eq!(item.reason, ContinueWatchingReason::NextUp);
-    assert_eq!((item.media_id, item.media_type), (show, TitleKind::Show));
-    assert_eq!(item.episode_id, Some(e2));
-    assert_eq!(item.file_id, e2_primary);
-    assert_eq!(item.position_secs, 0.0);
-    assert_eq!(
-        (item.season_number, item.episode_number),
-        (Some(1), Some(2))
-    );
-    assert_eq!(item.episode_title.as_deref(), Some("Episode 2"));
-    assert!(item.title.starts_with("Dark"));
-    assert_eq!(
-        item.poster_url.as_deref(),
-        Some(format!("/v1/artwork/show/{show}/poster").as_str())
-    );
-    assert!(!shelf.page_info.has_next_page);
-}
-
-#[tokio::test]
-async fn a_show_is_one_row_however_many_episodes_are_started() {
-    let fixture = fixture();
-    let show = fixture.show("Dark").await;
-    let movie = fixture.movie("Heat").await;
-    let movie_file = fixture.movie_file(movie, 1_000).await;
-    let (_, f1) = fixture.episode(show, 1, 1).await;
-    let (e2, f2) = fixture.episode(show, 1, 2).await;
-    let client = client(&fixture);
-    let token = session(&fixture).await;
-
-    watch(&client, &token, f1, 30.0).await;
-    fixture.later();
-    watch(&client, &token, movie_file, 30.0).await;
-    fixture.later();
-    watch(&client, &token, f2, 50.0).await;
-
-    let shelf = continue_watching(&client, &token).await;
-    let rows: Vec<(Uuid, Option<Uuid>, f64)> = shelf
-        .items
-        .iter()
-        .map(|i| (i.media_id, i.episode_id, i.position_secs))
-        .collect();
-    assert_eq!(
-        rows,
-        vec![(show, Some(e2), 50.0), (movie, None, 30.0)],
-        "the show once, at the episode touched last, newest first"
-    );
-}
-
-#[tokio::test]
-async fn next_up_steps_over_an_episode_with_no_file_and_ends_with_the_show() {
-    let fixture = fixture();
-    let show = fixture.show("Dark").await;
-    let (_, f1) = fixture.episode(show, 1, 1).await;
-    fixture.bare_episode(show, 1, 2).await;
-    let (e3, f3) = fixture.episode(show, 1, 3).await;
-    let client = client(&fixture);
-    let token = session(&fixture).await;
-
-    watch(&client, &token, f1, 99.0).await;
-    assert_eq!(
-        continue_watching(&client, &token).await.items[0].episode_id,
-        Some(e3)
-    );
-
-    fixture.later();
-    watch(&client, &token, f3, 99.0).await;
-    assert!(continue_watching(&client, &token).await.items.is_empty());
-}
-
-#[tokio::test]
-async fn a_missing_last_file_falls_back_to_the_primary() {
-    let fixture = fixture();
-    let movie = fixture.movie("Heat").await;
-    let small = fixture.movie_file(movie, 1_000).await;
-    let large = fixture.movie_file(movie, 4_000).await;
-    let client = client(&fixture);
-    let token = session(&fixture).await;
-    watch(&client, &token, small, 30.0).await;
-
-    fixture
-        .files
-        .mark_missing(vec![small], chrono::Utc::now())
-        .await
-        .unwrap();
-
-    let shelf = continue_watching(&client, &token).await;
-    assert_eq!(shelf.items[0].file_id, large);
-    assert_eq!(shelf.items[0].position_secs, 30.0);
-
-    fixture
-        .files
-        .mark_missing(vec![large], chrono::Utc::now())
-        .await
-        .unwrap();
-    assert!(
-        continue_watching(&client, &token).await.items.is_empty(),
-        "nothing left to play it from"
-    );
-}
-
-#[tokio::test]
-async fn a_dismissed_title_stays_away_until_it_is_played_again() {
-    let fixture = fixture();
-    let show = fixture.show("Dark").await;
-    let (e1, f1) = fixture.episode(show, 1, 1).await;
-    let (_, f2) = fixture.episode(show, 1, 2).await;
-    let client = client(&fixture);
-    let token = session(&fixture).await;
-    watch(&client, &token, f1, 30.0).await;
-
-    // An episode id dismisses its show.
-    let response = client
-        .delete(&format!("/v1/continue-watching/{e1}"))
-        .cookie("beam_session", &token)
-        .send()
-        .await;
-    assert_eq!(response.status(), StatusCode::NO_CONTENT);
-    assert!(continue_watching(&client, &token).await.items.is_empty());
-    assert_eq!(
-        progress(&client, &token, e1).await.position_secs,
-        30.0,
-        "dismissing keeps the resume point"
-    );
-
-    fixture.later();
-    watch(&client, &token, f2, 10.0).await;
-    assert_eq!(continue_watching(&client, &token).await.items.len(), 1);
-
-    let unknown = client
-        .delete(&format!("/v1/continue-watching/{}", Uuid::new_v4()))
-        .cookie("beam_session", &token)
-        .send()
-        .await;
-    assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
-async fn a_multi_episode_file_watched_to_its_end_plays_its_whole_run() {
-    let fixture = fixture();
-    let show = fixture.show("Dark").await;
-    let e1 = fixture.bare_episode(show, 1, 1).await;
-    let e2 = fixture.bare_episode(show, 1, 2).await;
-    let e3 = fixture.bare_episode(show, 1, 3).await;
-    let (e4, _) = fixture.episode(show, 1, 4).await;
-    let run = fixture
-        .file(
-            MediaFileContent::Episode {
-                episode_id: e1,
-                last_episode_number: Some(3),
-            },
-            1_000,
-            100,
-        )
-        .await;
-    let client = client(&fixture);
-    let token = session(&fixture).await;
-
-    watch(&client, &token, run, 98.0).await;
-
-    for episode in [e1, e2, e3] {
-        assert!(progress(&client, &token, episode).await.played, "{episode}");
-    }
-    assert!(!progress(&client, &token, e4).await.played);
-    assert_eq!(
-        continue_watching(&client, &token).await.items[0].episode_id,
-        Some(e4),
-        "next up is after the run"
-    );
-}
-
-/// Going back to an earlier episode does not lose the one left part-way
-/// after it: when next-up lands on it, the row resumes it, on the source it
-/// was being played from (FR-507).
-#[tokio::test]
-async fn next_up_onto_an_episode_under_way_resumes_it_from_its_source() {
-    let fixture = fixture();
-    let show = fixture.show("Dark").await;
-    let (_, f1) = fixture.episode(show, 1, 1).await;
-    let (e2, f2) = fixture.episode(show, 1, 2).await;
-    // A second, larger source of E2: the primary, which the viewer did not
-    // choose.
-    let e2_primary = fixture
-        .file(MediaFileContent::episode(e2), 9_000, 100)
-        .await;
-    let client = client(&fixture);
-    let token = session(&fixture).await;
-
-    watch(&client, &token, f2, 60.0).await;
-    fixture.later();
-    // Back to E1, watched to its end: the anchor, and E2 is next.
-    watch(&client, &token, f1, 99.0).await;
-
-    let shelf = continue_watching(&client, &token).await;
-    assert_eq!(shelf.items.len(), 1);
-    let item = &shelf.items[0];
-    assert_eq!(item.episode_id, Some(e2));
-    assert_eq!(item.reason, ContinueWatchingReason::Resume);
-    assert_eq!(item.position_secs, 60.0, "the resume point stands");
-    assert_eq!(item.duration_secs, Some(100.0));
-    assert_eq!(
-        item.file_id, f2,
-        "the source it was played from, not the primary ({e2_primary})"
-    );
-
-    // With no position to resume, the same episode is offered from the start.
-    let fresh = session(&fixture).await;
-    watch(&client, &fresh, f1, 99.0).await;
-    let item = &continue_watching(&client, &fresh).await.items[0];
-    assert_eq!(
-        (
-            item.reason,
-            item.episode_id,
-            item.position_secs,
-            item.file_id
-        ),
-        (ContinueWatchingReason::NextUp, Some(e2), 0.0, e2_primary)
-    );
-}
-
-#[tokio::test]
-async fn continue_watching_is_bounded_by_first() {
-    let fixture = fixture();
-    let client = client(&fixture);
-    let token = session(&fixture).await;
-    for title in ["A", "B", "C"] {
-        let movie = fixture.movie(title).await;
-        let file = fixture.movie_file(movie, 1_000).await;
-        watch(&client, &token, file, 10.0).await;
-        fixture.later();
-    }
-
-    let response = client
-        .get("/v1/continue-watching?first=2")
-        .cookie("beam_session", &token)
-        .send()
-        .await;
-    let shelf: ContinueWatchingConnection = response.json();
-    assert_eq!(shelf.items.len(), 2);
-    assert!(
-        shelf.page_info.has_next_page,
-        "a title past a full shelf may offer a row"
-    );
-    let whole = continue_watching(&client, &token).await;
-    assert_eq!(whole.items.len(), 3);
-    assert!(!whole.page_info.has_next_page, "every candidate was read");
-    for first in ["0", "51"] {
-        let response = client
-            .get(&format!("/v1/continue-watching?first={first}"))
-            .cookie("beam_session", &token)
-            .send()
-            .await;
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "first={first}");
-    }
-}
-
-/// Mark `count` new shows of one episode each watched, all after everything
-/// played so far.
-async fn caught_up_shows(
-    fixture: &Fixture,
-    client: &TestClient<AppState>,
-    token: &str,
-    count: u64,
-) {
-    fixture.later();
-    for n in 0..count {
-        let show = fixture
-            .show(&format!("Caught up {n} {}", Uuid::new_v4()))
-            .await;
-        fixture.episode(show, 1, 1).await;
-        assert_eq!(
-            set_watched(client, token, show, true).await,
-            StatusCode::NO_CONTENT
-        );
-    }
-}
-
-/// A bulk mark makes caught-up shows by the hundred, each played more
-/// recently than anything in progress. They are read past, a page of
-/// candidates after another, not counted against the shelf.
-#[tokio::test]
-async fn caught_up_shows_newer_than_an_unfinished_title_never_crowd_it_out() {
-    let fixture = fixture();
-    let client = client(&fixture);
-    let token = session(&fixture).await;
-    let movie = fixture.movie("Heat").await;
-    let file = fixture.movie_file(movie, 1_000).await;
-    watch(&client, &token, file, 30.0).await;
-    // More than one page of candidates, so the movie is found by reading on.
-    caught_up_shows(&fixture, &client, &token, 250).await;
-
-    for first in [1, 2] {
-        let response = client
-            .get(&format!("/v1/continue-watching?first={first}"))
-            .cookie("beam_session", &token)
-            .send()
-            .await;
-        assert_eq!(response.status(), StatusCode::OK, "{}", response.text());
-        let shelf: ContinueWatchingConnection = response.json();
-        let rows: Vec<Uuid> = shelf.items.iter().map(|i| i.media_id).collect();
-        assert_eq!(rows, vec![movie], "first={first}");
-        assert!(!shelf.page_info.has_next_page, "first={first}");
-    }
-}
-
-/// However many caught-up shows a viewer has, one load examines at most
-/// [`CANDIDATE_CEILING`] titles. A title just inside it is listed; one just
-/// past it is not, and the shelf says more may exist.
-#[tokio::test]
-async fn a_load_examines_candidates_up_to_the_ceiling_and_says_when_more_may_exist() {
-    let fixture = fixture();
-    let client = client(&fixture);
-    let token = session(&fixture).await;
-    let movie = fixture.movie("Heat").await;
-    let file = fixture.movie_file(movie, 1_000).await;
-    watch(&client, &token, file, 30.0).await;
-    caught_up_shows(&fixture, &client, &token, CANDIDATE_CEILING - 1).await;
-
-    let inside = continue_watching(&client, &token).await;
-    let rows: Vec<Uuid> = inside.items.iter().map(|i| i.media_id).collect();
-    assert_eq!(rows, vec![movie], "the last title the ceiling reaches");
-    assert!(!inside.page_info.has_next_page);
-
-    caught_up_shows(&fixture, &client, &token, 1).await;
-    let past = continue_watching(&client, &token).await;
-    assert!(past.items.is_empty(), "the movie is past the ceiling");
-    assert!(
-        past.page_info.has_next_page,
-        "a title past the ceiling may offer a row"
-    );
-    assert_eq!(
-        progress(&client, &token, movie).await.position_secs,
-        30.0,
-        "past the ceiling, the title keeps its place"
-    );
 }
 
 // ── History ──────────────────────────────────────────────────────────────────

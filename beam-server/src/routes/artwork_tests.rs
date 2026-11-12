@@ -69,27 +69,11 @@ mod tests {
         ));
 
         let services = AppServices {
-            hash: base.services.hash.clone(),
-            access: base.services.access.clone(),
-            library: base.services.library.clone(),
-            metadata: base.services.metadata.clone(),
-            subtitles: base.services.subtitles.clone(),
-            notification: base.services.notification.clone(),
-            admin_log: base.services.admin_log.clone(),
-            user_repo: base.services.user_repo.clone(),
-            language_preferences: base.services.language_preferences.clone(),
-            playback: base.services.playback.clone(),
-            genre_repo: base.services.genre_repo.clone(),
-            library_repo: base.services.library_repo.clone(),
-            file_repo: base.services.file_repo.clone(),
-            enrichment_repo: base.services.enrichment_repo.clone(),
-            enrichment_control: base.services.enrichment_control.clone(),
             people: Arc::new(crate::services::people::PeopleService::new(
                 people.clone(),
                 movies.clone(),
                 shows.clone(),
             )),
-            lists: base.services.lists.clone(),
             collections: Arc::new(crate::services::collections::CollectionService::new(
                 collections.clone(),
                 base.services.metadata.clone(),
@@ -98,15 +82,7 @@ mod tests {
             movie_repo: movies.clone(),
             show_repo: shows.clone(),
             artwork,
-            session_store: base.services.session_store.clone(),
-            oidc_client: base.services.oidc_client.clone(),
-            pending_auth_store: base.services.pending_auth_store.clone(),
-            device_auth_store: base.services.device_auth_store.clone(),
-            oidc_config: base.services.oidc_config.clone(),
-            watch_status: Arc::new(beam_index::services::watch_status::WatchStatus::new()),
-            telemetry: crate::routes::test_support::idle_library_report(),
-            playback_telemetry: crate::routes::test_support::idle_playback_telemetry(),
-            trickplay: crate::routes::test_support::idle_trickplay(),
+            ..base.services.clone()
         };
 
         Fixture {

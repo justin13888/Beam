@@ -2,7 +2,6 @@
 //! library's movies are in, and one collection's movies.
 
 use std::cmp::Ordering;
-use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use sea_orm::DbErr;
@@ -17,8 +16,10 @@ use crate::models::{
     ArtworkKind, ArtworkVariant, Collection, CollectionConnection, CollectionDetail, MediaMetadata,
     MovieMetadata, artwork_path,
 };
+use crate::services::cursor;
+use crate::services::cursor::offset::OffsetList;
 use crate::services::metadata::MetadataService;
-use crate::services::offset_cursor::{self, OffsetList};
+use crate::services::paging::page_size;
 use crate::services::playback::PlaybackService;
 
 /// The page size when a request names none.
@@ -133,15 +134,9 @@ impl CollectionService {
         first: Option<u32>,
         after: Option<String>,
     ) -> Result<CollectionConnection, CollectionError> {
-        let size = first.unwrap_or(DEFAULT_PAGE_SIZE);
-        let size = NonZeroU32::new(size)
-            .filter(|size| size.get() <= MAX_PAGE_SIZE)
-            .ok_or_else(|| {
-                CollectionError::InvalidPagination(format!(
-                    "a page holds 1 to {MAX_PAGE_SIZE} collections, not {size}"
-                ))
-            })?;
-        let offset = offset_cursor::start_after(OffsetList::Collections, after.as_deref())
+        let size = page_size(first, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, "collections")
+            .map_err(CollectionError::InvalidPagination)?;
+        let offset = cursor::offset::start_after(OffsetList::Collections, after.as_deref())
             .map_err(|err| CollectionError::InvalidCursor(err.to_string()))?;
 
         let page = self
@@ -151,7 +146,12 @@ impl CollectionService {
             .map_err(internal)?;
         let total = self.collections.count(access).await.map_err(internal)?;
         Ok(CollectionConnection {
-            page_info: offset_cursor::page_info(OffsetList::Collections, offset, page.len(), total),
+            page_info: cursor::offset::page_info(
+                OffsetList::Collections,
+                offset,
+                page.len(),
+                total,
+            ),
             items: page
                 .into_iter()
                 .map(|summary| {

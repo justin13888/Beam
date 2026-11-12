@@ -20,7 +20,7 @@ use std::future::Future;
 use std::sync::{Arc, Mutex};
 
 /// The cookie `beam-server` issues and reads. Defined in
-/// `beam-server/src/routes/api_error.rs`.
+/// `beam-server/src/routes/session_auth.rs`.
 pub const SESSION_COOKIE: &str = "beam_session";
 
 /// [`SESSION_COOKIE`], for a platform that lifts the session out of a browser

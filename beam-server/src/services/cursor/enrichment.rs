@@ -12,16 +12,13 @@
 //! are not in it: the list's order is the same under every filter, so a
 //! position is one whatever the filters are.
 
-use base64::Engine as _;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use beam_domain::models::enrichment::EnrichmentListPosition;
 
-/// The cursor layout this build writes and reads.
-const VERSION: u8 = 1;
+use super::{VERSION, open, seal};
 
 /// Why a cursor was refused: every case is the caller's to fix.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -52,17 +49,12 @@ pub fn encode(position: &EnrichmentListPosition) -> String {
             .to_rfc3339_opts(SecondsFormat::AutoSi, true),
         id: position.id,
     };
-    let json = serde_json::to_vec(&body).expect("a cursor body always serializes");
-    URL_SAFE_NO_PAD.encode(json)
+    seal(&body)
 }
 
 /// The position `cursor` names.
 pub fn decode(cursor: &str) -> Result<EnrichmentListPosition, CursorError> {
-    let bytes = URL_SAFE_NO_PAD
-        .decode(cursor)
-        .map_err(|_| CursorError::Malformed)?;
-    let CursorBody { v, at, id } =
-        serde_json::from_slice(&bytes).map_err(|_| CursorError::Malformed)?;
+    let CursorBody { v, at, id } = open(cursor).ok_or(CursorError::Malformed)?;
     if v != VERSION {
         return Err(CursorError::WrongVersion);
     }
@@ -75,6 +67,8 @@ pub fn decode(cursor: &str) -> Result<EnrichmentListPosition, CursorError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use proptest::prelude::*;
 
     proptest! {

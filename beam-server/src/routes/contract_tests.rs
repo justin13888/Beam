@@ -288,7 +288,7 @@ mod tests {
                 .send()
                 .await
                 .assert_status(StatusCode::FORBIDDEN)
-                .assert_problem_type(crate::routes::api_error::ADMIN_REQUIRED);
+                .assert_problem_type(crate::routes::session_auth::ADMIN_REQUIRED);
         }
     }
 

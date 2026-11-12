@@ -192,7 +192,7 @@ that does not apply to that kind of title (a season has no backdrop, an episode 
     `after` was given; backwards, the mirror. Pass `end_cursor` as `after` for the next page and
     `start_cursor` as `before` for the previous one.
   - A cursor is opaque base64url JSON holding the sort it was issued under and the boundary
-    title's sort key, kind and id (`services/cursor.rs`). It is a **position, not an offset**:
+    title's sort key, kind and id (`services/cursor/browse.rs`). It is a **position, not an offset**:
     a page after a title that has since left the listing starts where that title was. A cursor
     that is not the server's, or was issued under another `sort_by`/`sort_order`, is
     `400 #invalid-cursor`. It is unsigned: everything in it is either public or checked.
@@ -229,7 +229,7 @@ that does not apply to that kind of title (a season has no backdrop, an episode 
   `GET /v1/admin/enrichment` ([#185](https://github.com/justin13888/beam/issues/185)) is the
   same shape forwards only (`first`, 1-100, default 20, and `after`), plus `total`. Its order is
   fixed -- the most recently changed row first, `updated_at` then row id, both descending -- so its
-  cursor (`services/enrichment_cursor.rs`) holds just that pair, at full precision, and is valid
+  cursor (`services/cursor/enrichment.rs`) holds just that pair, at full precision, and is valid
   under any `status`/`kind` filter. A page is one keyset statement on
   `idx_metadata_enrichment_list`, one count and one read by ids per kind to name the titles.
 
@@ -238,20 +238,20 @@ that does not apply to that kind of title (a season has no backdrop, an episode 
   The rest page the same way, forwards only:
   - `GET /v1/libraries/{id}/files` by `first` (1-500, default 100) and `after`, ordered by stored
     path then id, through `FileRepository::find_page_by_library` -- a keyset seek, so a page costs
-    one statement whatever the library's size. Its cursor (`services/library_files_cursor.rs`)
+    one statement whatever the library's size. Its cursor (`services/cursor/library_files.rs`)
     holds the root-relative path the page reported, never the absolute one (NFR-108), and its
     library's id, so another library's cursor is `400 #invalid-cursor`. No `total`: the library's
     `file_count` is it.
   - `GET /v1/watchlist` and `GET /v1/favourites` by `first` (1-100, default 50) and `after`, with
     `total`, newest addition first: `added_at` then entry id, both descending, as a keyset on
-    `idx_user_list_entries_page`. Their cursor (`services/user_list_cursor.rs`) holds that pair at
+    `idx_user_list_entries_page`. Their cursor (`services/cursor/user_list.rs`) holds that pair at
     full precision and names its list, so the watchlist's cursor is `400 #invalid-cursor` on
     favourites.
   - `GET /v1/people` and `GET /v1/collections` (`first` 1-100, default 20) with `total`, by name
     ignoring ASCII case, through the offset cursor below.
   - `GET /v1/admin/users` (`first` 1-100, default 50) and `GET /v1/admin/logs` (`first` 1-200,
     default 50) with `total`. Both read by `LIMIT`/`OFFSET` underneath, so the offset rides inside
-    an opaque cursor (`services/offset_cursor.rs`) naming its list: the other list's cursor is
+    an opaque cursor (`services/cursor/offset.rs`) naming its list: the other list's cursor is
     `400 #invalid-cursor`, and either can move to a keyset later without a client noticing. An
     entry logged while an admin pages shifts the log's later pages by one. The log's count is its
     `total`; there is no separate count operation.

@@ -19,12 +19,9 @@
 //! it would start beyond the `bigint` Postgres reads `OFFSET` as, turning a
 //! forged cursor into a database error rather than a `400`.
 
-use base64::Engine as _;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
 
-/// The cursor layout this build writes and reads.
-const VERSION: u8 = 1;
+use super::{VERSION, open, seal};
 
 /// The furthest row a cursor can name: the page after it starts at
 /// `i64::MAX`, the largest `OFFSET` Postgres accepts.
@@ -69,20 +66,16 @@ pub fn encode(list: OffsetList, at: u64) -> String {
         list,
         at,
     };
-    let json = serde_json::to_vec(&body).expect("a cursor body always serializes");
-    URL_SAFE_NO_PAD.encode(json)
+    seal(&body)
 }
 
 /// The offset of the row `cursor` names in `list`.
 pub fn decode(list: OffsetList, cursor: &str) -> Result<u64, CursorError> {
-    let bytes = URL_SAFE_NO_PAD
-        .decode(cursor)
-        .map_err(|_| CursorError::Malformed)?;
     let CursorBody {
         v,
         list: issuer,
         at,
-    } = serde_json::from_slice(&bytes).map_err(|_| CursorError::Malformed)?;
+    } = open(cursor).ok_or(CursorError::Malformed)?;
     if v != VERSION {
         return Err(CursorError::WrongVersion);
     }
@@ -134,6 +127,8 @@ pub fn page_info(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use proptest::prelude::*;
 
     proptest! {
@@ -186,7 +181,7 @@ mod tests {
     #[test]
     fn what_this_list_did_not_issue_is_refused() {
         let encode_json = |json: &str| URL_SAFE_NO_PAD.encode(json.as_bytes());
-        let history = crate::services::history_cursor::encode(
+        let history = crate::services::cursor::history::encode(
             &beam_domain::models::watch_state::HistoryPosition {
                 last_played_at: chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
                 id: uuid::Uuid::nil(),

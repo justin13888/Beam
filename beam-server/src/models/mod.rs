@@ -1,6 +1,6 @@
 mod admin;
+pub mod auth;
 pub mod enrichment;
-mod file;
 mod library;
 pub mod lists;
 pub mod media;
@@ -12,8 +12,8 @@ pub mod search;
 pub mod telemetry;
 
 pub use admin::*;
+pub use auth::*;
 pub use enrichment::*;
-pub use file::*;
 pub use library::*;
 pub use lists::*;
 pub use media::*;

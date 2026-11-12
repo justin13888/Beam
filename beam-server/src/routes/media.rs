@@ -9,11 +9,11 @@ use uuid::Uuid;
 
 use crate::models::search::{MediaConnection, MediaSortField, SortOrder, TitleKind};
 use crate::models::{EpisodeDetail, MediaMetadata, MediaSourceConnection, SeasonDetail};
+use crate::routes::access::{caller_access, hides, media_not_found};
 use crate::routes::api_error::{
     MediaBrowseError, MediaLookupError, MediaRefLookupError, MediaSourcesError, ServerFault,
-    SessionAuth,
 };
-use crate::routes::playback::{caller_access, hides, media_not_found};
+use crate::routes::session_auth::SessionAuth;
 use crate::routes::tags::Media;
 use crate::services::metadata::{BrowseRequest, MediaSearchFilters, MetadataError};
 use crate::services::sources::apply_language_preferences;
@@ -326,3 +326,7 @@ pub async fn get_season_detail(
 #[cfg(test)]
 #[path = "media_tests.rs"]
 mod media_tests;
+
+#[cfg(test)]
+#[path = "media_browse_tests.rs"]
+mod media_browse_tests;
