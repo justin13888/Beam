@@ -100,7 +100,7 @@ mod tests {
     }
 
     #[test]
-    fn compose_and_the_chart_default_to_the_same_filter() {
+    fn every_shipped_config_defaults_to_the_same_filter() {
         let compose = include_str!("../../compose.beam.yaml");
         assert!(
             compose.contains(&format!("RUST_LOG=${{RUST_LOG:-{DEFAULT_LOG_FILTER}}}")),
@@ -110,6 +110,17 @@ mod tests {
         assert!(
             values.contains(&format!("logLevel: \"{DEFAULT_LOG_FILTER}\"")),
             "charts/beam/values.yaml's server.logLevel differs from DEFAULT_LOG_FILTER"
+        );
+        // The documented install copies these to `.env`, which overrides
+        // compose's default, so they must agree too.
+        let rust_log = format!("\nRUST_LOG={DEFAULT_LOG_FILTER}\n");
+        assert!(
+            include_str!("../../.env.example").contains(&rust_log),
+            ".env.example's RUST_LOG differs from DEFAULT_LOG_FILTER"
+        );
+        assert!(
+            include_str!("../.env.example").contains(&rust_log),
+            "beam-server/.env.example's RUST_LOG differs from DEFAULT_LOG_FILTER"
         );
     }
 }
