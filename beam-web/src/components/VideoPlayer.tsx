@@ -151,6 +151,15 @@ export function VideoPlayer({
 			title={title}
 			src={{ src, type: providerType(type) } as PlayerSrc}
 			autoPlay={autoPlay}
+			// The subtitle files are session-authenticated, and Vidstack fetches
+			// a `<Track>` with `credentials: "include"` only under
+			// `use-credentials`; with no `crossOrigin` it sends them only to its
+			// own origin, so where the app and the server are on different
+			// origins (the compose deployment, local dev) the cookie never goes
+			// and the server-named subtitle never shows. The server's CORS policy
+			// allows credentials for the origins it names (`cors_policy`), which
+			// also covers the stream and poster this puts in CORS mode.
+			crossOrigin="use-credentials"
 			playsInline
 			className={className}
 			onLoadedMetadata={() => {
