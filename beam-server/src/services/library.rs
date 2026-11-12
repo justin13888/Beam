@@ -21,7 +21,7 @@ pub struct LibraryFilePage {
 }
 use beam_index::runtime::LibraryWatchHook;
 use beam_index::services::index::{IndexError, IndexService};
-use beam_index::services::notification::{AdminEvent, EventCategory, NotificationService};
+use beam_index::services::notification::{EventCategory, NewAdminEvent, NotificationService};
 use beam_index::services::scan::{ScanTrigger, StoppedScan};
 
 pub trait PathValidator: Send + Sync + std::fmt::Debug {
@@ -579,7 +579,7 @@ impl LibraryService for LocalLibraryService {
         let watched = created.clone();
         tokio::spawn(async move { watch_hook.library_created(&watched).await });
 
-        self.notification_service.publish(AdminEvent::info(
+        self.notification_service.publish(NewAdminEvent::info(
             EventCategory::System,
             format!("Library '{}' created", created.name),
             Some(created.id),
@@ -648,7 +648,7 @@ impl LibraryService for LocalLibraryService {
         self.index_service.forget_library(lib_uuid);
         self.watch_hook.library_deleted(lib_uuid).await;
 
-        self.notification_service.publish(AdminEvent::info(
+        self.notification_service.publish(NewAdminEvent::info(
             EventCategory::System,
             format!("Library '{}' deleted", library.name),
             Some(lib_uuid),

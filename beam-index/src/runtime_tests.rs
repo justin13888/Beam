@@ -212,8 +212,12 @@ impl BackgroundIndexer for RecordingIndexer {
             None => ReconcileOutcome::Done,
         })
     }
+}
 
-    fn library_repo(&self) -> Arc<dyn LibraryRepository> {
+impl RecordingIndexer {
+    /// The library store the watch refresher is handed, failing the
+    /// listings [`Self::failing_listings`] says to.
+    fn libraries(&self) -> Arc<dyn LibraryRepository> {
         Arc::new(FlakyListings {
             inner: self.library_repo.clone(),
             failing: self.failing_listings.clone(),
@@ -223,7 +227,8 @@ impl BackgroundIndexer for RecordingIndexer {
 
 fn config(scan_interval_secs: u64, watch_debounce_ms: u64) -> BackgroundIndexingConfig {
     BackgroundIndexingConfig {
-        scan_interval_secs,
+        scan_interval_secs: NonZeroU64::new(scan_interval_secs)
+            .expect("a test interval is never zero"),
         watch_debounce_ms,
         watch_poll_interval_secs: 300,
     }
@@ -251,8 +256,13 @@ async fn the_startup_scan_runs_once_without_waiting_for_the_interval() {
     let indexer = Arc::new(RecordingIndexer::default());
     let clock = Arc::new(TestClock::new());
 
-    let tasks =
-        spawn_background_indexing_with(indexer.clone(), None, clock.clone(), config(3600, 2000));
+    let tasks = spawn_background_indexing_with(
+        indexer.clone(),
+        indexer.libraries(),
+        None,
+        clock.clone(),
+        config(3600, 2000),
+    );
     until("the startup scan", || indexer.scan_count() == 1).await;
     until("the maintenance loop to sleep", || {
         clock.waiter_count() == 1
@@ -273,8 +283,13 @@ async fn the_periodic_rescan_fires_once_per_interval_and_not_before() {
     let indexer = Arc::new(RecordingIndexer::default());
     let clock = Arc::new(TestClock::new());
 
-    let tasks =
-        spawn_background_indexing_with(indexer.clone(), None, clock.clone(), config(3600, 2000));
+    let tasks = spawn_background_indexing_with(
+        indexer.clone(),
+        indexer.libraries(),
+        None,
+        clock.clone(),
+        config(3600, 2000),
+    );
     until("the startup scan", || indexer.scan_count() == 1).await;
     // The maintenance loop then parks on its first sleep.
     until("the maintenance loop to sleep", || {
@@ -306,8 +321,13 @@ async fn the_startup_scan_and_the_rescans_say_what_started_them() {
     let indexer = Arc::new(RecordingIndexer::default());
     let clock = Arc::new(TestClock::new());
 
-    let tasks =
-        spawn_background_indexing_with(indexer.clone(), None, clock.clone(), config(60, 2000));
+    let tasks = spawn_background_indexing_with(
+        indexer.clone(),
+        indexer.libraries(),
+        None,
+        clock.clone(),
+        config(60, 2000),
+    );
     until("the startup scan", || indexer.scan_count() == 1).await;
     until("the maintenance loop to sleep", || {
         clock.waiter_count() == 1
@@ -332,8 +352,13 @@ async fn a_failing_rescan_does_not_stop_the_loop() {
     });
     let clock = Arc::new(TestClock::new());
 
-    let tasks =
-        spawn_background_indexing_with(indexer.clone(), None, clock.clone(), config(60, 2000));
+    let tasks = spawn_background_indexing_with(
+        indexer.clone(),
+        indexer.libraries(),
+        None,
+        clock.clone(),
+        config(60, 2000),
+    );
     until("the startup scan", || indexer.scan_count() == 1).await;
     until("the maintenance loop to sleep", || {
         clock.waiter_count() == 1
@@ -367,6 +392,7 @@ async fn libraries_are_watched_once_each_and_new_ones_picked_up_next_cycle() {
 
     let tasks = spawn_background_indexing_with(
         indexer.clone(),
+        indexer.libraries(),
         Some(watcher.clone()),
         clock.clone(),
         config(60, 2000),
@@ -408,6 +434,7 @@ async fn a_burst_of_events_for_one_path_reconciles_once_after_the_debounce() {
 
     let tasks = spawn_background_indexing_with(
         indexer.clone(),
+        indexer.libraries(),
         Some(watcher.clone()),
         clock.clone(),
         config(3600, 2000),
@@ -460,6 +487,7 @@ async fn a_burst_is_held_for_exactly_the_debounce_window() {
     let watcher = Arc::new(InMemoryFsWatcher::new());
     let tasks = spawn_background_indexing_with(
         indexer.clone(),
+        indexer.libraries(),
         Some(watcher.clone()),
         clock.clone(),
         config(3600, 2000),
@@ -500,6 +528,7 @@ async fn a_failed_reconcile_does_not_stop_the_consumer() {
     indexer.fail_next("/videos/broken.mkv");
     let tasks = spawn_background_indexing_with(
         indexer.clone(),
+        indexer.libraries(),
         Some(watcher.clone()),
         clock.clone(),
         config(3600, 2000),
@@ -693,6 +722,7 @@ async fn a_deferred_event_is_retried_once_its_delay_has_passed() {
 
     let tasks = spawn_background_indexing_with(
         indexer.clone(),
+        indexer.libraries(),
         Some(watcher.clone()),
         clock.clone(),
         config(3600, 2000),
@@ -751,6 +781,7 @@ async fn a_fresh_event_replaces_a_deferred_one_for_the_same_path() {
 
     let tasks = spawn_background_indexing_with(
         indexer.clone(),
+        indexer.libraries(),
         Some(watcher.clone()),
         clock.clone(),
         config(3600, 2000),
@@ -803,6 +834,7 @@ async fn events_for_different_paths_in_one_burst_each_reconcile() {
 
     let tasks = spawn_background_indexing_with(
         indexer.clone(),
+        indexer.libraries(),
         Some(watcher.clone()),
         clock.clone(),
         config(3600, 2000),
@@ -863,6 +895,7 @@ async fn a_library_the_hook_registered_is_not_registered_again_by_the_refresh() 
     let watches = LibraryWatches::new(Some(watcher.clone()));
     let tasks = spawn_background_indexing_with(
         indexer.clone(),
+        indexer.libraries(),
         watches.watcher(),
         clock.clone(),
         config(60, 2000),
@@ -894,6 +927,7 @@ async fn deleted_libraries_are_unwatched_on_the_next_cycle() {
 
     let tasks = spawn_background_indexing_with(
         indexer.clone(),
+        indexer.libraries(),
         Some(watcher.clone()),
         clock.clone(),
         config(60, 2000),
@@ -932,6 +966,7 @@ async fn a_library_recreated_at_a_deleted_ones_root_is_watched_under_its_new_id(
 
     let tasks = spawn_background_indexing_with(
         indexer.clone(),
+        indexer.libraries(),
         Some(watcher.clone()),
         clock.clone(),
         config(60, 2000),
@@ -986,6 +1021,7 @@ async fn the_startup_scan_starts_after_the_watches_and_no_library_scan_overlaps_
 
     let tasks = spawn_background_indexing_with(
         indexer.clone(),
+        indexer.libraries(),
         Some(watcher.clone()),
         clock.clone(),
         config(3600, 2000),
@@ -1052,6 +1088,7 @@ async fn a_library_registered_as_polled_after_startup_is_scanned_once() {
 
     let tasks = spawn_background_indexing_with(
         indexer.clone(),
+        indexer.libraries(),
         Some(watcher.clone()),
         clock.clone(),
         config(60, 2000),
@@ -1103,6 +1140,7 @@ async fn a_library_whose_demotion_failed_is_watched_again_next_cycle() {
 
     let tasks = spawn_background_indexing_with(
         indexer.clone(),
+        indexer.libraries(),
         Some(watcher.clone()),
         clock.clone(),
         config(600, 2000),
@@ -1141,6 +1179,7 @@ async fn a_refresh_that_cannot_list_the_libraries_is_retried_next_cycle() {
 
     let tasks = spawn_background_indexing_with(
         indexer.clone(),
+        indexer.libraries(),
         Some(watcher.clone()),
         clock.clone(),
         config(600, 2000),
@@ -1187,6 +1226,7 @@ async fn a_library_that_could_not_be_watched_is_tried_again_next_cycle() {
 
     let tasks = spawn_background_indexing_with(
         indexer.clone(),
+        indexer.libraries(),
         Some(watcher.clone()),
         clock.clone(),
         config(600, 2000),
@@ -1220,6 +1260,7 @@ async fn a_library_the_poll_moves_to_polling_is_scanned_once() {
 
     let tasks = spawn_background_indexing_with(
         indexer.clone(),
+        indexer.libraries(),
         Some(watcher.clone()),
         clock.clone(),
         config(3600, 2000),
@@ -1276,6 +1317,7 @@ mod local_index_service_adapter {
 
     use beam_domain::models::CreateLibrary;
     use beam_domain::repositories::LibraryRepository;
+    use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
     use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
     use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
     use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
@@ -1283,7 +1325,6 @@ mod local_index_service_adapter {
     use beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository;
 
     use super::*;
-    use crate::services::admin_log::NoOpAdminLogService;
     use crate::services::hash::{HashConfig, LocalHashService};
     use crate::services::index::LocalIndexService;
     use crate::services::media_info::LocalMediaInfoService;
@@ -1299,7 +1340,7 @@ mod local_index_service_adapter {
             Arc::new(LocalHashService::new(HashConfig::default())),
             Arc::new(LocalMediaInfoService::default()),
             Arc::new(InMemoryNotificationService::new()),
-            Arc::new(NoOpAdminLogService),
+            Arc::new(InMemoryAdminLogRepository::default()),
             Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         ))
     }
@@ -1312,8 +1353,10 @@ mod local_index_service_adapter {
         for watch_enabled in [false, true] {
             let status = Arc::new(WatchStatus::new());
             let watches = LibraryWatches::from_config(watch_enabled, status.clone());
+            let library_repo = Arc::new(InMemoryLibraryRepository::default());
             let tasks = spawn_background_indexing(
-                service(Arc::new(InMemoryLibraryRepository::default())),
+                service(library_repo.clone()),
+                library_repo,
                 config(3600, 2000),
                 &watches,
             );
@@ -1342,10 +1385,6 @@ mod local_index_service_adapter {
             .unwrap();
 
         let indexer: Arc<dyn BackgroundIndexer> = service(library_repo.clone());
-
-        // The repository the watcher refresher lists from is the one that was
-        // wired in, not a fresh empty one.
-        assert_eq!(indexer.library_repo().find_all().await.unwrap().len(), 1);
 
         let added = indexer
             .scan_all_libraries(ScanTrigger::Periodic)
@@ -1400,7 +1439,7 @@ mod local_index_service_adapter {
             .unwrap();
         let file_repo = Arc::new(InMemoryFileRepository::default());
         let indexer: Arc<dyn BackgroundIndexer> = Arc::new(LocalIndexService::new(
-            library_repo,
+            library_repo.clone(),
             file_repo.clone(),
             Arc::new(InMemoryMovieRepository::default()),
             Arc::new(InMemoryShowRepository::default()),
@@ -1408,7 +1447,7 @@ mod local_index_service_adapter {
             Arc::new(LocalHashService::new(HashConfig::default())),
             Arc::new(LocalMediaInfoService::default()),
             Arc::new(InMemoryNotificationService::new()),
-            Arc::new(NoOpAdminLogService),
+            Arc::new(InMemoryAdminLogRepository::default()),
             Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         ));
         let watcher = Arc::new(InMemoryFsWatcher::new());
@@ -1416,6 +1455,7 @@ mod local_index_service_adapter {
 
         let tasks = spawn_background_indexing_with(
             indexer,
+            library_repo,
             Some(watcher.clone()),
             clock.clone(),
             config(3600, 2000),
@@ -1477,7 +1517,7 @@ mod local_index_service_adapter {
             .unwrap();
         let file_repo = Arc::new(InMemoryFileRepository::default());
         let index_service = Arc::new(LocalIndexService::new(
-            library_repo,
+            library_repo.clone(),
             file_repo.clone(),
             Arc::new(InMemoryMovieRepository::default()),
             Arc::new(InMemoryShowRepository::default()),
@@ -1485,7 +1525,7 @@ mod local_index_service_adapter {
             Arc::new(LocalHashService::new(HashConfig { num_threads: 1 })),
             Arc::new(LocalMediaInfoService::default()),
             Arc::new(InMemoryNotificationService::new()),
-            Arc::new(NoOpAdminLogService),
+            Arc::new(InMemoryAdminLogRepository::default()),
             Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         ));
         let old = temp.path().join("Movie.2019.mkv");
@@ -1504,6 +1544,7 @@ mod local_index_service_adapter {
         let clock = Arc::new(TestClock::new());
         let tasks = spawn_background_indexing_with(
             index_service,
+            library_repo,
             Some(watcher.clone()),
             clock.clone(),
             config(3600, 2000),
@@ -1593,7 +1634,7 @@ mod local_index_service_adapter {
             Arc::new(LocalHashService::new(HashConfig::default())),
             Arc::new(LocalMediaInfoService::default()),
             Arc::new(InMemoryNotificationService::new()),
-            Arc::new(NoOpAdminLogService),
+            Arc::new(InMemoryAdminLogRepository::default()),
             Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         ));
         let indexer: Arc<dyn BackgroundIndexer> = index_service;
@@ -1634,8 +1675,13 @@ async fn aborting_stops_every_spawned_task() {
     let clock = Arc::new(TestClock::new());
     let watcher = Arc::new(InMemoryFsWatcher::new());
 
-    let tasks =
-        spawn_background_indexing_with(indexer.clone(), Some(watcher), clock, config(3600, 2000));
+    let tasks = spawn_background_indexing_with(
+        indexer.clone(),
+        indexer.libraries(),
+        Some(watcher),
+        clock,
+        config(3600, 2000),
+    );
     until("the startup scan to run", || indexer.scan_count() == 1).await;
 
     tasks.abort();
@@ -1662,6 +1708,7 @@ async fn the_watcher_is_polled_once_per_poll_interval_and_not_before() {
 
     let tasks = spawn_background_indexing_with(
         indexer.clone(),
+        indexer.libraries(),
         Some(watcher.clone()),
         clock.clone(),
         config(3600, 2000),
@@ -1710,6 +1757,7 @@ async fn the_poller_still_polls_when_maintenance_dies_before_the_startup_scan_fi
 
     let tasks = spawn_background_indexing_with(
         indexer.clone(),
+        indexer.libraries(),
         Some(watcher.clone()),
         clock.clone(),
         config(3600, 2000),
@@ -1736,8 +1784,13 @@ async fn without_a_watcher_nothing_is_polled() {
     let indexer = Arc::new(RecordingIndexer::default());
     let clock = Arc::new(TestClock::new());
 
-    let tasks =
-        spawn_background_indexing_with(indexer.clone(), None, clock.clone(), config(3600, 2000));
+    let tasks = spawn_background_indexing_with(
+        indexer.clone(),
+        indexer.libraries(),
+        None,
+        clock.clone(),
+        config(3600, 2000),
+    );
 
     assert!(tasks.watch_poller.is_none());
     assert!(tasks.watch_consumer.is_none());

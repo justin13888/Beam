@@ -12,10 +12,10 @@
 //! later window, between one file's hash and the next file's stat, is reached
 //! through the hasher, which runs a swap before it hashes.
 
+use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
 use std::sync::Mutex;
 
 use super::*;
-use crate::services::admin_log::in_memory::NoOpAdminLogService;
 use crate::services::filesystem_probe::FilesystemProbe;
 use crate::services::hash::HashService;
 use crate::services::hash::LocalHashService;
@@ -137,7 +137,7 @@ impl Harness {
             hasher.clone(),
             Arc::new(LocalMediaInfoService::default()),
             Arc::new(InMemoryNotificationService::new()),
-            Arc::new(NoOpAdminLogService),
+            Arc::new(InMemoryAdminLogRepository::default()),
             Arc::new(InMemoryWatchStateRepository::default()),
         )
         .with_filesystem_probe(probe.clone())

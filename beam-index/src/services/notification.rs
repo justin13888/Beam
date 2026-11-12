@@ -7,6 +7,7 @@ use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use beam_domain::models::enrichment::{EnrichmentStatus, EnrichmentTargetId};
+use beam_domain::services::{Clock, IdGenerator, RealClock, UuidGenerator};
 
 use crate::services::scan::ScanEvent;
 
@@ -63,6 +64,9 @@ pub struct EnrichmentEvent {
     pub error: Option<String>,
 }
 
+/// An event as published: what [`NewAdminEvent`] describes, stamped by the
+/// publisher with an id from its [`IdGenerator`] and a timestamp from its
+/// [`Clock`].
 #[derive(Clone, Debug)]
 pub struct AdminEvent {
     pub id: Uuid,
@@ -78,7 +82,23 @@ pub struct AdminEvent {
     pub enrichment: Option<EnrichmentEvent>,
 }
 
-impl AdminEvent {
+/// An event to publish, not yet stamped: the publisher gives it its id and
+/// timestamp, from the seams it was built with, as it becomes an
+/// [`AdminEvent`].
+#[derive(Clone, Debug)]
+pub struct NewAdminEvent {
+    pub level: EventLevel,
+    pub category: EventCategory,
+    pub message: String,
+    pub library_id: Option<Uuid>,
+    pub library_name: Option<String>,
+    /// The scan job an [`EventCategory::ScanProgress`] event reports on.
+    pub scan: Option<ScanEvent>,
+    /// The title an [`EventCategory::Enrichment`] event reports on.
+    pub enrichment: Option<EnrichmentEvent>,
+}
+
+impl NewAdminEvent {
     pub fn new(
         level: EventLevel,
         category: EventCategory,
@@ -87,8 +107,6 @@ impl AdminEvent {
         library_name: Option<String>,
     ) -> Self {
         Self {
-            id: Uuid::new_v4(),
-            timestamp: Utc::now(),
             level,
             category,
             message: message.into(),
@@ -96,6 +114,31 @@ impl AdminEvent {
             library_name,
             scan: None,
             enrichment: None,
+        }
+    }
+
+    /// This event as published under `id` at `timestamp`.
+    #[must_use]
+    pub fn stamp(self, id: Uuid, timestamp: DateTime<Utc>) -> AdminEvent {
+        let Self {
+            level,
+            category,
+            message,
+            library_id,
+            library_name,
+            scan,
+            enrichment,
+        } = self;
+        AdminEvent {
+            id,
+            timestamp,
+            level,
+            category,
+            message,
+            library_id,
+            library_name,
+            scan,
+            enrichment,
         }
     }
 
@@ -158,7 +201,8 @@ impl AdminEvent {
 }
 
 pub trait NotificationService: Send + Sync + std::fmt::Debug {
-    fn publish(&self, event: AdminEvent);
+    /// Stamps `event` with an id and the current time, and publishes it.
+    fn publish(&self, event: NewAdminEvent);
     fn subscribe(&self) -> broadcast::Receiver<AdminEvent>;
     fn recent_events(&self, limit: usize) -> Vec<AdminEvent>;
 }
@@ -168,15 +212,28 @@ pub struct LocalNotificationService {
     sender: broadcast::Sender<AdminEvent>,
     event_log: Arc<RwLock<VecDeque<AdminEvent>>>,
     max_log_size: usize,
+    /// Source of each published event's timestamp.
+    clock: Arc<dyn Clock>,
+    /// Source of each published event's id.
+    ids: Arc<dyn IdGenerator>,
 }
 
 impl LocalNotificationService {
+    /// A publisher stamping events from the wall clock with random ids.
     pub fn new() -> Self {
+        Self::with_seams(Arc::new(RealClock), Arc::new(UuidGenerator))
+    }
+
+    /// A publisher stamping each event's timestamp from `clock` and its id
+    /// from `ids`.
+    pub fn with_seams(clock: Arc<dyn Clock>, ids: Arc<dyn IdGenerator>) -> Self {
         let (sender, _) = broadcast::channel(BROADCAST_CAPACITY);
         Self {
             sender,
             event_log: Arc::new(RwLock::new(VecDeque::new())),
             max_log_size: DEFAULT_LOG_SIZE,
+            clock,
+            ids,
         }
     }
 }
@@ -188,7 +245,8 @@ impl Default for LocalNotificationService {
 }
 
 impl NotificationService for LocalNotificationService {
-    fn publish(&self, event: AdminEvent) {
+    fn publish(&self, event: NewAdminEvent) {
+        let event = event.stamp(self.ids.new_id(), self.clock.now());
         // Progress is live state, not history: a subscriber sees it as it
         // happens, and the log keeps what an administrator reads later.
         if !event.category.is_live_only() {
@@ -254,7 +312,8 @@ pub mod in_memory {
     }
 
     impl NotificationService for InMemoryNotificationService {
-        fn publish(&self, event: AdminEvent) {
+        fn publish(&self, event: NewAdminEvent) {
+            let event = event.stamp(Uuid::new_v4(), Utc::now());
             self.event_log.write().push_back(event.clone());
             let _ = self.sender.send(event);
         }
@@ -283,19 +342,19 @@ mod tests {
     #[test]
     fn test_publish_and_recent_events() {
         let svc = LocalNotificationService::new();
-        svc.publish(AdminEvent::info(
+        svc.publish(NewAdminEvent::info(
             EventCategory::LibraryScan,
             "Scan started",
             Some(Uuid::from_u128(1)),
             Some("Movies".to_string()),
         ));
-        svc.publish(AdminEvent::warning(
+        svc.publish(NewAdminEvent::warning(
             EventCategory::LibraryScan,
             "File skipped",
             Some(Uuid::from_u128(1)),
             Some("Movies".to_string()),
         ));
-        svc.publish(AdminEvent::error(
+        svc.publish(NewAdminEvent::error(
             EventCategory::System,
             "Disk full",
             None,
@@ -309,6 +368,55 @@ mod tests {
         assert_eq!(events[2].level, EventLevel::Error);
     }
 
+    /// A published event takes its id from the publisher's generator and its
+    /// timestamp from the publisher's clock, the same stamp on the live feed
+    /// and in the log.
+    #[tokio::test]
+    async fn the_publisher_stamps_each_event_from_its_seams() {
+        use beam_domain::services::{SequentialIdGenerator, TestClock};
+
+        let start = DateTime::parse_from_rfc3339("2026-01-02T03:04:05Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let clock = Arc::new(TestClock::starting_at(start));
+        let svc = LocalNotificationService::with_seams(
+            clock.clone(),
+            Arc::new(SequentialIdGenerator::new()),
+        );
+        let mut live = svc.subscribe();
+
+        svc.publish(NewAdminEvent::info(
+            EventCategory::System,
+            "first",
+            None,
+            None,
+        ));
+        clock.advance(std::time::Duration::from_secs(90));
+        svc.publish(NewAdminEvent::info(
+            EventCategory::System,
+            "second",
+            None,
+            None,
+        ));
+
+        let stamps = |events: Vec<AdminEvent>| -> Vec<(Uuid, DateTime<Utc>)> {
+            events
+                .into_iter()
+                .map(|event| (event.id, event.timestamp))
+                .collect()
+        };
+        let expected = vec![
+            (SequentialIdGenerator::nth(0), start),
+            (
+                SequentialIdGenerator::nth(1),
+                start + chrono::Duration::seconds(90),
+            ),
+        ];
+        assert_eq!(stamps(svc.recent_events(10)), expected);
+        let broadcast = vec![live.recv().await.unwrap(), live.recv().await.unwrap()];
+        assert_eq!(stamps(broadcast), expected);
+    }
+
     /// Scan progress reaches a live subscriber but not the recent-event log:
     /// one scan of a large library would otherwise push every other event out
     /// of it.
@@ -319,7 +427,7 @@ mod tests {
         let svc = LocalNotificationService::new();
         let mut live = svc.subscribe();
         svc.publish(
-            AdminEvent::info(EventCategory::ScanProgress, "Scanning", None, None).with_scan(
+            NewAdminEvent::info(EventCategory::ScanProgress, "Scanning", None, None).with_scan(
                 ScanEvent {
                     job_id: Uuid::nil(),
                     phase: ScanPhase::Progress,
@@ -327,7 +435,7 @@ mod tests {
                 },
             ),
         );
-        svc.publish(AdminEvent::info(
+        svc.publish(NewAdminEvent::info(
             EventCategory::LibraryScan,
             "Scan complete",
             None,
@@ -360,10 +468,10 @@ mod tests {
             error: None,
         };
         svc.publish(
-            AdminEvent::info(EventCategory::Enrichment, "Enriched \"Heat\"", None, None)
+            NewAdminEvent::info(EventCategory::Enrichment, "Enriched \"Heat\"", None, None)
                 .with_enrichment(title.clone()),
         );
-        svc.publish(AdminEvent::info(
+        svc.publish(NewAdminEvent::info(
             EventCategory::System,
             "Started",
             None,
@@ -387,7 +495,7 @@ mod tests {
         let svc = LocalNotificationService::new();
         let published = DEFAULT_LOG_SIZE + 3;
         for n in 0..published {
-            svc.publish(AdminEvent::info(
+            svc.publish(NewAdminEvent::info(
                 EventCategory::LibraryScan,
                 n.to_string(),
                 None,

@@ -13,7 +13,7 @@ use beam_auth::utils::{
 };
 use beam_domain::providers::artwork::ArtworkFetcher;
 use beam_domain::providers::enrichment::{EnrichmentProvider, NoopEnrichmentProvider};
-use beam_domain::repositories::LanguagePreferenceRepository;
+use beam_domain::repositories::{AdminLogRepository, LanguagePreferenceRepository};
 use beam_domain::services::{Clock, RealClock};
 use beam_index::providers::artwork::{ArtworkFetchLimits, ReqwestArtworkFetcher};
 use beam_index::providers::cameo::{CameoEnrichmentProvider, CameoWiringConfig};
@@ -21,7 +21,6 @@ use beam_index::providers::composite::CompositeEnrichmentProvider;
 use beam_index::providers::telemetry::ReqwestTelemetrySink;
 use beam_index::providers::tvdb::{TvdbEnrichmentProvider, TvdbWiringConfig};
 use beam_index::runtime::LibraryWatches;
-use beam_index::services::admin_log::{AdminLogService, LocalAdminLogService};
 use beam_index::services::enrichment::control::{EnrichmentControl, EnrichmentControlDeps};
 use beam_index::services::enrichment::{EnrichmentPolicy, MetadataEnrichmentService};
 use beam_index::services::hash::{HashConfig, LocalHashService};
@@ -194,7 +193,7 @@ pub struct AppServices {
     /// Sidecar subtitle delivery, as stored and as WebVTT (issue #189).
     pub subtitles: Arc<dyn SubtitleService>,
     pub notification: Arc<dyn NotificationService>,
-    pub admin_log: Arc<dyn AdminLogService>,
+    pub admin_log: Arc<dyn AdminLogRepository>,
     pub user_repo: Arc<dyn UserRepository>,
     /// Each user's audio and subtitle languages (issue #264), read by the
     /// sources route to name each source's default tracks.
@@ -335,9 +334,9 @@ impl AppServices {
             beam_index::repositories::SqlMediaStreamRepository::new(db.clone()),
         );
         let user_repo: Arc<dyn UserRepository> = Arc::new(SqlUserRepository::new(db.clone()));
-        let admin_log_repo = Arc::new(beam_index::repositories::SqlAdminLogRepository::new(
-            db.clone(),
-        ));
+        let admin_log_repo: Arc<dyn AdminLogRepository> = Arc::new(
+            beam_index::repositories::SqlAdminLogRepository::new(db.clone()),
+        );
         let enrichment_repo: Arc<dyn beam_domain::repositories::EnrichmentStateRepository> =
             Arc::new(
                 beam_index::repositories::SqlEnrichmentStateRepository::with_seams(
@@ -372,7 +371,10 @@ impl AppServices {
                 db.clone(),
             ));
 
-        let notification_service = Arc::new(LocalNotificationService::new());
+        let notification_service = Arc::new(LocalNotificationService::with_seams(
+            clock.clone(),
+            Arc::new(beam_domain::services::UuidGenerator),
+        ));
         let hash_service = Arc::new(LocalHashService::new(hash_config));
         let media_info_service = Arc::new(LocalMediaInfoService::default());
 
@@ -425,9 +427,6 @@ impl AppServices {
             session_max_days: config.session_max_days,
         };
 
-        let admin_log_service: Arc<dyn AdminLogService> =
-            Arc::new(LocalAdminLogService::new(admin_log_repo.clone()));
-
         // Written by the indexer, read by the sources and subtitle routes.
         let sidecar_repo: Arc<dyn beam_domain::repositories::SidecarSubtitleRepository> = Arc::new(
             beam_index::repositories::SqlSidecarSubtitleRepository::new(db.clone()),
@@ -452,7 +451,7 @@ impl AppServices {
                 hash_service.clone(),
                 media_info_service.clone(),
                 notification_service.clone(),
-                admin_log_service.clone(),
+                admin_log_repo.clone(),
                 watch_state_repo.clone(),
             )
             .with_clock(clock.clone())
@@ -479,7 +478,7 @@ impl AppServices {
                 person_repo.clone(),
                 collection_repo.clone(),
                 enrichment_provider.clone(),
-                admin_log_service.clone(),
+                admin_log_repo.clone(),
                 notification_service.clone(),
                 clock.clone(),
             )
@@ -495,7 +494,7 @@ impl AppServices {
             states: enrichment_repo.clone(),
             libraries: library_repo.clone(),
             provider: enrichment_provider,
-            admin_log: admin_log_service.clone(),
+            admin_log: admin_log_repo.clone(),
             nfo_pins: index_service.clone(),
             worker: enrichment_service.notify_handle(),
         }));
@@ -634,7 +633,7 @@ impl AppServices {
                 sidecar_repo,
             )),
             notification: notification_service,
-            admin_log: admin_log_service,
+            admin_log: admin_log_repo,
             user_repo,
             language_preferences: Arc::new(
                 beam_index::repositories::SqlLanguagePreferenceRepository::with_clock(
