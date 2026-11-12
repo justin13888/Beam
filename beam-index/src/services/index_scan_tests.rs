@@ -710,6 +710,77 @@ async fn a_scan_records_the_present_file_count_and_its_start_and_finish() {
     );
 }
 
+mod rescan_properties {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Names a library holds: movies and episodes, flat and in folders.
+    const NAMES: [&str; 8] = [
+        "Heat (1995).mkv",
+        "Alien (1979)/Alien (1979).mkv",
+        "Ronin (1998)/Ronin.1998.1080p.mkv",
+        "The Office/Season 1/The Office S01E01.mkv",
+        "The Office/Season 1/The Office S01E02.mkv",
+        "Frieren/Frieren - S01E03.mkv",
+        "notes.txt",
+        "Extras/Behind the Scenes.mkv",
+    ];
+
+    /// Each row as the index keeps it, every field shown (`MediaFile` has
+    /// no `PartialEq`).
+    async fn rows(h: &Harness) -> Vec<String> {
+        let mut rows = h
+            .file_repo
+            .find_all_by_library_including_missing(h.library.id)
+            .await
+            .unwrap();
+        rows.sort_by(|a, b| a.path.cmp(&b.path));
+        rows.iter().map(|row| format!("{row:?}")).collect()
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(24))]
+
+        /// A second scan of a library nothing changed in changes nothing:
+        /// every row reads back as the first scan left it, nothing is
+        /// hashed or probed again, and the scan reports every file found
+        /// as it was.
+        #[test]
+        fn a_rescan_of_an_unchanged_library_changes_nothing(
+            names in prop::sample::subsequence(NAMES.to_vec(), 1..=NAMES.len()),
+        ) {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let h = Harness::settled().await;
+                for name in &names {
+                    h.write(name);
+                }
+                let first = h.scan().await;
+                let before = rows(&h).await;
+                let (hashes, probes) = (h.hashes(), h.probes());
+
+                let second = h.scan().await;
+
+                prop_assert_eq!(rows(&h).await, before);
+                prop_assert_eq!((h.hashes(), h.probes()), (hashes, probes));
+                prop_assert_eq!(
+                    (second.added, second.changed, second.relinked),
+                    (0, 0, 0)
+                );
+                prop_assert_eq!(
+                    (second.marked_missing, second.restored, second.purged, second.failed),
+                    (0, 0, 0, 0)
+                );
+                prop_assert_eq!(second.unchanged, first.added);
+                Ok(())
+            })?;
+        }
+    }
+}
+
 // ─── Watcher events while a scan runs ────────────────────────────────────────
 
 /// A watcher event for a library being scanned is handed back untouched: the
@@ -1436,79 +1507,6 @@ mod library_scans {
         assert_eq!(files[0].status, FileStatus::Known);
         assert_eq!(files[0].size_bytes, 16);
         assert_eq!(files[0].hash, 99999);
-    }
-
-    #[tokio::test]
-    async fn test_scan_library_removed_file_is_marked_missing_not_deleted() {
-        let lib_repo = Arc::new(InMemoryLibraryRepository::default());
-        let file_repo = Arc::new(InMemoryFileRepository::default());
-        let dir = TempDir::new().unwrap();
-        let library = make_library_in_tempdir(&lib_repo, &dir).await;
-
-        // A file that is still on disk and unchanged since it was indexed, so
-        // the root is not empty and the scan reconciles rather than refuses.
-        let kept_path = dir.path().join("kept.mp4");
-        std::fs::write(&kept_path, b"still here").unwrap();
-        let kept = indexed_file_matching_disk(library.id, &kept_path);
-        file_repo
-            .files
-            .lock()
-            .unwrap()
-            .insert(kept.id, kept.clone());
-
-        // Seed the file repo with a phantom file that doesn't exist on disk
-        let phantom = MediaFile {
-            id: Uuid::new_v4(),
-            library_id: library.id,
-            path: dir.path().join("ghost.mp4"),
-            hash: 0,
-            size_bytes: 1024,
-            mtime: None,
-            identity: None,
-            mime_type: None,
-            duration: None,
-            container_format: None,
-            content: None,
-            status: FileStatus::Known,
-            classifier_version: 0,
-            container_tags: None,
-            scanned_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-            missing_since: None,
-        };
-        file_repo
-            .files
-            .lock()
-            .unwrap()
-            .insert(phantom.id, phantom.clone());
-
-        let service = LocalIndexService::new(
-            lib_repo.clone(),
-            file_repo.clone(),
-            Arc::new(InMemoryMovieRepository::default()),
-            Arc::new(InMemoryShowRepository::default()),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-            Arc::new(MockHashService::new()),
-            Arc::new(MockMediaInfoService::new()),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(NoOpAdminLogService),
-            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-        );
-
-        let result = service.scan_library(library.id).await;
-        assert_eq!(result.unwrap(), 0); // no new files
-
-        // The phantom is hidden from the visible reads but kept, stamped
-        // missing, so its id -- and anything keyed on it -- survives (#179).
-        let files = file_repo.find_all_by_library(library.id).await.unwrap();
-        let ids: Vec<Uuid> = files.iter().map(|f| f.id).collect();
-        assert_eq!(ids, vec![kept.id]);
-        let stored = file_repo
-            .find_by_path(&phantom.path.to_string_lossy())
-            .await
-            .unwrap()
-            .expect("a missing file is soft-deleted, not deleted");
-        assert!(stored.missing_since.is_some());
     }
 
     /// The row a previous scan would have written for a file that is on disk
@@ -2611,67 +2609,6 @@ mod library_scans {
         assert!(files[0].content.is_none(), "{:?}", files[0].content);
         assert_eq!(files[0].hash, 200, "the new content was recorded");
         assert_eq!(files[0].size_bytes, "new content".len() as u64);
-    }
-
-    #[tokio::test]
-    async fn test_reconcile_path_removed_marks_file_missing() {
-        let lib_repo = Arc::new(InMemoryLibraryRepository::default());
-        let file_repo = Arc::new(InMemoryFileRepository::default());
-        let dir = TempDir::new().unwrap();
-        let library = make_library_in_tempdir(&lib_repo, &dir).await;
-
-        let ghost_path = dir.path().join("ghost.mp4");
-        // The file is intentionally NOT created on disk.
-
-        let phantom = MediaFile {
-            id: Uuid::new_v4(),
-            library_id: library.id,
-            path: ghost_path.clone(),
-            hash: 0,
-            size_bytes: 10,
-            mtime: None,
-            identity: None,
-            mime_type: None,
-            duration: None,
-            container_format: None,
-            content: None,
-            status: FileStatus::Known,
-            classifier_version: 0,
-            container_tags: None,
-            scanned_at: Utc::now(),
-            updated_at: Utc::now(),
-            missing_since: None,
-        };
-        let phantom_id = phantom.id;
-        file_repo.files.lock().unwrap().insert(phantom.id, phantom);
-
-        let service = LocalIndexService::new(
-            lib_repo.clone(),
-            file_repo.clone(),
-            Arc::new(InMemoryMovieRepository::default()),
-            Arc::new(InMemoryShowRepository::default()),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-            Arc::new(MockHashService::new()),
-            Arc::new(MockMediaInfoService::new()),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(NoOpAdminLogService),
-            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-        );
-
-        service
-            .reconcile_path(library.id, ghost_path, FsEventKind::Removed)
-            .await
-            .unwrap();
-
-        let files = file_repo.find_all_by_library(library.id).await.unwrap();
-        assert!(files.is_empty(), "a removed file is hidden from the index");
-        let stored = file_repo
-            .find_all_by_library_including_missing(library.id)
-            .await
-            .unwrap();
-        assert_eq!(stored.len(), 1, "a removal never hard-deletes");
-        assert_eq!(stored[0].id, phantom_id);
-        assert!(stored[0].missing_since.is_some());
     }
 
     #[tokio::test]

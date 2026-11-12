@@ -216,6 +216,66 @@ fn the_most_alike_candidate_wins_whatever_the_order() {
     }
 }
 
+mod relink_properties {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// A row of one of two contents, one of two sizes, at one of a few
+    /// paths, gone or not, under a small id so ids collide with plays.
+    fn any_candidate() -> impl Strategy<Value = MediaFile> {
+        (
+            0u128..6,
+            prop::sample::select(vec![
+                "/lib/a/One.mkv",
+                "/lib/a/Two.mkv",
+                "/lib/b/One.mkv",
+                "/lib/b/Two.mkv",
+                "/lib/c/Six.mkv",
+            ]),
+            prop::sample::select(vec![0u64, 77, 78]),
+            prop::sample::select(vec![999u64, 1000]),
+            any::<bool>(),
+        )
+            .prop_map(|(id, path, hash, size_bytes, gone)| MediaFile {
+                hash,
+                size_bytes,
+                ..candidate(id, path, gone.then(|| instant(0)))
+            })
+    }
+
+    proptest! {
+        /// The row a moved file relinks to does not depend on the order the
+        /// candidates come in: any permutation of them chooses the same row.
+        #[test]
+        fn the_chosen_row_is_the_same_whatever_the_order(
+            (rows, shuffled) in prop::collection::vec(any_candidate(), 0..8)
+                .prop_map(|rows| {
+                    // Distinct ids, as a store's rows have.
+                    let mut seen = std::collections::HashSet::new();
+                    rows.into_iter()
+                        .filter(|row| seen.insert(row.id))
+                        .collect::<Vec<MediaFile>>()
+                })
+                .prop_flat_map(|rows| (Just(rows.clone()), Just(rows).prop_shuffle())),
+            plays in prop::collection::hash_map(0u128..6, 0i64..4, 0..6),
+            hash in prop::sample::select(vec![0u64, 77, 78]),
+        ) {
+            let last_played: HashMap<Uuid, DateTime<Utc>> = plays
+                .into_iter()
+                .map(|(id, secs)| (Uuid::from_u128(id), instant(secs)))
+                .collect();
+            let new_path = Path::new("/lib/b/One.mkv");
+            let absent = |path: &Path| path.starts_with("/lib/c");
+
+            let chosen = |rows: &[MediaFile]| {
+                choose_relink_candidate(new_path, 1000, hash, rows, absent, &last_played)
+                    .map(|row| row.id)
+            };
+            prop_assert_eq!(chosen(&rows), chosen(&shuffled));
+        }
+    }
+}
+
 // ─── plan_content_moves ──────────────────────────────────────────────────────
 
 /// A row of hash `hash` at `path`, 1000 bytes, with no modification time.

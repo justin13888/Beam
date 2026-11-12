@@ -1209,6 +1209,96 @@ mod tests {
         }
     }
 
+    mod properties {
+        use super::*;
+        use proptest::prelude::*;
+        use std::collections::HashMap;
+
+        /// A path of 1 to 4 components from a small alphabet, so generated
+        /// roots and paths nest and share prefixes often.
+        fn path() -> impl Strategy<Value = PathBuf> {
+            prop::collection::vec(prop::sample::select(vec!["m", "mo", "tv", "a"]), 1..=4).prop_map(
+                |names| {
+                    let mut path = PathBuf::from("/");
+                    path.extend(names);
+                    path
+                },
+            )
+        }
+
+        fn kind() -> impl Strategy<Value = FsEventKind> {
+            prop::sample::select(vec![
+                FsEventKind::Created,
+                FsEventKind::Modified,
+                FsEventKind::Removed,
+            ])
+        }
+
+        proptest! {
+            /// Whatever the order and the overlap of a burst, a drain holds
+            /// one event per library and path, of the kind submitted last
+            /// for it, and leaves nothing behind.
+            #[test]
+            fn the_debouncer_keeps_the_last_kind_per_path(
+                burst in prop::collection::vec((0u128..2, path(), kind()), 0..40),
+            ) {
+                let mut debouncer = PathDebouncer::new();
+                let mut last: HashMap<(Uuid, PathBuf), FsEventKind> = HashMap::new();
+                for (library, path, kind) in &burst {
+                    let library_id = Uuid::from_u128(*library);
+                    debouncer.submit(FsEvent { library_id, path: path.clone(), kind: *kind });
+                    last.insert((library_id, path.clone()), *kind);
+                }
+
+                let drained: HashMap<(Uuid, PathBuf), FsEventKind> = debouncer
+                    .drain()
+                    .into_iter()
+                    .map(|FsEvent { library_id, path, kind }| ((library_id, path), kind))
+                    .collect();
+                prop_assert_eq!(drained, last);
+                prop_assert!(debouncer.is_empty());
+                prop_assert!(debouncer.drain().is_empty());
+            }
+
+            /// An event belongs to a library whose root holds it, and to no
+            /// library whose root is beneath that one's and also holds it;
+            /// to none when no root holds it.
+            #[test]
+            fn the_innermost_root_holding_a_path_wins(
+                roots in prop::collection::btree_set(path(), 0..6),
+                event in path(),
+            ) {
+                let libraries: Vec<WatchedLibrary> = roots
+                    .iter()
+                    .enumerate()
+                    .map(|(n, root)| WatchedLibrary {
+                        id: Uuid::from_u128(n as u128),
+                        root: root.clone(),
+                        backend: Backend::Native,
+                    })
+                    .collect();
+                let holding: Vec<&WatchedLibrary> = libraries
+                    .iter()
+                    .filter(|library| event.starts_with(&library.root))
+                    .collect();
+
+                match library_owning(&libraries, &event) {
+                    None => prop_assert!(holding.is_empty()),
+                    Some(owner) => {
+                        let owner = libraries.iter().find(|l| l.id == owner).unwrap();
+                        prop_assert!(event.starts_with(&owner.root));
+                        prop_assert!(
+                            !holding
+                                .iter()
+                                .any(|l| l.root != owner.root && l.root.starts_with(&owner.root)),
+                            "a root beneath {:?} also holds {:?}", owner.root, event
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     #[tokio::test]
     async fn a_root_whose_filesystem_cannot_be_probed_is_watched_natively() {
         use crate::services::filesystem_probe::FailingFilesystemProbe;

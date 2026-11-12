@@ -324,7 +324,7 @@ async fn a_subtitle_that_cannot_be_recorded_is_recorded_by_the_next_scan() {
 /// Not pinned here: whether a later scan stores the chapters once the store
 /// recovers. Today it does not -- the file is recorded as probed, so an
 /// unchanged file is never probed again -- and that is filed as its own
-/// defect rather than characterized as intended.
+/// defect (#438) rather than characterized as intended.
 #[tokio::test]
 async fn chapters_that_cannot_be_stored_do_not_cost_the_file_its_index() {
     let h = Harness::new().await;

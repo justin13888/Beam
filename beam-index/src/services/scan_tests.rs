@@ -99,6 +99,81 @@ fn the_throttle_lets_the_first_event_through_then_one_per_interval() {
     assert!(throttle.ready(start + Duration::from_millis(2_000)));
 }
 
+mod settle_and_throttle_properties {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// A file is unsettled for exactly the window after its last write
+        /// and no longer: the wait it is told to come back after is never
+        /// zero, never longer than the window, and ends where the window
+        /// does. A file with no modification time, or one dated after now,
+        /// is settled.
+        #[test]
+        fn a_file_is_unsettled_for_exactly_the_window_after_its_write(
+            age_ms in -86_400_000i64..86_400_000,
+            window_ms in 0u64..86_400_000,
+            known in any::<bool>(),
+        ) {
+            let now = instant(1_000_000);
+            let mtime = known.then(|| now - TimeDelta::milliseconds(age_ms));
+            let window = Duration::from_millis(window_ms);
+
+            match settle_state(now, mtime, window) {
+                Settle::Unsettled { retry_after } => {
+                    let mtime = mtime.expect("an unknown mtime is settled");
+                    prop_assert!(!retry_after.is_zero());
+                    prop_assert!(retry_after <= window);
+                    prop_assert_eq!(
+                        now + TimeDelta::from_std(retry_after).unwrap(),
+                        mtime + TimeDelta::from_std(window).unwrap(),
+                        "it settles where the window ends"
+                    );
+                }
+                Settle::Settled => {
+                    if let Some(mtime) = mtime {
+                        prop_assert!(
+                            mtime > now || now - mtime >= TimeDelta::from_std(window).unwrap(),
+                            "settled {age_ms}ms after its write, in a {window_ms}ms window"
+                        );
+                    }
+                }
+            }
+        }
+
+        /// Over any rising sequence of instants, the first event goes out;
+        /// two that go out are at least an interval apart; and one held
+        /// back fell within an interval of the last that went out.
+        #[test]
+        fn the_throttle_lets_one_event_out_per_interval(
+            interval_ms in 0u64..5_000,
+            mut offsets_ms in prop::collection::vec(0u64..60_000, 1..60),
+        ) {
+            offsets_ms.sort_unstable();
+            let start = Instant::now();
+            let interval = Duration::from_millis(interval_ms);
+            let mut throttle = ProgressThrottle::new(interval);
+            let mut last_out: Option<Instant> = None;
+
+            for offset in offsets_ms {
+                let now = start + Duration::from_millis(offset);
+                let out = throttle.ready(now);
+                match last_out {
+                    None => prop_assert!(out, "the first event always goes out"),
+                    Some(last) => prop_assert_eq!(
+                        out,
+                        now.duration_since(last) >= interval,
+                        "{:?} after the last that went out", now.duration_since(last)
+                    ),
+                }
+                if out {
+                    last_out = Some(now);
+                }
+            }
+        }
+    }
+}
+
 // ─── ScanCoordinator ────────────────────────────────────────────────────────
 
 #[test]
