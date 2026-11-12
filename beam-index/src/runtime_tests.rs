@@ -1276,6 +1276,7 @@ mod local_index_service_adapter {
 
     use beam_domain::models::CreateLibrary;
     use beam_domain::repositories::LibraryRepository;
+    use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
     use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
     use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
     use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
@@ -1283,7 +1284,6 @@ mod local_index_service_adapter {
     use beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository;
 
     use super::*;
-    use crate::services::admin_log::NoOpAdminLogService;
     use crate::services::hash::{HashConfig, LocalHashService};
     use crate::services::index::LocalIndexService;
     use crate::services::media_info::LocalMediaInfoService;
@@ -1299,7 +1299,7 @@ mod local_index_service_adapter {
             Arc::new(LocalHashService::new(HashConfig::default())),
             Arc::new(LocalMediaInfoService::default()),
             Arc::new(InMemoryNotificationService::new()),
-            Arc::new(NoOpAdminLogService),
+            Arc::new(InMemoryAdminLogRepository::default()),
             Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         ))
     }
@@ -1408,7 +1408,7 @@ mod local_index_service_adapter {
             Arc::new(LocalHashService::new(HashConfig::default())),
             Arc::new(LocalMediaInfoService::default()),
             Arc::new(InMemoryNotificationService::new()),
-            Arc::new(NoOpAdminLogService),
+            Arc::new(InMemoryAdminLogRepository::default()),
             Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         ));
         let watcher = Arc::new(InMemoryFsWatcher::new());
@@ -1485,7 +1485,7 @@ mod local_index_service_adapter {
             Arc::new(LocalHashService::new(HashConfig { num_threads: 1 })),
             Arc::new(LocalMediaInfoService::default()),
             Arc::new(InMemoryNotificationService::new()),
-            Arc::new(NoOpAdminLogService),
+            Arc::new(InMemoryAdminLogRepository::default()),
             Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         ));
         let old = temp.path().join("Movie.2019.mkv");
@@ -1593,7 +1593,7 @@ mod local_index_service_adapter {
             Arc::new(LocalHashService::new(HashConfig::default())),
             Arc::new(LocalMediaInfoService::default()),
             Arc::new(InMemoryNotificationService::new()),
-            Arc::new(NoOpAdminLogService),
+            Arc::new(InMemoryAdminLogRepository::default()),
             Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         ));
         let indexer: Arc<dyn BackgroundIndexer> = index_service;

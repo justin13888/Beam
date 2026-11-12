@@ -8,7 +8,8 @@
 use std::sync::Arc;
 
 use beam_domain::models::enrichment::EnrichmentTargetId;
-use beam_domain::repositories::EnrichmentStateRepository;
+use beam_domain::models::{AdminLog, AdminLogCategory, CreateAdminLog};
+use beam_domain::repositories::{AdminLogRepository, EnrichmentStateRepository};
 use beam_index::services::notification::{AdminEvent, EventCategory, NotificationService};
 use kynos::http::StatusCode;
 use serde_json::Value;
@@ -18,6 +19,7 @@ use super::admin_tests::{
     build_client, make_test_state, make_test_state_with_notification, seed_user_session,
 };
 use crate::models::AdminLogConnection;
+use crate::routes::test_support::outage;
 
 /// A notification service whose live feed is finite.
 ///
@@ -78,12 +80,12 @@ async fn an_admin_reads_the_seeded_log_entries() {
         .state
         .services
         .admin_log
-        .log(
-            beam_domain::models::AdminLogLevel::Info,
-            beam_domain::models::AdminLogCategory::System,
-            "server started".to_string(),
-            None,
-        )
+        .create(beam_domain::models::CreateAdminLog {
+            level: beam_domain::models::AdminLogLevel::Info,
+            category: beam_domain::models::AdminLogCategory::System,
+            message: "server started".to_string(),
+            details: None,
+        })
         .await
         .unwrap();
 
@@ -114,12 +116,12 @@ async fn the_admin_log_pages_by_cursor() {
             .state
             .services
             .admin_log
-            .log(
-                beam_domain::models::AdminLogLevel::Info,
-                beam_domain::models::AdminLogCategory::System,
-                message.to_string(),
-                None,
-            )
+            .create(beam_domain::models::CreateAdminLog {
+                level: beam_domain::models::AdminLogLevel::Info,
+                category: beam_domain::models::AdminLogCategory::System,
+                message: message.to_string(),
+                details: None,
+            })
             .await
             .unwrap();
     }
@@ -188,6 +190,63 @@ async fn the_admin_log_refuses_a_cursor_it_did_not_issue() {
             .await
             .assert_status(StatusCode::BAD_REQUEST)
             .assert_problem_type("https://beam.justinchung.net/reference/errors/#invalid-cursor");
+    }
+}
+
+/// An admin log store that fails every call.
+#[derive(Debug)]
+struct UnavailableAdminLog;
+
+#[async_trait::async_trait]
+impl AdminLogRepository for UnavailableAdminLog {
+    async fn create(&self, _entry: CreateAdminLog) -> Result<AdminLog, sea_orm::DbErr> {
+        Err(outage())
+    }
+
+    async fn list(&self, _limit: u64, _offset: u64) -> Result<Vec<AdminLog>, sea_orm::DbErr> {
+        Err(outage())
+    }
+
+    async fn list_by_category(
+        &self,
+        _category: AdminLogCategory,
+        _limit: u64,
+        _offset: u64,
+    ) -> Result<Vec<AdminLog>, sea_orm::DbErr> {
+        Err(outage())
+    }
+
+    async fn count(&self) -> Result<u64, sea_orm::DbErr> {
+        Err(outage())
+    }
+}
+
+/// NFR-205: an admin log store that cannot be read is a 500 on both routes
+/// that read it, never an empty log or an empty scan history, and the
+/// store's message stays off the wire.
+#[tokio::test]
+async fn an_admin_log_store_failure_is_a_500_on_the_log_and_the_status() {
+    let mut fixture = make_test_state();
+    let mut services = fixture.state.services.clone();
+    services.admin_log = Arc::new(UnavailableAdminLog);
+    fixture.state = crate::state::AppState::new(
+        fixture.state.config.clone(),
+        services,
+        fixture.state.probe.clone(),
+        None,
+    );
+    let client = build_client(&fixture);
+    let token = seed_user_session(&fixture, true).await;
+
+    for path in ["/v1/admin/logs", "/v1/admin/status"] {
+        let response = client.get(path).cookie("beam_session", &token).send().await;
+        response
+            .assert_status(StatusCode::INTERNAL_SERVER_ERROR)
+            .assert_problem_type("https://beam.justinchung.net/reference/errors/#internal");
+        assert!(
+            !response.text().contains("store unavailable"),
+            "{path}: the store's message never reaches the wire"
+        );
     }
 }
 

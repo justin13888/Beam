@@ -9,7 +9,6 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 
 use super::*;
-use crate::services::admin_log::LocalAdminLogService;
 use crate::services::notification::InMemoryNotificationService;
 use crate::services::scan::{INTERRUPTED, ScanGuard};
 use beam_domain::models::CreateLibrary;
@@ -165,9 +164,7 @@ impl Harness {
                 hasher.clone(),
                 prober.clone(),
                 notifications.clone(),
-                Arc::new(LocalAdminLogService::new(
-                    Arc::new(InMemoryAdminLogRepository::default()) as Arc<dyn AdminLogRepository>,
-                )),
+                Arc::new(InMemoryAdminLogRepository::default()) as Arc<dyn AdminLogRepository>,
                 Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
             )
             .with_clock(clock.clone())
@@ -1248,8 +1245,6 @@ mod library_scans {
 
     use crate::probe::metadata::MetadataError;
 
-    use crate::services::admin_log::LocalAdminLogService;
-    use crate::services::admin_log::NoOpAdminLogService;
     use crate::services::hash::MockHashService;
     use crate::services::media_info::MockMediaInfoService;
     use crate::services::notification::EventLevel;
@@ -1287,7 +1282,7 @@ mod library_scans {
             Arc::new(MockHashService::new()),
             Arc::new(MockMediaInfoService::new()),
             Arc::new(InMemoryNotificationService::new()),
-            Arc::new(NoOpAdminLogService),
+            Arc::new(InMemoryAdminLogRepository::default()),
             Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
@@ -1335,7 +1330,7 @@ mod library_scans {
             Arc::new(mock_hash),
             Arc::new(mock_media_info),
             Arc::new(InMemoryNotificationService::new()),
-            Arc::new(NoOpAdminLogService),
+            Arc::new(InMemoryAdminLogRepository::default()),
             Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
@@ -1377,7 +1372,7 @@ mod library_scans {
             Arc::new(MockHashService::new()),
             Arc::new(MockMediaInfoService::new()),
             Arc::new(InMemoryNotificationService::new()),
-            Arc::new(NoOpAdminLogService),
+            Arc::new(InMemoryAdminLogRepository::default()),
             Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
@@ -1424,7 +1419,7 @@ mod library_scans {
             Arc::new(mock_hash),
             Arc::new(mock_media_info),
             Arc::new(InMemoryNotificationService::new()),
-            Arc::new(NoOpAdminLogService),
+            Arc::new(InMemoryAdminLogRepository::default()),
             Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
@@ -1494,7 +1489,7 @@ mod library_scans {
             Arc::new(mock_hash),
             Arc::new(mock_media_info),
             Arc::new(InMemoryNotificationService::new()),
-            Arc::new(NoOpAdminLogService),
+            Arc::new(InMemoryAdminLogRepository::default()),
             Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
@@ -1598,9 +1593,7 @@ mod library_scans {
             Arc::new(MockHashService::new()),
             Arc::new(MockMediaInfoService::new()),
             notification_svc.clone(),
-            Arc::new(LocalAdminLogService::new(
-                admin_log_repo.clone() as Arc<dyn AdminLogRepository>
-            )),
+            admin_log_repo.clone() as Arc<dyn AdminLogRepository>,
             Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
         IndexedLibraryHarness {
@@ -1883,9 +1876,7 @@ mod library_scans {
             .insert(library.id, library.clone());
 
         let admin_log_repo = Arc::new(InMemoryAdminLogRepository::default());
-        let admin_log_svc = Arc::new(LocalAdminLogService::new(
-            admin_log_repo.clone() as Arc<dyn AdminLogRepository>
-        ));
+        let admin_log_svc = admin_log_repo.clone() as Arc<dyn AdminLogRepository>;
 
         let service = LocalIndexService::new(
             lib_repo.clone(),
@@ -1974,7 +1965,7 @@ mod library_scans {
             Arc::new(MockHashService::new()),
             Arc::new(MockMediaInfoService::new()),
             Arc::new(InMemoryNotificationService::new()),
-            Arc::new(NoOpAdminLogService),
+            Arc::new(InMemoryAdminLogRepository::default()),
             Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
@@ -2028,7 +2019,7 @@ mod library_scans {
             Arc::new(mock_hash),
             Arc::new(mock_media_info),
             Arc::new(InMemoryNotificationService::new()),
-            Arc::new(NoOpAdminLogService),
+            Arc::new(InMemoryAdminLogRepository::default()),
             Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
@@ -2071,7 +2062,7 @@ mod library_scans {
             Arc::new(crate::services::hash::LocalHashService::default()),
             Arc::new(crate::services::media_info::LocalMediaInfoService::default()),
             Arc::new(InMemoryNotificationService::new()),
-            Arc::new(NoOpAdminLogService),
+            Arc::new(InMemoryAdminLogRepository::default()),
             Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
@@ -2106,9 +2097,7 @@ mod library_scans {
             .returning(|_| Err(std::io::Error::other("hash io error")));
 
         let admin_log_repo = Arc::new(InMemoryAdminLogRepository::default());
-        let admin_log_svc = Arc::new(LocalAdminLogService::new(
-            admin_log_repo.clone() as Arc<dyn AdminLogRepository>
-        ));
+        let admin_log_svc = admin_log_repo.clone() as Arc<dyn AdminLogRepository>;
 
         let service = LocalIndexService::new(
             lib_repo.clone(),
@@ -2166,7 +2155,7 @@ mod library_scans {
             Arc::new(MockHashService::new()),
             Arc::new(MockMediaInfoService::new()),
             Arc::new(InMemoryNotificationService::new()),
-            Arc::new(NoOpAdminLogService),
+            Arc::new(InMemoryAdminLogRepository::default()),
             Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
@@ -2182,9 +2171,7 @@ mod library_scans {
         let lib_repo = Arc::new(InMemoryLibraryRepository::default());
         let notification_svc = Arc::new(InMemoryNotificationService::new());
         let admin_log_repo = Arc::new(InMemoryAdminLogRepository::default());
-        let admin_log_svc = Arc::new(LocalAdminLogService::new(
-            admin_log_repo.clone() as Arc<dyn AdminLogRepository>
-        ));
+        let admin_log_svc = admin_log_repo.clone() as Arc<dyn AdminLogRepository>;
         let dir = TempDir::new().unwrap();
         let library = make_library_in_tempdir(&lib_repo, &dir).await;
 
@@ -2236,9 +2223,7 @@ mod library_scans {
         let lib_repo = Arc::new(InMemoryLibraryRepository::default());
         let file_repo = Arc::new(InMemoryFileRepository::default());
         let admin_log_repo = Arc::new(InMemoryAdminLogRepository::default());
-        let admin_log_svc = Arc::new(LocalAdminLogService::new(
-            admin_log_repo.clone() as Arc<dyn AdminLogRepository>
-        ));
+        let admin_log_svc = admin_log_repo.clone() as Arc<dyn AdminLogRepository>;
         let dir = TempDir::new().unwrap();
         let library = make_library_in_tempdir(&lib_repo, &dir).await;
 
@@ -2387,7 +2372,7 @@ mod library_scans {
             Arc::new(MockHashService::new()),
             Arc::new(MockMediaInfoService::new()),
             Arc::new(InMemoryNotificationService::new()),
-            Arc::new(NoOpAdminLogService),
+            Arc::new(InMemoryAdminLogRepository::default()),
             Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
@@ -2453,7 +2438,7 @@ mod library_scans {
             Arc::new(mock_hash),
             Arc::new(MockMediaInfoService::new()), // no expectation: ffmpeg must NOT be called
             Arc::new(InMemoryNotificationService::new()),
-            Arc::new(NoOpAdminLogService),
+            Arc::new(InMemoryAdminLogRepository::default()),
             Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
@@ -2522,7 +2507,7 @@ mod library_scans {
             Arc::new(mock_hash),
             Arc::new(mock_media_info),
             Arc::new(InMemoryNotificationService::new()),
-            Arc::new(NoOpAdminLogService),
+            Arc::new(InMemoryAdminLogRepository::default()),
             Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
@@ -2594,7 +2579,7 @@ mod library_scans {
             Arc::new(mock_hash),
             Arc::new(mock_media_info),
             Arc::new(InMemoryNotificationService::new()),
-            Arc::new(NoOpAdminLogService),
+            Arc::new(InMemoryAdminLogRepository::default()),
             Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
@@ -2638,7 +2623,7 @@ mod library_scans {
             Arc::new(mock_hash),
             Arc::new(mock_media_info),
             Arc::new(InMemoryNotificationService::new()),
-            Arc::new(NoOpAdminLogService),
+            Arc::new(InMemoryAdminLogRepository::default()),
             Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
@@ -2667,7 +2652,7 @@ mod library_scans {
             Arc::new(MockHashService::new()),
             Arc::new(MockMediaInfoService::new()),
             Arc::new(InMemoryNotificationService::new()),
-            Arc::new(NoOpAdminLogService),
+            Arc::new(InMemoryAdminLogRepository::default()),
             Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 
@@ -2689,9 +2674,7 @@ mod library_scans {
         let lib_repo = Arc::new(InMemoryLibraryRepository::default());
         let file_repo = Arc::new(InMemoryFileRepository::default());
         let admin_log_repo = Arc::new(InMemoryAdminLogRepository::default());
-        let admin_log_svc = Arc::new(LocalAdminLogService::new(
-            admin_log_repo.clone() as Arc<dyn AdminLogRepository>
-        ));
+        let admin_log_svc = admin_log_repo.clone() as Arc<dyn AdminLogRepository>;
         let dir = TempDir::new().unwrap();
         let library = make_library_in_tempdir(&lib_repo, &dir).await;
 
@@ -2768,7 +2751,7 @@ mod library_scans {
             Arc::new(mock_hash),
             Arc::new(mock_media_info),
             Arc::new(InMemoryNotificationService::new()),
-            Arc::new(NoOpAdminLogService),
+            Arc::new(InMemoryAdminLogRepository::default()),
             Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         );
 

@@ -3,10 +3,10 @@
 use super::test_harness::*;
 use super::*;
 use crate::probe::metadata::VideoFileMetadata;
-use crate::services::admin_log::NoOpAdminLogService;
 use crate::services::hash::MockHashService;
 use crate::services::media_info::MockMediaInfoService;
 use crate::services::notification::InMemoryNotificationService;
+use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
 use beam_domain::repositories::file::MockFileRepository;
 use beam_domain::repositories::library::MockLibraryRepository;
 use beam_domain::repositories::movie::MockMovieRepository;
@@ -152,7 +152,7 @@ async fn test_process_file_movie_success() {
         Arc::new(mock_hash_service),
         Arc::new(mock_media_info_service),
         Arc::new(InMemoryNotificationService::new()),
-        Arc::new(NoOpAdminLogService),
+        Arc::new(InMemoryAdminLogRepository::default()),
         Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
     );
 
@@ -324,7 +324,7 @@ async fn test_process_file_episode_success() {
         Arc::new(mock_hash_service),
         Arc::new(mock_media_info_service),
         Arc::new(InMemoryNotificationService::new()),
-        Arc::new(NoOpAdminLogService),
+        Arc::new(InMemoryAdminLogRepository::default()),
         Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
     );
 
@@ -356,7 +356,7 @@ async fn test_process_file_missing_path_reports_no_filesystem_path() {
         Arc::new(MockHashService::new()),
         Arc::new(MockMediaInfoService::new()),
         Arc::new(InMemoryNotificationService::new()),
-        Arc::new(NoOpAdminLogService),
+        Arc::new(InMemoryAdminLogRepository::default()),
         Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
     );
 
@@ -407,7 +407,7 @@ async fn test_process_file_hash_failure_reports_no_filesystem_path() {
         Arc::new(mock_hash),
         Arc::new(mock_media_info),
         Arc::new(InMemoryNotificationService::new()),
-        Arc::new(NoOpAdminLogService),
+        Arc::new(InMemoryAdminLogRepository::default()),
         Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
     );
 

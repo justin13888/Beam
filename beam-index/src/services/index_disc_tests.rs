@@ -11,7 +11,6 @@ use super::*;
 use crate::disc::fixtures::{TitleSet, mpls, ticks, write_blu_ray, write_dvd};
 use crate::library_file::test_support::snapshot;
 use crate::probe::metadata::MetadataError;
-use crate::services::admin_log::LocalAdminLogService;
 use crate::services::filesystem_probe::{FilesystemKind, FixedFilesystemProbe};
 use crate::services::hash::{HashConfig, LocalHashService};
 use crate::services::notification::InMemoryNotificationService;
@@ -111,9 +110,7 @@ impl Harness {
             Arc::new(LocalHashService::new(HashConfig { num_threads: 1 })),
             prober.clone(),
             Arc::new(InMemoryNotificationService::new()),
-            Arc::new(LocalAdminLogService::new(
-                admin_log_repo.clone() as Arc<dyn AdminLogRepository>
-            )),
+            admin_log_repo.clone() as Arc<dyn AdminLogRepository>,
             progress.clone(),
         )
         .with_clock(clock)

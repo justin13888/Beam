@@ -23,18 +23,17 @@ use std::time::Duration;
 
 use tracing::{info, warn};
 
-use beam_domain::models::ProviderPin;
 use beam_domain::models::enrichment::{EnrichmentState, EnrichmentTargetId, MetadataField};
+use beam_domain::models::{CreateAdminLog, ProviderPin};
 use beam_domain::providers::enrichment::{
     EnrichmentError, EnrichmentProvider, EpisodeEnrichment, ExternalMediaRef, MediaQuery,
     MovieEnrichment, SeasonEnrichment, ShowEnrichment,
 };
 use beam_domain::repositories::{
-    CollectionRepository, EnrichmentStateRepository, GenreRepository, MovieRepository,
-    PersonRepository, ShowRepository,
+    AdminLogRepository, CollectionRepository, EnrichmentStateRepository, GenreRepository,
+    MovieRepository, PersonRepository, ShowRepository,
 };
 
-use crate::services::admin_log::AdminLogService;
 use crate::services::notification::{
     AdminEvent, EnrichmentEvent, EventCategory, EventLevel, NotificationService,
 };
@@ -277,7 +276,7 @@ pub struct MetadataEnrichmentService {
     /// Where a movie match's collection is stored (issue #262).
     collection_repo: Arc<dyn CollectionRepository>,
     provider: Arc<dyn EnrichmentProvider>,
-    admin_log: Arc<dyn AdminLogService>,
+    admin_log: Arc<dyn AdminLogRepository>,
     notifications: Arc<dyn NotificationService>,
     clock: Arc<dyn Clock>,
     policy: EnrichmentPolicy,
@@ -294,7 +293,7 @@ impl MetadataEnrichmentService {
         person_repo: Arc<dyn PersonRepository>,
         collection_repo: Arc<dyn CollectionRepository>,
         provider: Arc<dyn EnrichmentProvider>,
-        admin_log: Arc<dyn AdminLogService>,
+        admin_log: Arc<dyn AdminLogRepository>,
         notifications: Arc<dyn NotificationService>,
         clock: Arc<dyn Clock>,
     ) -> Self {
@@ -1018,12 +1017,12 @@ impl MetadataEnrichmentService {
         let details = serde_json::json!({ "row_id": row_id.to_string(), "title": title, "year": year, "candidates": top.iter().map(|(label, score)| serde_json::json!({ "candidate": label, "score": score.total_score })).collect::<Vec<_>>() });
         let _ = self
             .admin_log
-            .log(
-                beam_domain::models::AdminLogLevel::Warning,
-                beam_domain::models::AdminLogCategory::Enrichment,
-                format!("No enrichment match found for movie \"{title}\""),
-                Some(details),
-            )
+            .create(CreateAdminLog {
+                level: beam_domain::models::AdminLogLevel::Warning,
+                category: beam_domain::models::AdminLogCategory::Enrichment,
+                message: format!("No enrichment match found for movie \"{title}\""),
+                details: Some(details),
+            })
             .await;
     }
 
@@ -1038,12 +1037,12 @@ impl MetadataEnrichmentService {
         let details = serde_json::json!({ "row_id": row_id.to_string(), "title": title, "year": year, "candidates": top.iter().map(|(label, score)| serde_json::json!({ "candidate": label, "score": score.total_score })).collect::<Vec<_>>() });
         let _ = self
             .admin_log
-            .log(
-                beam_domain::models::AdminLogLevel::Warning,
-                beam_domain::models::AdminLogCategory::Enrichment,
-                format!("No enrichment match found for show \"{title}\""),
-                Some(details),
-            )
+            .create(CreateAdminLog {
+                level: beam_domain::models::AdminLogLevel::Warning,
+                category: beam_domain::models::AdminLogCategory::Enrichment,
+                message: format!("No enrichment match found for show \"{title}\""),
+                details: Some(details),
+            })
             .await;
     }
 }
@@ -1051,7 +1050,6 @@ impl MetadataEnrichmentService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::admin_log::LocalAdminLogService;
     use crate::services::notification::InMemoryNotificationService;
     use beam_domain::models::catalog::TitleKind;
     use beam_domain::models::enrichment::EnrichmentStatus;
@@ -1163,7 +1161,7 @@ mod tests {
         let admin_log_repo = Arc::new(
             beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository::default(),
         );
-        let admin_log = Arc::new(LocalAdminLogService::new(admin_log_repo));
+        let admin_log = admin_log_repo;
         let clock = Arc::new(TestClock::new());
 
         let service = MetadataEnrichmentService::new(

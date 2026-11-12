@@ -1,8 +1,6 @@
 //! Duplicate and runtime-divergence warnings (issue #88).
 
 use super::*;
-use crate::services::admin_log::LocalAdminLogService;
-use crate::services::admin_log::NoOpAdminLogService;
 use crate::services::hash::MockHashService;
 use crate::services::media_info::MockMediaInfoService;
 use crate::services::notification::EventLevel;
@@ -29,7 +27,7 @@ fn make_divergence_service(
     file_repo: Arc<dyn FileRepository>,
     movie_repo: Arc<dyn MovieRepository>,
     notification: Arc<InMemoryNotificationService>,
-    admin_log: Arc<dyn AdminLogService>,
+    admin_log: Arc<dyn AdminLogRepository>,
 ) -> LocalIndexService {
     LocalIndexService::new(
         Arc::new(InMemoryLibraryRepository::default()),
@@ -89,9 +87,7 @@ async fn seed_two_movie_renditions(
     let file_repo = Arc::new(InMemoryFileRepository::default());
     let notification = Arc::new(InMemoryNotificationService::new());
     let admin_log_repo = Arc::new(InMemoryAdminLogRepository::default());
-    let admin_log_svc = Arc::new(LocalAdminLogService::new(
-        admin_log_repo.clone() as Arc<dyn AdminLogRepository>
-    ));
+    let admin_log_svc = admin_log_repo.clone() as Arc<dyn AdminLogRepository>;
 
     let library_id = Uuid::new_v4();
     let movie = movie_repo
@@ -217,9 +213,7 @@ async fn test_divergence_names_the_worst_of_several_diverging_renditions() {
         file_repo,
         movie_repo,
         notification.clone(),
-        Arc::new(LocalAdminLogService::new(
-            admin_log_repo.clone() as Arc<dyn AdminLogRepository>
-        )),
+        admin_log_repo.clone() as Arc<dyn AdminLogRepository>,
     );
 
     service
@@ -365,7 +359,7 @@ async fn test_divergence_short_content_guard_no_warning() {
         file_repo,
         Arc::new(InMemoryMovieRepository::default()),
         notification.clone(),
-        Arc::new(NoOpAdminLogService),
+        Arc::new(InMemoryAdminLogRepository::default()),
     );
 
     service.check_and_report_runtime_divergence(&file_a).await;
@@ -404,7 +398,7 @@ async fn test_divergence_episode_siblings_warn() {
         file_repo,
         Arc::new(InMemoryMovieRepository::default()),
         notification.clone(),
-        Arc::new(NoOpAdminLogService),
+        Arc::new(InMemoryAdminLogRepository::default()),
     );
 
     service.check_and_report_runtime_divergence(&file_a).await;
@@ -459,7 +453,7 @@ async fn test_divergence_multi_episode_sibling_is_not_compared_with_a_single_epi
         file_repo,
         Arc::new(InMemoryMovieRepository::default()),
         notification.clone(),
-        Arc::new(NoOpAdminLogService),
+        Arc::new(InMemoryAdminLogRepository::default()),
     );
 
     service.check_and_report_runtime_divergence(&single).await;
@@ -506,7 +500,7 @@ async fn test_divergence_check_never_fails_on_repo_error() {
         Arc::new(mock_file),
         Arc::new(MockMovieRepository::new()),
         notification.clone(),
-        Arc::new(NoOpAdminLogService),
+        Arc::new(InMemoryAdminLogRepository::default()),
     );
 
     let file = make_file_with_content(

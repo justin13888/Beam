@@ -9,7 +9,6 @@
 //! actually wrote.
 
 use super::*;
-use crate::services::admin_log::LocalAdminLogService;
 use crate::services::hash::MockHashService;
 use crate::services::media_info::MockMediaInfoService;
 use crate::services::notification::InMemoryNotificationService;
@@ -151,9 +150,7 @@ impl Harness {
             Arc::new(hasher),
             Arc::new(prober),
             Arc::new(InMemoryNotificationService::new()),
-            Arc::new(LocalAdminLogService::new(
-                admin_log_repo.clone() as Arc<dyn AdminLogRepository>
-            )),
+            admin_log_repo.clone() as Arc<dyn AdminLogRepository>,
             watch_state.clone(),
         )
         .with_missing_file_grace(grace)
@@ -964,9 +961,7 @@ async fn a_failed_backfill_does_not_hold_up_the_scan_and_is_retried() {
         Arc::new(MockHashService::new()),
         Arc::new(MockMediaInfoService::new()),
         Arc::new(InMemoryNotificationService::new()),
-        Arc::new(LocalAdminLogService::new(
-            Arc::new(InMemoryAdminLogRepository::default()) as Arc<dyn AdminLogRepository>,
-        )),
+        Arc::new(InMemoryAdminLogRepository::default()) as Arc<dyn AdminLogRepository>,
         Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
     );
 
@@ -2979,9 +2974,7 @@ async fn a_merge_whose_survivor_loses_the_key_moves_no_file() {
         Arc::new(MockHashService::new()),
         Arc::new(MockMediaInfoService::new()),
         Arc::new(InMemoryNotificationService::new()),
-        Arc::new(LocalAdminLogService::new(
-            h.admin_log_repo.clone() as Arc<dyn AdminLogRepository>
-        )),
+        h.admin_log_repo.clone() as Arc<dyn AdminLogRepository>,
         Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
     );
 

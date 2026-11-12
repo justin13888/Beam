@@ -11,7 +11,6 @@ use std::sync::atomic::{AtomicBool, AtomicUsize};
 use super::*;
 use crate::library_file::test_support::snapshot;
 use crate::probe::metadata::{ChapterMetadata, MetadataError};
-use crate::services::admin_log::LocalAdminLogService;
 use crate::services::hash::{HashService, LocalHashService, MockHashService};
 use crate::services::media_info::{LocalMediaInfoService, MockMediaInfoService};
 use crate::services::notification::InMemoryNotificationService;
@@ -298,9 +297,7 @@ impl Harness {
             hasher,
             prober,
             Arc::new(InMemoryNotificationService::new()),
-            Arc::new(LocalAdminLogService::new(
-                admin_log_repo.clone() as Arc<dyn AdminLogRepository>
-            )),
+            admin_log_repo.clone() as Arc<dyn AdminLogRepository>,
             Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         )
         .with_enrichment_repo(Arc::new(store_fault_tests::FaultyEnrichmentQueue {
@@ -1025,9 +1022,7 @@ fn enrichment_control(h: &Harness) -> crate::services::enrichment::control::Enri
         states: h.enrichment_repo.clone(),
         libraries: Arc::new(InMemoryLibraryRepository::default()),
         provider: Arc::new(InMemoryEnrichmentProvider::new(&["tmdb"])),
-        admin_log: Arc::new(LocalAdminLogService::new(
-            h.admin_log_repo.clone() as Arc<dyn AdminLogRepository>
-        )),
+        admin_log: h.admin_log_repo.clone() as Arc<dyn AdminLogRepository>,
         nfo_pins: h.service.clone(),
         worker: Arc::new(tokio::sync::Notify::new()),
     })

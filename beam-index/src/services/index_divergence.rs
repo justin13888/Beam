@@ -72,15 +72,15 @@ impl LocalIndexService {
         ));
         let _ = self
             .admin_log
-            .log(
-                AdminLogLevel::Info,
-                AdminLogCategory::LibraryScan,
+            .create(CreateAdminLog {
+                level: AdminLogLevel::Info,
+                category: AdminLogCategory::LibraryScan,
                 message,
-                Some(serde_json::json!({
+                details: Some(serde_json::json!({
                     "file": file.path.display().to_string(),
                     "duplicates": duplicates,
                 })),
-            )
+            })
             .await;
     }
 
@@ -254,11 +254,11 @@ impl LocalIndexService {
             .collect();
         let _ = self
             .admin_log
-            .log(
-                AdminLogLevel::Warning,
-                AdminLogCategory::LibraryScan,
+            .create(CreateAdminLog {
+                level: AdminLogLevel::Warning,
+                category: AdminLogCategory::LibraryScan,
                 message,
-                Some(serde_json::json!({
+                details: Some(serde_json::json!({
                     "file": file.path.display().to_string(),
                     "siblings": siblings_json,
                     "threshold": {
@@ -266,7 +266,7 @@ impl LocalIndexService {
                         "min_runtime_delta_secs": policy.min_runtime_delta_secs,
                     },
                 })),
-            )
+            })
             .await;
         metrics::counter!("beam_index_divergence_warnings_total").increment(1);
     }

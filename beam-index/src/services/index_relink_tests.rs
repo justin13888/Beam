@@ -15,7 +15,6 @@ use std::sync::atomic::AtomicUsize;
 use super::*;
 use crate::library_file::test_support::snapshot;
 use crate::probe::metadata::MetadataError;
-use crate::services::admin_log::LocalAdminLogService;
 use crate::services::filesystem_probe::{FilesystemKind, FixedFilesystemProbe};
 use crate::services::hash::{HashConfig, LocalHashService};
 use crate::services::notification::InMemoryNotificationService;
@@ -731,9 +730,7 @@ impl Harness {
             hasher.clone(),
             prober.clone(),
             notifications.clone(),
-            Arc::new(LocalAdminLogService::new(
-                admin_log_repo.clone() as Arc<dyn AdminLogRepository>
-            )),
+            admin_log_repo.clone() as Arc<dyn AdminLogRepository>,
             progress.clone(),
         )
         .with_clock(clock)
@@ -1492,9 +1489,9 @@ async fn a_removed_path_the_policy_never_indexes_is_not_looked_beneath() {
         Arc::new(MockHashService::new()),
         Arc::new(MockMediaInfoService::new()),
         Arc::new(InMemoryNotificationService::new()),
-        Arc::new(LocalAdminLogService::new(Arc::new(
+        Arc::new(
             InMemoryAdminLogRepository::default(),
-        ))),
+        ),
         Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
     );
 
