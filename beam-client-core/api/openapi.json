@@ -21797,31 +21797,48 @@
       "MediaMetadata": {
         "oneOf": [
           {
-            "properties": {
-              "Show": {
+            "allOf": [
+              {
+                "properties": {
+                  "media_type": {
+                    "type": "string",
+                    "const": "show"
+                  }
+                },
+                "type": "object",
+                "required": [
+                  "media_type"
+                ]
+              },
+              {
                 "$ref": "#/components/schemas/ShowMetadata"
               }
-            },
-            "additionalProperties": false,
-            "type": "object",
-            "required": [
-              "Show"
             ]
           },
           {
-            "properties": {
-              "Movie": {
+            "allOf": [
+              {
+                "properties": {
+                  "media_type": {
+                    "type": "string",
+                    "const": "movie"
+                  }
+                },
+                "type": "object",
+                "required": [
+                  "media_type"
+                ]
+              },
+              {
                 "$ref": "#/components/schemas/MovieMetadata"
               }
-            },
-            "additionalProperties": false,
-            "type": "object",
-            "required": [
-              "Movie"
             ]
           }
         ],
-        "description": "Media metadata"
+        "description": "Media metadata: a movie or a show, told apart by `media_type` beside its\nfields (`{\"media_type\": \"movie\", \"id\": ...}`), never a single-key wrapper\n(wire rule R9).",
+        "discriminator": {
+          "propertyName": "media_type"
+        }
       },
       "EpisodeSpan": {
         "properties": {

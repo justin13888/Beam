@@ -115,7 +115,8 @@ describe("RouteError", () => {
 				return attempts === 1
 					? problem(500, "boom", "#internal")
 					: HttpResponse.json({
-							Movie: factory.movie({
+							media_type: "movie",
+							...factory.movie({
 								id: "movie-1",
 								title: {
 									original: "Recovered",

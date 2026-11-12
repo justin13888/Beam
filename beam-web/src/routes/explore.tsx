@@ -445,26 +445,25 @@ export function ExplorePage({
 				<>
 					<ul className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
 						{titles.map((node) => {
-							const isMovie = "Movie" in node;
-							const media = isMovie ? node.Movie : node.Show;
-							const title = media.title.original;
-							const year = media.year ?? null;
+							const isMovie = node.media_type === "movie";
+							const title = node.title.original;
+							const year = node.year ?? null;
 							// A show without art of its own falls back to the first
 							// season that has a poster (a show's first season can
 							// lack art: specials, season-less shows).
 							const poster = artworkSrc(
-								isMovie
-									? node.Movie.poster_url
-									: (node.Show.poster_url ??
-											node.Show.seasons.find((s) => s.poster_url)?.poster_url ??
+								node.media_type === "movie"
+									? node.poster_url
+									: (node.poster_url ??
+											node.seasons.find((s) => s.poster_url)?.poster_url ??
 											null),
 							);
 							const typeLabel = isMovie ? "Movie" : "Show";
 							return (
-								<li key={media.id}>
+								<li key={node.id}>
 									<Link
 										to="/media/$id"
-										params={{ id: media.id }}
+										params={{ id: node.id }}
 										className="group block"
 									>
 										<div className="aspect-2/3 w-full overflow-hidden rounded-md bg-gray-800">

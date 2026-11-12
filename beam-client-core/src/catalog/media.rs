@@ -226,18 +226,19 @@ pub struct BrowseQuery {
 
 impl MediaSummary {
     /// Normalise a generated catalog entry.
+    ///
+    /// The server tags each title with `media_type` beside its fields. spargen
+    /// lowers each `oneOf` branch -- the tag `allOf` the metadata schema -- to
+    /// one struct carrying both, `MediaMetadataVariant0` (`show`) and
+    /// `MediaMetadataVariant1` (`movie`), dispatched on that tag.
     fn from_generated(node: wire::MediaMetadata, record: &ServerRecord) -> Self {
         match node {
-            wire::MediaMetadata::MediaMetadataVariant1(boxed) => {
-                Self::from_movie(&boxed.movie, record)
-            }
-            wire::MediaMetadata::MediaMetadataVariant0(boxed) => {
-                Self::from_show(&boxed.show, record)
-            }
+            wire::MediaMetadata::MediaMetadataVariant1(movie) => Self::from_movie(&movie, record),
+            wire::MediaMetadata::MediaMetadataVariant0(show) => Self::from_show(&show, record),
         }
     }
 
-    fn from_movie(movie: &wire::MovieMetadata, record: &ServerRecord) -> Self {
+    fn from_movie(movie: &wire::MediaMetadataVariant1, record: &ServerRecord) -> Self {
         let title = &movie.title;
         Self {
             id: movie.id.to_string(),
@@ -263,7 +264,7 @@ impl MediaSummary {
         }
     }
 
-    fn from_show(show: &wire::ShowMetadata, record: &ServerRecord) -> Self {
+    fn from_show(show: &wire::MediaMetadataVariant0, record: &ServerRecord) -> Self {
         let title = &show.title;
         // A series' own poster wins. One without -- specials, season-less
         // shows, a series the provider has no art for -- borrows the first
@@ -356,13 +357,12 @@ impl MediaDetail {
     #[must_use]
     pub fn from_generated(node: wire::MediaMetadata, record: &ServerRecord) -> Self {
         match node {
-            wire::MediaMetadata::MediaMetadataVariant1(boxed) => Self::Movie {
-                summary: MediaSummary::from_movie(&boxed.movie, record),
+            wire::MediaMetadata::MediaMetadataVariant1(movie) => Self::Movie {
+                summary: MediaSummary::from_movie(&movie, record),
             },
-            wire::MediaMetadata::MediaMetadataVariant0(boxed) => Self::Show {
-                summary: MediaSummary::from_show(&boxed.show, record),
-                seasons: boxed
-                    .show
+            wire::MediaMetadata::MediaMetadataVariant0(show) => Self::Show {
+                summary: MediaSummary::from_show(&show, record),
+                seasons: show
                     .seasons
                     .iter()
                     .map(|season| SeasonSummary::from_generated(season, record))
@@ -459,7 +459,7 @@ mod tests {
     const EPISODE_ONE_FILE_ID: &str = "f1f1f1f1-0000-4000-8000-000000000001";
     const RETURN_EPISODE_ID: &str = "e0000003-0000-4000-8000-000000000003";
 
-    const MOVIE: &str = r#"{"Movie":{
+    const MOVIE: &str = r#"{"media_type":"movie",
         "id":"11111111-1111-4111-8111-111111111111",
         "title":{"original":"Le Samourai","localized":"The Samurai"},
         "genres":["Crime","Drama"],
@@ -472,9 +472,9 @@ mod tests {
         "file_id":"f1f1f1f1-0000-4000-8000-000000000001",
         "ratings":{"tmdb":8.1},
         "user_state":{"played":false,"position_secs":0.0,"play_count":0}
-    }}"#;
+    }"#;
 
-    const SHOW: &str = r#"{"Show":{
+    const SHOW: &str = r#"{"media_type":"show",
         "id":"22222222-2222-4222-8222-222222222222",
         "title":{"original":"Le Bureau"},
         "description":"Undercover.",
@@ -494,11 +494,11 @@ mod tests {
                  "thumbnail_url":"/artwork/e3.jpg","duration_secs":3120.0,"air_date":"2016-01-01"}
             ]}
         ]
-    }}"#;
+    }"#;
 
     /// A show as browse sends it: its counts and its own genres and rating,
     /// and no seasons.
-    const BROWSED_SHOW: &str = r#"{"Show":{
+    const BROWSED_SHOW: &str = r#"{"media_type":"show",
         "id":"22222222-2222-4222-8222-222222222222",
         "title":{"original":"Le Bureau"},
         "genres":["Drama"],
@@ -506,7 +506,7 @@ mod tests {
         "season_count":5,
         "episode_count":50,
         "seasons":[]
-    }}"#;
+    }"#;
 
     #[test]
     fn movie_prefers_the_localized_title_and_keeps_the_original() {
@@ -543,7 +543,7 @@ mod tests {
 
     /// A series carrying its own artwork, as the server publishes it whenever
     /// enrichment found any, alongside a season that also has a poster.
-    const SHOW_WITH_ARTWORK: &str = r#"{"Show":{
+    const SHOW_WITH_ARTWORK: &str = r#"{"media_type":"show",
         "id":"22222222-2222-4222-8222-222222222222",
         "title":{"original":"Le Bureau"},
         "genres":[],
@@ -555,7 +555,7 @@ mod tests {
             {"id":"5e500002-0000-4000-8000-000000000002","season_number":2,"dates":{},"genres":[],
              "poster_url":"/artwork/s1/2.jpg","episodes":[]}
         ]
-    }}"#;
+    }"#;
 
     #[test]
     fn a_show_prefers_its_own_artwork_over_a_seasons() {
@@ -650,7 +650,7 @@ mod tests {
     /// marking it watched names.
     #[test]
     fn a_show_detail_carries_the_viewers_watched_state_at_every_level() {
-        const WATCHED: &str = r#"{"Show":{
+        const WATCHED: &str = r#"{"media_type":"show",
             "id":"22222222-2222-4222-8222-222222222222",
             "title":{"original":"Le Bureau"},
             "genres":[],"season_count":1,"episode_count":2,
@@ -665,7 +665,7 @@ mod tests {
                      "user_state":{"played":false,"position_secs":600.0,"play_count":0}}
                 ]}
             ]
-        }}"#;
+        }"#;
         let detail = MediaDetail::from_generated(node(WATCHED), &record());
         let MediaDetail::Show { seasons, summary } = &detail else {
             panic!("a Show node must lower to a Show detail");

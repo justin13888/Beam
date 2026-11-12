@@ -38,21 +38,24 @@ const showEpisode = factory.historyItem({
 
 const mediaById: Record<string, MediaMetadata> = {
 	"movie-1": {
-		Movie: factory.movie({
+		media_type: "movie",
+		...factory.movie({
 			id: "movie-1",
 			title: { original: "Inception", localized: null, alternatives: [] },
 			poster_url: "https://img.example/inception.jpg",
 		}),
 	},
 	"movie-2": {
-		Movie: factory.movie({
+		media_type: "movie",
+		...factory.movie({
 			id: "movie-2",
 			title: { original: "Arrival", localized: null, alternatives: [] },
 			poster_url: null,
 		}),
 	},
 	"show-1": {
-		Show: factory.show({
+		media_type: "show",
+		...factory.show({
 			id: "show-1",
 			title: { original: "Severance", localized: null, alternatives: [] },
 			seasons: [

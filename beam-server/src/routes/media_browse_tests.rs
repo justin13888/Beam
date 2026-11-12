@@ -601,7 +601,9 @@ async fn a_browsed_show_carries_its_genres_rating_identifiers_and_counts_on_the_
         .await;
     assert_eq!(response.status(), StatusCode::OK);
     let body: serde_json::Value = response.json();
-    let show = &body["items"][0]["Show"];
+    // Tagged beside its fields, not wrapped under a `Show` key (wire rule R9).
+    let show = &body["items"][0];
+    assert_eq!(show["media_type"], "show");
     assert_eq!(show["id"], id.to_string());
     assert_eq!(show["genres"], serde_json::json!(["Thriller"]));
     // On TMDB's own 0-10 scale, and the decimal it was stored as rather than

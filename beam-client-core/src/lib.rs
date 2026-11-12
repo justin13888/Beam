@@ -99,53 +99,62 @@ uniffi::setup_scaffolding!();
 mod tests {
     use super::api::types::*;
 
-    /// The catalog's `MediaMetadata` is a Serde externally-tagged enum, which
-    /// reaches the spec as a `oneOf` of two single-required-property objects
-    /// with no `discriminator`. That shape is only safe to generate if the
-    /// branches are statically disjoint; this asserts the generated
-    /// `Deserialize` actually discriminates rather than first-match-wins.
+    /// The catalog's `MediaMetadata` is internally tagged: a title carries
+    /// `media_type` beside its fields, and the spec describes it as a `oneOf`
+    /// under `discriminator: {propertyName: media_type}` with no `mapping`.
+    /// The generated `Deserialize` must dispatch on the value the server sends
+    /// (`movie`, `show`), not on a tag it invented (getkono/spargen#403).
     #[test]
-    fn media_metadata_discriminates_movie_from_show() {
+    fn media_metadata_dispatches_on_the_media_type_the_server_sends() {
         let movie = serde_json::json!({
-            "Movie": {
-                "id": "11111111-1111-4111-8111-111111111111",
-                "title": { "original": "Arrival" },
-                "genres": [],
-                "ratings": {},
-                "identifiers": {},
-                "user_state": { "played": false, "position_secs": 0.0, "play_count": 0 },
-            }
+            "media_type": "movie",
+            "id": "11111111-1111-4111-8111-111111111111",
+            "title": { "original": "Arrival" },
+            "genres": [],
+            "ratings": {},
+            "identifiers": {},
+            "user_state": { "played": false, "position_secs": 0.0, "play_count": 0 },
         });
         let show = serde_json::json!({
-            "Show": {
-                "id": "22222222-2222-4222-8222-222222222222",
-                "title": { "original": "Severance" },
-                "seasons": [],
-                "genres": [],
-                "season_count": 0,
-                "episode_count": 0,
-            }
+            "media_type": "show",
+            "id": "22222222-2222-4222-8222-222222222222",
+            "title": { "original": "Severance" },
+            "seasons": [],
+            "genres": [],
+            "season_count": 0,
+            "episode_count": 0,
         });
 
         let decoded_movie: MediaMetadata = serde_json::from_value(movie).expect("movie decodes");
-        assert!(matches!(
-            decoded_movie,
-            MediaMetadata::MediaMetadataVariant1(_)
-        ));
+        let MediaMetadata::MediaMetadataVariant1(decoded_movie) = decoded_movie else {
+            panic!("a movie must decode to the movie branch");
+        };
+        assert_eq!(decoded_movie.title.original, "Arrival");
 
         let decoded_show: MediaMetadata = serde_json::from_value(show).expect("show decodes");
-        assert!(matches!(
-            decoded_show,
-            MediaMetadata::MediaMetadataVariant0(_)
-        ));
+        let MediaMetadata::MediaMetadataVariant0(decoded_show) = decoded_show else {
+            panic!("a show must decode to the show branch");
+        };
+        assert_eq!(decoded_show.title.original, "Severance");
     }
 
-    /// A payload matching neither branch must be rejected, not silently
-    /// coerced into one of them.
+    /// A payload matching no branch must be rejected, not silently coerced
+    /// into one of them: an unknown tag, a missing tag, and the single-key
+    /// wrapper the server no longer sends (wire rule R9).
     #[test]
     fn media_metadata_rejects_an_unknown_shape() {
-        let neither = serde_json::json!({ "Episode": { "id": "x" } });
-        let result: Result<MediaMetadata, _> = serde_json::from_value(neither);
-        assert!(result.is_err(), "an unknown variant must not decode");
+        for neither in [
+            serde_json::json!({ "media_type": "episode", "id": "x" }),
+            serde_json::json!({ "id": "11111111-1111-4111-8111-111111111111" }),
+            serde_json::json!({ "Movie": {
+                "id": "11111111-1111-4111-8111-111111111111",
+                "title": { "original": "Arrival" },
+                "genres": [],
+                "user_state": { "played": false, "position_secs": 0.0, "play_count": 0 },
+            }}),
+        ] {
+            let result: Result<MediaMetadata, _> = serde_json::from_value(neither.clone());
+            assert!(result.is_err(), "{neither} must not decode");
+        }
     }
 }
