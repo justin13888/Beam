@@ -180,8 +180,13 @@ struct Harness {
     chapters: Chapters,
     /// While set, every probe fails, as one of a file still being muxed.
     probe_fails: Arc<AtomicBool>,
+    /// Which of the stores beside the file store fail their writes.
+    faults: Arc<store_fault_tests::StoreFaults>,
     service: Arc<LocalIndexService>,
 }
+
+#[path = "index_store_fault_tests.rs"]
+mod store_fault_tests;
 
 /// A clock stopped at the moment it is made: before any file a test then
 /// writes. No NFO written after it ever settles (`STAMP_SETTLE`), however
@@ -216,6 +221,7 @@ impl Harness {
         let sidecar_repo = Arc::new(InMemorySidecarSubtitleRepository::default());
         let chapter_repo = Arc::new(InMemoryChapterRepository::default());
         let applied_nfo_repo = Arc::new(InMemoryAppliedNfoRepository::default());
+        let faults = Arc::new(store_fault_tests::StoreFaults::default());
         let file_reads = Arc::new(CountingFileRepository {
             inner: file_repo.clone(),
             whole_library_reads: AtomicUsize::new(0),
@@ -297,10 +303,22 @@ impl Harness {
             )),
             Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         )
-        .with_enrichment_repo(enrichment_repo.clone())
-        .with_sidecar_repo(sidecar_repo.clone())
-        .with_chapter_repo(chapter_repo.clone())
-        .with_applied_nfo_repo(applied_nfo_repo.clone())
+        .with_enrichment_repo(Arc::new(store_fault_tests::FaultyEnrichmentQueue {
+            inner: enrichment_repo.clone(),
+            faults: faults.clone(),
+        }))
+        .with_sidecar_repo(Arc::new(store_fault_tests::FaultySidecars {
+            inner: sidecar_repo.clone(),
+            faults: faults.clone(),
+        }))
+        .with_chapter_repo(Arc::new(store_fault_tests::FaultyChapters {
+            inner: chapter_repo.clone(),
+            faults: faults.clone(),
+        }))
+        .with_applied_nfo_repo(Arc::new(store_fault_tests::FaultyAppliedNfos {
+            inner: applied_nfo_repo.clone(),
+            faults: faults.clone(),
+        }))
         .with_clock(clock);
 
         Self {
@@ -319,6 +337,7 @@ impl Harness {
             tags,
             chapters,
             probe_fails,
+            faults,
             service: Arc::new(service),
         }
     }
