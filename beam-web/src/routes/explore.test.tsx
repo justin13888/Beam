@@ -15,7 +15,8 @@ type MediaMetadata = components["schemas"]["MediaMetadata"];
 
 function movieItem(id: string, title: string): MediaMetadata {
 	return {
-		Movie: factory.movie({
+		media_type: "movie",
+		...factory.movie({
 			id,
 			title: { original: title, localized: null, alternatives: [] },
 			year: 2000,
@@ -29,7 +30,8 @@ function showItem(
 	seasons: { poster_url: string | null }[],
 ): MediaMetadata {
 	return {
-		Show: factory.show({
+		media_type: "show",
+		...factory.show({
 			id,
 			title: { original: title, localized: null, alternatives: [] },
 			year: 2010,
@@ -293,8 +295,8 @@ describe("/explore", () => {
 		const withOwnPoster = showItem("s1", "Own Art", [
 			{ poster_url: "https://posters.test/season-1.jpg" },
 		]);
-		if ("Show" in withOwnPoster) {
-			withOwnPoster.Show.poster_url = "https://posters.test/show.jpg";
+		if (withOwnPoster.media_type === "show") {
+			withOwnPoster.poster_url = "https://posters.test/show.jpg";
 		}
 		serveExplore({
 			mediaPages: [connectionPage([withOwnPoster], { hasNext: false })],

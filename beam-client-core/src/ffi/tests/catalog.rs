@@ -1,10 +1,10 @@
 use super::*;
 
 /// What `GET /v1/media/{id}` answers for [`MEDIA_ID`].
-const MOVIE_DETAIL: &str = r#"{"Movie":{"id":"00000000-0000-0000-0000-000000000007","title":{"original":"Le Samourai"},"genres":[],"user_state":{"played":false,"position_secs":0.0,"play_count":0}}}"#;
+const MOVIE_DETAIL: &str = r#"{"media_type":"movie","id":"00000000-0000-0000-0000-000000000007","title":{"original":"Le Samourai"},"genres":[],"user_state":{"played":false,"position_secs":0.0,"play_count":0}}"#;
 
 /// The same movie, once the viewer has marked it watched.
-const WATCHED_MOVIE_DETAIL: &str = r#"{"Movie":{"id":"00000000-0000-0000-0000-000000000007","title":{"original":"Le Samourai"},"genres":[],"user_state":{"played":true,"position_secs":0.0,"play_count":1}}}"#;
+const WATCHED_MOVIE_DETAIL: &str = r#"{"media_type":"movie","id":"00000000-0000-0000-0000-000000000007","title":{"original":"Le Samourai"},"genres":[],"user_state":{"played":true,"position_secs":0.0,"play_count":1}}"#;
 
 /// Marking a title watched and reading it back shows it watched: the mark
 /// is a `PUT` on the title's `watched`, and the read after it reaches the
@@ -249,10 +249,10 @@ async fn genres_are_the_servers_list() {
 /// cursor and its titles' artwork resolved against the server.
 #[tokio::test]
 async fn a_browse_sends_its_query_and_resolves_the_page() {
-    let body = r#"{"items":[{"Movie":{"id":"00000000-0000-0000-0000-000000000007",
+    let body = r#"{"items":[{"media_type":"movie","id":"00000000-0000-0000-0000-000000000007",
         "title":{"original":"Le Samourai"},"genres":[],"ratings":{},"identifiers":{},
         "poster_url":"/v1/artwork/movie/7/poster",
-        "user_state":{"played":false,"position_secs":0.0,"play_count":0}}}],
+        "user_state":{"played":false,"position_secs":0.0,"play_count":0}}],
         "page_info":{"has_next_page":true,"has_previous_page":false,"end_cursor":"m2"}}"#;
     let (client, backend) = one_answer(200, body).await;
 

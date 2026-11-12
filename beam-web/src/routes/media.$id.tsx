@@ -86,8 +86,8 @@ export function MediaDetailPage({
 	fileIdParam: string | undefined;
 }) {
 	const { user } = useAuth();
-	const movie = metadata && "Movie" in metadata ? metadata.Movie : null;
-	const show = metadata && "Show" in metadata ? metadata.Show : null;
+	const movie = metadata?.media_type === "movie" ? metadata : null;
+	const show = metadata?.media_type === "show" ? metadata : null;
 	const mediaId = movie?.id ?? show?.id ?? null;
 
 	// Admin-only: force this title's enrichment (poster/genres/ratings) to be

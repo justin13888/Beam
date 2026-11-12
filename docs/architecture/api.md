@@ -405,15 +405,13 @@ section describes them; when the two disagree, the test is right:
   above), so it can page, or say it does not, without a breaking change;
 - **R8** `info.version` is the release, `CARGO_PKG_VERSION`, in the document served and in both
   committed copies;
+- **R9** no `oneOf` or `anyOf` branch is a single-key wrapper -- an object with exactly one
+  property, that property required (`{"Movie": {...}}`). A variant carries its tag beside its
+  fields: `MediaMetadata` is `{"media_type": "movie", ...}` or `{"media_type": "show", ...}`. A
+  lone `const` property is such a tag, not a wrapper;
 - **R10** a `409` or `422` names its problem `type` from the taxonomy, never leaving it open or
   `about:blank`. The one `about:blank` allowed is Kynos's own `422` for a request body that does
   not decode, on an operation that takes one.
-
-**R9**, no single-key `oneOf` wrapper, is not enforced yet. `MediaMetadata` is the one schema it
-would refuse -- `{"Movie": {...}}` rather than a `media_type` tag beside the fields. spargen 0.6
-dispatches on the tag the server sends
-([getkono/spargen#403](https://github.com/getkono/spargen/issues/403)), so the tagged form is no
-longer blocked; moving to it is [#300](https://github.com/justin13888/beam/issues/300).
 
 R4-R6 read every property of every component schema and every path and query parameter. Headers
 are transport, described by Kynos rather than by Beam's types, and are not asserted
