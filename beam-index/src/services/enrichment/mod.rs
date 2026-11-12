@@ -35,7 +35,7 @@ use beam_domain::repositories::{
 };
 
 use crate::services::notification::{
-    AdminEvent, EnrichmentEvent, EventCategory, EventLevel, NotificationService,
+    EnrichmentEvent, EventCategory, EventLevel, NewAdminEvent, NotificationService,
 };
 use beam_domain::services::Clock;
 
@@ -446,7 +446,7 @@ impl MetadataEnrichmentService {
             ProcessOutcome::Failed => format!("Enrichment of \"{name}\" failed"),
             ProcessOutcome::RateLimited => return,
         };
-        let event = AdminEvent::new(level, EventCategory::Enrichment, message, None, None)
+        let event = NewAdminEvent::new(level, EventCategory::Enrichment, message, None, None)
             .with_enrichment(EnrichmentEvent {
                 target: row.target,
                 title,

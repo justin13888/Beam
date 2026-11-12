@@ -19,7 +19,8 @@ pub use media_info::{LocalMediaInfoService, MediaInfoService};
 #[cfg(any(test, feature = "test-utils"))]
 pub use notification::InMemoryNotificationService;
 pub use notification::{
-    AdminEvent, EventCategory, EventLevel, LocalNotificationService, NotificationService,
+    AdminEvent, EventCategory, EventLevel, LocalNotificationService, NewAdminEvent,
+    NotificationService,
 };
 pub use scan::{
     Retirement, ScanJob, ScanPhase, ScanProgress, ScanState, ScanTicket, ScanTrigger, StoppedScan,

@@ -404,7 +404,7 @@ impl LocalIndexService {
                 from.display(),
                 path.display()
             );
-            self.notification_service.publish(AdminEvent::info(
+            self.notification_service.publish(NewAdminEvent::info(
                 EventCategory::LibraryScan,
                 message.clone(),
                 Some(library.id),

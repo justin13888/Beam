@@ -20,7 +20,7 @@ use crate::services::filesystem_probe::{FilesystemKind, FilesystemProbe, StatfsF
 use crate::services::hash::HashService;
 use crate::services::media_info::MediaInfoService;
 use crate::services::mime::container_mime_type;
-use crate::services::notification::{AdminEvent, EventCategory, NotificationService};
+use crate::services::notification::{EventCategory, NewAdminEvent, NotificationService};
 use crate::services::scan::{
     CANCELLED, CatalogExclusive, ProgressThrottle, SCAN_STOP_TIMEOUT, ScanCoordinator, ScanEvent,
     ScanJob, ScanPhase, ScanProgress, ScanRefused, ScanState, ScanTicket, ScanTrigger, Settle,
@@ -1754,7 +1754,7 @@ impl LocalIndexService {
     ) {
         error!("Failed to process file {}: {}", path.display(), err);
         record_file_outcome("failed");
-        self.notification_service.publish(AdminEvent::warning(
+        self.notification_service.publish(NewAdminEvent::warning(
             EventCategory::LibraryScan,
             format!("Failed to process file '{}': {}", path.display(), err),
             Some(lib_uuid),
@@ -1792,7 +1792,7 @@ impl LocalIndexService {
             shielded,
             "library walk could not read part of the root; rows beneath were left untouched"
         );
-        self.notification_service.publish(AdminEvent::warning(
+        self.notification_service.publish(NewAdminEvent::warning(
             EventCategory::LibraryScan,
             format!(
                 "Library '{}': {} path(s) could not be read during the scan; {} indexed file(s) \
@@ -2417,7 +2417,7 @@ impl LocalIndexService {
             library_id = %library.id,
             "library root is not a directory"
         );
-        self.notification_service.publish(AdminEvent::error(
+        self.notification_service.publish(NewAdminEvent::error(
             EventCategory::LibraryScan,
             format!(
                 "Library '{}' root path does not exist or is not a directory: {}",
@@ -2467,13 +2467,13 @@ impl LocalIndexService {
         let library_id = Some(library.id);
         let library_name = Some(name.clone());
         let event = match phase {
-            ScanPhase::Failed => AdminEvent::error(
+            ScanPhase::Failed => NewAdminEvent::error(
                 EventCategory::ScanProgress,
                 message,
                 library_id,
                 library_name,
             ),
-            ScanPhase::Started | ScanPhase::Progress | ScanPhase::Completed => AdminEvent::info(
+            ScanPhase::Started | ScanPhase::Progress | ScanPhase::Completed => NewAdminEvent::info(
                 EventCategory::ScanProgress,
                 message,
                 library_id,
@@ -2724,7 +2724,7 @@ impl LocalIndexService {
             library.name, library.root_path
         );
 
-        self.notification_service.publish(AdminEvent::info(
+        self.notification_service.publish(NewAdminEvent::info(
             EventCategory::LibraryScan,
             format!("Library scan started for '{}'", library.name),
             Some(lib_uuid),
@@ -2802,7 +2802,7 @@ impl LocalIndexService {
                 indexed_video_files,
                 "library root contains no video files but video files are indexed; refusing to reconcile"
             );
-            self.notification_service.publish(AdminEvent::error(
+            self.notification_service.publish(NewAdminEvent::error(
                 EventCategory::LibraryScan,
                 format!(
                     "Library '{}' root contains no video files but {} are indexed; refusing to \
@@ -3131,7 +3131,7 @@ impl LocalIndexService {
             total_files
         );
 
-        self.notification_service.publish(AdminEvent::info(
+        self.notification_service.publish(NewAdminEvent::info(
             EventCategory::LibraryScan,
             format!(
                 "Library scan complete for '{}': added {}, moved {}, missing {}, restored {}, purged {}, total {}",

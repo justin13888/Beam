@@ -10,7 +10,9 @@ use std::sync::Arc;
 use beam_domain::models::enrichment::EnrichmentTargetId;
 use beam_domain::models::{AdminLog, AdminLogCategory, CreateAdminLog};
 use beam_domain::repositories::{AdminLogRepository, EnrichmentStateRepository};
-use beam_index::services::notification::{AdminEvent, EventCategory, NotificationService};
+use beam_index::services::notification::{
+    AdminEvent, EventCategory, NewAdminEvent, NotificationService,
+};
 use kynos::http::StatusCode;
 use serde_json::Value;
 use tokio::sync::broadcast;
@@ -37,22 +39,35 @@ use crate::routes::test_support::outage;
 /// handler encoded onto the wire.
 #[derive(Debug)]
 struct FiniteEventFeed {
-    events: Vec<AdminEvent>,
+    events: Vec<NewAdminEvent>,
+}
+
+/// `events` as published, each stamped with its position as its id.
+fn stamped(events: &[NewAdminEvent]) -> Vec<AdminEvent> {
+    events
+        .iter()
+        .zip(1u128..)
+        .map(|(event, n)| {
+            event
+                .clone()
+                .stamp(uuid::Uuid::from_u128(n), chrono::DateTime::UNIX_EPOCH)
+        })
+        .collect()
 }
 
 impl NotificationService for FiniteEventFeed {
-    fn publish(&self, _event: AdminEvent) {}
+    fn publish(&self, _event: NewAdminEvent) {}
 
     fn subscribe(&self) -> broadcast::Receiver<AdminEvent> {
         let (sender, receiver) = broadcast::channel(self.events.len().max(1));
-        for event in &self.events {
-            let _ = sender.send(event.clone());
+        for event in stamped(&self.events) {
+            let _ = sender.send(event);
         }
         receiver
     }
 
     fn recent_events(&self, limit: usize) -> Vec<AdminEvent> {
-        self.events.iter().take(limit).cloned().collect()
+        stamped(&self.events).into_iter().take(limit).collect()
     }
 }
 
@@ -258,7 +273,7 @@ async fn an_admin_log_store_failure_is_a_500_on_the_log_and_the_status() {
 async fn the_admin_event_snapshot_returns_the_newest_events_within_the_limit() {
     let fixture = make_test_state();
     for message in ["oldest", "middle", "newest"] {
-        fixture.notification.publish(AdminEvent::info(
+        fixture.notification.publish(NewAdminEvent::info(
             EventCategory::LibraryScan,
             message,
             None,
@@ -297,7 +312,7 @@ async fn the_admin_event_snapshot_returns_the_newest_events_within_the_limit() {
 #[tokio::test]
 async fn the_admin_event_snapshot_is_admin_only() {
     let fixture = make_test_state();
-    fixture.notification.publish(AdminEvent::info(
+    fixture.notification.publish(NewAdminEvent::info(
         EventCategory::LibraryScan,
         "scan of a private library",
         None,
@@ -351,14 +366,14 @@ async fn the_admin_event_stream_is_admin_only() {
 async fn the_admin_event_stream_encodes_each_event_as_json() {
     let fixture = make_test_state_with_notification(Arc::new(FiniteEventFeed {
         events: vec![
-            AdminEvent::info(
+            NewAdminEvent::info(
                 EventCategory::LibraryScan,
                 "scan started",
                 Some(uuid::Uuid::from_u128(1)),
                 Some("Movies".to_string()),
             ),
-            AdminEvent::warning(EventCategory::System, "disk nearly full", None, None),
-            AdminEvent::info(
+            NewAdminEvent::warning(EventCategory::System, "disk nearly full", None, None),
+            NewAdminEvent::info(
                 EventCategory::ScanProgress,
                 "Scanning 'Movies': 3 of 8 files",
                 Some(uuid::Uuid::from_u128(1)),
@@ -374,7 +389,7 @@ async fn the_admin_event_stream_encodes_each_event_as_json() {
                     ..Default::default()
                 },
             }),
-            AdminEvent::warning(
+            NewAdminEvent::warning(
                 EventCategory::Enrichment,
                 "No enrichment match for \"Heat\"",
                 None,
@@ -463,16 +478,16 @@ async fn the_admin_event_stream_encodes_each_event_as_json() {
 /// event the buffer kept, and the one after that `Closed`.
 #[derive(Debug)]
 struct LaggingEventFeed {
-    events: Vec<AdminEvent>,
+    events: Vec<NewAdminEvent>,
 }
 
 impl NotificationService for LaggingEventFeed {
-    fn publish(&self, _event: AdminEvent) {}
+    fn publish(&self, _event: NewAdminEvent) {}
 
     fn subscribe(&self) -> broadcast::Receiver<AdminEvent> {
         let (sender, receiver) = broadcast::channel(1);
-        for event in &self.events {
-            let _ = sender.send(event.clone());
+        for event in stamped(&self.events) {
+            let _ = sender.send(event);
         }
         receiver
     }
@@ -489,7 +504,7 @@ async fn a_lagging_event_stream_skips_and_keeps_delivering() {
     let fixture = make_test_state_with_notification(Arc::new(LaggingEventFeed {
         events: ["missed", "also missed", "delivered"]
             .into_iter()
-            .map(|message| AdminEvent::info(EventCategory::System, message, None, None))
+            .map(|message| NewAdminEvent::info(EventCategory::System, message, None, None))
             .collect(),
     }));
     let client = build_client(&fixture);

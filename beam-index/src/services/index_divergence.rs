@@ -64,7 +64,7 @@ impl LocalIndexService {
             file.path.display(),
             duplicates.len()
         );
-        self.notification_service.publish(AdminEvent::info(
+        self.notification_service.publish(NewAdminEvent::info(
             EventCategory::LibraryScan,
             message.clone(),
             Some(file.library_id),
@@ -237,7 +237,7 @@ impl LocalIndexService {
             diverging.len(),
         );
 
-        self.notification_service.publish(AdminEvent::warning(
+        self.notification_service.publish(NewAdminEvent::warning(
             EventCategory::LibraryScan,
             message.clone(),
             Some(file.library_id),

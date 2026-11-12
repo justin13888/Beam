@@ -371,7 +371,10 @@ impl AppServices {
                 db.clone(),
             ));
 
-        let notification_service = Arc::new(LocalNotificationService::new());
+        let notification_service = Arc::new(LocalNotificationService::with_seams(
+            clock.clone(),
+            Arc::new(beam_domain::services::UuidGenerator),
+        ));
         let hash_service = Arc::new(LocalHashService::new(hash_config));
         let media_info_service = Arc::new(LocalMediaInfoService::default());
 
