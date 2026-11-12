@@ -1,3 +1,6 @@
+//! [`EnrichmentControl`]'s reads over the control tests' harness: one
+//! title's detail, and the paged list of the queue.
+
 use super::*;
 
 // ── one title's detail ──────────────────────────────────────────────────────

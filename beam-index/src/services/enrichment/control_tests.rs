@@ -760,6 +760,6 @@ async fn refreshing_all_or_one_queues_them_whatever_their_status() {
     assert_eq!(h.audit().await.len(), 2);
 }
 
-/// One title's enrichment detail, and the list of titles.
-#[path = "control_detail_tests.rs"]
-mod detail;
+// One title's detail and the list: the reads, over this harness.
+#[path = "control_read_tests.rs"]
+mod read_tests;
