@@ -166,7 +166,7 @@ mise tasks         # list every task
 Individual tasks, if you need them: `rust:fmt`, `rust:clippy`, `rust:test`, `rust:deny`,
 `rust:lockfile`, `rust:coverage`, `rust:coverage:report`, `ts:check`, `ts:typecheck`, `ts:test`,
 `docs:build`, `codegen:openapi`, `codegen:openapi:check`, `check:ffmpeg-version`,
-`check:mutants-skip-fakes`, `check:compose-invariants`, `check:hook-git-env`, `helm:lint`,
+`check:mutants-skip-fakes`, `check:file-size`, `check:compose-invariants`, `check:hook-git-env`, `helm:lint`,
 `helm:template`, `check:chart-invariants`. The `:fix` variants (`rust:fmt:fix`, `ts:check:fix`) write their fixes.
 
 `rust:test:pg` runs the opt-in real-Postgres tier and is deliberately outside `ci`; it needs
