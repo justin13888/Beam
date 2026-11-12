@@ -1524,6 +1524,13 @@ fi
 exit "$status"
 '''
 
+[tasks."check:file-size"]
+description = "Assert no Rust or Kotlin file exceeds its line limit unless it is on the shrink-only baseline"
+# The limits and the baseline live in scripts/file-size-baseline.txt; the script
+# explains the ratchet. It compares the baseline with $BEAM_FILE_SIZE_BASE's, or
+# the merge base with origin/master, to refuse a path being added (#362).
+run = "sh scripts/check-file-size.sh"
+
 [tasks."check:hook-git-env"]
 description = "Assert git hook steps run without the GIT_DIR/GIT_WORK_TREE a linked worktree's hook carries"
 # Drives the real pre-push `hook-git-env` step through hk, with the environment
@@ -2542,6 +2549,7 @@ depends = [
     "rust:lockfile",
     "check:ffmpeg-version",
     "check:mutants-skip-fakes",
+    "check:file-size",
     "check:compose-invariants",
     "helm:lint",
     "helm:template",

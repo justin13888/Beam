@@ -1,0 +1,84 @@
+# Read by scripts/check-file-size.sh (`mise run check:file-size`), #362.
+#
+# `limit .EXT N`: a tracked file with that extension may have at most N total
+# lines. The limits are each language's p90 over the workspace when the gate
+# landed; they are never raised to let a file pass.
+#
+# Every other line is a file that was over its limit when the gate landed. The
+# list only shrinks: split a file below its limit and delete its line here (the
+# check fails until you do). The check refuses a path that is not on the base
+# revision's list, unless the limit lines change in the same diff -- the one
+# time the list may be regenerated.
+limit .rs 906
+limit .kt 312
+limit .kts 312
+
+beam-android/app/src/main/kotlin/dev/beam/android/ui/BeamApp.kt
+beam-android/core/ffi/src/main/kotlin/dev/beam/android/core/ffi/repository/BeamRepositories.kt
+beam-android/core/ffi/src/main/kotlin/dev/beam/android/core/ffi/repository/Repositories.kt
+beam-android/core/ffi/src/test/kotlin/dev/beam/android/core/ffi/DeviceProfilesTest.kt
+beam-android/core/media/src/main/kotlin/dev/beam/android/core/media/player/ExoBeamPlayer.kt
+beam-android/core/media/src/test/kotlin/dev/beam/android/core/media/download/DownloadArtworkTest.kt
+beam-android/core/media/src/test/kotlin/dev/beam/android/core/media/http/BeamImageLoaderTest.kt
+beam-android/core/testing/src/main/kotlin/dev/beam/android/core/testing/Fixtures.kt
+beam-android/feature/admin/src/main/kotlin/dev/beam/android/feature/admin/AdminViewModel.kt
+beam-android/feature/admin/src/test/kotlin/dev/beam/android/feature/admin/AdminTest.kt
+beam-android/feature/auth/src/test/kotlin/dev/beam/android/feature/auth/AuthViewModelTest.kt
+beam-android/feature/detail/src/main/kotlin/dev/beam/android/feature/detail/DetailScreen.kt
+beam-android/feature/detail/src/test/kotlin/dev/beam/android/feature/detail/DetailTest.kt
+beam-android/feature/explore/src/test/kotlin/dev/beam/android/feature/explore/ExploreViewModelTest.kt
+beam-android/feature/history/src/test/kotlin/dev/beam/android/feature/history/HistoryTest.kt
+beam-android/feature/player/src/main/kotlin/dev/beam/android/feature/player/PlayerViewModel.kt
+beam-android/feature/player/src/test/kotlin/dev/beam/android/feature/player/PlayerSourceSwitchTest.kt
+beam-android/feature/settings/src/main/kotlin/dev/beam/android/feature/settings/SettingsScreen.kt
+beam-auth/src/utils/oidc/discovered.rs
+beam-auth/src/utils/sql_shape_tests.rs
+beam-client-core/src/capability/select.rs
+beam-client-core/src/demux/mkv.rs
+beam-client-core/src/ffi/mod.rs
+beam-client-core/src/ffi/tests/mod.rs
+beam-client-core/src/telemetry.rs
+beam-client-core/src/transport.rs
+beam-domain/src/repositories/contract/catalog.rs
+beam-domain/src/repositories/contract/file.rs
+beam-domain/src/repositories/contract/movie.rs
+beam-domain/src/repositories/contract/show.rs
+beam-domain/src/utils/filename.rs
+beam-domain/src/utils/media_path_corpus.rs
+beam-index/src/library_file.rs
+beam-index/src/probe/color.rs
+beam-index/src/probe/metadata.rs
+beam-index/src/providers/cameo.rs
+beam-index/src/repositories/catalog_tests.rs
+beam-index/src/repositories/sql_shape_tests.rs
+beam-index/src/runtime_tests.rs
+beam-index/src/services/enrichment/matcher.rs
+beam-index/src/services/enrichment/mod.rs
+beam-index/src/services/index.rs
+beam-index/src/services/index_disc_tests.rs
+beam-index/src/services/index_hints.rs
+beam-index/src/services/index_identity.rs
+beam-index/src/services/index_identity_tests.rs
+beam-index/src/services/index_missing_tests.rs
+beam-index/src/services/index_nfo_sidecar_tests.rs
+beam-index/src/services/index_relink_tests.rs
+beam-index/src/services/index_scan_tests.rs
+beam-index/src/services/watcher.rs
+beam-migration/src/m20260209_000001_create_schema.rs
+beam-migration/tests/pg_integration/migrations.rs
+beam-server/src/config_tests.rs
+beam-server/src/routes/access_tests.rs
+beam-server/src/routes/admin.rs
+beam-server/src/routes/admin_tests.rs
+beam-server/src/routes/admin_users_tests.rs
+beam-server/src/routes/api_error.rs
+beam-server/src/routes/artwork_tests.rs
+beam-server/src/routes/auth.rs
+beam-server/src/routes/auth_tests.rs
+beam-server/src/routes/conventions_tests.rs
+beam-server/src/routes/media_tests.rs
+beam-server/src/routes/playback_tests.rs
+beam-server/src/routes/stream_tests.rs
+beam-server/src/services/library_tests.rs
+beam-server/src/services/metadata_browse_tests.rs
+beam-server/src/services/playback.rs
