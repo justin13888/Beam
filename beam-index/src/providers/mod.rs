@@ -1,6 +1,8 @@
 pub mod artwork;
 pub mod cameo;
 pub mod composite;
+#[cfg(test)]
+pub(crate) mod contract;
 pub mod telemetry;
 pub mod tvdb;
 

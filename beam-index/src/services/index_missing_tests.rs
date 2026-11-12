@@ -181,6 +181,77 @@ fn plan_missing_shields_every_row_after_an_unscoped_walk_failure() {
     );
 }
 
+mod plan_missing_properties {
+    use super::*;
+    use proptest::prelude::*;
+    use std::collections::HashSet;
+
+    const DIRS: [&str; 4] = ["/lib/a", "/lib/a/b", "/lib/ab", "/lib/c"];
+
+    /// An unseen row in one of [`DIRS`], missing since some second of the
+    /// last ten days or not missing.
+    fn unseen_row() -> impl Strategy<Value = MediaFile> {
+        (
+            prop::sample::select(DIRS.to_vec()),
+            prop::option::of(0i64..10 * 86_400),
+        )
+            .prop_map(|(dir, since)| row_at(&format!("{dir}/x.mkv"), since.map(instant)))
+    }
+
+    proptest! {
+        /// Every unseen row is either shielded -- left alone, in neither
+        /// list -- or decided, and each decision names the row at most
+        /// once. A row's first stamp is never replaced, a row is never
+        /// purged before it has been missing for the whole grace, and
+        /// nothing outside the input is named.
+        #[test]
+        fn plan_missing_partitions_its_input(
+            rows in prop::collection::vec(unseen_row(), 0..30),
+            failed in prop::sample::subsequence(DIRS.to_vec(), 0..=DIRS.len()),
+            unscoped in any::<bool>(),
+            grace_secs in 0u64..12 * 86_400,
+        ) {
+            let failed: Vec<PathBuf> = failed.iter().map(PathBuf::from).collect();
+            let now = instant(10 * 86_400);
+            let grace = Duration::from_secs(grace_secs);
+
+            let plan = plan_missing(&rows, &failed, unscoped, now, grace);
+
+            let shielded: Vec<&MediaFile> = rows
+                .iter()
+                .filter(|row| unscoped || failed.iter().any(|dir| row.path.starts_with(dir)))
+                .collect();
+            prop_assert_eq!(plan.shielded, shielded.len());
+
+            let marked: HashSet<Uuid> = plan.mark.iter().copied().collect();
+            let purged: HashSet<Uuid> = plan.purge.iter().copied().collect();
+            prop_assert_eq!(marked.len(), plan.mark.len(), "marked at most once");
+            prop_assert_eq!(purged.len(), plan.purge.len(), "purged at most once");
+            for row in &rows {
+                let is_shielded = shielded.iter().any(|s| s.id == row.id);
+                if is_shielded {
+                    prop_assert!(!marked.contains(&row.id) && !purged.contains(&row.id));
+                    continue;
+                }
+                if row.missing_since.is_some() {
+                    prop_assert!(!marked.contains(&row.id), "its first stamp is kept");
+                } else {
+                    prop_assert!(marked.contains(&row.id), "an unshielded row is stamped");
+                }
+                if purged.contains(&row.id) {
+                    let since = row.missing_since.unwrap_or(now);
+                    prop_assert!(
+                        now - since >= chrono::TimeDelta::from_std(grace).unwrap(),
+                        "purged before the grace was up"
+                    );
+                }
+            }
+            let ids: HashSet<Uuid> = rows.iter().map(|row| row.id).collect();
+            prop_assert!(marked.is_subset(&ids) && purged.is_subset(&ids));
+        }
+    }
+}
+
 // ─── the scan and the watcher ────────────────────────────────────────────────
 
 /// The grace the harness configures: short enough to step across with the

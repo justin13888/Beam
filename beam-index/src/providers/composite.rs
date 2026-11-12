@@ -328,6 +328,26 @@ mod tests {
         assert!(second.invalidated_refs().is_empty());
     }
 
+    /// The shared contract, over a composite whose second provider knows
+    /// the titles and whose first knows nothing: a lookup by id reaches the
+    /// provider the id names, and a search every provider.
+    mod contract {
+        use super::*;
+        use crate::providers::contract::{enrichment_provider_contract, knowing, subject};
+
+        async fn setup() -> crate::providers::contract::ContractSubject {
+            subject(
+                Arc::new(composite(vec![
+                    InMemoryEnrichmentProvider::new(&["anilist"]),
+                    knowing("tmdb"),
+                ])),
+                "tmdb",
+            )
+        }
+
+        enrichment_provider_contract!(setup);
+    }
+
     #[tokio::test]
     async fn an_id_no_provider_resolves_is_not_configured() {
         let provider = composite(vec![InMemoryEnrichmentProvider::new(&["tmdb"])]);

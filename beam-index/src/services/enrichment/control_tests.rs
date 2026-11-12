@@ -767,6 +767,81 @@ async fn refreshing_all_or_one_queues_them_whatever_their_status() {
     assert_eq!(h.audit().await.len(), 2);
 }
 
+// ── one title's detail ──────────────────────────────────────────────────────
+
+/// A queued title's detail is its row: status, match, attempts and the
+/// position it holds in the list, under the title's own name.
+#[tokio::test]
+async fn a_titles_detail_is_its_row_under_its_own_name() {
+    let h = Harness::new(InMemoryEnrichmentProvider::new(&["tmdb"]));
+    let movie = h.movie("Heat", Some(1995)).await;
+    let show = h.show("The Office").await;
+    let target = EnrichmentTargetId::Movie(movie);
+    let row = h.state(target).await.id;
+    h.states
+        .mark_enriched(row, "tmdb:949", 0.875, Utc::now())
+        .await
+        .unwrap();
+    let stored = h.state(target).await;
+
+    let detail = h.control.detail(movie).await.unwrap();
+
+    assert_eq!(detail.target, target);
+    assert_eq!((detail.title.as_str(), detail.year), ("Heat", Some(1995)));
+    assert_eq!(detail.status, EnrichmentStatus::Enriched);
+    assert_eq!(detail.matched_ref.as_deref(), Some("tmdb:949"));
+    assert_eq!(detail.match_confidence, Some(0.875));
+    assert_eq!(detail.attempts, stored.attempts);
+    assert_eq!(detail.enriched_at, stored.enriched_at);
+    assert_eq!(detail.updated_at, Some(stored.updated_at));
+    assert_eq!(detail.position, Some(stored.list_position()));
+
+    let show_detail = h.control.detail(show).await.unwrap();
+    assert_eq!(show_detail.target, EnrichmentTargetId::Show(show));
+    assert_eq!(show_detail.title, "The Office");
+    assert_eq!(show_detail.status, EnrichmentStatus::Pending);
+}
+
+/// A title indexed before enrichment existed has no row yet: it reads as
+/// pending with nothing tried, and holds no place in the list, until the
+/// startup backfill queues it.
+#[tokio::test]
+async fn a_title_with_no_row_reads_as_pending_and_unplaced() {
+    let h = Harness::new(InMemoryEnrichmentProvider::new(&["tmdb"]));
+    let movie = h
+        .movies
+        .find_or_create_by_identity(CreateMovie::new("Alien".to_string(), Some(1979), None))
+        .await
+        .unwrap();
+
+    let detail = h.control.detail(movie.id).await.unwrap();
+
+    assert_eq!(detail.target, EnrichmentTargetId::Movie(movie.id));
+    assert_eq!(detail.status, EnrichmentStatus::Pending);
+    assert_eq!(detail.attempts, 0);
+    assert_eq!(detail.matched_ref, None);
+    assert_eq!(detail.updated_at, None);
+    assert_eq!(detail.position, None);
+    assert_eq!(detail.locked_fields, FieldLocks::none());
+}
+
+/// An id that names no title is refused as not found, and the refusal --
+/// which the API hands a client as it is -- names the id asked for.
+#[tokio::test]
+async fn the_detail_of_an_unknown_id_is_not_found_and_names_it() {
+    let h = Harness::new(InMemoryEnrichmentProvider::new(&["tmdb"]));
+    h.movie("Heat", None).await;
+    let unknown = Uuid::new_v4();
+
+    let err = h.control.detail(unknown).await.unwrap_err();
+
+    assert!(
+        matches!(err, ControlError::MediaNotFound(id) if id == unknown),
+        "{err:?}"
+    );
+    assert_eq!(err.to_string(), format!("media {unknown} not found"));
+}
+
 // ── the list ────────────────────────────────────────────────────────────────
 
 #[tokio::test]
