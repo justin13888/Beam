@@ -130,8 +130,10 @@ impl Harness {
         let root = dir.path().join("library");
         std::fs::create_dir_all(&root).unwrap();
 
-        let library_repo = Arc::new(InMemoryLibraryRepository::default());
         let file_repo = Arc::new(InMemoryFileRepository::default());
+        // The library counts the files the file store holds, as the SQL
+        // store counts the `files` table, so a scan's recorded count is real.
+        let library_repo = Arc::new(InMemoryLibraryRepository::with_files(file_repo.clone()));
         let stream_repo = Arc::new(InMemoryMediaStreamRepository::default());
         let notifications = Arc::new(InMemoryNotificationService::new());
         let clock = Arc::new(TestClock::starting_at(now));
@@ -647,6 +649,65 @@ async fn a_rescan_of_every_library_skips_one_already_being_scanned() {
     let scanned = h.service.scan_job(other.id).unwrap();
     assert_eq!(scanned.trigger, ScanTrigger::Periodic);
     assert_eq!(scanned.state, ScanState::Succeeded);
+}
+
+// ─── What a scan records on its library ──────────────────────────────────────
+
+/// A scan stamps its library with when it started and finished, on the
+/// injected clock, and with how many of the library's files are present
+/// once it is done: a file the scan found gone is kept as missing (#179),
+/// and is not counted.
+#[tokio::test]
+async fn a_scan_records_the_present_file_count_and_its_start_and_finish() {
+    let h = Harness::settled().await;
+    h.write("Heat (1995).mkv");
+    let alien = h.write("Alien (1979).mkv");
+    *h.hasher.advance_per_hash.lock() = Duration::from_secs(1);
+    let first_start = h.clock.now();
+
+    h.scan().await;
+
+    let stored = h
+        .library_repo
+        .find_by_id(h.library.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.last_scan_started_at, Some(first_start));
+    assert_eq!(
+        stored.last_scan_finished_at,
+        Some(first_start + chrono::TimeDelta::seconds(2)),
+        "finished once both files were hashed"
+    );
+    assert_eq!(stored.last_scan_file_count, Some(2));
+
+    std::fs::remove_file(&alien).unwrap();
+    h.clock.advance(Duration::from_secs(60));
+    let second_start = h.clock.now();
+
+    h.scan().await;
+
+    let stored = h
+        .library_repo
+        .find_by_id(h.library.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        h.row(&alien).await.unwrap().missing_since.is_some(),
+        "the gone file is kept as missing"
+    );
+    assert_eq!(stored.last_scan_started_at, Some(second_start));
+    assert_eq!(
+        stored.last_scan_finished_at,
+        Some(second_start),
+        "nothing was hashed: the file left is unchanged"
+    );
+    assert_eq!(
+        stored.last_scan_file_count,
+        Some(1),
+        "the missing file is not counted"
+    );
 }
 
 // ─── Watcher events while a scan runs ────────────────────────────────────────
