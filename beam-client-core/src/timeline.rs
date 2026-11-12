@@ -100,6 +100,7 @@ mod tests {
                 url: format!("https://beam.example/{index}"),
                 duration_secs: *duration_secs,
                 sidecar_subtitles: Vec::new(),
+                start_tracks: None,
             })
             .collect()
     }

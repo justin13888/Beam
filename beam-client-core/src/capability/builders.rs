@@ -193,6 +193,8 @@ impl MediaSourceBuilder {
                 parts: Vec::new(),
                 disc_structure: None,
                 subtitle_tracks: Vec::new(),
+                default_audio_track_index: None,
+                default_subtitle_track_index: None,
             },
         }
     }
@@ -278,6 +280,7 @@ impl MediaSourceBuilder {
                 duration_secs: Some(*duration),
                 stream_url: format!("/v1/files/{file_id}/stream"),
                 subtitle_tracks: Vec::new(),
+                default_subtitle_track_index: None,
             })
             .collect();
         self

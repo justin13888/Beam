@@ -1,5 +1,5 @@
 use super::*;
-use crate::capability::QualityPolicy;
+use crate::capability::{QualityPolicy, StartSubtitle, StartTracks};
 use crate::ffi::playback::PLAYBACK_PLAN_LOOKUP_TIMEOUT;
 
 #[tokio::test]
@@ -72,6 +72,7 @@ async fn sources_become_views_of_their_first_video_track() {
              "is_text":true,
              "url":"/v1/files/f1f1f1f1-0000-4000-8000-000000000001/subtitles/5c5c5c5c-0000-4000-8000-000000000001",
              "webvtt_url":null}],
+         "default_audio_track_index":1,"default_subtitle_track_index":0,
          "stream_url":"/v1/files/f1f1f1f1-0000-4000-8000-000000000001/stream",
          "download_url":"/v1/files/f1f1f1f1-0000-4000-8000-000000000001/download"},
         {"file_id":"f2f2f2f2-0000-4000-8000-000000000002","is_primary":false,
@@ -125,6 +126,24 @@ async fn sources_become_views_of_their_first_video_track() {
     assert_eq!(other.file_id, "f2f2f2f2-0000-4000-8000-000000000002");
     assert_eq!(other.video_codec, None, "no video track, no picture");
     assert_eq!((other.width, other.height), (None, None));
+
+    // The tracks the server names for this viewer (issue #329): the French
+    // audio and the sidecar, on the primary; nothing on a source that has
+    // no track to name.
+    assert_eq!(
+        (
+            primary.default_audio_track_index,
+            primary.default_subtitle_track_index
+        ),
+        (Some(1), Some(0))
+    );
+    assert_eq!(
+        (
+            other.default_audio_track_index,
+            other.default_subtitle_track_index
+        ),
+        (None, None)
+    );
 }
 
 /// A Blu-ray rip of one film across two clips, the second with a forced
@@ -147,6 +166,7 @@ const MULTI_PART_SOURCES: &str = r#"{"items":[
                  "is_text":true,
                  "url":"/v1/files/c2c2c2c2-0000-4000-8000-000000000002/subtitles/5d5d5d5d-0000-4000-8000-000000000002",
                  "webvtt_url":"/v1/files/c2c2c2c2-0000-4000-8000-000000000002/subtitles/5d5d5d5d-0000-4000-8000-000000000002/webvtt"}],
+             "default_subtitle_track_index":0,
              "stream_url":"/v1/files/c2c2c2c2-0000-4000-8000-000000000002/stream",
              "download_url":"/v1/files/c2c2c2c2-0000-4000-8000-000000000002/download"}],
          "size_bytes":5000,
@@ -285,6 +305,25 @@ async fn a_plan_queues_every_part_and_starts_in_the_one_named() {
         plan.parts[1].sidecar_subtitles[0].language.as_deref(),
         Some("spa")
     );
+    // Each part starts on the subtitle the server names for that part: none
+    // for the first, the forced Spanish file beside the second (issue #329).
+    // The source has no audio track, so no audio is named.
+    assert_eq!(
+        plan.parts[0].start_tracks,
+        Some(StartTracks {
+            audio_index: None,
+            subtitle: None
+        })
+    );
+    assert_eq!(
+        plan.parts[1].start_tracks,
+        Some(StartTracks {
+            audio_index: None,
+            subtitle: Some(StartSubtitle::Sidecar {
+                sidecar_id: "5d5d5d5d-0000-4000-8000-000000000002".to_owned()
+            }),
+        })
+    );
     assert_eq!(
         plan.headers.get("Cookie").map(String::as_str),
         Some("beam_session=opaque-value")
@@ -318,6 +357,10 @@ async fn a_plan_whose_source_cannot_be_listed_is_the_file_alone() {
     assert_eq!(plan.parts[0].file_id, "f-1");
     assert_eq!(plan.parts[0].url, "https://beam.test/v1/files/f-1/stream");
     assert_eq!(plan.start_part_index, 0);
+    assert_eq!(
+        plan.parts[0].start_tracks, None,
+        "with no source list the server named no tracks, so the player keeps its own choice"
+    );
 }
 
 /// Without a title there is no source to look up: the plan is the file

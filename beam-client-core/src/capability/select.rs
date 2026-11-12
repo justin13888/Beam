@@ -7,6 +7,7 @@
 //! Beam's answer to an unplayable file is "index a compatible version", it
 //! tells the operator exactly what to do about it.
 
+use super::start_tracks::{StartTracks, start_tracks};
 use super::{AudioCodec, DeviceProfile, VideoCodec};
 use crate::error::BeamError;
 use crate::servers::ServerRecord;
@@ -57,6 +58,18 @@ pub struct MediaSourceView {
     /// the subtitle files beside it (issue #189).
     #[uniffi(default)]
     pub subtitle_tracks: Vec<SubtitleTrackView>,
+    /// Which of `audio_tracks` (from 0) the server names as the one to start
+    /// on for this viewer (issue #264): their first preferred audio language
+    /// the source carries, else the file's default, else the first. Absent
+    /// for a source with no audio track, and for a view built without the
+    /// server's answer.
+    #[uniffi(default)]
+    pub default_audio_track_index: Option<u32>,
+    /// Which of `subtitle_tracks` (from 0) the server names as the one to
+    /// start on for this viewer, by their subtitle mode and languages beside
+    /// the default audio track; absent to start without subtitles.
+    #[uniffi(default)]
+    pub default_subtitle_track_index: Option<u32>,
 }
 
 impl MediaSourceView {
@@ -105,6 +118,9 @@ impl MediaSourceView {
                     duration_secs: part.duration_secs,
                     stream_url: record.absolute_url(&part.stream_url)?,
                     subtitle_tracks: subtitle_views(part.subtitle_tracks, record)?,
+                    default_subtitle_track_index: part
+                        .default_subtitle_track_index
+                        .and_then(|index| u32::try_from(index).ok()),
                 })
             })
             .collect::<Result<Vec<_>, BeamError>>()?;
@@ -140,6 +156,12 @@ impl MediaSourceView {
                 crate::api::types::MediaSourcediscStructure::BluRay => DiscStructure::BluRay,
             }),
             subtitle_tracks: subtitle_views(source.subtitle_tracks, record)?,
+            default_audio_track_index: source
+                .default_audio_track_index
+                .and_then(|index| u32::try_from(index).ok()),
+            default_subtitle_track_index: source
+                .default_subtitle_track_index
+                .and_then(|index| u32::try_from(index).ok()),
         })
     }
 }
@@ -203,6 +225,11 @@ pub struct PlaybackPart {
     /// from. A file's own subtitle streams are not listed: the player's
     /// extractor finds those in the file.
     pub sidecar_subtitles: Vec<SubtitleTrackView>,
+    /// The audio and subtitle track the server names for this viewer (issue
+    /// #329). Absent for a part planned without the server's source list,
+    /// where the player keeps its own choice.
+    #[uniffi(default)]
+    pub start_tracks: Option<StartTracks>,
 }
 
 /// The parts to queue for `file_id`, and which of them to start in.
@@ -232,6 +259,7 @@ pub fn plan_parts(
                 url: single_url,
                 duration_secs: None,
                 sidecar_subtitles: Vec::new(),
+                start_tracks: None,
             }],
             0,
         );
@@ -243,6 +271,11 @@ pub fn plan_parts(
                 url: source.stream_url.clone(),
                 duration_secs: source.duration_secs,
                 sidecar_subtitles: sidecars(&source.subtitle_tracks),
+                start_tracks: Some(start_tracks(
+                    source,
+                    &source.subtitle_tracks,
+                    source.default_subtitle_track_index,
+                )),
             }],
             0,
         );
@@ -255,6 +288,11 @@ pub fn plan_parts(
             url: part.stream_url.clone(),
             duration_secs: part.duration_secs,
             sidecar_subtitles: sidecars(&part.subtitle_tracks),
+            start_tracks: Some(start_tracks(
+                source,
+                &part.subtitle_tracks,
+                part.default_subtitle_track_index,
+            )),
         })
         .collect();
     let start = parts
@@ -282,6 +320,11 @@ pub struct SourcePartView {
     /// This part's own subtitle tracks: a subtitle file beside a part times
     /// that part.
     pub subtitle_tracks: Vec<SubtitleTrackView>,
+    /// Which of this part's `subtitle_tracks` (from 0) the server names as
+    /// the one to start it on, chosen as the source's
+    /// `default_subtitle_track_index` is; absent for none.
+    #[uniffi(default)]
+    pub default_subtitle_track_index: Option<u32>,
 }
 
 /// The disc structure a source was copied from whole.

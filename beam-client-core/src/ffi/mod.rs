@@ -8,12 +8,13 @@
 //!
 //! [`BeamClient`] is defined here with the server registry, sign-in and the
 //! plumbing every request shares. Each API resource adds its own exported
-//! `impl` block in a submodule: `playback`, `catalog`, `progress`, `telemetry`
-//! and `admin`.
+//! `impl` block in a submodule: `playback`, `catalog`, `preferences`,
+//! `progress`, `telemetry` and `admin`.
 
 mod admin;
 mod catalog;
 mod playback;
+mod preferences;
 mod progress;
 mod telemetry;
 
