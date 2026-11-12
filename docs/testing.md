@@ -265,7 +265,8 @@ Two mechanisms close that:
 - **`sea_orm::MockDatabase`** asserts the SQL a repository actually generates -- which column a
   filter binds and to what value, sort direction, pagination numbers, the `ON CONFLICT` target and
   its update list -- with no database running. Hermetic, and part of the default suite
-  (`beam-index/src/repositories/sql_shape_tests.rs`). These assert *properties*, never a
+  (`beam-index/src/repositories/sql_shape/`, one file per repository, over the helpers in
+  `sql_shape_tests.rs`). These assert *properties*, never a
   full statement string: pinning the whole generated SQL is a second copy of the query builder's
   output, which fails on harmless formatting changes and catches nothing a property does not.
 - **The `pg-integration` cargo feature** runs the shared behavioural contract against a real
