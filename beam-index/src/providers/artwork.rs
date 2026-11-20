@@ -123,6 +123,25 @@ impl ReqwestArtworkFetcher {
     /// accident. Redirects are followed only while they stay on `https`, so a
     /// CDN cannot walk Beam down to cleartext.
     pub fn new(limits: ArtworkFetchLimits) -> Result<Self, reqwest::Error> {
+        Self::build(limits, Vec::new())
+    }
+
+    /// As [`Self::new`], but also trusting `root` alongside the platform's
+    /// roots -- for a provider mirror behind a private CA, and the seam the
+    /// TLS stand-in tests use to reach a listener with a self-signed
+    /// certificate. Nothing else about the client differs, so a test through
+    /// here exercises the same redirect policy and body ceiling as production.
+    pub fn with_root_certificate(
+        limits: ArtworkFetchLimits,
+        root: reqwest::Certificate,
+    ) -> Result<Self, reqwest::Error> {
+        Self::build(limits, vec![root])
+    }
+
+    fn build(
+        limits: ArtworkFetchLimits,
+        extra_roots: Vec<reqwest::Certificate>,
+    ) -> Result<Self, reqwest::Error> {
         let redirect = reqwest::redirect::Policy::custom(|attempt| {
             // Named rather than chained, because the two reasons to refuse are
             // different -- one is a redirect loop, the other a downgrade to
@@ -140,6 +159,7 @@ impl ReqwestArtworkFetcher {
             .timeout(limits.timeout)
             .redirect(redirect)
             .user_agent(concat!("Beam/", env!("CARGO_PKG_VERSION")))
+            .tls_certs_merge(extra_roots)
             .build()?;
 
         Ok(Self {
