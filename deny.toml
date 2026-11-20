@@ -87,6 +87,14 @@ ignore = [
     # 0.7.6, which elliptic-curve 0.13 (openidconnect 4.0.1's pin) cannot take;
     # re-evaluate when openidconnect moves to elliptic-curve 0.14.
     { id = "RUSTSEC-2026-0387", reason = "constant-time leak only matters for secret integers; beam only verifies EC signatures against public JWKS keys as an OIDC relying party, and no patched 0.5.x exists" },
+    # chrono: an "unmaintained" notice, not a vulnerability -- the advisory names
+    # no defect and no affected API, and covers every version. Beam's data layer
+    # is built on it: sea-orm's `with-chrono` and sea-query's `time-chrono`
+    # features (Cargo.toml) and sqlx-postgres all pull it in, so migrating
+    # Beam's own code to jiff or time would not remove it from the tree.
+    # Re-evaluate when sea-orm/sqlx offer a maintained date-time backend Beam
+    # can switch to wholesale (#476).
+    { id = "RUSTSEC-2026-0543", reason = "unmaintained notice with no named defect; chrono is the date-time backend of sea-orm, sea-query and sqlx-postgres, so it stays in the tree whatever Beam's own code uses (#476)" },
 ]
 # If this is true, then cargo deny will use the git executable to fetch advisory database.
 # If this is false, then it uses a built-in git library.
