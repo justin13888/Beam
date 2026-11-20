@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use sea_orm::{DatabaseConnection, DbErr};
+use sea_orm::{DatabaseConnection, DbBackend, DbErr, Statement};
 use uuid::Uuid;
 
 use beam_domain::models::catalog::ShowChildCounts;
@@ -11,6 +11,7 @@ use beam_domain::models::{CreateEpisode, CreateShow, Episode, Season, Show};
 use beam_domain::models::{FieldLocks, MetadataField, PinSource, ProviderPin};
 use beam_domain::providers::enrichment::{SeasonEnrichment, ShowEnrichment};
 use beam_domain::repositories::ShowRepository;
+use beam_domain::utils::media_path::EpisodeNumbering;
 use beam_domain::utils::next_up::OutlineEpisode;
 
 /// SQL-based implementation of the ShowRepository trait.
@@ -524,7 +525,28 @@ impl ShowRepository for SqlShowRepository {
             title,
             runtime,
             air_date,
+            numbering,
         } = create;
+
+        // An absolutely numbered file finds its episode by its running number
+        // first, wherever enrichment has re-homed it (issue #334).
+        let absolute_number = (numbering == EpisodeNumbering::Absolute).then_some(episode_number);
+        if let Some(absolute) = absolute_number {
+            let rehomed = episode::Entity::find()
+                .from_raw_sql(Statement::from_sql_and_values(
+                    DbBackend::Postgres,
+                    "SELECT e.* FROM episodes AS e JOIN seasons AS s ON s.id = e.season_id \
+                     WHERE e.absolute_number = $1 \
+                       AND s.show_id = (SELECT show_id FROM seasons WHERE id = $2) \
+                     ORDER BY e.created_at, e.id LIMIT 1",
+                    [(absolute as i32).into(), season_id.into()],
+                ))
+                .one(self.db.as_ref())
+                .await?;
+            if let Some(rehomed) = rehomed {
+                return Ok(Episode::from(rehomed));
+            }
+        }
 
         // One `INSERT ... ON CONFLICT DO NOTHING`, not SELECT-then-INSERT:
         // `(season_id, episode_number)` carries `idx_episodes_unique`, so two
@@ -539,6 +561,8 @@ impl ShowRepository for SqlShowRepository {
             title: Set(title),
             runtime_mins: Set(runtime.map(|d| (d.as_secs() / 60) as i32)),
             air_date: Set(air_date),
+            numbering: Set(numbering.as_str().to_string()),
+            absolute_number: Set(absolute_number.map(|n| n as i32)),
             created_at: Set(Utc::now().into()),
             ..Default::default()
         };
@@ -566,6 +590,21 @@ impl ShowRepository for SqlShowRepository {
                 ))
             })?;
         Ok(Episode::from(stored))
+    }
+
+    async fn rehome_episode(
+        &self,
+        episode_id: Uuid,
+        season_number: u32,
+        episode_number: u32,
+    ) -> Result<Option<Episode>, DbErr> {
+        super::show_rehome::rehome_episode(
+            self.db.as_ref(),
+            episode_id,
+            season_number,
+            episode_number,
+        )
+        .await
     }
 
     async fn find_episode_by_id(&self, episode_id: Uuid) -> Result<Option<Episode>, DbErr> {

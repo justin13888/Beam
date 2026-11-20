@@ -342,8 +342,17 @@ index on `(show_id, season_number)`; index on `show_id`.
 null), `title` (TEXT, not null — the text after the episode marker at index time, else
 `Episode N`; refined by enrichment), `description` (TEXT, nullable), `air_date` (DATE, nullable —
 set at index time for a date-based episode), `runtime_mins` (INTEGER,
-nullable), `thumbnail_url` (TEXT, nullable), `created_at` (TIMESTAMPTZ, not null). Unique index on
-`(season_id, episode_number)`; index on `season_id`.
+nullable), `thumbnail_url` (TEXT, nullable), `numbering` (TEXT, not null, default `standard` — how
+the number of the file that created the row was written: `standard`, `daily` or `absolute`, a
+`CHECK` holding it to those), `absolute_number` (INTEGER, nullable, positive — the running number an
+absolutely numbered file gave the episode), `created_at` (TIMESTAMPTZ, not null). Unique index on
+`(season_id, episode_number)`; index on `season_id`; partial index on `absolute_number` where set.
+
+An absolutely numbered file (`Show - 030`) is indexed as episode 30 of season 1 (or of its season
+folder). Once the show is matched, enrichment re-homes the row to the season and episode the
+provider's absolute order puts 30 at, merging it into a row already there (its files and watch
+state with it), and the row keeps `absolute_number`, so a rescan of the file finds it there rather
+than making a new row at 30 (issue #334).
 
 ## Media-file tables
 

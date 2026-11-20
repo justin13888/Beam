@@ -11,7 +11,7 @@ macro_rules! show_repository_contract {
         use $crate::providers::enrichment::ShowEnrichment;
         use $crate::repositories::ShowRepository;
         use $crate::repositories::contract::fixture::ShowRepositoryFixture;
-        use $crate::utils::media_path::CLASSIFIER_VERSION;
+        use $crate::utils::media_path::{CLASSIFIER_VERSION, EpisodeNumbering};
 
         /// A show parsed as a title of its own; a fresh UUID keeps tests
         /// apart.
@@ -74,7 +74,27 @@ macro_rules! show_repository_contract {
                 title: title.to_string(),
                 runtime: Some(Duration::from_secs(mins * 60)),
                 air_date: None,
+                numbering: EpisodeNumbering::Standard,
             }
+        }
+
+        /// What an absolutely numbered file indexes: its running number as
+        /// the episode number of `season_id`.
+        fn absolute(season_id: Uuid, number: u32) -> CreateEpisode {
+            CreateEpisode {
+                numbering: EpisodeNumbering::Absolute,
+                ..episode(season_id, number, &format!("Episode {number}"), 24)
+            }
+        }
+
+        /// A show of its own and its season `1`.
+        async fn new_show_season(repo: &dyn ShowRepository, name: &str) -> (Uuid, Uuid) {
+            let show = repo
+                .find_or_create_by_identity(new_show(name))
+                .await
+                .unwrap();
+            let one = repo.find_or_create_season(show.id, 1).await.unwrap();
+            (show.id, one.id)
         }
 
         /// A season's enrichment fills the season and the episodes scanning
@@ -365,6 +385,227 @@ macro_rules! show_repository_contract {
                 .unwrap()
                 .expect("the episode is readable by id");
             assert_eq!(stored.air_date, Some(aired));
+        }
+
+        /// A new episode keeps how its number was written, and an absolutely
+        /// numbered one its running number (issue #334).
+        #[tokio::test]
+        async fn a_new_episode_keeps_its_numbering() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let (season, _) = new_seasons(repo).await;
+
+            let mut stored = Vec::new();
+            for create in [
+                episode(season, 1, "Standard", 30),
+                CreateEpisode {
+                    numbering: EpisodeNumbering::Daily,
+                    ..episode(season, 301, "Daily", 30)
+                },
+                absolute(season, 30),
+            ] {
+                let created = repo.find_or_create_episode(create).await.unwrap();
+                let read = repo.find_episode_by_id(created.id).await.unwrap().unwrap();
+                stored.push((read.numbering, read.absolute_number));
+            }
+            assert_eq!(
+                stored,
+                vec![
+                    (EpisodeNumbering::Standard, None),
+                    (EpisodeNumbering::Daily, None),
+                    (EpisodeNumbering::Absolute, Some(30)),
+                ]
+            );
+        }
+
+        /// An episode re-homed to a free place moves with its files and
+        /// watch state, keeps its running number, and takes with it the
+        /// season it emptied; a rescan of its file finds it there rather
+        /// than making a new row at its running number.
+        #[tokio::test]
+        async fn a_rehomed_episode_moves_whole_and_a_rescan_finds_it_there() {
+            use $crate::models::watch_state::WatchTarget;
+
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let (show_id, one) = new_show_season(repo, "rehome free").await;
+            let indexed = repo
+                .find_or_create_episode(absolute(one, 30))
+                .await
+                .unwrap();
+            let file = episode_file(&fixture, indexed.id).await;
+            let user = fixture.new_user().await;
+            let target = WatchTarget::Episode {
+                episode_id: indexed.id,
+                show_id,
+            };
+            fixture
+                .watch_state()
+                .mark_played(user, &[target])
+                .await
+                .unwrap();
+
+            let home = repo
+                .rehome_episode(indexed.id, 2, 5)
+                .await
+                .unwrap()
+                .expect("the episode exists");
+
+            assert_eq!(home.id, indexed.id, "moved, not copied");
+            let seasons = repo.find_seasons_by_show_id(show_id).await.unwrap();
+            let numbers: Vec<u32> = seasons.iter().map(|s| s.season_number).collect();
+            assert_eq!(numbers, vec![2], "the emptied season 1 went");
+            let moved = repo.find_episode_by_id(indexed.id).await.unwrap().unwrap();
+            assert_eq!(
+                (moved.season_id, moved.episode_number, moved.absolute_number),
+                (seasons[0].id, 5, Some(30))
+            );
+            let file = fixture.files().find_by_id(file.id).await.unwrap().unwrap();
+            assert_eq!(file.content, Some(MediaFileContent::episode(indexed.id)));
+            assert!(
+                fixture
+                    .watch_state()
+                    .find(user, target)
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "the watch state stays with the episode"
+            );
+
+            // The indexer makes season 1 again before it finds the episode.
+            let one_again = repo.find_or_create_season(show_id, 1).await.unwrap();
+            let rescanned = repo
+                .find_or_create_episode(absolute(one_again.id, 30))
+                .await
+                .unwrap();
+            assert_eq!(rescanned.id, indexed.id, "the rescan does not move it back");
+            assert!(
+                repo.find_episodes_by_season_id(one_again.id)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+
+        /// An episode re-homed onto a place another episode holds merges
+        /// into it: the occupant takes its files, its running number and
+        /// every user's watch state -- one user's two rows folded into one
+        /// -- and the re-homed row goes.
+        #[tokio::test]
+        async fn rehoming_onto_an_occupied_place_merges_into_the_occupant() {
+            use $crate::models::watch_state::WatchTarget;
+            use $crate::repositories::WatchStateRepository;
+
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let (show_id, one) = new_show_season(repo, "rehome merge").await;
+            let two = repo.find_or_create_season(show_id, 2).await.unwrap();
+            let occupant = repo
+                .find_or_create_episode(episode(two.id, 5, "S02E05", 24))
+                .await
+                .unwrap();
+            let kept_file = episode_file(&fixture, occupant.id).await;
+            let indexed = repo
+                .find_or_create_episode(absolute(one, 30))
+                .await
+                .unwrap();
+            let moved_file = episode_file(&fixture, indexed.id).await;
+            // `one` keeps an episode, so it survives the move.
+            repo.find_or_create_episode(absolute(one, 1)).await.unwrap();
+            let target = |episode_id| WatchTarget::Episode {
+                episode_id,
+                show_id,
+            };
+            let (both, only_moved) = (fixture.new_user().await, fixture.new_user().await);
+            let watch_state: &dyn WatchStateRepository = fixture.watch_state();
+            watch_state
+                .mark_played(both, &[target(occupant.id)])
+                .await
+                .unwrap();
+            watch_state
+                .mark_played(both, &[target(indexed.id)])
+                .await
+                .unwrap();
+            watch_state
+                .mark_played(only_moved, &[target(indexed.id)])
+                .await
+                .unwrap();
+
+            let home = repo
+                .rehome_episode(indexed.id, 2, 5)
+                .await
+                .unwrap()
+                .expect("the episode exists");
+
+            assert_eq!(home.id, occupant.id);
+            assert_eq!(home.absolute_number, Some(30), "a rescan finds it by 30");
+            assert!(repo.find_episode_by_id(indexed.id).await.unwrap().is_none());
+            let mut files: Vec<Uuid> = fixture
+                .files()
+                .find_by_episode_id(occupant.id)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|f| f.id)
+                .collect();
+            files.sort();
+            let mut expected = vec![kept_file.id, moved_file.id];
+            expected.sort();
+            assert_eq!(files, expected);
+            let folded = watch_state
+                .find(both, target(occupant.id))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(folded.play_count, 2, "both rows' plays");
+            assert!(
+                watch_state
+                    .find(only_moved, target(occupant.id))
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "a row only the moved episode had follows it"
+            );
+            assert_eq!(
+                repo.find_seasons_by_show_id(show_id).await.unwrap().len(),
+                2,
+                "a season left with an episode stays"
+            );
+            let rescanned = repo
+                .find_or_create_episode(absolute(one, 30))
+                .await
+                .unwrap();
+            assert_eq!(rescanned.id, occupant.id);
+        }
+
+        /// Re-homing an episode to where it is, or one that does not exist,
+        /// changes nothing.
+        #[tokio::test]
+        async fn rehoming_in_place_or_nothing_changes_nothing() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let (show_id, one) = new_show_season(repo, "rehome nothing").await;
+            let indexed = repo.find_or_create_episode(absolute(one, 3)).await.unwrap();
+
+            let home = repo
+                .rehome_episode(indexed.id, 1, 3)
+                .await
+                .unwrap()
+                .unwrap();
+
+            assert_eq!(home.id, indexed.id);
+            let seasons = repo.find_seasons_by_show_id(show_id).await.unwrap();
+            assert_eq!(seasons.len(), 1);
+            assert_eq!(
+                repo.find_episodes_by_season_id(one).await.unwrap()[0].episode_number,
+                3
+            );
+            assert!(
+                repo.rehome_episode(Uuid::new_v4(), 1, 1)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
         }
 
         /// Episodes of one new season indexed at once -- two libraries'

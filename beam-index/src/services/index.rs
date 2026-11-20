@@ -743,7 +743,7 @@ impl LocalIndexService {
                 last_episode,
                 air_date,
                 episode_title,
-                numbering: _,
+                numbering,
                 contradicted_season_folder,
             }) => {
                 if let Some(folder) = contradicted_season_folder {
@@ -793,6 +793,7 @@ impl LocalIndexService {
                     title: episode_title.unwrap_or_else(|| format!("Episode {first_episode}")),
                     runtime: if spans_episodes { None } else { runtime },
                     air_date,
+                    numbering,
                 };
                 let episode = self
                     .show_repo

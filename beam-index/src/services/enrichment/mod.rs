@@ -39,6 +39,7 @@ use crate::services::notification::{
     AdminEvent, EnrichmentEvent, EventCategory, EventLevel, NotificationService,
 };
 use beam_domain::services::Clock;
+use beam_domain::utils::media_path::EpisodeNumbering;
 
 /// Tunables for the enrichment sweep. All fields are independent of any
 /// concrete provider so they can be exercised with
@@ -797,32 +798,34 @@ impl MetadataEnrichmentService {
     /// for from the provider's season of the same number. Never fabricates
     /// seasons or episodes that scanning hasn't created.
     ///
-    /// A local episode the provider's season has no episode for is read as
-    /// an absolute number (issue #267): `Show - 030` is indexed as episode 30
-    /// of season 1, or of its season folder's season, and the provider's
-    /// absolute order ([`matcher::absolute_episode`]) says which episode that
-    /// is. It takes that episode's metadata where it stands. Episode 30 of
-    /// season 1 is taken wherever the order places it; of a later season,
-    /// only when the order places it in that season, since a season folder
-    /// and the number must agree. Specials keep their own numbering: the
-    /// absolute order counts none of them.
+    /// Absolutely numbered episodes are re-homed first
+    /// ([`Self::rehome_absolute_episodes`]), so each takes the metadata of
+    /// the place it now has. One left where it was indexed -- its re-home
+    /// failed -- takes the metadata of the episode its running number names
+    /// where it stands (issue #267), on the same terms. An episode numbered
+    /// any other way that the provider does not list is left as it is.
     async fn enrich_seasons(&self, show_id: uuid::Uuid, ref_id: &ExternalMediaRef) {
+        let mut fetched = SeasonCache::default();
+        self.rehome_absolute_episodes(show_id, ref_id, &mut fetched)
+            .await;
         let Ok(seasons) = self.show_repo.find_seasons_by_show_id(show_id).await else {
             return;
         };
-        let mut fetched = SeasonCache::default();
         for season in seasons {
             let season_number = season.season_number;
             let provider_season = fetched.get(&*self.provider, ref_id, season_number).await;
-            let unplaced: Vec<u32> = match self
+            // `(episode_number, absolute_number)` of each absolutely numbered
+            // episode the provider's season does not list.
+            let unplaced: Vec<(u32, u32)> = match self
                 .show_repo
                 .find_episodes_by_season_id(season.id)
                 .await
             {
                 Ok(episodes) => episodes
                     .into_iter()
-                    .map(|episode| episode.episode_number)
-                    .filter(|number| {
+                    .filter(|episode| episode.numbering == EpisodeNumbering::Absolute)
+                    .filter_map(|episode| Some((episode.episode_number, episode.absolute_number?)))
+                    .filter(|(number, _)| {
                         provider_season.as_ref().is_none_or(|provider| {
                             !provider
                                 .episodes
@@ -839,15 +842,12 @@ impl MetadataEnrichmentService {
 
             let mut placed = Vec::new();
             if season_number != matcher::SPECIALS_SEASON && !unplaced.is_empty() {
+                let through = unplaced.iter().map(|(_, absolute)| *absolute).max();
                 let order = fetched
-                    .absolute_order(
-                        &*self.provider,
-                        ref_id,
-                        unplaced.iter().copied().max().unwrap_or(0),
-                    )
+                    .absolute_order(&*self.provider, ref_id, through.unwrap_or(0))
                     .await;
-                for number in unplaced {
-                    let Some((in_season, episode)) = matcher::absolute_episode(&order, number)
+                for (number, absolute) in unplaced {
+                    let Some((in_season, episode)) = matcher::absolute_episode(&order, absolute)
                     else {
                         continue;
                     };
@@ -875,6 +875,84 @@ impl MetadataEnrichmentService {
                 .await
             {
                 warn!(error = %err, show_id = %show_id, season_number, "failed to persist season enrichment");
+            }
+        }
+    }
+
+    /// Move each absolutely numbered episode of `show_id` to the season and
+    /// episode the provider's absolute order ([`matcher::absolute_episode`])
+    /// puts its running number at (issue #334), merging it into an episode
+    /// already there ([`ShowRepository::rehome_episode`]). `Show - 030` is
+    /// indexed as episode 30 of season 1, or of its season folder's season:
+    /// of season 1 it moves wherever the order places it; of a later season
+    /// only within that season, since a season folder and the number must
+    /// agree. One re-homed before follows the order from wherever it now is,
+    /// and one already at its place stays. A place another running number
+    /// holds is never merged into: two running numbers are not one episode.
+    /// Specials keep their own numbering: the order counts none of them.
+    /// Best-effort: a failure leaves the episode where it was.
+    async fn rehome_absolute_episodes(
+        &self,
+        show_id: uuid::Uuid,
+        ref_id: &ExternalMediaRef,
+        fetched: &mut SeasonCache,
+    ) {
+        let Ok(seasons) = self.show_repo.find_seasons_by_show_id(show_id).await else {
+            return;
+        };
+        let mut episodes = Vec::new();
+        for season in seasons
+            .iter()
+            .filter(|season| season.season_number != matcher::SPECIALS_SEASON)
+        {
+            match self.show_repo.find_episodes_by_season_id(season.id).await {
+                Ok(list) => episodes.extend(list.into_iter().map(|e| (season.season_number, e))),
+                Err(err) => {
+                    // Without every place's holder a move could merge two
+                    // running numbers: nothing moves this time.
+                    warn!(error = %err, show_id = %show_id, "failed to read a season's episodes");
+                    return;
+                }
+            }
+        }
+        let Some(through) = episodes.iter().filter_map(|(_, e)| e.absolute_number).max() else {
+            return;
+        };
+        let order = fetched
+            .absolute_order(&*self.provider, ref_id, through)
+            .await;
+        let mut held: std::collections::HashMap<(u32, u32), Option<u32>> = episodes
+            .iter()
+            .map(|(season, e)| ((*season, e.episode_number), e.absolute_number))
+            .collect();
+        for (season_number, episode) in episodes {
+            let Some(absolute) = episode.absolute_number else {
+                continue;
+            };
+            let Some((in_season, provider_episode)) = matcher::absolute_episode(&order, absolute)
+            else {
+                continue;
+            };
+            let from = (season_number, episode.episode_number);
+            let to = (in_season, provider_episode.episode_number);
+            let as_indexed = episode.episode_number == absolute;
+            if from == to || (as_indexed && season_number != 1 && in_season != season_number) {
+                continue;
+            }
+            if held
+                .get(&to)
+                .is_some_and(|holder| holder.is_some_and(|other| other != absolute))
+            {
+                continue;
+            }
+            match self.show_repo.rehome_episode(episode.id, to.0, to.1).await {
+                Ok(_) => {
+                    held.remove(&from);
+                    held.insert(to, Some(absolute));
+                }
+                Err(err) => {
+                    warn!(error = %err, show_id = %show_id, absolute, "failed to re-home an episode");
+                }
             }
         }
     }
@@ -2566,13 +2644,18 @@ mod tests {
         );
     }
 
-    /// Issue #267: a file numbered absolutely (`Show - 013`) is indexed as
-    /// that episode of season 1, or of its season folder's season, and takes
-    /// the metadata of the episode the provider's absolute order puts there.
+    /// Issues #267 and #334: a file numbered absolutely (`Show - 013`) is
+    /// indexed as that episode of season 1, or of its season folder's
+    /// season, and enrichment moves it to the episode the provider's
+    /// absolute order puts there -- merging it into an episode already
+    /// there -- where it takes that episode's metadata, and where enriching
+    /// again leaves it. An episode numbered as its season's that the
+    /// provider does not list is not read as a running number.
     #[tokio::test]
-    async fn an_absolutely_numbered_episode_takes_the_metadata_its_place_in_the_order_names() {
+    async fn an_absolutely_numbered_episode_moves_to_its_place_in_the_order() {
         use beam_domain::models::CreateEpisode;
         use beam_domain::providers::enrichment::{EpisodeEnrichment, SeasonEnrichment};
+        use beam_domain::utils::media_path::EpisodeNumbering::{Absolute, Standard};
 
         let show_ref = ExternalMediaRef::new("tvdb", "81797");
         let provider_season = |season_number: u32, count: u32| SeasonEnrichment {
@@ -2619,9 +2702,18 @@ mod tests {
             .await
             .unwrap();
         let mut local = Vec::new();
-        for (season_number, episode_number) in
-            [(0, 1), (1, 1), (1, 13), (1, 15), (1, 16), (2, 14), (3, 2)]
-        {
+        for (season_number, episode_number, numbering) in [
+            (0, 1, Standard),
+            (1, 3, Absolute),
+            (1, 13, Absolute),
+            (1, 15, Absolute),
+            (1, 16, Absolute),
+            (1, 17, Standard),
+            (2, 1, Absolute),
+            (2, 3, Standard),
+            (2, 14, Absolute),
+            (3, 2, Absolute),
+        ] {
             let season = show_repo
                 .find_or_create_season(show.id, season_number)
                 .await
@@ -2633,6 +2725,7 @@ mod tests {
                     title: format!("local {season_number}x{episode_number}"),
                     runtime: None,
                     air_date: None,
+                    numbering,
                 })
                 .await
                 .unwrap();
@@ -2645,34 +2738,66 @@ mod tests {
 
         assert_eq!(service.sweep_once().await.enriched, 1);
 
-        let mut titles = Vec::new();
-        for (position, episode_id) in local {
-            let episode = show_repo
-                .find_episode_by_id(episode_id)
-                .await
-                .unwrap()
-                .unwrap();
-            titles.push((position, episode.title));
-        }
+        // Where each indexed row is now, and its title; `None` once merged.
+        let placed = || async {
+            let mut placed = Vec::new();
+            for (indexed, episode_id) in &local {
+                let now = match show_repo.find_episode_by_id(*episode_id).await.unwrap() {
+                    Some(episode) => {
+                        let season = show_repo
+                            .find_season_by_id(episode.season_id)
+                            .await
+                            .unwrap()
+                            .unwrap();
+                        Some((season.season_number, episode.episode_number, episode.title))
+                    }
+                    None => None,
+                };
+                placed.push((*indexed, now));
+            }
+            placed
+        };
         let expected = [
             // A special keeps its own number: the order counts none.
-            ((0, 1), "S00E01"),
-            ((1, 1), "S01E01"),
-            // Past season 1's twelve: the order runs on into season 2.
-            ((1, 13), "S02E01"),
-            ((1, 15), "S02E03"),
+            ((0, 1), Some((0, 1, "S00E01"))),
+            ((1, 3), Some((1, 3, "S01E03"))),
+            // Past season 1's twelve the order runs on into season 2, but
+            // S02E01 holds another running number -- season 2's folder's 1,
+            // which the order puts in season 1 -- so 13 is not merged into
+            // it, and takes S02E01's metadata where it stands.
+            ((1, 13), Some((1, 13, "S02E01"))),
+            // S02E03 already has a row: 15 merges into it.
+            ((1, 15), None),
             // Past the order's end: left as indexed.
-            ((1, 16), "local 1x16"),
+            ((1, 16), Some((1, 16, "local 1x16"))),
+            // Numbered as season 1's: not a running number.
+            ((1, 17), Some((1, 17, "local 1x17"))),
+            ((2, 1), Some((2, 1, "S02E01"))),
+            ((2, 3), Some((2, 3, "S02E03"))),
             // In a season folder, and the order agrees it is that season's.
-            ((2, 14), "S02E02"),
+            ((2, 14), Some((2, 2, "S02E02"))),
             // The order puts 2 in season 1, not the folder's season 3.
-            ((3, 2), "local 3x2"),
+            ((3, 2), Some((3, 2, "local 3x2"))),
         ];
-        let expected: Vec<((u32, u32), String)> = expected
+        let expected: Vec<_> = expected
             .into_iter()
-            .map(|(position, title)| (position, title.to_string()))
+            .map(|(indexed, now)| {
+                (
+                    indexed,
+                    now.map(|(season, number, title)| (season, number, title.to_string())),
+                )
+            })
             .collect();
-        assert_eq!(titles, expected);
+        assert_eq!(placed().await, expected);
+        let merged = show_repo
+            .find_episode_by_id(local[7].1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(merged.absolute_number, Some(15));
+
+        service.enrich_seasons(show.id, &show_ref).await;
+        assert_eq!(placed().await, expected, "enriching again moves nothing");
 
         // Season 3 has nothing from the provider, so its row is left alone.
         let seasons = show_repo.find_seasons_by_show_id(show.id).await.unwrap();

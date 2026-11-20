@@ -131,7 +131,28 @@ pub trait ShowRepository: Send + Sync + std::fmt::Debug {
     /// indexer reuses a movie found by identity key without touching it.
     ///
     /// Atomic: concurrent calls for one pair all return the same row.
+    ///
+    /// An `Absolute` episode is first looked for by its running number among
+    /// the season's show's episodes ([`Episode::absolute_number`]), wherever
+    /// [`Self::rehome_episode`] has since moved it, so a rescan of its file
+    /// never moves it back (issue #334). A new row records its numbering.
     async fn find_or_create_episode(&self, create: CreateEpisode) -> Result<Episode, DbErr>;
+    /// Move `episode_id` to episode `episode_number` of season
+    /// `season_number` of its show (issue #334), creating that season if
+    /// need be, and return the episode it now is: itself, moved with its
+    /// files, watch state and chapters, or -- where an episode already holds
+    /// that place -- that episode, which takes its files and every user's
+    /// watch state (folded as `WatchStateRepository::carry` folds them) and
+    /// its `absolute_number` where it had none, the moved row being deleted.
+    /// A season the move leaves with no episode is deleted. Moving an
+    /// episode to where it is changes nothing; `None` when it does not
+    /// exist. Atomic.
+    async fn rehome_episode(
+        &self,
+        episode_id: Uuid,
+        season_number: u32,
+        episode_number: u32,
+    ) -> Result<Option<Episode>, DbErr>;
     /// Reverse lookup from a `MediaFileContent::Episode { episode_id, .. }` back
     /// to the episode -- used together with `find_season_by_id` to resolve a
     /// file id to its show for continue-watching.
@@ -176,7 +197,11 @@ pub trait ShowRepository: Send + Sync + std::fmt::Debug {
 pub mod in_memory {
     use super::*;
     use crate::models::file::MediaFileContent;
+    use crate::models::watch_state::WatchTarget;
+    use crate::repositories::WatchStateRepository;
     use crate::repositories::file::in_memory::InMemoryFileRepository;
+    use crate::repositories::watch_state::in_memory::InMemoryWatchStateRepository;
+    use crate::utils::media_path::EpisodeNumbering;
     use std::collections::{HashMap, HashSet};
     use std::sync::{Arc, Mutex};
 
@@ -195,6 +220,9 @@ pub mod in_memory {
         /// `(library_id, show_id)` associations.
         library_links: Mutex<HashSet<(Uuid, Uuid)>>,
         files: Option<Arc<InMemoryFileRepository>>,
+        /// Where [`ShowRepository::rehome_episode`] carries a merged
+        /// episode's watch state, when linked.
+        watch_state: Option<Arc<InMemoryWatchStateRepository>>,
     }
 
     impl InMemoryShowRepository {
@@ -204,6 +232,30 @@ pub mod in_memory {
                 files: Some(files),
                 ..Self::default()
             }
+        }
+
+        /// This double, carrying watch state through `watch_state` when an
+        /// episode is re-homed onto another.
+        pub fn linking_watch_state(
+            mut self,
+            watch_state: Arc<InMemoryWatchStateRepository>,
+        ) -> Self {
+            self.watch_state = Some(watch_state);
+            self
+        }
+
+        /// The oldest episode of `show_id` an absolutely numbered file gave
+        /// the running number `absolute`, wherever it now sits.
+        fn find_absolute(&self, show_id: Uuid, absolute: u32) -> Option<Episode> {
+            // `episodes` before `seasons`, as `child_counts` takes them.
+            let episodes = self.episodes.lock().unwrap();
+            let seasons = self.seasons.lock().unwrap();
+            episodes
+                .values()
+                .filter(|e| e.absolute_number == Some(absolute))
+                .filter(|e| seasons.get(&e.season_id).map(|s| s.show_id) == Some(show_id))
+                .min_by_key(|e| (e.created_at, e.id))
+                .cloned()
         }
 
         /// Every show associated with the library `library_id`, in no
@@ -590,7 +642,23 @@ pub mod in_memory {
                 title,
                 runtime,
                 air_date,
+                numbering,
             } = create;
+            let absolute_number =
+                (numbering == EpisodeNumbering::Absolute).then_some(episode_number);
+            if let Some(absolute) = absolute_number {
+                let show_id = self
+                    .seasons
+                    .lock()
+                    .unwrap()
+                    .get(&season_id)
+                    .map(|s| s.show_id);
+                if let Some(rehomed) =
+                    show_id.and_then(|show_id| self.find_absolute(show_id, absolute))
+                {
+                    return Ok(rehomed);
+                }
+            }
             // Lookup and insert under one lock, so the double is as atomic as
             // the `ON CONFLICT` statement it stands in for.
             let mut episodes = self.episodes.lock().unwrap();
@@ -609,10 +677,91 @@ pub mod in_memory {
                 air_date,
                 runtime,
                 thumbnail_url: None,
+                numbering,
+                absolute_number,
                 created_at: chrono::Utc::now(),
             };
             episodes.insert(ep.id, ep.clone());
             Ok(ep)
+        }
+
+        async fn rehome_episode(
+            &self,
+            episode_id: Uuid,
+            season_number: u32,
+            episode_number: u32,
+        ) -> Result<Option<Episode>, DbErr> {
+            let Some(source) = self.episodes.lock().unwrap().get(&episode_id).cloned() else {
+                return Ok(None);
+            };
+            let Some(show_id) = self
+                .seasons
+                .lock()
+                .unwrap()
+                .get(&source.season_id)
+                .map(|s| s.show_id)
+            else {
+                return Ok(None);
+            };
+            let season = self.find_or_create_season(show_id, season_number).await?;
+            let occupant = self
+                .episodes
+                .lock()
+                .unwrap()
+                .values()
+                .find(|e| e.season_id == season.id && e.episode_number == episode_number)
+                .cloned();
+            let home = match occupant {
+                Some(occupant) if occupant.id == source.id => return Ok(Some(occupant)),
+                Some(occupant) => {
+                    if let Some(files) = &self.files {
+                        for file in files.files.lock().unwrap().values_mut() {
+                            if let Some(MediaFileContent::Episode { episode_id, .. }) =
+                                &mut file.content
+                                && *episode_id == source.id
+                            {
+                                *episode_id = occupant.id;
+                            }
+                        }
+                    }
+                    if let Some(watch_state) = &self.watch_state {
+                        let target = |episode_id| WatchTarget::Episode {
+                            episode_id,
+                            show_id,
+                        };
+                        watch_state
+                            .carry(target(source.id), target(occupant.id))
+                            .await?;
+                    }
+                    let mut episodes = self.episodes.lock().unwrap();
+                    episodes.remove(&source.id);
+                    let kept = episodes
+                        .get_mut(&occupant.id)
+                        .expect("the occupant was just read");
+                    kept.absolute_number = kept.absolute_number.or(source.absolute_number);
+                    kept.clone()
+                }
+                None => {
+                    let mut episodes = self.episodes.lock().unwrap();
+                    let moved = episodes
+                        .get_mut(&source.id)
+                        .expect("the source was just read");
+                    moved.season_id = season.id;
+                    moved.episode_number = episode_number;
+                    moved.clone()
+                }
+            };
+            // A season the move empties goes with it.
+            let emptied = !self
+                .episodes
+                .lock()
+                .unwrap()
+                .values()
+                .any(|e| e.season_id == source.season_id);
+            if emptied {
+                self.seasons.lock().unwrap().remove(&source.season_id);
+            }
+            Ok(Some(home))
         }
 
         async fn find_episode_by_id(&self, episode_id: Uuid) -> Result<Option<Episode>, DbErr> {
@@ -748,90 +897,6 @@ pub mod in_memory {
     }
 }
 
-#[mutants::skip]
-#[cfg(any(test, feature = "test-utils"))]
-pub mod in_memory_fixture {
-    use std::sync::Arc;
-
-    use uuid::Uuid;
-
-    use super::ShowRepository;
-    use super::in_memory::InMemoryShowRepository;
-    use crate::models::show::Show;
-    use crate::repositories::FileRepository;
-    use crate::repositories::contract::fixture::ShowRepositoryFixture;
-    use crate::repositories::file::in_memory::InMemoryFileRepository;
-
-    /// The hermetic instantiation of the shared contract: a show double linked
-    /// to the file double the contract writes files through.
-    #[derive(Debug)]
-    pub struct InMemoryFixture {
-        repo: InMemoryShowRepository,
-        files: Arc<InMemoryFileRepository>,
-    }
-
-    impl Default for InMemoryFixture {
-        fn default() -> Self {
-            let files = Arc::new(InMemoryFileRepository::default());
-            Self {
-                repo: InMemoryShowRepository::with_files(files.clone()),
-                files,
-            }
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl ShowRepositoryFixture for InMemoryFixture {
-        fn repo(&self) -> &dyn ShowRepository {
-            &self.repo
-        }
-
-        fn files(&self) -> &dyn FileRepository {
-            self.files.as_ref()
-        }
-
-        async fn new_library(&self) -> Uuid {
-            Uuid::new_v4()
-        }
-
-        async fn new_unkeyed_show(
-            &self,
-            title: &str,
-            created_at: chrono::DateTime<chrono::Utc>,
-        ) -> Uuid {
-            let now = created_at;
-            let show = Show {
-                id: Uuid::new_v4(),
-                title: title.to_string(),
-                identity_key: None,
-                pinned_ref: None,
-                pin_source: None,
-                title_localized: None,
-                description: None,
-                year: None,
-                poster_url: None,
-                backdrop_url: None,
-                tmdb_id: None,
-                imdb_id: None,
-                tvdb_id: None,
-                anilist_id: None,
-                rating_tmdb: None,
-                content_rating: None,
-                created_at: now,
-                updated_at: now,
-            };
-            let id = show.id;
-            self.repo.shows.lock().unwrap().insert(id, show);
-            id
-        }
-    }
-}
-
 #[cfg(test)]
-mod contract_over_in_memory {
-    async fn setup() -> super::in_memory_fixture::InMemoryFixture {
-        super::in_memory_fixture::InMemoryFixture::default()
-    }
-
-    crate::show_repository_contract!(setup);
-}
+#[path = "show_contract_tests.rs"]
+mod contract_over_in_memory;

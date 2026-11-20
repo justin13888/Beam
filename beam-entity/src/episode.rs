@@ -15,6 +15,12 @@ pub struct Model {
     pub air_date: Option<Date>,
     pub runtime_mins: Option<i32>,
     pub thumbnail_url: Option<String>,
+    /// `standard`, `daily` or `absolute`: how the number of the file that
+    /// created the row was written (issue #334).
+    pub numbering: String,
+    /// The running number an absolutely numbered file gave the episode,
+    /// wherever enrichment has since re-homed it.
+    pub absolute_number: Option<i32>,
 
     pub created_at: DateTimeWithTimeZone,
 }

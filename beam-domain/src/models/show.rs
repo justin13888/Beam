@@ -2,6 +2,8 @@ use chrono::{DateTime, NaiveDate, Utc};
 use std::time::Duration;
 use uuid::Uuid;
 
+use crate::utils::media_path::EpisodeNumbering;
+
 /// A TV show in the library
 #[derive(Debug, Clone)]
 pub struct Show {
@@ -60,6 +62,12 @@ pub struct Episode {
     pub air_date: Option<NaiveDate>,
     pub runtime: Option<Duration>,
     pub thumbnail_url: Option<String>,
+    /// How the number of the file that created the episode was written.
+    pub numbering: EpisodeNumbering,
+    /// The running number an absolutely numbered file gave the episode
+    /// (issue #334), kept wherever enrichment has since re-homed it -- see
+    /// [`crate::repositories::ShowRepository::rehome_episode`].
+    pub absolute_number: Option<u32>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -98,6 +106,10 @@ pub struct CreateEpisode {
     pub runtime: Option<Duration>,
     /// When a date-based episode aired, read from its filename.
     pub air_date: Option<NaiveDate>,
+    /// How the file's number was written. An `Absolute` episode's
+    /// `episode_number` is its running number, and a new row records it as
+    /// [`Episode::absolute_number`].
+    pub numbering: EpisodeNumbering,
 }
 
 #[cfg(feature = "entity")]
@@ -157,6 +169,10 @@ impl From<beam_entity::episode::Model> for Episode {
                 .runtime_mins
                 .and_then(crate::models::movie::runtime_from_stored_minutes),
             thumbnail_url: model.thumbnail_url,
+            // The column's CHECK admits only what `as_str` stores.
+            numbering: EpisodeNumbering::parse(&model.numbering)
+                .unwrap_or(EpisodeNumbering::Standard),
+            absolute_number: model.absolute_number.map(|n| n as u32),
             created_at: model.created_at.with_timezone(&Utc),
         }
     }
@@ -177,6 +193,8 @@ mod entity_conversion_tests {
             air_date: None,
             runtime_mins,
             thumbnail_url: None,
+            numbering: "standard".to_string(),
+            absolute_number: None,
             created_at: now,
         }
     }
