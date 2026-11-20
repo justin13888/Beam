@@ -1633,7 +1633,10 @@ impl LocalIndexService {
     /// content, and a row with no duration is probed again on every visit. A
     /// failed probe of a file whose content did not change writes only the
     /// size, modification time and identity it was found with, so the next
-    /// visit -- which tries the probe again -- does not rehash it.
+    /// visit -- which tries the probe again -- does not rehash it. A row with
+    /// no hash (`0`) counts as one whose content did not change: it keeps its
+    /// probe results, streams, chapters and status, and stays unhashed, so
+    /// the next visit hashes and probes it again.
     ///
     /// The probe reads `opened`, the handle the file was stat'ed and hashed
     /// from (issue #238).
@@ -1653,7 +1656,11 @@ impl LocalIndexService {
             identity,
             inodes: _,
         } = stat;
-        let content_changed = new_hash != existing.hash;
+        // An unhashed row (the sentinel `0`: stored by an older build, or
+        // left so because its streams or chapters were not stored, issue
+        // #438) has no hash to compare against: its content is unknown, not
+        // changed, so a failed probe must not clear what it holds.
+        let content_changed = existing.hash != 0 && new_hash != existing.hash;
         if content_changed {
             info!("File content changed, reconciling: {}", path.display());
         }

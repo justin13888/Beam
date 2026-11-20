@@ -362,6 +362,47 @@ async fn chapters_that_cannot_be_stored_are_stored_by_the_next_scan() {
     assert_eq!(h.movie_of("Heat (1995)/Heat (1995).mkv").id, heat.id);
 }
 
+/// A file left to be probed again because its chapters were not stored, whose
+/// next probe fails, is not taken for one whose content changed: having no
+/// hash to compare, its content is unknown. It keeps its status and runtime,
+/// stays unhashed, and the scan after the probe recovers stores its chapters.
+#[tokio::test]
+async fn a_failed_retry_of_unstored_chapters_does_not_mark_the_file_changed() {
+    let h = Harness::new().await;
+    h.video("Heat (1995)/Heat (1995).mkv");
+    h.chapter(
+        "Heat (1995)/Heat (1995).mkv",
+        &[(0, 60_000, Some("Opening"))],
+    );
+    fail(&h.faults.chapters);
+    h.scan().await;
+    let heat = h.movie_of("Heat (1995)/Heat (1995).mkv");
+
+    heal(&h.faults.chapters);
+    fail(&h.probe_fails);
+    h.scan().await;
+
+    let video = h.file("Heat (1995)/Heat (1995).mkv");
+    assert_eq!(video.status, FileStatus::Known);
+    assert_eq!(video.duration, Some(Duration::from_secs(60 * 60)));
+    assert_eq!(video.hash, 0, "still left to be probed again");
+    assert_eq!(h.movie_of("Heat (1995)/Heat (1995).mkv").id, heat.id);
+
+    heal(&h.probe_fails);
+    h.scan().await;
+
+    let chapters: Vec<(u64, u64, Option<String>)> = h
+        .chapters_of("Heat (1995)/Heat (1995).mkv")
+        .await
+        .into_iter()
+        .map(|chapter| (chapter.start_ms, chapter.end_ms, chapter.title))
+        .collect();
+    assert_eq!(chapters, [(0, 60_000, Some("Opening".to_string()))]);
+    let video = h.file("Heat (1995)/Heat (1995).mkv");
+    assert_eq!(video.status, FileStatus::Known);
+    assert_ne!(video.hash, 0);
+}
+
 /// A new video whose title cannot be queued for enrichment fails as a file
 /// the scan could not record, and the next scan after the queue recovers
 /// indexes it and queues its title.
