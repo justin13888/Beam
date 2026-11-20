@@ -65,7 +65,10 @@ replaced while its predecessor is still terminating, the CLI run beside a live s
 waits, then finds nothing pending. The lock makes migrate-on-boot safe; it does not make Beam
 multi-replica (the indexer is not leader-elected), so the supported topologies still run exactly
 one server process. Set `BEAM_AUTO_MIGRATE=false` to manage schema out-of-band with the
-`beam-migration` CLI (`cargo run -p beam-migration -- <command>` with `DATABASE_URL` set).
+`beam-migration` CLI, which reads `DATABASE_URL`. The server image ships it beside `beam-server`
+(`podman run --rm -e DATABASE_URL=... <server image> beam-migration up`); from a source checkout,
+`cargo run -p beam-migration -- <command>` runs the same thing. On Kubernetes the chart can run it
+as a hook Job (see [Kubernetes (Helm)](#kubernetes-helm)).
 
 Only two CLI commands are safe beside a running server:
 
@@ -153,6 +156,7 @@ documents every value, and `values.schema.json` rejects unknown ones.
 | `Secret` | Only for secrets given inline (`database.url`, `oidc.clientSecret`, `tmdb.apiToken`, `tvdb.apiKey` and `tvdb.pin`, `telemetry.url`); each also accepts an `existingSecret`. |
 | `Ingress` | Optional. Routes `/v1` to the server and, with the web client enabled, `/` to it. `/metrics` and `/openapi` are never routed. |
 | `Deployment` + `Service` (web) | Optional; see below. |
+| `Job` (migration) | Optional (`migrations.job.enabled`): a `pre-install,pre-upgrade` hook running `beam-migration up`; see **Migrations** below. |
 
 **Database.** Postgres is external: set `database.url` or `database.existingSecret` (key
 `existingSecretKey`, default `url`). The chart refuses to render with neither. Use the version
@@ -175,6 +179,26 @@ beside the running pod; `down`, `fresh`, `refresh` and `reset` need the server s
 `helm install beam`; the chart's full name otherwise), and pause any GitOps self-heal (Argo CD `selfHeal`, Flux
 reconciliation) first so it does not scale the Deployment straight back to one. Scale it back to 1
 afterwards.
+
+Migrations run in one of two modes:
+
+- **On boot** (the default, `server.autoMigrate: true`): the server applies pending migrations at
+  startup. With the `Recreate` strategy the old pod is gone first, so no server ever runs against a
+  schema newer than it was built for.
+- **As a hook Job** (`migrations.job.enabled: true`, usually with `server.autoMigrate: false`): a
+  `pre-install,pre-upgrade` Helm hook Job runs `beam-migration up` from the server image, with the
+  server's database Secret and the same non-root, read-only pod and container security settings.
+  Helm waits for it (up to `--timeout`) before creating or rolling the Deployment; if it fails,
+  the batch is rolled back, the release fails, and the old server keeps running on the schema it
+  expects. A successful Job is deleted; a failed one stays for `kubectl logs job/<release>-migrate`
+  (`beam-migrate` for `helm install beam`) until the next attempt replaces it. The Job requires
+  `database.existingSecret`: a pre-install hook runs before the Secret the chart creates for an
+  inline `database.url` exists, so the chart refuses that combination. On upgrade the migration
+  runs while the old server is still serving, so this mode suits releases whose migrations the
+  previous server tolerates; on-boot migration avoids that overlap. The Job runs under the
+  namespace's default ServiceAccount unless `serviceAccount.create` is false, in which case it uses
+  the named one -- a hook runs before the chart's own ServiceAccount exists -- and mounts no token
+  either way. `migrations.job.backoffLimit` and `migrations.job.resources` tune it.
 
 **Libraries.** Each entry in `libraries` names a Kubernetes volume source and is mounted read-only
 at `/videos/<name>`; create the library in the admin UI with that path. Every source kind with a
@@ -239,6 +263,8 @@ The chart is gated by `mise run helm:lint`, `helm:template` (kubeconform against
 source is read-only (or a `hostPath`/`image` source), `/data` is never a library, every container
 is hardened, liveness does not probe `/v1/health`, the ingress routes the server only under `/v1`,
 `X-Forwarded-For` is trusted by default only behind an ingress with a `ClusterIP` Service, and the
-grace period outlasts `BEAM_SHUTDOWN_TIMEOUT_SECS` -- and that the chart refuses to render a library
-on a source it cannot make read-only. All three run in
+grace period outlasts `BEAM_SHUTDOWN_TIMEOUT_SECS`, and the migration Job renders only when enabled
+and shares the server's image, database Secret and security settings -- and that the chart refuses
+to render a library on a source it cannot make read-only, or the migration Job with an inline
+`database.url`. All three run in
 `mise run ci`, CI's `helm-chart` job, and the pre-push hook.
