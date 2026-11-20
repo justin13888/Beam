@@ -216,6 +216,91 @@ pub fn transition(state: &SessionState, event: SessionEvent) -> (SessionState, V
     }
 }
 
+/// Told when the server list the foreign side shows has changed.
+///
+/// One callback for every way it changes -- a sign-in completing, a sign-out,
+/// a `401` expiring a session on any call, a server added, removed or
+/// selected -- so no client has to catch errors and re-read the list to find
+/// out, and Android and Apple cannot drift apart in how they do it (ADR-0012).
+///
+/// Called synchronously, on whichever thread finished the change, while the
+/// core holds the lock that keeps announcements in order. An implementation
+/// hands the list off (a `tryEmit`, a main-queue dispatch) and returns: it
+/// must not block, and must not call [`crate::ffi::BeamClient::set_session_observer`]
+/// from inside the callback.
+#[uniffi::export(with_foreign)]
+pub trait SessionObserver: Send + Sync {
+    /// Every known server, as [`crate::ffi::BeamClient::list_servers`] now
+    /// answers.
+    fn on_sessions_changed(&self, servers: Vec<crate::ffi::ServerSummary>);
+}
+
+/// The registered [`SessionObserver`], and what it was last told.
+///
+/// Announcing is "tell the observer if the list differs from the last one it
+/// saw", not "tell it on every transition". Several steps of one operation
+/// each touch the list -- adding a server installs and then selects it -- and
+/// many transitions change nothing visible: a second `401` on a session
+/// already expired, a sign-in the server rejected from signed out. Comparing
+/// against what was announced is what makes each change arrive exactly once.
+#[derive(Default)]
+pub(crate) struct SessionAnnouncer(std::sync::Mutex<AnnouncerSlot>);
+
+#[derive(Default)]
+struct AnnouncerSlot {
+    observer: Option<std::sync::Arc<dyn SessionObserver>>,
+    announced: Option<Vec<crate::ffi::ServerSummary>>,
+}
+
+impl SessionAnnouncer {
+    /// The slot, even if a callback panicked while holding it: what it holds
+    /// is replaced wholesale, never left half-written.
+    fn slot(&self) -> std::sync::MutexGuard<'_, AnnouncerSlot> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Make `observer` the one told of changes, replacing any before it.
+    ///
+    /// Nothing is announced now; the next change is announced in full, since
+    /// this observer has been told nothing yet.
+    pub(crate) fn register(&self, observer: std::sync::Arc<dyn SessionObserver>) {
+        let mut slot = self.slot();
+        slot.observer = Some(observer);
+        slot.announced = None;
+    }
+
+    /// Tell the observer the list `current` reads, if it differs from the
+    /// last one it was told.
+    ///
+    /// `current` is read, compared and delivered under one lock, so two
+    /// changes finishing on different threads are announced in the order the
+    /// list actually took -- the last list delivered is always the latest.
+    pub(crate) fn announce(&self, current: impl FnOnce() -> Vec<crate::ffi::ServerSummary>) {
+        let mut slot = self.slot();
+        let Some(observer) = slot.observer.clone() else {
+            return;
+        };
+        let servers = current();
+        if slot.announced.as_ref() == Some(&servers) {
+            return;
+        }
+        slot.announced = Some(servers.clone());
+        observer.on_sessions_changed(servers);
+    }
+}
+
+impl std::fmt::Debug for SessionAnnouncer {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let registered = self.slot().observer.is_some();
+        formatter
+            .debug_struct("SessionAnnouncer")
+            .field("registered", &registered)
+            .finish_non_exhaustive()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
