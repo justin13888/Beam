@@ -156,6 +156,23 @@ certifications are grouped into. A user nobody restricted sees everything.
 The policy is read on every request that touches a title, so a change takes effect on the user's
 next request; an unrestricted policy short-circuits every check without further reads.
 
+**File delivery is the one exception, and only for a few seconds** (issue #462). A player seeking
+through a file sends many Range requests to `/stream` (and a resumed download many to `/download`),
+so the decision those make -- this user may have this file, and it is at this path -- is held in a
+bounded in-process cache keyed by `(user, file)` for five seconds after it is resolved
+(`beam-server/src/services/stream_cache.rs`). What that does and does not relax:
+
+- **The session is not cached.** Every request still resolves `beam_session` against the store and
+  slides its idle expiry, so a signed-out or revoked session is refused on its very next request,
+  and session-touch semantics are unchanged.
+- **A policy change is immediate.** Replacing a user's policy forgets their cached grants, and a
+  grant resolved from the old policy by a request still in flight is discarded rather than stored.
+- **Anything else is at most five seconds stale.** A title linked to another library or re-rated,
+  a file re-indexed to a new path, or a library removed is seen once the grant expires.
+- **Only grants are held.** A hidden or missing file is resolved afresh on every request.
+
+The file's bytes are always opened afresh, beneath its library root, on every request.
+
 ## Read-only media filesystem as a security boundary
 
 The media library is mounted read-only, as a hard architectural invariant: even a worst-case
