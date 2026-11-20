@@ -319,14 +319,11 @@ async fn a_subtitle_that_cannot_be_recorded_is_recorded_by_the_next_scan() {
 }
 
 /// A probe whose chapters cannot be stored still indexes its file: the scan
-/// goes on, and the file is classified with the runtime the probe read.
-///
-/// Not pinned here: whether a later scan stores the chapters once the store
-/// recovers. Today it does not -- the file is recorded as probed, so an
-/// unchanged file is never probed again -- and that is filed as its own
-/// defect (#438) rather than characterized as intended.
+/// goes on, and the file is classified with the runtime the probe read. The
+/// next scan after the store recovers probes the unchanged file again and
+/// stores its chapters (#438), keeping its classification.
 #[tokio::test]
-async fn chapters_that_cannot_be_stored_do_not_cost_the_file_its_index() {
+async fn chapters_that_cannot_be_stored_are_stored_by_the_next_scan() {
     let h = Harness::new().await;
     h.video("Heat (1995)/Heat (1995).mkv");
     h.chapter(
@@ -345,7 +342,24 @@ async fn chapters_that_cannot_be_stored_do_not_cost_the_file_its_index() {
     let video = h.file("Heat (1995)/Heat (1995).mkv");
     assert_eq!(video.status, FileStatus::Known);
     assert_eq!(video.duration, Some(Duration::from_secs(60 * 60)));
-    assert_eq!(h.movie_of("Heat (1995)/Heat (1995).mkv").title, "Heat");
+    let heat = h.movie_of("Heat (1995)/Heat (1995).mkv");
+    assert_eq!(heat.title, "Heat");
+
+    heal(&h.faults.chapters);
+    h.scan().await;
+
+    let chapters: Vec<(u64, u64, Option<String>)> = h
+        .chapters_of("Heat (1995)/Heat (1995).mkv")
+        .await
+        .into_iter()
+        .map(|chapter| (chapter.start_ms, chapter.end_ms, chapter.title))
+        .collect();
+    assert_eq!(chapters, [(0, 60_000, Some("Opening".to_string()))]);
+    let video = h.file("Heat (1995)/Heat (1995).mkv");
+    assert_eq!(video.status, FileStatus::Known);
+    assert_eq!(video.duration, Some(Duration::from_secs(60 * 60)));
+    assert_ne!(video.hash, 0, "hashed again once its chapters are stored");
+    assert_eq!(h.movie_of("Heat (1995)/Heat (1995).mkv").id, heat.id);
 }
 
 /// A new video whose title cannot be queued for enrichment fails as a file
