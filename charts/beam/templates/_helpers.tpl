@@ -78,6 +78,52 @@ oidc.clientSecret, tmdb.apiToken, tvdb.apiKey, tvdb.pin, telemetry.url).
 {{- include "beam.fullname" . }}
 {{- end }}
 
+{{/*
+The secretKeyRef behind BEAM_DATABASE_URL. The server and the migration Job
+both read it from here, so they can never point at different databases.
+*/}}
+{{- define "beam.databaseUrlSecretKeyRef" -}}
+{{- if .Values.database.existingSecret }}
+name: {{ .Values.database.existingSecret }}
+key: {{ .Values.database.existingSecretKey }}
+{{- else }}
+name: {{ include "beam.secretName" . }}
+key: database-url
+{{- end }}
+{{- end }}
+
+{{/*
+The pod securityContext of every pod that runs the server image: the image's
+`appuser`, which owns /data in the image. Fixed, not a value; media access is
+widened with supplemental groups instead. `check:chart-invariants` fails if
+the server's supplemental groups are not what values set, or if the migration
+Job's pod differs from the server's.
+*/}}
+{{- define "beam.podSecurityContext" -}}
+runAsNonRoot: true
+runAsUser: 1000
+runAsGroup: 1000
+fsGroup: 1000
+fsGroupChangePolicy: OnRootMismatch
+{{- with .Values.server.podSecurityContext.supplementalGroups }}
+# Groups the library media is readable by (a NAS `media` group).
+supplementalGroups:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+seccompProfile:
+  type: RuntimeDefault
+{{- end }}
+
+{{/*
+The container securityContext of every container that runs the server image.
+*/}}
+{{- define "beam.containerSecurityContext" -}}
+allowPrivilegeEscalation: false
+readOnlyRootFilesystem: true
+capabilities:
+  drop: ["ALL"]
+{{- end }}
+
 {{- define "beam.dataClaimName" -}}
 {{- default (printf "%s-data" (include "beam.fullname" .)) .Values.persistence.data.existingClaim }}
 {{- end }}
@@ -139,6 +185,9 @@ refuses them as well as `helm install`.
 {{- end }}
 {{- if not (or .Values.database.url .Values.database.existingSecret) }}
 {{- fail "database.url or database.existingSecret is required: Beam needs an external PostgreSQL" }}
+{{- end }}
+{{- if and .Values.migrations.job.enabled (not .Values.database.existingSecret) }}
+{{- fail "migrations.job.enabled requires database.existingSecret: the Job is a pre-install hook, which runs before the Secret the chart creates for database.url exists" }}
 {{- end }}
 {{- $names := dict }}
 {{- range .Values.libraries }}

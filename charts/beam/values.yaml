@@ -39,7 +39,8 @@ server:
   # BEAM_COOKIE_SECURE. null leaves it to publicUrl's scheme.
   cookieSecure: null
   # BEAM_AUTO_MIGRATE. Migrations run at startup under a Postgres advisory
-  # lock, so an overlapping old and new pod cannot race them.
+  # lock, so an overlapping old and new pod cannot race them. To migrate in a
+  # separate step instead, set this false and enable migrations.job.
   autoMigrate: true
   # BEAM_SHUTDOWN_TIMEOUT_SECS: how long a stopping server waits for in-flight
   # requests (streams included) to drain. The pod's
@@ -195,6 +196,26 @@ metrics:
   # BEAM_ENABLE_METRICS, plus prometheus.io/* scrape annotations on the pod.
   # /metrics is served on the API port and is never routed by the ingress.
   enabled: false
+
+migrations:
+  # A Helm pre-install,pre-upgrade hook Job that runs `beam-migration up` from
+  # the server image, with the server's database Secret and pod security
+  # settings, before the server Deployment is created or rolled. Helm waits
+  # for it (up to --timeout), and a failed Job fails the install or upgrade,
+  # leaving the old server running. Usually paired with server.autoMigrate:
+  # false; with both on, the server finds nothing pending at boot.
+  #
+  # Requires database.existingSecret: a pre-install hook runs before the
+  # Secret the chart creates for an inline database.url exists.
+  job:
+    enabled: false
+    backoffLimit: 1
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        memory: 256Mi
 
 serviceAccount:
   create: true

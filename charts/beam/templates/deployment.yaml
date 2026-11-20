@@ -53,31 +53,15 @@ spec:
       # before the kubelet's SIGKILL. `check:chart-invariants` fails if it is
       # not longer than BEAM_SHUTDOWN_TIMEOUT_SECS.
       terminationGracePeriodSeconds: {{ include "beam.terminationGracePeriodSeconds" . }}
+      # Shared with the migration Job (beam.podSecurityContext).
       securityContext:
-        # The image's `appuser`, which owns /data in the image. Fixed, not a
-        # value; media access is widened with supplemental groups instead.
-        runAsNonRoot: true
-        runAsUser: 1000
-        runAsGroup: 1000
-        fsGroup: 1000
-        fsGroupChangePolicy: OnRootMismatch
-        {{- with .Values.server.podSecurityContext.supplementalGroups }}
-        # Groups the library media is readable by (a NAS `media` group).
-        # `check:chart-invariants` fails if these are not what values set.
-        supplementalGroups:
-          {{- toYaml . | nindent 10 }}
-        {{- end }}
-        seccompProfile:
-          type: RuntimeDefault
+        {{- include "beam.podSecurityContext" . | nindent 8 }}
       containers:
         - name: server
           image: {{ include "beam.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop: ["ALL"]
+            {{- include "beam.containerSecurityContext" . | nindent 12 }}
           ports:
             - name: http
               containerPort: 8000
@@ -118,13 +102,7 @@ spec:
             - name: BEAM_DATABASE_URL
               valueFrom:
                 secretKeyRef:
-                  {{- if .Values.database.existingSecret }}
-                  name: {{ .Values.database.existingSecret }}
-                  key: {{ .Values.database.existingSecretKey }}
-                  {{- else }}
-                  name: {{ include "beam.secretName" . }}
-                  key: database-url
-                  {{- end }}
+                  {{- include "beam.databaseUrlSecretKeyRef" . | trim | nindent 18 }}
             {{- with .Values.oidc.issuer }}
             - name: BEAM_OIDC_ISSUER
               value: {{ . | quote }}

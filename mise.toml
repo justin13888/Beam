@@ -1795,7 +1795,7 @@ done
 '''
 
 [tasks."check:chart-invariants"]
-description = "Assert the rendered Helm chart keeps one Recreate replica, read-only libraries, a hardened pod, a liveness probe that ignores the database, an ingress that exposes only the API, a forwarded-for trust that needs the ingress, a grace period longer than the drain, and the image's user with the configured supplemental groups"
+description = "Assert the rendered Helm chart keeps one Recreate replica, read-only libraries, a hardened pod, a liveness probe that ignores the database, an ingress that exposes only the API, a forwarded-for trust that needs the ingress, a grace period longer than the drain, the image's user with the configured supplemental groups, and an opt-in migration Job that shares the server's image, database Secret and security settings"
 # The properties Beam's design depends on that neither the schema nor
 # kubeconform can see, asserted over what the chart actually renders for every
 # scenario in ci/ -- never over the templates' text:
@@ -1835,6 +1835,13 @@ description = "Assert the rendered Helm chart keeps one Recreate replica, read-o
 #      /data in the image) and with exactly the supplemental groups the
 #      scenario sets in server.podSecurityContext.supplementalGroups -- the
 #      one way to let it read media a group can read.
+#  11. A migration Job renders only when the scenario sets
+#      migrations.job.enabled, and then exactly one: a pre-install,pre-upgrade
+#      hook running `beam-migration up` from the server's image, reading the
+#      server's database secretKeyRef, with the server pod's and container's
+#      securityContext and no service-account token. The chart refuses it
+#      with an inline database.url, whose Secret does not exist yet when a
+#      pre-install hook runs.
 #
 # The directory argument points the gate at a copy of the chart; that is how
 # its negative cases are exercised without editing the tracked one.
@@ -1876,6 +1883,15 @@ for source in '{"emptyDir":{}}' '{"ephemeral":{"volumeClaimTemplate":{"spec":{}}
     echo "ok    the chart refuses a library on $source"
   fi
 done
+
+# 11, refusal half: the migration Job is a pre-install hook, so it runs before
+# the Secret the chart creates for an inline database.url exists.
+if helm template beam "$chart" -f "$base" --set migrations.job.enabled=true > /dev/null 2>&1; then
+  echo "FAIL  the chart renders the migration Job with an inline database.url, whose Secret a pre-install hook cannot read"
+  status=1
+else
+  echo "ok    the chart refuses the migration Job with an inline database.url"
+fi
 
 for values in "$chart"/ci/*-values.yaml; do
   name="$(basename "$values" .yaml)"
@@ -1961,7 +1977,7 @@ for (const scenario of scenarios.sort()) {
 
   // 4.
   check(pod.securityContext?.runAsNonRoot === true, `${tag} the server pod runs as non-root`);
-  for (const d of rendered.filter((d) => d.kind === "Deployment"))
+  for (const d of rendered.filter((d) => d.kind === "Deployment" || d.kind === "Job"))
     for (const c of d.spec?.template?.spec?.containers ?? []) {
       check(c.securityContext?.readOnlyRootFilesystem === true, `${tag} ${d.metadata.name}/${c.name} has a read-only root filesystem`);
       check(c.securityContext?.allowPrivilegeEscalation === false, `${tag} ${d.metadata.name}/${c.name} cannot escalate privileges`);
@@ -2024,6 +2040,44 @@ for (const scenario of scenarios.sort()) {
     JSON.stringify(gotGroups) === JSON.stringify(wantGroups),
     `${tag} the server pod has the supplemental groups the values set (want ${JSON.stringify(wantGroups)}, got ${JSON.stringify(gotGroups)})`,
   );
+
+  // 11.
+  const wantJob = values.migrations?.job?.enabled === true;
+  const jobs = rendered.filter((d) => d.kind === "Job");
+  check(jobs.length === (wantJob ? 1 : 0), `${tag} ${wantJob ? "exactly one" : "no"} migration Job renders (found ${jobs.length})`);
+  const databaseRef = (container, name) =>
+    (container?.env ?? []).find((e) => e.name === name)?.valueFrom?.secretKeyRef;
+  for (const job of jobs) {
+    const hooks = String(job.metadata?.annotations?.["helm.sh/hook"] ?? "").split(",");
+    check(
+      hooks.includes("pre-install") && hooks.includes("pre-upgrade"),
+      `${tag} Job ${job.metadata.name} is a pre-install,pre-upgrade hook (got ${JSON.stringify(hooks)})`,
+    );
+    const jobPod = job.spec?.template?.spec ?? {};
+    const containers = jobPod.containers ?? [];
+    check(containers.length === 1, `${tag} Job ${job.metadata.name} has one container (found ${containers.length})`);
+    const migrate = containers[0];
+    check(
+      JSON.stringify(migrate?.command) === JSON.stringify(["beam-migration", "up"]),
+      `${tag} Job ${job.metadata.name} runs beam-migration up (got ${JSON.stringify(migrate?.command)})`,
+    );
+    check(migrate?.image === main.image, `${tag} Job ${job.metadata.name} runs the server image (got ${JSON.stringify(migrate?.image)})`);
+    const serverDb = databaseRef(main, "BEAM_DATABASE_URL");
+    const jobDb = databaseRef(migrate, "DATABASE_URL");
+    check(
+      serverDb !== undefined && Bun.deepEquals(jobDb, serverDb),
+      `${tag} Job ${job.metadata.name} reads the server database Secret (server ${JSON.stringify(serverDb)}, job ${JSON.stringify(jobDb)})`,
+    );
+    check(
+      Bun.deepEquals(jobPod.securityContext, pod.securityContext),
+      `${tag} Job ${job.metadata.name} pod securityContext equals the server pod securityContext`,
+    );
+    check(
+      Bun.deepEquals(migrate?.securityContext, main.securityContext),
+      `${tag} Job ${job.metadata.name} container securityContext equals the server container securityContext`,
+    );
+    check(jobPod.automountServiceAccountToken === false, `${tag} Job ${job.metadata.name} mounts no service-account token`);
+  }
 }
 process.exit(status);
 ' "$out" || status=1

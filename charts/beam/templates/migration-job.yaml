@@ -1,0 +1,67 @@
+{{- if .Values.migrations.job.enabled }}
+# Applies pending migrations with the image's `beam-migration up` before Helm
+# creates or rolls the server, for operators who set server.autoMigrate false.
+# It takes the same advisory lock and applies the batch all-or-nothing, exactly
+# as the server does at boot. `check:chart-invariants` fails if it stops
+# sharing the server's image, database Secret or security settings.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ printf "%s-migrate" (include "beam.fullname" .) | trunc 63 | trimSuffix "-" }}
+  labels:
+    {{- include "beam.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migration
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    # A failed Job is kept for `kubectl logs` until the next attempt replaces
+    # it; a successful one is removed.
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.migrations.job.backoffLimit }}
+  template:
+    metadata:
+      labels:
+        {{- include "beam.labels" . | nindent 8 }}
+        app.kubernetes.io/component: migration
+    spec:
+      restartPolicy: Never
+      {{- /* A hook runs before the chart's own ServiceAccount exists, so the
+             Job uses the namespace default unless the operator names an
+             existing one. It needs no API access either way. */}}
+      {{- if not .Values.serviceAccount.create }}
+      serviceAccountName: {{ include "beam.serviceAccountName" . }}
+      {{- end }}
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- include "beam.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: migrate
+          image: {{ include "beam.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["beam-migration", "up"]
+          securityContext:
+            {{- include "beam.containerSecurityContext" . | nindent 12 }}
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  {{- include "beam.databaseUrlSecretKeyRef" . | trim | nindent 18 }}
+          resources:
+            {{- toYaml .Values.migrations.job.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

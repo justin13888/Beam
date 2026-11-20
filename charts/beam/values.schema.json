@@ -367,6 +367,21 @@
       "additionalProperties": false,
       "properties": { "enabled": { "type": "boolean" } }
     },
+    "migrations": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "job": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "backoffLimit": { "type": "integer", "minimum": 0 },
+            "resources": { "$ref": "#/definitions/resources" }
+          }
+        }
+      }
+    },
     "serviceAccount": {
       "type": "object",
       "additionalProperties": false,
