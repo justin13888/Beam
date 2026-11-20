@@ -149,7 +149,12 @@ impl ReqwestArtworkFetcher {
             // Named rather than chained, because the two reasons to refuse are
             // different -- one is a redirect loop, the other a downgrade to
             // cleartext -- while the answer to both is the same.
-            let looping = attempt.previous().len() >= MAX_REDIRECTS;
+            //
+            // `previous()` holds every URL already requested, the original one
+            // included, so it is one longer than the redirects followed so
+            // far: `>` lets exactly `MAX_REDIRECTS` through, as reqwest's own
+            // `Policy::limited` does.
+            let looping = attempt.previous().len() > MAX_REDIRECTS;
             let downgraded = attempt.url().scheme() != "https";
             if looping || downgraded {
                 attempt.stop()
@@ -430,6 +435,44 @@ mod tests {
             "{:?}",
             cleartext.requested()
         );
+    }
+
+    /// `MAX_REDIRECTS` counts redirects, not requests: a chain of exactly that
+    /// many arrives, and one more stops at the redirect it refused -- whose
+    /// target is never requested.
+    #[tokio::test]
+    async fn a_redirect_chain_is_followed_up_to_the_cap_and_no_further() {
+        let (server, root) = stand_in::https(Arc::new(|path: &str| {
+            match path
+                .strip_prefix("/chain/")
+                .and_then(|hops| hops.parse::<usize>().ok())
+            {
+                Some(0) => stand_in::png_with_length(16),
+                Some(hops) => stand_in::redirect(&format!("/chain/{}", hops - 1)),
+                None => stand_in::not_found(),
+            }
+        }))
+        .await;
+        let fetcher = trusting(root);
+
+        let over = MAX_REDIRECTS + 1;
+        assert_eq!(
+            fetcher
+                .fetch(&server.url("https", &format!("/chain/{over}")))
+                .await,
+            Err(ArtworkFetchError::Upstream { status: 302 }),
+        );
+        let followed: Vec<String> = (1..=over)
+            .rev()
+            .map(|hops| format!("/chain/{hops}"))
+            .collect();
+        assert_eq!(server.requested(), followed);
+
+        let at_cap = fetcher
+            .fetch(&server.url("https", &format!("/chain/{MAX_REDIRECTS}")))
+            .await
+            .expect("a chain of exactly MAX_REDIRECTS is followed");
+        assert_eq!(at_cap.bytes.len(), 16);
     }
 
     /// A TLS listener on 127.0.0.1 with a fresh self-signed certificate, and a
