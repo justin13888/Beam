@@ -87,6 +87,13 @@ ignore = [
     # 0.7.6, which elliptic-curve 0.13 (openidconnect 4.0.1's pin) cannot take;
     # re-evaluate when openidconnect moves to elliptic-curve 0.14.
     { id = "RUSTSEC-2026-0387", reason = "constant-time leak only matters for secret integers; beam only verifies EC signatures against public JWKS keys as an OIDC relying party, and no patched 0.5.x exists" },
+    # chrono: marked unmaintained for every version, with no safe upgrade.
+    # This is an `unmaintained` notice, not a vulnerability. chrono also
+    # reaches the tree through dependencies Beam does not control the
+    # features of (openidconnect, oauth2, kynos, cameo), so migrating Beam's
+    # own uses to `jiff` or `time` would not remove it. Re-evaluate when
+    # those drop chrono, then migrate the direct uses (#476).
+    { id = "RUSTSEC-2026-0543", reason = "unmaintained notice, not a vulnerability; chrono also arrives through openidconnect, oauth2, kynos and cameo, so migrating Beam's own uses cannot remove it (#476)" },
 ]
 # If this is true, then cargo deny will use the git executable to fetch advisory database.
 # If this is false, then it uses a built-in git library.
