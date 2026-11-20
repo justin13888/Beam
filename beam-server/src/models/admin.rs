@@ -133,6 +133,8 @@ pub enum ScanTrigger {
     Periodic,
     /// The library has just started being polled rather than watched.
     NewlyPolled,
+    /// The library has just been created.
+    Created,
 }
 
 impl From<index_scan::ScanTrigger> for ScanTrigger {
@@ -142,6 +144,7 @@ impl From<index_scan::ScanTrigger> for ScanTrigger {
             index_scan::ScanTrigger::Startup => ScanTrigger::Startup,
             index_scan::ScanTrigger::Periodic => ScanTrigger::Periodic,
             index_scan::ScanTrigger::NewlyPolled => ScanTrigger::NewlyPolled,
+            index_scan::ScanTrigger::Created => ScanTrigger::Created,
         }
     }
 }

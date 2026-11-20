@@ -23677,7 +23677,8 @@
           "manual",
           "startup",
           "periodic",
-          "newly_polled"
+          "newly_polled",
+          "created"
         ],
         "description": "What started a scan."
       },
