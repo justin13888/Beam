@@ -451,8 +451,8 @@ async fn a_symlinked_file_or_folder_is_never_read() {
     let inside = tree.path("films/Arrival (2016).mp4");
     tree.symlink(&inside, "films/Arrival again (2016).mp4");
 
-    let library = admin.add_library("Films", "films").await;
-    let counts = rescan(&admin, library).await;
+    let (library, first) = admin.add_library_scanned("Films", "films").await;
+    let counts = Counts::of(&first);
     assert_eq!(
         (counts.added, counts.failed),
         (1, 0),
