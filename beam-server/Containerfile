@@ -89,9 +89,12 @@ ENV PATH=/opt/ffmpeg/bin:$PATH
 COPY --from=planner /app/recipe.json recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json --bin beam-server
 
-# Build application
+# Build application. beam-migration ships beside the server so an operator who
+# sets BEAM_AUTO_MIGRATE=false can still migrate from this image (the Helm
+# chart's migration Job runs it); its dependencies are already the server's, so
+# the recipe above covers them.
 COPY . .
-RUN cargo build --release --package beam-server
+RUN cargo build --release --package beam-server --package beam-migration
 
 # ----------------------------------------------------
 # Runtime stage
@@ -124,8 +127,9 @@ RUN mkdir -p /app /videos /data && chown 1000:1000 /data
 ENV BEAM_VIDEO_DIR=/videos
 ENV BEAM_DATA_DIR=/data
 
-# Copy the binary from builder
+# Copy the binaries from builder
 COPY --from=builder /app/target/release/beam-server /usr/local/bin/beam-server
+COPY --from=builder /app/target/release/beam-migration /usr/local/bin/beam-migration
 
 # Create non-root user
 RUN useradd -m -u 1000 -s /bin/bash appuser
