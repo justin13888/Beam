@@ -189,13 +189,62 @@ and on by default from 1.35, GA in 1.36, and a container runtime that supports i
 kind (`emptyDir`,
 `ephemeral`, `gitRepo`, `configMap`, `secret`, `projected`, `downwardAPI`, and the in-tree
 `flocker`, `photonPersistentDisk` and `vsphereVolume`) is refused by the schema. `BEAM_VIDEO_DIR` (`/videos`) and `BEAM_DATA_DIR` (`/data`)
-are fixed by the chart and cannot be overridden through `server.env`.
+are fixed by the chart and cannot be overridden through `server.env`; nor can the watcher settings
+the chart sets from `watch` and `scan` (below).
 
 The pod reads media as uid 1000 and gid 1000 (the image's user, which owns `/data`; fixed by the
 chart), plus any gids in `server.podSecurityContext.supplementalGroups`. Library media must be
 readable by one of those or by everyone. A NAS export readable by a `media` group with gid 1500
 needs `supplementalGroups: [1500]`; the chart never changes ownership on a library, so nothing
 else can grant access.
+
+A `hostPath` library may set `mountPropagation: HostToContainer`. Without it, a disk the host
+mounts or remounts under the path after the pod started -- a USB drive, a NAS automount -- is
+invisible to the pod, which keeps seeing the empty directory beneath it until it is restarted. It is
+opt-in, accepted only on a `hostPath` library, and only in that mode: the schema refuses
+`Bidirectional`, which would let the pod propagate mounts back onto the host.
+
+**How quickly new files appear.** Between full rescans the indexer learns of library changes from
+a filesystem watcher, and which kind depends on the filesystem behind each library:
+
+- A local filesystem (a `hostPath` on the node's disk, a local or block-device PV such as `rbd`,
+  `iscsi` or a cloud disk) gets native inotify events. A new file is picked up within
+  `watch.debounceMs` (`BEAM_WATCH_DEBOUNCE_MS`, default 2000) of its last write, plus
+  `scan.settleSeconds` (`BEAM_SCAN_SETTLE_SECS`, default 30) -- the window a file must go
+  unwritten before it is hashed, so a file still being copied in is not read while partial.
+- A network filesystem cannot deliver change events to a client: writes made by another machine
+  never raise inotify in the pod. The volumes Kubernetes usually provides for an existing library
+  are exactly these -- `nfs`, `cephfs`, SMB through a CSI driver, and anything FUSE-backed
+  (rclone, s3fs, mergerfs) -- so Beam detects them and **polls** them instead, walking every polled
+  library each `watch.pollIntervalSeconds` (`BEAM_WATCH_POLL_INTERVAL_SECS`, default 300). With the
+  defaults a new file on network storage takes up to about five and a half minutes to appear.
+  Lowering the interval makes it appear sooner at the cost of walking the whole library that often
+  -- every directory listed and every file stat'ed over the network -- so for a large library keep
+  it in minutes rather than seconds.
+
+```yaml
+watch:
+  pollIntervalSeconds: 60   # network-storage libraries: new files within about 1.5 minutes
+  debounceMs: 2000
+scan:
+  settleSeconds: 30
+```
+
+The admin UI's system status tab (`GET /v1/admin/status`, the `watcher` object) shows which mode
+each library is in: `native`, `polling` with a `poll_reason` of `network_filesystem`,
+`watch_limit_reached` or `native_unavailable`, or `unwatched` when `BEAM_WATCH_ENABLED` is false.
+
+**inotify limits.** A native watch costs one inotify watch per directory in the library, counted
+against `fs.inotify.max_user_watches` -- a node-level kernel setting shared by every container on
+that node running as the same uid (Beam runs as 1000, a common uid). When a library would exceed
+it, Beam polls that library instead (`poll_reason: watch_limit_reached`, with
+`watch_limit_reached` and the limit itself as `watch_limit_count` in the status). The setting is not
+namespaced, so a pod's `securityContext.sysctls` cannot raise it; raise it on the nodes that may run
+Beam -- in the node image or provisioning config (a file under `/etc/sysctl.d/`), through your
+platform's node-tuning mechanism, or with a privileged DaemonSet that runs `sysctl -w` -- for example
+`fs.inotify.max_user_watches=524288`. Each watch costs roughly 1 KiB of unswappable kernel memory.
+Restart the Beam pod afterwards so it watches the library natively again. Libraries on network
+storage are polled whatever the limit, so raising it only helps large local libraries.
 
 **Probes.** Startup and readiness use `GET /v1/health`, which answers 503 while the database is
 unreachable -- the pod leaves the Service until it recovers. Liveness is a TCP check, so a database
@@ -239,6 +288,8 @@ The chart is gated by `mise run helm:lint`, `helm:template` (kubeconform against
 source is read-only (or a `hostPath`/`image` source), `/data` is never a library, every container
 is hardened, liveness does not probe `/v1/health`, the ingress routes the server only under `/v1`,
 `X-Forwarded-For` is trusted by default only behind an ingress with a `ClusterIP` Service, and the
-grace period outlasts `BEAM_SHUTDOWN_TIMEOUT_SECS` -- and that the chart refuses to render a library
-on a source it cannot make read-only. All three run in
+grace period outlasts `BEAM_SHUTDOWN_TIMEOUT_SECS`, the `watch` and `scan` values reach the env vars
+they name, and only a `hostPath` library that opts in carries `mountPropagation` -- and that the
+chart refuses to render a library on a source it cannot make read-only, or with mount propagation
+off a `hostPath` or in any mode but `HostToContainer`. All three run in
 `mise run ci`, CI's `helm-chart` job, and the pre-push hook.
