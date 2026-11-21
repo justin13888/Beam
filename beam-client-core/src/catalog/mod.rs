@@ -27,7 +27,9 @@ pub use media::{
     BrowseQuery, EpisodeSummary, MediaDetail, MediaKind, MediaPage, MediaSortField, MediaSummary,
     MediaTypeFilter, SeasonSummary, SortOrder, browse_params,
 };
-pub use watching::{ContinueWatchingEntry, HistoryEntry, HistoryPage, progress_fraction};
+pub use watching::{
+    ContinueWatchingEntry, HistoryEntry, HistoryPage, progress_fraction, start_position_secs,
+};
 
 use crate::servers::ServerRecord;
 
