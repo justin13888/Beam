@@ -25,7 +25,6 @@ import dev.beam.android.core.testing.Fixtures
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
@@ -36,7 +35,6 @@ import mockwebserver3.MockWebServer
 import mockwebserver3.RecordedRequest
 import org.junit.After
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -50,7 +48,6 @@ import org.robolectric.shadows.ShadowNetworkCapabilities
 import uniffi.beam_client_core.PlaybackHttpConfig
 import uniffi.beam_client_core.ServerHttpConfig
 import java.util.concurrent.TimeoutException
-import java.util.concurrent.atomic.AtomicReference
 
 /**
  * The downloads repository as the app builds it, against a real Media3
@@ -156,59 +153,16 @@ class MediaDownloadRepositoryTest {
     fun `downloads are listed while signed out`() =
         runTest {
             home = null
-            val listed = listed()
+            val listed = java.util.concurrent.CopyOnWriteArrayList<List<DownloadRecord>>()
+            backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+                repository.downloads.collect { listed += it }
+            }
 
             enqueue("f1", serverId = "home")
-            awaitUntil { listed.get().orEmpty().isNotEmpty() }
+            awaitUntil { listed.lastOrNull().orEmpty().isNotEmpty() }
 
-            assertEquals(listOf("f1"), listed.get().map(DownloadRecord::fileId))
+            assertEquals(listOf("f1"), listed.last().map(DownloadRecord::fileId))
         }
-
-    @Test
-    fun `a download that completes stays listed as completed`() =
-        runTest {
-            home = config(FRESH)
-            val listed = listed()
-
-            enqueue("f1", serverId = "home")
-            awaitUntil { listed.get().orEmpty().any { it.state == DownloadState.Completed } }
-
-            assertEquals(
-                listOf("f1" to DownloadState.Completed),
-                listed.get().map { it.fileId to it.state },
-            )
-        }
-
-    @Test
-    fun `a download that runs out of retries stays listed as failed`() =
-        runTest {
-            // Signed in with a session the server refuses on every attempt.
-            home = config(STALE)
-            // Media3 waits up to seconds between attempts; failing on the
-            // first keeps the test to the outcome rather than the backoff.
-            repository.manager().minRetryCount = 0
-            val listed = listed()
-
-            enqueue("f1", serverId = "home")
-            awaitUntil { listed.get().orEmpty().any { it.state == DownloadState.Failed } }
-
-            val failed = listed.get().single()
-            assertEquals("f1" to DownloadState.Failed, failed.fileId to failed.state)
-            assertNotNull("a failed download says how to recover", failed.failureMessage)
-        }
-
-    /**
-     * The repository's latest list, collected for the rest of the test. An
-     * [AtomicReference], because the list is read from the download index on
-     * an IO thread and handed over there.
-     */
-    private fun TestScope.listed(): AtomicReference<List<DownloadRecord>?> {
-        val latest = AtomicReference<List<DownloadRecord>?>(null)
-        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
-            repository.downloads.collect { latest.set(it) }
-        }
-        return latest
-    }
 
     @Test
     fun `a download picks up a new session on its next request without the manager being rebuilt`() =

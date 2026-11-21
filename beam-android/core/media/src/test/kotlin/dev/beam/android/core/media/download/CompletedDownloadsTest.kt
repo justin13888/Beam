@@ -23,11 +23,14 @@ import dev.beam.android.core.ffi.repository.PlaybackRepository
 import dev.beam.android.core.media.http.BeamHttpClientFactory
 import dev.beam.android.core.media.http.ServerCallFactory
 import dev.beam.android.core.media.player.DownloadCacheRule
+import dev.beam.android.core.model.DownloadRecord
+import dev.beam.android.core.model.DownloadState
 import dev.beam.android.core.model.UserPreferences
 import dev.beam.android.core.testing.FakePlaybackRepository
 import dev.beam.android.core.testing.FakePreferencesRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
@@ -50,10 +53,12 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.shadows.ShadowNetworkCapabilities
 import uniffi.beam_client_core.PlaybackHttpConfig
+import java.util.concurrent.atomic.AtomicReference
 
 /**
- * Which downloads count as complete, against a real Media3 download manager
- * and a real server on loopback: the server serves [DONE] in full and refuses
+ * Which downloads count as complete, and that a finished one stays listed,
+ * against a real Media3 download manager and a real server on loopback: the
+ * server serves [DONE] in full and refuses
  * every request for [PARTIAL], whose first bytes are already in the cache.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -136,6 +141,31 @@ class CompletedDownloadsTest {
             assertTrue(repository.isDownloaded(DONE))
             assertEquals(CompletedDownload(DONE, mediaUrl(DONE)), repository.completed(DONE))
             assertNull("never queued", repository.completed("unknown"))
+        }
+
+    @Test
+    fun `a download stays listed once it has completed or failed`() =
+        runTest {
+            // Media3 waits seconds between attempts; failing on the first
+            // keeps this to the outcome rather than the backoff.
+            repository.manager().minRetryCount = 0
+            // Atomic: the list is read from the download index on an IO thread.
+            val listed = AtomicReference<List<DownloadRecord>>(emptyList())
+            backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+                repository.downloads.collect(listed::set)
+            }
+
+            enqueue(DONE)
+            enqueue(PARTIAL)
+            runMainLooperUntil {
+                val finished = setOf(DownloadState.Completed, DownloadState.Failed)
+                listed.get().size == 2 && listed.get().all { it.state in finished }
+            }
+
+            assertEquals(
+                listOf(DONE to DownloadState.Completed, PARTIAL to DownloadState.Failed),
+                listed.get().map { it.fileId to it.state },
+            )
         }
 
     @Test
