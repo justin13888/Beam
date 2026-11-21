@@ -23,10 +23,10 @@ import java.io.IOException
  * progress stay on screen rather than the list going blank.
  */
 internal fun DownloadIndex.listed(current: List<Download>): List<Download> {
-    val indexed =
+    val indexed: List<Download> =
         try {
             getDownloads().use { cursor ->
-                buildList { while (cursor.moveToNext()) add(cursor.download) }
+                buildList<Download> { while (cursor.moveToNext()) add(cursor.download) }
             }
         } catch (_: IOException) {
             return current
