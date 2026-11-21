@@ -538,9 +538,15 @@ arg "[files]..." var=#true help="The .rs files to check; nothing to check when n
 '''
 run = '''
 set -eu
-[ -n "${usage_files:-}" ] || exit 0
+# A push that deletes a file can hand its path over; there is nothing to check.
+files=""
 # shellcheck disable=SC2086 # one path per word; tracked paths have no spaces
-rustfmt --edition 2024 --check $usage_files
+for file in ${usage_files:-}; do
+    [ -f "$file" ] && files="$files $file"
+done
+[ -n "$files" ] || exit 0
+# shellcheck disable=SC2086 # one path per word
+rustfmt --edition 2024 --check $files
 '''
 
 # CARGO_INCREMENTAL=0 on the tasks the hooks and CI run (#478): sccache refuses
@@ -910,8 +916,9 @@ run = "bun run --filter beam-web test"
 # pushed beam-web sources, which runs only the tests whose import graph reaches
 # one of them. A changed file outside the source graph -- a package.json, a
 # config, the OpenAPI document, a tsconfig -- can affect every test without
-# being imported by any, so it runs the whole suite as `ts:test` does, which
-# stays the gate `ci` runs.
+# being imported by any, and a deleted file leaves no import graph to follow,
+# so either runs the whole suite as `ts:test` does, which stays the gate `ci`
+# runs.
 [tasks."ts:test:related"]
 description = "Run the beam-web tests related to the given files"
 depends = ["deps:js"]
@@ -925,6 +932,11 @@ full=false
 # shellcheck disable=SC2086 # one path per word; tracked paths have no spaces
 for file in ${usage_files:-}; do
     case "$file" in
+        beam-web/*.md) continue ;;
+        # A deleted file has no import graph left to follow.
+        beam-web/*) [ -f "$file" ] || { full=true; continue; } ;;
+    esac
+    case "$file" in
         beam-web/*.config.ts | beam-web/*.config.tsx) full=true ;;
         beam-web/*.ts | beam-web/*.tsx) related="$related ${file#beam-web/}" ;;
         beam-web/*.md) ;;
@@ -933,7 +945,7 @@ for file in ${usage_files:-}; do
 done
 cd beam-web
 if [ "$full" = true ]; then
-    echo "ts:test:related: a non-source beam-web file changed; running the whole suite"
+    echo "ts:test:related: a beam-web file outside the source graph changed, or one was deleted; running the whole suite"
     exec bun run test
 fi
 if [ -z "$related" ]; then
