@@ -134,7 +134,7 @@ pub fn start_position_secs(resume_position_secs: f64, duration_secs: Option<f64>
 }
 
 /// Map the server's `media_type` onto the core's own enum.
-fn kind_from_wire(media_type: wire::TitleKind) -> MediaKind {
+pub(super) fn kind_from_wire(media_type: wire::TitleKind) -> MediaKind {
     match media_type {
         wire::TitleKind::Movie => MediaKind::Movie,
         wire::TitleKind::Show => MediaKind::Show,
