@@ -6,10 +6,10 @@ use crate::probe::color::ColorTransferCharacteristic;
 use crate::probe::format::Disposition;
 use crate::probe::media::CodecId;
 use crate::probe::metadata::StreamMetadata as UtilStreamMetadata;
-use crate::services::admin_log::NoOpAdminLogService;
 use crate::services::hash::MockHashService;
 use crate::services::media_info::MockMediaInfoService;
 use crate::services::notification::InMemoryNotificationService;
+use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
 use beam_domain::repositories::file::MockFileRepository;
 use beam_domain::repositories::library::MockLibraryRepository;
 use beam_domain::repositories::movie::MockMovieRepository;
@@ -428,7 +428,7 @@ async fn test_insert_streams_db_error_propagates() {
         Arc::new(MockHashService::new()),
         Arc::new(MockMediaInfoService::new()),
         Arc::new(InMemoryNotificationService::new()),
-        Arc::new(NoOpAdminLogService),
+        Arc::new(InMemoryAdminLogRepository::default()),
         Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
     );
 

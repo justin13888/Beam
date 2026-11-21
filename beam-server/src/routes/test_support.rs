@@ -23,7 +23,8 @@ use beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateReposit
 
 use beam_domain::providers::enrichment::{EnrichmentProvider, NoopEnrichmentProvider};
 use beam_domain::repositories::{
-    EnrichmentStateRepository, LibraryRepository, MovieRepository, ShowRepository,
+    AdminLogRepository, EnrichmentStateRepository, LibraryRepository, MovieRepository,
+    ShowRepository,
 };
 use beam_index::services::enrichment::control::{
     EnrichmentControl, EnrichmentControlDeps, TitleNfoPins,
@@ -39,7 +40,6 @@ use crate::services::playback_telemetry::{PlaybackTelemetryConfig, PlaybackTelem
 use crate::services::sources::SourceCatalog;
 use crate::services::telemetry::{LibraryReportConfig, LibraryReportService};
 use crate::state::{AppServices, AppState};
-use beam_index::services::admin_log::{AdminLogService, LocalAdminLogService};
 use beam_index::services::notification::InMemoryNotificationService;
 
 #[derive(Debug)]
@@ -264,7 +264,7 @@ pub(crate) fn enrichment_control(
     states: Arc<dyn EnrichmentStateRepository>,
     libraries: Arc<dyn LibraryRepository>,
     provider: Arc<dyn EnrichmentProvider>,
-    admin_log: Arc<dyn AdminLogService>,
+    admin_log: Arc<dyn AdminLogRepository>,
 ) -> Arc<EnrichmentControl> {
     let nfo_pins = Arc::new(NoNfoPins {
         movies: movies.clone(),
@@ -631,9 +631,7 @@ fn services_over(
     enrichment_provider: Arc<dyn EnrichmentProvider>,
 ) -> AppServices {
     let notification = Arc::new(InMemoryNotificationService::new());
-    let admin_log: Arc<dyn AdminLogService> = Arc::new(LocalAdminLogService::new(Arc::new(
-        InMemoryAdminLogRepository::default(),
-    )));
+    let admin_log: Arc<dyn AdminLogRepository> = Arc::new(InMemoryAdminLogRepository::default());
 
     let file_repo = Arc::new(InMemoryFileRepository::default());
     let movie_repo = Arc::new(InMemoryMovieRepository::default());

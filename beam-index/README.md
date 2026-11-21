@@ -24,7 +24,7 @@ probing, and metadata-enrichment sweeps. This runs as a set of background tasks 
   sweep loop.
 - **`services`** -- `IndexService` (scan/classify/reconcile a library against the filesystem),
   `MetadataEnrichmentService` (matches classified titles against enrichment providers and applies
-  results), plus smaller services (`HashService`, `AdminLogService`, `NotificationService`,
+  results), plus smaller services (`HashService`, `NotificationService`,
   `MediaInfoService`, and the trickplay sheet generator).
 
 ## Testing

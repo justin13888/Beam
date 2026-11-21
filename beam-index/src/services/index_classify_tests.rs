@@ -2,11 +2,11 @@
 
 use super::test_harness::*;
 use super::*;
-use crate::services::admin_log::NoOpAdminLogService;
 use crate::services::hash::MockHashService;
 use crate::services::media_info::MockMediaInfoService;
 use crate::services::notification::InMemoryNotificationService;
 use beam_domain::models::MediaFile;
+use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
 use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
 use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
 use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
@@ -232,7 +232,7 @@ fn make_multi_source_scan_service(
         Arc::new(mock_hash),
         Arc::new(mock_media_info),
         Arc::new(InMemoryNotificationService::new()),
-        Arc::new(NoOpAdminLogService),
+        Arc::new(InMemoryAdminLogRepository::default()),
         Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
     )
 }

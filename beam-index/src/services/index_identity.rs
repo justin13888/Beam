@@ -375,21 +375,21 @@ impl LocalIndexService {
             );
             let _ = self
                 .admin_log
-                .log(
-                    AdminLogLevel::Warning,
-                    AdminLogCategory::LibraryScan,
-                    format!(
+                .create(CreateAdminLog {
+                    level: AdminLogLevel::Warning,
+                    category: AdminLogCategory::LibraryScan,
+                    message: format!(
                         "{unkeyed} titles indexed before identity keys could not be keyed: their \
                          files disagree on the title, or another title already has it. They stay \
                          listed, but new files will be matched to other titles."
                     ),
-                    Some(serde_json::json!({
+                    details: Some(serde_json::json!({
                         "ambiguous_movies": ambiguous_movies,
                         "ambiguous_shows": ambiguous_shows,
                         "duplicate_movies": clashing_movies,
                         "duplicate_shows": clashing_shows,
                     })),
-                )
+                })
                 .await;
         }
         Ok(report)
@@ -419,20 +419,20 @@ impl LocalIndexService {
                 warn!(%kept, %dropped, "merged two titles an administrator pinned to different ids");
                 let _ = self
                     .admin_log
-                    .log(
-                        AdminLogLevel::Warning,
-                        AdminLogCategory::Enrichment,
-                        format!(
+                    .create(CreateAdminLog {
+                        level: AdminLogLevel::Warning,
+                        category: AdminLogCategory::Enrichment,
+                        message: format!(
                             "Merged two titles an administrator pinned to different ids: the \
                              pin to {kept} is kept, the pin to {dropped} is dropped"
                         ),
-                        Some(serde_json::json!({
+                        details: Some(serde_json::json!({
                             "kept": survivor.id(),
                             "retired": loser.id(),
                             "kept_pin": kept,
                             "dropped_pin": dropped.to_ref_string(),
                         })),
-                    )
+                    })
                     .await;
             }
             (None, Some(pin)) => {
@@ -939,19 +939,19 @@ impl LocalIndexService {
             };
             let _ = self
                 .admin_log
-                .log(
-                    AdminLogLevel::Info,
-                    AdminLogCategory::LibraryScan,
-                    format!(
+                .create(CreateAdminLog {
+                    level: AdminLogLevel::Info,
+                    category: AdminLogCategory::LibraryScan,
+                    message: format!(
                         "Updated the identity keys of {rekeyed} titles to the current naming \
                          rules, and merged {merged} titles those rules now read as one"
                     ),
-                    Some(serde_json::json!({
+                    details: Some(serde_json::json!({
                         "rekeyed": rekeyed,
                         "merged_movies": pairs(merged_movies),
                         "merged_shows": pairs(merged_shows),
                     })),
-                )
+                })
                 .await;
         }
         let ambiguous = ambiguous_movies.len() + ambiguous_shows.len();
@@ -962,19 +962,19 @@ impl LocalIndexService {
             );
             let _ = self
                 .admin_log
-                .log(
-                    AdminLogLevel::Warning,
-                    AdminLogCategory::LibraryScan,
-                    format!(
+                .create(CreateAdminLog {
+                    level: AdminLogLevel::Warning,
+                    category: AdminLogCategory::LibraryScan,
+                    message: format!(
                         "{ambiguous} titles keep identity keys from older naming rules: their \
                          files name more than one title, so new files may be matched to other \
                          titles."
                     ),
-                    Some(serde_json::json!({
+                    details: Some(serde_json::json!({
                         "ambiguous_movies": ambiguous_movies,
                         "ambiguous_shows": ambiguous_shows,
                     })),
-                )
+                })
                 .await;
         }
         let conflicting = conflicting_movies.len() + conflicting_shows.len();
@@ -987,21 +987,21 @@ impl LocalIndexService {
             };
             let _ = self
                 .admin_log
-                .log(
-                    AdminLogLevel::Warning,
-                    AdminLogCategory::LibraryScan,
-                    format!(
+                .create(CreateAdminLog {
+                    level: AdminLogLevel::Warning,
+                    category: AdminLogCategory::LibraryScan,
+                    message: format!(
                         "{conflicting} pairs of titles the current naming rules read as one are \
                          matched to different provider entries, so they are kept apart: each \
                          keeps its identity key and its files. Rename the files or correct a \
                          match to settle them; a pair whose matches agree is merged the next \
                          time the server starts."
                     ),
-                    Some(serde_json::json!({
+                    details: Some(serde_json::json!({
                         "conflicting_movies": pairs(conflicting_movies),
                         "conflicting_shows": pairs(conflicting_shows),
                     })),
-                )
+                })
                 .await;
         }
         Ok(report)
@@ -1342,16 +1342,16 @@ impl LocalIndexService {
                 error!(pass, error = %e, "identity key pass failed; reclassification held");
                 let _ = self
                     .admin_log
-                    .log(
-                        AdminLogLevel::Warning,
-                        AdminLogCategory::LibraryScan,
-                        format!(
+                    .create(CreateAdminLog {
+                        level: AdminLogLevel::Warning,
+                        category: AdminLogCategory::LibraryScan,
+                        message: format!(
                             "Titles could not be brought up to the current naming rules ({e}). \
                              Files indexed under older rules keep their titles until a later \
                              scan succeeds; new files are indexed as usual."
                         ),
-                        Some(serde_json::json!({ "pass": pass, "error": e.to_string() })),
-                    )
+                        details: Some(serde_json::json!({ "pass": pass, "error": e.to_string() })),
+                    })
                     .await;
                 false
             }

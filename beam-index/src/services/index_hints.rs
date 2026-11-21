@@ -396,20 +396,20 @@ impl LocalIndexService {
                 );
                 let _ = self
                     .admin_log
-                    .log(
-                        AdminLogLevel::Warning,
-                        AdminLogCategory::LibraryScan,
-                        format!(
+                    .create(CreateAdminLog {
+                        level: AdminLogLevel::Warning,
+                        category: AdminLogCategory::LibraryScan,
+                        message: format!(
                             "An NFO pins a title to {stored}, but the title is already pinned to \
                              {current}; the existing pin is kept: {}",
                             source.display()
                         ),
-                        Some(serde_json::json!({
+                        details: Some(serde_json::json!({
                             "path": source.display().to_string(),
                             "pinned": current,
                             "nfo": stored,
                         })),
-                    )
+                    })
                     .await;
                 return Ok(PinOutcome::Settled);
             }
@@ -718,19 +718,19 @@ impl LocalIndexService {
         );
         let _ = self
             .admin_log
-            .log(
-                AdminLogLevel::Warning,
-                AdminLogCategory::LibraryScan,
-                format!(
+            .create(CreateAdminLog {
+                level: AdminLogLevel::Warning,
+                category: AdminLogCategory::LibraryScan,
+                message: format!(
                     "An NFO pins several {titles} to {stored}; an id pins one title, so only one \
                      of them is pinned: {}",
                     nfo_path.display()
                 ),
-                Some(serde_json::json!({
+                details: Some(serde_json::json!({
                     "path": nfo_path.display().to_string(),
                     "nfo": stored,
                 })),
-            )
+            })
             .await;
     }
 

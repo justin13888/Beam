@@ -204,8 +204,7 @@ pub(super) mod tests {
         use beam_index::services::media_info::MockMediaInfoService;
         use beam_index::services::watcher::FsEventKind;
         use beam_index::services::{
-            IndexService, LocalHashService, LocalIndexService, NoOpAdminLogService,
-            ReconcileOutcome,
+            IndexService, LocalHashService, LocalIndexService, ReconcileOutcome,
         };
 
         let root = tempfile::TempDir::new().unwrap();
@@ -241,7 +240,7 @@ pub(super) mod tests {
             Arc::new(LocalHashService::default()),
             Arc::new(prober),
             Arc::new(InMemoryNotificationService::new()),
-            Arc::new(NoOpAdminLogService),
+            Arc::new(beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository::default()),
             Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         ));
 

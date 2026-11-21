@@ -47,10 +47,8 @@ beam-domain/src/utils/filename.rs
 beam-domain/src/utils/media_path_corpus.rs
 beam-index/src/library_file.rs
 beam-index/src/probe/color.rs
-beam-index/src/probe/metadata.rs
 beam-index/src/providers/cameo.rs
 beam-index/src/repositories/catalog_tests.rs
-beam-index/src/repositories/sql_shape_tests.rs
 beam-index/src/runtime_tests.rs
 beam-index/src/services/enrichment/matcher.rs
 beam-index/src/services/enrichment/mod.rs
@@ -58,12 +56,8 @@ beam-index/src/services/index.rs
 beam-index/src/services/index_disc_tests.rs
 beam-index/src/services/index_hints.rs
 beam-index/src/services/index_identity.rs
-beam-index/src/services/index_identity_tests.rs
 beam-index/src/services/index_missing_tests.rs
-beam-index/src/services/index_nfo_sidecar_tests.rs
-beam-index/src/services/index_relink_tests.rs
 beam-index/src/services/index_scan_tests.rs
-beam-index/src/services/watcher.rs
 beam-migration/src/m20260209_000001_create_schema.rs
 beam-migration/tests/pg_integration/migrations.rs
 beam-server/src/config_tests.rs

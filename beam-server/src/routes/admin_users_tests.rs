@@ -482,12 +482,12 @@ async fn the_status_endpoint_reports_counts_queue_state_and_recent_scans() {
             .state
             .services
             .admin_log
-            .log(
-                beam_domain::models::AdminLogLevel::Info,
-                beam_domain::models::AdminLogCategory::LibraryScan,
-                message.to_string(),
-                None,
-            )
+            .create(beam_domain::models::CreateAdminLog {
+                level: beam_domain::models::AdminLogLevel::Info,
+                category: beam_domain::models::AdminLogCategory::LibraryScan,
+                message: message.to_string(),
+                details: None,
+            })
             .await
             .unwrap();
     }
@@ -495,12 +495,12 @@ async fn the_status_endpoint_reports_counts_queue_state_and_recent_scans() {
         .state
         .services
         .admin_log
-        .log(
-            beam_domain::models::AdminLogLevel::Info,
-            beam_domain::models::AdminLogCategory::System,
-            "server started".to_string(),
-            None,
-        )
+        .create(beam_domain::models::CreateAdminLog {
+            level: beam_domain::models::AdminLogLevel::Info,
+            category: beam_domain::models::AdminLogCategory::System,
+            message: "server started".to_string(),
+            details: None,
+        })
         .await
         .unwrap();
 

@@ -21,9 +21,9 @@ use beam_auth::utils::{
     repository::{UserRepository, in_memory::InMemoryUserRepository},
     session_store::{SessionData, SessionStore, in_memory::InMemorySessionStore},
 };
-use beam_domain::repositories::FileRepository;
 use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
 use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
+use beam_domain::repositories::{AdminLogRepository, FileRepository};
 use beam_domain::test_utils::create_media_file;
 use beam_index::probe::metadata::MetadataError as ProbeError;
 use beam_index::services::IndexService;
@@ -48,7 +48,6 @@ use crate::services::library::{
     InMemoryPathValidator, LibraryService, LibraryServiceDependencies, LocalLibraryService,
 };
 use crate::state::{AppServices, AppState};
-use beam_index::services::admin_log::{AdminLogService, LocalAdminLogService};
 use beam_index::services::hash::HashService;
 use beam_index::services::notification::{InMemoryNotificationService, NotificationService};
 
@@ -192,9 +191,7 @@ fn build_fixture(
 ) -> TestFixture {
     let session_store = Arc::new(InMemorySessionStore::default());
 
-    let admin_log: Arc<dyn AdminLogService> = Arc::new(LocalAdminLogService::new(Arc::new(
-        InMemoryAdminLogRepository::default(),
-    )));
+    let admin_log: Arc<dyn AdminLogRepository> = Arc::new(InMemoryAdminLogRepository::default());
 
     // Shared between the library service and `AppServices::{library_repo,
     // file_repo}` so the status endpoint's counts reflect libraries/files

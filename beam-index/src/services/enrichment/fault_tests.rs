@@ -6,6 +6,7 @@
 //! store, so it asserts what the failure left behind, not what the wrapper
 //! was told to say.
 
+use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
@@ -38,7 +39,6 @@ use beam_domain::services::TestClock;
 use beam_domain::utils::next_up::OutlineEpisode;
 
 use super::{MetadataEnrichmentService, SweepReport};
-use crate::services::admin_log::NoOpAdminLogService;
 use crate::services::notification::InMemoryNotificationService;
 
 fn database_down() -> DbErr {
@@ -272,7 +272,7 @@ impl Stores {
             Arc::new(InMemoryPersonRepository::default()),
             Arc::new(InMemoryCollectionRepository::default()),
             provider,
-            Arc::new(NoOpAdminLogService),
+            Arc::new(InMemoryAdminLogRepository::default()),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(TestClock::new()),
         )

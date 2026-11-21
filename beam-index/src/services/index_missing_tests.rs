@@ -7,7 +7,6 @@
 //! injected `TestClock`, the filesystem a real `TempDir`.
 
 use super::*;
-use crate::services::admin_log::LocalAdminLogService;
 use crate::services::hash::MockHashService;
 use crate::services::media_info::MockMediaInfoService;
 use crate::services::notification::{EventLevel, InMemoryNotificationService};
@@ -427,9 +426,7 @@ impl Harness {
             Arc::new(MockHashService::new()),
             Arc::new(MockMediaInfoService::new()),
             notifications.clone(),
-            Arc::new(LocalAdminLogService::new(
-                admin_log_repo.clone() as Arc<dyn AdminLogRepository>
-            )),
+            admin_log_repo.clone() as Arc<dyn AdminLogRepository>,
             Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         )
         .with_clock(clock.clone())

@@ -744,6 +744,26 @@ fn out_of_range_enrich_min_confidence_is_rejected() {
 }
 
 #[test]
+fn zero_scan_interval_is_rejected() {
+    let config = ServerConfig {
+        scan_interval_secs: 0,
+        ..config_with_secrets()
+    };
+    let err = config
+        .validate_values()
+        .expect_err("a zero rescan interval must be rejected");
+    assert!(
+        matches!(&err, ConfigError::InvalidValue(f, _) if f == "BEAM_SCAN_INTERVAL_SECS"),
+        "unexpected error: {err}"
+    );
+    let one = ServerConfig {
+        scan_interval_secs: 1,
+        ..config_with_secrets()
+    };
+    assert!(one.validate_values().is_ok(), "1 is the smallest interval");
+}
+
+#[test]
 fn zero_watch_poll_interval_is_rejected() {
     let config = ServerConfig {
         watch_poll_interval_secs: 0,

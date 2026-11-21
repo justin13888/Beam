@@ -9,6 +9,7 @@
 //! the rescan cadence could only be exercised by waiting for it.
 
 use std::collections::{HashMap, HashSet};
+use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -54,9 +55,6 @@ pub trait BackgroundIndexer: Send + Sync + std::fmt::Debug {
         path: PathBuf,
         kind: FsEventKind,
     ) -> Result<ReconcileOutcome, IndexError>;
-
-    /// The repository the watch refresher lists libraries from.
-    fn library_repo(&self) -> Arc<dyn LibraryRepository>;
 }
 
 #[async_trait::async_trait]
@@ -77,10 +75,6 @@ impl BackgroundIndexer for LocalIndexService {
         kind: FsEventKind,
     ) -> Result<ReconcileOutcome, IndexError> {
         LocalIndexService::reconcile_path(self, library_id, path, kind).await
-    }
-
-    fn library_repo(&self) -> Arc<dyn LibraryRepository> {
-        LocalIndexService::library_repo(self).clone()
     }
 }
 
@@ -103,8 +97,9 @@ pub fn spawn_enrichment_worker(
 #[derive(Debug, Clone)]
 pub struct BackgroundIndexingConfig {
     /// Interval between periodic full rescans of every library, in seconds.
-    /// Acts as the backstop that catches changes the watcher missed.
-    pub scan_interval_secs: u64,
+    /// Acts as the backstop that catches changes the watcher missed. Never
+    /// zero: a zero interval would rescan every library back to back.
+    pub scan_interval_secs: NonZeroU64,
     /// Debounce window for filesystem-watcher events, in milliseconds. Bursts
     /// of events for the same path within this window collapse into one.
     pub watch_debounce_ms: u64,
@@ -233,20 +228,29 @@ impl LibraryWatchHook for LibraryWatches {
 /// background tasks for in-process indexing. Call once at server startup,
 /// after the [`LocalIndexService`] is constructed.
 ///
+/// `libraries` is the store the watch refresher lists libraries from, and
 /// `watches` is the watcher the library service also tells about created
 /// and deleted libraries (see [`LibraryWatches::from_config`]).
 pub fn spawn_background_indexing(
     index_service: Arc<LocalIndexService>,
+    libraries: Arc<dyn LibraryRepository>,
     config: BackgroundIndexingConfig,
     watches: &LibraryWatches,
 ) -> BackgroundIndexingTasks {
     let indexer: Arc<dyn BackgroundIndexer> = index_service;
-    spawn_background_indexing_with(indexer, watches.watcher(), Arc::new(RealClock), config)
+    spawn_background_indexing_with(
+        indexer,
+        libraries,
+        watches.watcher(),
+        Arc::new(RealClock),
+        config,
+    )
 }
 
 /// [`spawn_background_indexing`] with every collaborator injected.
 pub fn spawn_background_indexing_with(
     indexer: Arc<dyn BackgroundIndexer>,
+    libraries: Arc<dyn LibraryRepository>,
     watcher: Option<Arc<dyn FsWatcher>>,
     clock: Arc<dyn Clock>,
     config: BackgroundIndexingConfig,
@@ -276,9 +280,10 @@ pub fn spawn_background_indexing_with(
 
     let periodic_maintenance = tokio::spawn(run_periodic_maintenance(
         indexer,
+        libraries,
         watcher,
         clock,
-        Duration::from_secs(config.scan_interval_secs),
+        Duration::from_secs(config.scan_interval_secs.get()),
         startup_scan_done,
     ));
 
@@ -464,13 +469,20 @@ async fn reconcile_newly_polled(indexer: &dyn BackgroundIndexer, library_id: Uui
 /// the poller.
 async fn run_periodic_maintenance(
     indexer: Arc<dyn BackgroundIndexer>,
+    libraries: Arc<dyn LibraryRepository>,
     watcher: Option<Arc<dyn FsWatcher>>,
     clock: Arc<dyn Clock>,
     interval: Duration,
     startup_scan_done: oneshot::Sender<()>,
 ) {
     if let Some(watcher) = &watcher {
-        refresh_watches(watcher, indexer.as_ref(), NewlyPolled::CoveredByStartupScan).await;
+        refresh_watches(
+            watcher,
+            indexer.as_ref(),
+            libraries.as_ref(),
+            NewlyPolled::CoveredByStartupScan,
+        )
+        .await;
     }
 
     info!("Running startup library scan...");
@@ -490,7 +502,13 @@ async fn run_periodic_maintenance(
         }
 
         if let Some(watcher) = &watcher {
-            refresh_watches(watcher, indexer.as_ref(), NewlyPolled::Scan).await;
+            refresh_watches(
+                watcher,
+                indexer.as_ref(),
+                libraries.as_ref(),
+                NewlyPolled::Scan,
+            )
+            .await;
         }
     }
 }
@@ -524,9 +542,10 @@ enum NewlyPolled {
 async fn refresh_watches(
     watcher: &Arc<dyn FsWatcher>,
     indexer: &dyn BackgroundIndexer,
+    library_repo: &dyn LibraryRepository,
     newly_polled: NewlyPolled,
 ) {
-    let libraries = match indexer.library_repo().find_all().await {
+    let libraries = match library_repo.find_all().await {
         Ok(libraries) => libraries,
         Err(e) => {
             warn!("Watch refresh failed to list libraries: {e}");
