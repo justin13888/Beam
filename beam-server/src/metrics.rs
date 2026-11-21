@@ -42,7 +42,10 @@ pub const LONG_OPERATION_BUCKETS: &[f64] = &[
 ///
 /// An exact-name matcher takes precedence over the suffix matcher in the
 /// exporter, so listing a name here is all it takes to move it.
-pub const LONG_OPERATION_HISTOGRAMS: &[&str] = &["beam_http_response_delivery_seconds"];
+pub const LONG_OPERATION_HISTOGRAMS: &[&str] = &[
+    "beam_http_response_delivery_seconds",
+    "beam_scan_duration_seconds",
+];
 
 /// How often [`spawn_upkeep`] drains histogram samples.
 ///
@@ -142,6 +145,30 @@ pub const DESCRIPTIONS: &[Description] = &[
         kind: Kind::Counter,
         unit: Some(Unit::Count),
         help: "Metadata-enrichment attempts, by outcome.",
+    },
+    Description {
+        name: "beam_scan_duration_seconds",
+        kind: Kind::Histogram,
+        unit: Some(Unit::Seconds),
+        help: "Time a successful library scan ran for, from taking the library to finishing, by library id and trigger.",
+    },
+    Description {
+        name: "beam_scan_last_success_timestamp_seconds",
+        kind: Kind::Gauge,
+        unit: Some(Unit::Seconds),
+        help: "Unix time the library's last successful scan finished, by library id.",
+    },
+    Description {
+        name: "beam_scan_failures_total",
+        kind: Kind::Counter,
+        unit: Some(Unit::Count),
+        help: "Library scans that failed or were interrupted, not counting those cancelled by the library's delete, by library id.",
+    },
+    Description {
+        name: "beam_scan_in_progress",
+        kind: Kind::Gauge,
+        unit: None,
+        help: "1 while a scan of the library is running, 0 otherwise, by library id.",
     },
 ];
 
