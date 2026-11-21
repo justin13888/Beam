@@ -331,6 +331,8 @@ private fun Actions(
                 text =
                     when {
                         playable == null -> "Unavailable"
+                        state.playsOffline && state.canResume -> "Resume offline"
+                        state.playsOffline -> "Play offline"
                         state.canResume -> "Resume"
                         else -> "Play"
                     },
