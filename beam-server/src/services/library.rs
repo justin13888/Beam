@@ -568,6 +568,26 @@ impl LibraryService for LocalLibraryService {
         };
 
         let created = self.library_repo.create(create).await?;
+
+        // What the root already holds is indexed by a scan of its own
+        // (FR-213), registered now so the job is readable as soon as the
+        // request answers. A scan that cannot start -- the root gone since it
+        // was validated, or the library already being scanned -- does not
+        // undo the creation: it is logged, and the periodic rescan or an
+        // administrator's indexes the library instead.
+        let library_id = created.id;
+        let ticket = match self
+            .index_service
+            .begin_scan(library_id, ScanTrigger::Created)
+            .await
+        {
+            Ok(ticket) => Some(ticket),
+            Err(e) => {
+                warn!(%library_id, error = %e, "could not start the new library's first scan");
+                None
+            }
+        };
+
         // Watched from now, not from the next maintenance cycle -- but on a
         // task of its own: registering walks the library's tree (a native
         // watch per directory, or a poller's first snapshot of a network
@@ -575,9 +595,23 @@ impl LibraryService for LocalLibraryService {
         // A failure is logged by the hook, and the cycle registers the
         // library instead; a library deleted before its registration lands
         // is unwatched by that cycle too.
+        //
+        // The first scan runs once the watch is registered, as the startup
+        // scan follows every registration: a file written while the scan
+        // walks is then reported by the watch rather than missed until the
+        // periodic rescan. Until then the job reads as queued. A task that
+        // dies unfinished fails the job as interrupted.
         let watch_hook = self.watch_hook.clone();
+        let index_service = self.index_service.clone();
         let watched = created.clone();
-        tokio::spawn(async move { watch_hook.library_created(&watched).await });
+        tokio::spawn(async move {
+            watch_hook.library_created(&watched).await;
+            if let Some(ticket) = ticket
+                && let Err(e) = index_service.run_scan(ticket).await
+            {
+                warn!(%library_id, error = %e, "new library's first scan failed");
+            }
+        });
 
         self.notification_service.publish(AdminEvent::info(
             EventCategory::System,
@@ -586,7 +620,7 @@ impl LibraryService for LocalLibraryService {
             Some(created.name.clone()),
         ));
 
-        // Nothing is indexed until its first scan.
+        // Nothing is indexed until its first scan has run.
         Ok(Library::from_domain(created, 0))
     }
 
