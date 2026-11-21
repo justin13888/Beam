@@ -13,6 +13,7 @@ import dev.beam.android.core.testing.Fixtures
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
@@ -24,6 +25,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import uniffi.beam_client_core.BeamException
+import uniffi.beam_client_core.MediaDetail
 import uniffi.beam_client_core.Playability
 import uniffi.beam_client_core.QualityPolicy
 import uniffi.beam_client_core.SourceSelection
@@ -356,6 +358,115 @@ class DetailTest {
             label(Fixtures.show(episodeCount = 12u).copy(watchedEpisodeCount = 3u)),
         )
     }
+
+    /** A loaded page for [detail], with the policy's file chosen. */
+    private fun TestScope.loaded(detail: MediaDetail): DetailUiState {
+        val catalog = FakeCatalogRepository().apply { details[MEDIA_ID] = detail }
+        val playback =
+            FakePlaybackRepository().apply {
+                selection =
+                    SourceSelection(
+                        source = Fixtures.source(fileId = "uhd"),
+                        playability = Playability.Hardware,
+                        audioTrackIndex = null,
+                        reason = "",
+                        rejected = emptyList(),
+                    )
+            }
+        val model = viewModel(catalog = catalog, playback = playback)
+        testScheduler.advanceUntilIdle()
+        return model.state.value.valueOrNull!!
+    }
+
+    @Test
+    fun `play resumes a film where the core says it starts`() =
+        runTest {
+            // The core's start, not its raw resume point: the two differ for a
+            // film near its end, and Play must follow the rule (issue #466).
+            val film = Fixtures.movie().copy(resumePositionSecs = 6_250.0, startPositionSecs = 1_200.0)
+            val state = loaded(Fixtures.movieDetail(film))
+
+            val play = state.play()!!
+            assertEquals(1_200.0, play.startPositionSecs, 0.0)
+            assertEquals("uhd", play.fileId)
+            assertEquals(film.id, play.mediaId)
+            assertTrue(state.canResume)
+            assertEquals(
+                "starting over is the viewer's explicit choice",
+                0.0,
+                state.play(fromBeginning = true)!!.startPositionSecs,
+                0.0,
+            )
+            val picked = state.playPicked(Fixtures.source(fileId = "hd"))
+            assertEquals("a picked file resumes the title too", 1_200.0, picked.startPositionSecs, 0.0)
+            assertTrue(picked.isSourcePicked)
+            assertTrue("Play leaves the file to the policy", !play.isSourcePicked)
+        }
+
+    @Test
+    fun `returning from the player resumes from the server's newer point`() =
+        runTest {
+            // The view model survives under the player; Play on return must not
+            // start -- and then report -- the point from before the viewer played.
+            val catalog =
+                FakeCatalogRepository().apply { details[MEDIA_ID] = Fixtures.movieDetail(Fixtures.movie()) }
+            val playback =
+                FakePlaybackRepository().apply {
+                    selection =
+                        SourceSelection(
+                            source = Fixtures.source(fileId = "uhd"),
+                            playability = Playability.Hardware,
+                            audioTrackIndex = null,
+                            reason = "",
+                            rejected = emptyList(),
+                        )
+                }
+            val model = viewModel(catalog = catalog, playback = playback)
+            model.onShown()
+            testScheduler.advanceUntilIdle()
+            assertEquals(
+                0.0,
+                model.state.value.valueOrNull!!
+                    .play()!!
+                    .startPositionSecs,
+                0.0,
+            )
+
+            // The viewer played to 20 minutes, stopped, and came back.
+            catalog.details[MEDIA_ID] = Fixtures.movieDetail(Fixtures.movie().copy(startPositionSecs = 1_200.0))
+            model.onShown()
+            testScheduler.advanceUntilIdle()
+
+            val state = model.state.value.valueOrNull!!
+            assertEquals(1_200.0, state.play()!!.startPositionSecs, 0.0)
+            assertTrue(state.canResume)
+        }
+
+    @Test
+    fun `a film with nowhere to resume plays from the start and offers no restart`() =
+        runTest {
+            val state = loaded(Fixtures.movieDetail(Fixtures.movie()))
+
+            assertEquals(0.0, state.play()!!.startPositionSecs, 0.0)
+            assertTrue(!state.canResume)
+        }
+
+    @Test
+    fun `an episode plays from its own start position`() =
+        runTest {
+            val episode = Fixtures.episode(id = "s1e2", fileId = "ep-file").copy(startPositionSecs = 900.0)
+            val state =
+                loaded(Fixtures.showDetail(seasons = listOf(Fixtures.season(episodes = listOf(episode)))))
+
+            val play = state.playEpisode(episode)!!
+            assertEquals(900.0, play.startPositionSecs, 0.0)
+            assertEquals("ep-file", play.fileId)
+            assertEquals("s1e2", play.episodeId)
+            assertNull(
+                "an episode with no file has nothing to play",
+                state.playEpisode(Fixtures.episode(fileId = null)),
+            )
+        }
 
     private companion object {
         const val MEDIA_ID = "media-1"

@@ -32,6 +32,23 @@ const MAX_AGE_SECS: i64 = 30 * 24 * 60 * 60;
 /// how long such a sample waits.
 const MAX_REJECTIONS: u32 = 8;
 
+/// The largest power of two [`backoff_secs`] waits: 64 seconds.
+const MAX_BACKOFF_EXPONENT: u32 = 6;
+
+/// How long an entry waits after its `attempts`th failed send, where the
+/// server named no interval of its own: 2 s, 4 s, 8 s, ... capped at 64 s, so
+/// a flapping server is not hammered but a brief outage still recovers
+/// quickly.
+///
+/// The one schedule for every retry of the queue: [`ProgressQueue`] backs an
+/// entry off by it, and a platform that retries a drain which failed outright
+/// (and so backed nothing off) waits by it too, through
+/// [`super::progress_retry_delay_secs`].
+#[must_use]
+pub fn backoff_secs(attempts: u32) -> i64 {
+    2_i64.saturating_pow(attempts.min(MAX_BACKOFF_EXPONENT))
+}
+
 /// What a failed send says about the sample it carried.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SendFailure {
@@ -170,7 +187,8 @@ impl ProgressQueue {
     /// Record a failed attempt, backing the entry off exponentially.
     ///
     /// Every failure backs off; only a [`SendFailure::Rejected`] one moves the
-    /// entry toward abandonment.
+    /// entry toward abandonment. Answers when the entry is next due, or `None`
+    /// where it is not held -- never queued, or retired by this failure.
     ///
     /// # Errors
     ///
@@ -180,9 +198,10 @@ impl ProgressQueue {
         file_id: &str,
         kind: SendFailure,
         retry_after_secs: Option<u64>,
-    ) -> Result<(), StorageError> {
+    ) -> Result<Option<i64>, StorageError> {
         let mut entries = self.load().await?;
         let now = self.clock.now_unix();
+        let mut next_due = None;
         for entry in &mut entries {
             if entry.file_id == file_id {
                 // Saturating: an outage no longer retires the entry, so this
@@ -192,20 +211,37 @@ impl ProgressQueue {
                     entry.rejections = entry.rejections.saturating_add(1);
                 }
                 let backoff = retry_after_secs.map_or_else(
-                    // 2s, 4s, 8s, ... capped, so a flapping server is not
-                    // hammered but a brief outage still recovers quickly.
-                    || 2_i64.saturating_pow(entry.attempts.min(6)),
+                    || backoff_secs(entry.attempts),
                     |seconds| i64::try_from(seconds).unwrap_or(i64::MAX),
                 );
                 // Saturating: the transport clamps `Retry-After`, but this
                 // layer must not be the one that panics if a caller does not.
                 entry.not_before_unix = now.saturating_add(backoff);
+                if entry.rejections < MAX_REJECTIONS {
+                    next_due = Some(entry.not_before_unix);
+                }
             }
         }
         // An entry that just exhausted its rejections is dropped by `load`,
         // so persisting the incremented count is what retires it.
         entries.retain(|entry| entry.rejections < MAX_REJECTIONS);
-        self.persist(&entries).await
+        self.persist(&entries).await?;
+        Ok(next_due)
+    }
+
+    /// The earliest time any held entry falls due, or `None` when the queue
+    /// is empty.
+    ///
+    /// # Errors
+    ///
+    /// Propagates storage failures.
+    pub async fn next_due_unix(&self) -> Result<Option<i64>, StorageError> {
+        Ok(self
+            .load()
+            .await?
+            .iter()
+            .map(|entry| entry.not_before_unix)
+            .min())
     }
 
     /// How many entries are held.
@@ -474,6 +510,54 @@ mod tests {
         assert!(queue.ready().await.expect("ready").is_empty());
         clock.advance_secs(2);
         assert_eq!(queue.ready().await.expect("ready").len(), 1);
+    }
+
+    /// A failure answers when its entry is next due -- which is what a drain
+    /// waits for -- and `None` once that failure retired it; the queue's
+    /// earliest due time is the least of its entries'.
+    #[tokio::test]
+    async fn a_failure_answers_when_its_entry_is_next_due() {
+        let clock = Arc::new(TestClock::new(1_000));
+        let (queue, _storage) = queue(clock.clone());
+        assert_eq!(queue.next_due_unix().await.expect("read"), None);
+        let mut later = sample("f2", 30.0, 1_000);
+        later.not_before_unix = 1_500;
+        queue.enqueue(later).await.expect("enqueue");
+        queue
+            .enqueue(sample("f1", 120.0, 1_000))
+            .await
+            .expect("enqueue");
+
+        let due = queue
+            .record_failure("f1", SendFailure::Undelivered, Some(90))
+            .await
+            .expect("record_failure");
+        assert_eq!(due, Some(1_090));
+        assert_eq!(queue.next_due_unix().await.expect("read"), Some(1_090));
+        assert_eq!(
+            queue
+                .record_failure("absent", SendFailure::Undelivered, None)
+                .await
+                .expect("record_failure"),
+            None,
+            "nothing is held for a file that was never queued"
+        );
+
+        for _ in 1..MAX_REJECTIONS {
+            queue
+                .record_failure("f1", SendFailure::Rejected, None)
+                .await
+                .expect("record_failure");
+        }
+        assert_eq!(
+            queue
+                .record_failure("f1", SendFailure::Rejected, None)
+                .await
+                .expect("record_failure"),
+            None,
+            "the failure that retires an entry leaves nothing to wait for"
+        );
+        assert_eq!(queue.next_due_unix().await.expect("read"), Some(1_500));
     }
 
     /// A `Retry-After` at the edge of the integer range neither panics nor

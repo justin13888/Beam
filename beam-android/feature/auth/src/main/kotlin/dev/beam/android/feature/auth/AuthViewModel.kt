@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dev.beam.android.core.ffi.repository.ServerRepository
 import dev.beam.android.core.ffi.toFailure
+import dev.beam.android.core.media.download.DownloadRepository
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -33,6 +34,7 @@ public class AuthViewModel
     constructor(
         private val servers: ServerRepository,
         private val browser: BrowserAvailability,
+        private val downloads: DownloadRepository,
     ) : ViewModel() {
         private val mutableState = MutableStateFlow(AuthUiState())
 
@@ -203,10 +205,19 @@ public class AuthViewModel
             mutableState.update { it.copy(loginUrl = null) }
         }
 
-        /** Forget a server offered as a shortcut. */
+        /**
+         * Forget a server offered as a shortcut, with the downloads fetched
+         * from it.
+         *
+         * The downloads go whatever the core answers: it unlists the server
+         * before any write that can fail, so a removal that reports failure
+         * has already forgotten it, and keeping the downloads would orphan
+         * them under a server nothing lists.
+         */
         public fun forget(serverId: String) {
             viewModelScope.launch {
                 runCatching { servers.removeServer(serverId) }
+                runCatching { downloads.removeServer(serverId) }
                 val known = runCatching { servers.restore() }.getOrDefault(emptyList())
                 mutableState.update { it.copy(knownServers = known) }
             }

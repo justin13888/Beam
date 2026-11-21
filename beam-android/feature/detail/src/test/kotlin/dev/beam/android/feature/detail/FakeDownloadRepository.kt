@@ -37,6 +37,8 @@ internal class FakeDownloadRepository : DownloadRepository {
 
     override suspend fun removeAll() = Unit
 
+    override suspend fun removeServer(serverId: String) = Unit
+
     override suspend fun setRequiresUnmeteredNetwork(required: Boolean) = Unit
 
     override suspend fun isDownloaded(fileId: String): Boolean = false

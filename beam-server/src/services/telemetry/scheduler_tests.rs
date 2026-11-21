@@ -69,9 +69,17 @@ fn spawn(harness: &Harness) {
     tokio::spawn(async move { service.run().await });
 }
 
-/// Polls `condition`, yielding to the spawned schedule between checks.
+/// Yield to the spawned schedule until `condition` holds, or fail after a
+/// generous deadline.
+///
+/// The schedule reads and writes its state file through `tokio::fs`, which
+/// runs on the blocking pool, on another thread, so no fixed number of yields
+/// is enough to be sure that work has landed. The deadline only bounds a hang
+/// and never orders anything: the `TestClock` never advances on its own, so
+/// this cannot stand in for an `advance`.
 async fn until(label: &str, mut condition: impl FnMut() -> bool) {
-    for _ in 0..10_000 {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
         if condition() {
             return;
         }

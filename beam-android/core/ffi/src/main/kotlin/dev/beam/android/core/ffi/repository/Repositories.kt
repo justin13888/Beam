@@ -20,6 +20,7 @@ import uniffi.beam_client_core.MediaSourceView
 import uniffi.beam_client_core.PlaybackHttpConfig
 import uniffi.beam_client_core.PlaybackPlan
 import uniffi.beam_client_core.PlaybackTelemetrySummary
+import uniffi.beam_client_core.ProgressDrain
 import uniffi.beam_client_core.ProgressOutcome
 import uniffi.beam_client_core.QualityPolicy
 import uniffi.beam_client_core.ScanJob
@@ -204,17 +205,19 @@ public interface PlaybackRepository {
     ): ProgressOutcome
 
     /**
-     * Send every queued position that is due, to the active server. Returns
-     * how many landed.
+     * Send every queued position that is due, each to the server that owns
+     * it, and answer when another drain is worth running
+     * ([ProgressDrain.retryInSecs], `null` once nothing a drain could send
+     * is left). Throws only when a queue could not be read.
      */
-    public suspend fun flushProgress(): UInt
+    public suspend fun drainProgress(): ProgressDrain
 
     /**
-     * How many positions are still queued for the active server. A drain
-     * stops at the first failed send, so this -- not [flushProgress]'s count
-     * -- is what says whether anything is left to retry.
+     * Seconds to wait before retrying a drain that threw for the [attempt]th
+     * time in a row: the core's own back-off, since a drain that threw
+     * backed nothing off and so named no wait.
      */
-    public suspend fun pendingProgressCount(): UInt
+    public fun progressRetryDelaySecs(attempt: UInt): ULong
 }
 
 /**
