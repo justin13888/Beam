@@ -1954,7 +1954,7 @@ git clone -q "$tmp/src" "$tmp/clone"
 '''
 
 [tasks."check:compose-invariants"]
-description = "Assert the compose topology keeps the dev IdP opt-in, declares its networks, lets dev admin work, forwards what dev:up sets and .env.example names, mounts libraries read-only, proxies only the server's /v1, and publishes the server port on loopback only"
+description = "Assert the compose topology keeps the dev IdP opt-in, declares its networks, lets dev admin work, forwards what dev:up sets and .env.example names, mounts libraries read-only, proxies only the server's /v1, and publishes the server, web and Postgres ports on loopback only"
 # Nine properties the stack depends on, none of which any other gate sees.
 # `dev:verify-oidc` asserts the first two, but it needs a container runtime and
 # so sits outside `ci` (NFR-201) -- which means nothing runs them automatically.
@@ -2001,13 +2001,19 @@ description = "Assert the compose topology keeps the dev IdP opt-in, declares it
 #      server's other routes -- the unauthenticated `/metrics` and `/openapi`
 #      -- stay off the public entrypoint, as the Helm ingress keeps them
 #      (check:chart-invariants property 6) and the operations docs promise.
-#   9. Every port a `server` service publishes binds 127.0.0.1. A published
-#      port with no address listens on every interface, which hands the whole
-#      server -- `/metrics` included -- to the network and bypasses property 8.
+#   9. Every port a `server`, `web` or `postgres` service publishes binds
+#      127.0.0.1, and each of the three is declared somewhere. A published
+#      port with no address listens on every interface: for `server` that
+#      hands the whole server -- `/metrics` included -- to the network and
+#      bypasses property 8; for `web` it is a plain-HTTP path around Traefik's
+#      TLS router; for `postgres` it hands the database, with the default
+#      POSTGRES_PASSWORD, to anything that can reach the host (#495). Traefik's
+#      own 80/443 are the stack's one intended public entrypoint, and `dex`'s
+#      5556 is part of its issuer string, so neither is under this property.
 #
 # Properties 8 and 9 are predicates, and each is run first over fixed
 # fixtures: the shapes it must refuse (the unrestricted rule and the
-# all-interfaces port these properties were written against) and ones it must
+# all-interfaces ports these properties were written against) and ones it must
 # accept. A predicate weakened until it accepts everything fails there, even
 # while the tracked files still satisfy it.
 #
@@ -2149,10 +2155,15 @@ for (const [rule, want] of [
   check(apiOnlyRule(rule) === want, `fixture: the /v1 router predicate ${want ? "accepts" : "refuses"} ${rule}`);
 for (const [port, want] of [
   ["${BEAM_SERVER_HOST_PORT:-8000}:8000", false],
+  ["${WEB_HOST_PORT:-8080}:80", false],
+  ["${POSTGRES_HOST_PORT:-5432}:5432", false],
   ["0.0.0.0:8000:8000", false],
   ["8000", false],
   [{ target: 8000, published: 8000 }, false],
+  [{ target: 5432, published: 5432, host_ip: "0.0.0.0" }, false],
   ["127.0.0.1:${BEAM_SERVER_HOST_PORT:-8000}:8000", true],
+  ["127.0.0.1:${WEB_HOST_PORT:-8080}:80", true],
+  ["127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432", true],
   [{ target: 8000, published: 8000, host_ip: "127.0.0.1" }, true],
 ])
   check(loopbackPort(port) === want, `fixture: the loopback predicate ${want ? "accepts" : "refuses"} ${JSON.stringify(port)}`);
@@ -2169,10 +2180,17 @@ for (const [f, doc] of docs) {
     serverRouters += 1;
     check(apiOnlyRule(String(rule)), `${f}: server router ${key} is restricted to PathPrefix(\`/v1\`) (${rule})`);
   }
-  for (const port of svc?.ports ?? [])
-    check(loopbackPort(port), `${f}: server publishes ${JSON.stringify(port)} on 127.0.0.1 only`);
 }
 check(serverRouters > 0, "some compose file routes the server through Traefik");
+
+// Property 9.
+for (const name of ["server", "web", "postgres"]) {
+  const declaring = [...docs].filter(([, doc]) => doc.services?.[name] !== undefined);
+  check(declaring.length > 0, `some compose file declares a ${name} service`);
+  for (const [f, doc] of declaring)
+    for (const port of doc.services[name]?.ports ?? [])
+      check(loopbackPort(port), `${f}: ${name} publishes ${JSON.stringify(port)} on 127.0.0.1 only`);
+}
 
 process.exit(status);
 '
