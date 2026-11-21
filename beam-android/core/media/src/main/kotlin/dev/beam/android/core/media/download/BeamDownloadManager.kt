@@ -40,8 +40,8 @@ import uniffi.beam_client_core.DownloadRequest as CoreDownloadRequest
  * state and its progress -- so this client and the Apple one cannot disagree
  * about any of them. What stays here is the transfer: Media3's
  * [DownloadManager] writes into a [Cache] that ExoPlayer can read directly,
- * with range-resume, retry with backoff and a pause on a metered network,
- * which a reimplementation loses a viewer's 8 GB download to a tunnel over.
+ * with range-resume, retry with backoff and a pause on a metered network;
+ * a reimplementation of those is how an 8 GB download dies in a tunnel.
  *
  * Each item of a download's plan -- every part, and every subtitle file
  * beside one -- is one Media3 download, keyed by the item's id, and what
