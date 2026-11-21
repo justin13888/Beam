@@ -42,7 +42,10 @@ pub const LONG_OPERATION_BUCKETS: &[f64] = &[
 ///
 /// An exact-name matcher takes precedence over the suffix matcher in the
 /// exporter, so listing a name here is all it takes to move it.
-pub const LONG_OPERATION_HISTOGRAMS: &[&str] = &["beam_http_response_delivery_seconds"];
+pub const LONG_OPERATION_HISTOGRAMS: &[&str] = &[
+    "beam_http_response_delivery_seconds",
+    "beam_scan_duration_seconds",
+];
 
 /// How often [`spawn_upkeep`] drains histogram samples.
 ///
@@ -142,6 +145,102 @@ pub const DESCRIPTIONS: &[Description] = &[
         kind: Kind::Counter,
         unit: Some(Unit::Count),
         help: "Metadata-enrichment attempts, by outcome.",
+    },
+    Description {
+        name: "beam_scan_duration_seconds",
+        kind: Kind::Histogram,
+        unit: Some(Unit::Seconds),
+        help: "Time a successful library scan ran for, from taking the library to finishing, by library id and trigger.",
+    },
+    Description {
+        name: "beam_scan_last_success_timestamp_seconds",
+        kind: Kind::Gauge,
+        unit: Some(Unit::Seconds),
+        help: "Unix time the library's last successful scan finished, by library id; 0 once the library is deleted.",
+    },
+    Description {
+        name: "beam_scan_failures_total",
+        kind: Kind::Counter,
+        unit: Some(Unit::Count),
+        help: "Library scans that failed or were interrupted, not counting those cancelled by the library's delete, by library id.",
+    },
+    Description {
+        name: "beam_scan_in_progress",
+        kind: Kind::Gauge,
+        unit: None,
+        help: "1 while a scan of the library is running, 0 otherwise, by library id.",
+    },
+    Description {
+        name: "beam_watcher_events_total",
+        kind: Kind::Counter,
+        unit: Some(Unit::Count),
+        help: "Filesystem change events the watcher attributed to a library, by library id and kind.",
+    },
+    Description {
+        name: "beam_watcher_errors_total",
+        kind: Kind::Counter,
+        unit: Some(Unit::Count),
+        help: "Filesystem watcher errors, and watches that could not be added, by library id.",
+    },
+    Description {
+        name: "beam_watcher_mode",
+        kind: Kind::Gauge,
+        unit: None,
+        help: "1 for how the library's changes are observed (native events or polling), 0 for the other, both 0 when it is not watched; by library id and mode.",
+    },
+    Description {
+        name: "beam_watcher_pending_paths",
+        kind: Kind::Gauge,
+        unit: Some(Unit::Count),
+        help: "Changed paths the watcher holds and has not reconciled yet: being debounced, or waiting in the batch being reconciled.",
+    },
+    Description {
+        name: "beam_watcher_deferred_paths",
+        kind: Kind::Gauge,
+        unit: Some(Unit::Count),
+        help: "Changed paths whose reconcile was deferred -- the library was being scanned, or the file was still being written -- held for a retry.",
+    },
+    Description {
+        name: "beam_provider_requests_total",
+        kind: Kind::Counter,
+        unit: Some(Unit::Count),
+        help: "Requests to a metadata provider, by provider and result.",
+    },
+    Description {
+        name: "beam_provider_request_duration_seconds",
+        kind: Kind::Histogram,
+        unit: Some(Unit::Seconds),
+        help: "Time a metadata provider took to answer a request, by provider.",
+    },
+    Description {
+        name: "beam_provider_rate_limited_total",
+        kind: Kind::Counter,
+        unit: Some(Unit::Count),
+        help: "Requests a metadata provider refused for its rate limit, by provider.",
+    },
+    Description {
+        name: "beam_enrichment_pending",
+        kind: Kind::Gauge,
+        unit: Some(Unit::Count),
+        help: "Titles waiting for metadata enrichment, due or backing off, as of the last sweep.",
+    },
+    Description {
+        name: "beam_library_files",
+        kind: Kind::Gauge,
+        unit: Some(Unit::Count),
+        help: "Files present in the library as of its last completed scan, by library id; 0 once the library is deleted.",
+    },
+    Description {
+        name: "beam_trickplay_pending",
+        kind: Kind::Gauge,
+        unit: Some(Unit::Count),
+        help: "Files the running trickplay pass has still to make sheets for.",
+    },
+    Description {
+        name: "beam_trickplay_failures_total",
+        kind: Kind::Counter,
+        unit: Some(Unit::Count),
+        help: "Files whose trickplay sheets could not be made: left for a later pass, or undecodable.",
     },
     Description {
         name: "beam_db_pool_connections",

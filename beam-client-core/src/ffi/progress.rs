@@ -1,10 +1,11 @@
 //! Playback progress: the throttled report and the offline queue behind it.
 
 use super::{BeamClient, parse_uuid};
+use crate::catalog::start_position_secs;
 use crate::error::BeamError;
 use crate::progress::{
-    ProgressDrain, ProgressOutcome, ProgressQueue, QueuedProgress, SendFailure, ThrottleDecision,
-    backoff_secs,
+    LastPositions, ProgressDrain, ProgressOutcome, ProgressQueue, QueuedProgress, SendFailure,
+    ThrottleDecision, backoff_secs,
 };
 use crate::session::SessionState;
 use crate::transport::TransportFailure;
@@ -23,9 +24,9 @@ impl BeamClient {
     ///
     /// Returns [`BeamError::NoActiveServer`] when no server is selected,
     /// [`BeamError::BadRequest`] when `file_id` is not a UUID, and
-    /// [`BeamError::Storage`] only when the retry queue itself cannot be
-    /// written. A failed *send* is reported as [`ProgressOutcome::Queued`],
-    /// not as an error: the position is safe, and a player should not surface
+    /// [`BeamError::Storage`] only when the retry queue, or the device's own
+    /// record of the position, cannot be written. A failed *send* is reported
+    /// as [`ProgressOutcome::Queued`], not as an error: the position is safe, and a player should not surface
     /// a network blip as a playback failure.
     pub async fn report_progress(
         &self,
@@ -59,10 +60,21 @@ impl BeamClient {
             duration_secs: duration,
             position_secs: position,
         };
+        // Whatever becomes of the send, the position is also recorded on the
+        // device, so a Play with no network can resume from it later
+        // (`local_start_position_secs`, issue #487): a sample the server
+        // acknowledged leaves the queue, and with it the only copy the device
+        // had. Recorded after the send, so the device's storage never holds
+        // back the position the server keeps, and after the queue retires an
+        // acknowledged sample, so a failure here cannot leave an older one
+        // queued to overwrite it. On a failed send it is recorded after the
+        // sample is queued, so a failure here cannot lose the retry.
+        let recorded = self.last_positions(&server_id);
         match TransportFailure::capture(client.report_playback_progress(wire_file_id, &body)).await
         {
             Ok(response) => {
                 queue.remove(&file_id).await?;
+                recorded.record(&file_id, position, duration).await?;
                 Ok(ProgressOutcome::Sent {
                     position_secs: response.into_inner().position_secs,
                 })
@@ -91,6 +103,7 @@ impl BeamClient {
                 // exactly that kind of interruption. Those are queued, and
                 // `flush_progress` sends them once the user has acted.
                 if mapped.is_permanent() {
+                    recorded.record(&file_id, position, duration).await?;
                     return Ok(ProgressOutcome::Dropped {
                         reason: mapped.to_string(),
                     });
@@ -106,9 +119,13 @@ impl BeamClient {
                 let not_before_unix = failure.retry_after_secs.map_or(now, |seconds| {
                     now.saturating_add(i64::try_from(seconds).unwrap_or(i64::MAX))
                 });
+                // Queued before it is recorded: the queued sample is the one
+                // copy bound for the server, so a record the device cannot
+                // write must not cost it. The queue also answers an offline
+                // Play, so the position survives even then.
                 queue
                     .enqueue(QueuedProgress {
-                        file_id,
+                        file_id: file_id.clone(),
                         position_secs: position,
                         duration_secs: duration,
                         captured_at_unix: now,
@@ -117,6 +134,7 @@ impl BeamClient {
                         not_before_unix,
                     })
                     .await?;
+                recorded.record(&file_id, position, duration).await?;
                 let pending = queue.len().await?;
                 Ok(ProgressOutcome::Queued {
                     pending: u32::try_from(pending).unwrap_or(u32::MAX),
@@ -264,6 +282,61 @@ impl BeamClient {
         let queue = self.with_context(&server_id, |context| Arc::clone(&context.queue))?;
         Ok(u32::try_from(queue.len().await?).unwrap_or(u32::MAX))
     }
+
+    /// Where Play starts `file_id` from the last position this device
+    /// recorded for it, by the start rule ([`start_position_secs`]): 0 where
+    /// it recorded none, or one near the end.
+    ///
+    /// For Play with no network (issue #487), when the server's own position
+    /// cannot be asked for. Needs no active server or session, and asks
+    /// nothing of the network. The newest position wins across every known
+    /// server -- the one queued unsent, or the one recorded at the last
+    /// report -- because a file's id is unique and a download may have been
+    /// reported while another server was active.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::Storage`] when a record cannot be read.
+    pub async fn local_start_position_secs(&self, file_id: String) -> Result<f64, BeamError> {
+        let contexts: Vec<(String, Arc<ProgressQueue>)> = {
+            let servers = self.servers.read().expect("servers lock");
+            servers
+                .iter()
+                .map(|(server_id, context)| (server_id.clone(), Arc::clone(&context.queue)))
+                .collect()
+        };
+
+        // (captured at, position, duration) of the newest position seen.
+        let mut newest: Option<(i64, f64, Option<f64>)> = None;
+        for (server_id, queue) in contexts {
+            let recorded = self
+                .last_positions(&server_id)
+                .get(&file_id)
+                .await?
+                .map(|entry| {
+                    (
+                        entry.captured_at_unix,
+                        entry.position_secs,
+                        entry.duration_secs,
+                    )
+                });
+            let queued = queue.find(&file_id).await?.map(|entry| {
+                (
+                    entry.captured_at_unix,
+                    entry.position_secs,
+                    entry.duration_secs,
+                )
+            });
+            for candidate in [recorded, queued].into_iter().flatten() {
+                if newest.is_none_or(|(at, _, _)| candidate.0 > at) {
+                    newest = Some(candidate);
+                }
+            }
+        }
+        Ok(newest.map_or(0.0, |(_, position, duration)| {
+            start_position_secs(position, duration)
+        }))
+    }
 }
 
 /// What draining one server's queue did.
@@ -280,6 +353,15 @@ struct ServerDrain {
 }
 
 impl BeamClient {
+    /// The last position recorded for each file played from `server_id`.
+    fn last_positions(&self, server_id: &str) -> LastPositions {
+        LastPositions::new(
+            Arc::clone(&self.storage),
+            Arc::clone(&self.clock),
+            server_id,
+        )
+    }
+
     /// Send `server_id`'s due samples, oldest first, with its own client.
     ///
     /// Stops at the first failure rather than hammering an unreachable server

@@ -3,9 +3,14 @@
 //! type is mapped to beam-domain's provider-agnostic DTOs here and nowhere
 //! else, mirroring how ffmpeg is confined to this crate's `probe` module.
 
+use std::sync::Arc;
+
 use tracing::warn;
 
+use beam_domain::services::Clock;
+
 use super::composite::search_in_turn;
+use super::request_metrics::observed;
 
 use beam_domain::providers::enrichment::{
     CollectionEnrichment, CreditEnrichment, CreditRole, EnrichmentError, EnrichmentProvider,
@@ -53,8 +58,11 @@ pub struct CameoWiringConfig {
 /// lookups -- which cameo 0.2.0 offers on `TmdbClient` only, not on the
 /// facade (justin13888/cameo#58) -- share one connection pool and one
 /// rate-limit budget with every other TMDB request.
+///
+/// `clock` times each request for the provider metrics.
 pub fn build_client(
     config: CameoWiringConfig,
+    clock: Arc<dyn Clock>,
 ) -> Result<Option<CameoEnrichmentProvider>, cameo::CameoClientError> {
     let mut builder = cameo::CameoClient::builder();
     let mut tmdb = None;
@@ -94,16 +102,21 @@ pub fn build_client(
     Ok(Some(CameoEnrichmentProvider {
         client: builder.build()?,
         tmdb,
+        clock,
     }))
 }
 
 /// [`EnrichmentProvider`] backed by a configured `cameo::CameoClient`.
+///
+/// Every request to one of its providers is recorded under that provider's
+/// id (`tmdb`, `anilist`) by [`observed`].
 #[derive(Debug)]
 pub struct CameoEnrichmentProvider {
     client: cameo::CameoClient,
     /// The TMDB client the facade dispatches to, kept for the credits the
     /// facade cannot ask for; `None` when no TMDB token is configured.
     tmdb: Option<cameo::TmdbClient>,
+    clock: Arc<dyn Clock>,
 }
 
 impl CameoEnrichmentProvider {
@@ -130,10 +143,14 @@ impl CameoEnrichmentProvider {
             warn!(id = %id, "not a numeric TMDB id; its credits are not fetched");
             return None;
         };
-        let fetched = match kind {
-            CreditsOf::Movie => tmdb.movie_credits(native).await,
-            CreditsOf::Show => tmdb.tv_series_credits(native).await,
-        };
+        let fetched = observed("tmdb", &*self.clock, async {
+            match kind {
+                CreditsOf::Movie => tmdb.movie_credits(native).await,
+                CreditsOf::Show => tmdb.tv_series_credits(native).await,
+            }
+            .map_err(|err| map_provider_error(cameo::ProviderError::from(err)))
+        })
+        .await;
         match fetched {
             Ok(credits) => Some(map_credits(&credits)),
             Err(err) => {
@@ -236,13 +253,16 @@ impl EnrichmentProvider for CameoEnrichmentProvider {
                 .provider_ids()
                 .into_iter()
                 .map(|provider| {
-                    (provider, async move {
-                        self.client
-                            .search_movies_with(provider, &query.title, None)
-                            .await
-                            .map(|page| page.results.iter().map(map_movie_hit).collect())
-                            .map_err(map_client_error)
-                    })
+                    (
+                        provider,
+                        observed(provider, &*self.clock, async move {
+                            self.client
+                                .search_movies_with(provider, &query.title, None)
+                                .await
+                                .map(|page| page.results.iter().map(map_movie_hit).collect())
+                                .map_err(map_client_error)
+                        }),
+                    )
                 })
                 .collect(),
         )
@@ -258,13 +278,16 @@ impl EnrichmentProvider for CameoEnrichmentProvider {
                 .provider_ids()
                 .into_iter()
                 .map(|provider| {
-                    (provider, async move {
-                        self.client
-                            .search_tv_shows_with(provider, &query.title, None)
-                            .await
-                            .map(|page| page.results.iter().map(map_show_hit).collect())
-                            .map_err(map_client_error)
-                    })
+                    (
+                        provider,
+                        observed(provider, &*self.clock, async move {
+                            self.client
+                                .search_tv_shows_with(provider, &query.title, None)
+                                .await
+                                .map(|page| page.results.iter().map(map_show_hit).collect())
+                                .map_err(map_client_error)
+                        }),
+                    )
                 })
                 .collect(),
         )
@@ -276,11 +299,13 @@ impl EnrichmentProvider for CameoEnrichmentProvider {
         id: &ExternalMediaRef,
     ) -> Result<MovieEnrichment, EnrichmentError> {
         let media_id = to_media_id(id)?;
-        let details = self
-            .client
-            .movie_details(&media_id)
-            .await
-            .map_err(map_client_error)?;
+        let details = observed(id.provider(), &*self.clock, async {
+            self.client
+                .movie_details(&media_id)
+                .await
+                .map_err(map_client_error)
+        })
+        .await?;
         let mut enrichment = map_movie_enrichment(&details);
         enrichment.credits = self.credits(id, CreditsOf::Movie).await;
         Ok(enrichment)
@@ -291,11 +316,13 @@ impl EnrichmentProvider for CameoEnrichmentProvider {
         id: &ExternalMediaRef,
     ) -> Result<ShowEnrichment, EnrichmentError> {
         let media_id = to_media_id(id)?;
-        let details = self
-            .client
-            .tv_show_details(&media_id)
-            .await
-            .map_err(map_client_error)?;
+        let details = observed(id.provider(), &*self.clock, async {
+            self.client
+                .tv_show_details(&media_id)
+                .await
+                .map_err(map_client_error)
+        })
+        .await?;
         let mut enrichment = map_show_enrichment(&details);
         enrichment.credits = self.credits(id, CreditsOf::Show).await;
         Ok(enrichment)
@@ -307,11 +334,13 @@ impl EnrichmentProvider for CameoEnrichmentProvider {
         season_number: u32,
     ) -> Result<SeasonEnrichment, EnrichmentError> {
         let media_id = to_media_id(show)?;
-        let details = self
-            .client
-            .season_details(&media_id, season_number)
-            .await
-            .map_err(map_client_error)?;
+        let details = observed(show.provider(), &*self.clock, async {
+            self.client
+                .season_details(&media_id, season_number)
+                .await
+                .map_err(map_client_error)
+        })
+        .await?;
         Ok(map_season_enrichment(&details))
     }
 
@@ -504,6 +533,10 @@ mod tests {
         MediaId, PartialDate, UnifiedEpisode, UnifiedMovie, UnifiedMovieDetails,
         UnifiedSeasonDetails, UnifiedTvShow, UnifiedTvShowDetails,
     };
+
+    fn test_clock() -> Arc<dyn Clock> {
+        Arc::new(beam_domain::services::TestClock::new())
+    }
 
     #[test]
     fn maps_movie_hit_fields() {
@@ -720,11 +753,14 @@ mod tests {
 
     #[tokio::test]
     async fn an_anilist_title_has_no_credits_to_fetch() {
-        let provider = build_client(CameoWiringConfig {
-            tmdb_api_token: Some("test-token".to_string()),
-            anilist_enabled: true,
-            metadata_language: None,
-        })
+        let provider = build_client(
+            CameoWiringConfig {
+                tmdb_api_token: Some("test-token".to_string()),
+                anilist_enabled: true,
+                metadata_language: None,
+            },
+            test_clock(),
+        )
         .unwrap()
         .expect("both providers configured");
         // `None` leaves stored credits alone; no request is made for it.
@@ -737,11 +773,14 @@ mod tests {
 
     #[test]
     fn tmdb_keeps_priority_over_anilist() {
-        let provider = build_client(CameoWiringConfig {
-            tmdb_api_token: Some("test-token".to_string()),
-            anilist_enabled: true,
-            metadata_language: None,
-        })
+        let provider = build_client(
+            CameoWiringConfig {
+                tmdb_api_token: Some("test-token".to_string()),
+                anilist_enabled: true,
+                metadata_language: None,
+            },
+            test_clock(),
+        )
         .unwrap()
         .expect("both providers configured");
         assert_eq!(provider.provider_ids(), ["tmdb", "anilist"]);
@@ -975,6 +1014,60 @@ mod tests {
         CameoEnrichmentProvider {
             client: builder.with_priority(order).build().unwrap(),
             tmdb: None,
+            clock: test_clock(),
+        }
+    }
+
+    /// Each provider a search reaches is counted under its own id, by
+    /// result, and a rate limit is counted as one too (issue #457).
+    #[tokio::test]
+    async fn each_providers_search_is_counted_under_its_own_id() {
+        use crate::test_metrics::MetricsCapture;
+
+        let capture = MetricsCapture::new();
+        let _recorder = capture.install();
+        let working = ScriptedSearch::answering("tmdb", vec!["Frieren"]);
+        let limited = ScriptedSearch::failing("anilist", || cameo::ProviderError::RateLimited {
+            retry_after: None,
+        });
+        let adapter = searching(&[working, limited]);
+
+        assert!(matches!(
+            adapter.search_shows(&query()).await,
+            Err(EnrichmentError::RateLimited { .. })
+        ));
+
+        let recorded = capture.snapshot();
+        let requests = |provider, result| {
+            recorded.counter(
+                "beam_provider_requests_total",
+                &[("provider", provider), ("result", result)],
+            )
+        };
+        assert_eq!(requests("tmdb", "ok"), Some(1));
+        assert_eq!(requests("anilist", "rate_limited"), Some(1));
+        assert_eq!(
+            recorded.counter(
+                "beam_provider_rate_limited_total",
+                &[("provider", "anilist")]
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            recorded.counter("beam_provider_rate_limited_total", &[("provider", "tmdb")]),
+            None
+        );
+        for provider in ["tmdb", "anilist"] {
+            assert_eq!(
+                recorded
+                    .histogram(
+                        "beam_provider_request_duration_seconds",
+                        &[("provider", provider)]
+                    )
+                    .map(|samples| samples.len()),
+                Some(1),
+                "{provider} is timed once"
+            );
         }
     }
 
@@ -1100,7 +1193,7 @@ mod tests {
             anilist_enabled: false,
             metadata_language: None,
         };
-        let client = build_client(config).unwrap();
+        let client = build_client(config, test_clock()).unwrap();
         assert!(client.is_none());
     }
 
@@ -1111,7 +1204,7 @@ mod tests {
             anilist_enabled: true,
             metadata_language: None,
         };
-        let client = build_client(config)
+        let client = build_client(config, test_clock())
             .unwrap()
             .expect("AniList is configured");
         assert_eq!(client.provider_ids(), ["anilist"]);
@@ -1126,7 +1219,9 @@ mod tests {
             anilist_enabled: false,
             metadata_language: Some("en-US".to_string()),
         };
-        let client = build_client(config).unwrap().expect("TMDB is configured");
+        let client = build_client(config, test_clock())
+            .unwrap()
+            .expect("TMDB is configured");
         assert_eq!(client.provider_ids(), ["tmdb"]);
     }
 
@@ -1140,7 +1235,8 @@ mod tests {
             anilist_enabled: false,
             metadata_language: Some("english".to_string()),
         };
-        let err = build_client(config).expect_err("an invalid language tag must fail the build");
+        let err = build_client(config, test_clock())
+            .expect_err("an invalid language tag must fail the build");
         let message = err.to_string();
         assert!(
             message.contains("language") && message.contains("english"),
@@ -1158,7 +1254,9 @@ mod tests {
             anilist_enabled: false,
             metadata_language: Some("   ".to_string()),
         };
-        let client = build_client(config).unwrap().expect("TMDB is configured");
+        let client = build_client(config, test_clock())
+            .unwrap()
+            .expect("TMDB is configured");
         assert_eq!(client.provider_ids(), ["tmdb"]);
     }
 }

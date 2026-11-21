@@ -211,6 +211,14 @@ public interface PlaybackRepository {
      * backed nothing off and so named no wait.
      */
     public fun progressRetryDelaySecs(attempt: UInt): ULong
+
+    /**
+     * Where Play starts [fileId] from the last position this device recorded
+     * for it, by the core's start rule: 0 where it recorded none, or one near
+     * the end. Asks nothing of the network -- it is what an offline Play
+     * resumes from. Throws only when the device's record could not be read.
+     */
+    public suspend fun localStartPositionSecs(fileId: String): Double
 }
 
 /**

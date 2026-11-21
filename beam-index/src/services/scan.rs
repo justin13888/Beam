@@ -22,8 +22,8 @@
 //!   what an administrator watches, not a history, and a restart forgets it.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
@@ -49,6 +49,19 @@ pub enum ScanTrigger {
     /// A library that has just been created, so what its root already holds
     /// is indexed at once (FR-213).
     Created,
+}
+
+impl ScanTrigger {
+    /// The `trigger` label of `beam_scan_duration_seconds`.
+    pub fn label(self) -> &'static str {
+        match self {
+            ScanTrigger::Manual => "manual",
+            ScanTrigger::Startup => "startup",
+            ScanTrigger::Periodic => "periodic",
+            ScanTrigger::NewlyPolled => "newly_polled",
+            ScanTrigger::Created => "created",
+        }
+    }
 }
 
 /// Where a scan job is in its life.
@@ -164,6 +177,11 @@ struct LibrarySlot {
     /// The cancellation flag of the current job; replaced when a job
     /// registers, so cancelling one job never reaches the next.
     cancel: parking_lot::Mutex<Arc<AtomicBool>>,
+    /// Set once the library is [forgotten](ScanCoordinator::forget): its
+    /// scan series have been zeroed, and a ticket still running against this
+    /// slot emits nothing more. A lock rather than a flag, so a ticket's
+    /// check and its emission are one step against the zeroing.
+    forgotten: parking_lot::Mutex<bool>,
 }
 
 impl LibrarySlot {
@@ -173,6 +191,7 @@ impl LibrarySlot {
             lock: Arc::new(AsyncMutex::new(())),
             job,
             cancel: parking_lot::Mutex::new(Arc::new(AtomicBool::new(false))),
+            forgotten: parking_lot::Mutex::new(false),
         }
     }
 }
@@ -328,6 +347,7 @@ impl ScanCoordinator {
             library_id,
             cancel,
             clock,
+            started: OnceLock::new(),
         })
     }
 
@@ -398,8 +418,24 @@ impl ScanCoordinator {
     /// Drop `library_id`'s slot -- its lock and latest job -- once the
     /// library is gone. A ticket or guard still held keeps its own reference
     /// and finishes against it; a later call for the library starts afresh.
+    ///
+    /// The library's scan series are zeroed, since the exporter keeps a
+    /// series until the process ends: `beam_scan_in_progress`,
+    /// `beam_scan_last_success_timestamp_seconds` and `beam_library_files`
+    /// read 0 for a deleted library rather than its last values, so an alert
+    /// on a stale last success can exclude it. A ticket still running --
+    /// one that did not stop in time -- emits nothing after this.
     pub fn forget(&self, library_id: Uuid) {
-        self.libraries.lock().remove(&library_id);
+        let Some(slot) = self.libraries.lock().remove(&library_id) else {
+            return;
+        };
+        let mut forgotten = slot.forgotten.lock();
+        *forgotten = true;
+        let library = library_id.to_string();
+        metrics::gauge!("beam_scan_in_progress", "library" => library.clone()).set(0.0);
+        metrics::gauge!("beam_scan_last_success_timestamp_seconds", "library" => library.clone())
+            .set(0.0);
+        metrics::gauge!("beam_library_files", "library" => library).set(0.0);
     }
 
     /// Take `library_id`'s lock and the catalog gate for a scan, waiting for
@@ -462,12 +498,24 @@ impl ScanCoordinator {
 /// Whoever holds the ticket updates the job. Dropping a ticket whose job is
 /// still queued or running -- its task panicked, or was dropped unfinished --
 /// fails the job as [`INTERRUPTED`], so a job never reads as running forever.
+///
+/// The ticket is also where a scan's metrics are emitted (issue #457), since
+/// every way a scan starts and ends passes through it:
+/// `beam_scan_in_progress{library}` while it runs,
+/// `beam_scan_duration_seconds{library,trigger}` and
+/// `beam_scan_last_success_timestamp_seconds{library}` when it succeeds, and
+/// `beam_scan_failures_total{library}` when it fails -- other than by a
+/// [cancellation](ScanCoordinator::cancel), which only a library's delete
+/// asks for. Only a change the job actually took is measured: a job that
+/// already ended keeps its ending, and emits nothing more.
 pub struct ScanTicket {
     slot: Arc<LibrarySlot>,
     job_id: Uuid,
     library_id: Uuid,
     cancel: Arc<AtomicBool>,
     clock: Arc<dyn Clock>,
+    /// When the job started running, on the monotonic clock.
+    started: OnceLock<Instant>,
 }
 
 impl std::fmt::Debug for ScanTicket {
@@ -505,24 +553,55 @@ impl ScanTicket {
 
     /// Apply `change` to the job while it is still active. A finished job
     /// -- one cancelled while it was queued, above all -- keeps the ending
-    /// it was given: its task, still running, cannot revive it.
-    fn update(&self, change: impl FnOnce(&mut ScanJob)) {
+    /// it was given: its task, still running, cannot revive it. Whether the
+    /// change was applied.
+    fn update(&self, change: impl FnOnce(&mut ScanJob)) -> bool {
         self.slot.job.send_if_modified(|current| match current {
             Some(job) if job.id == self.job_id && job.state.is_active() => {
                 change(job);
                 true
             }
             _ => false,
+        })
+    }
+
+    /// The `library` label of every scan metric: the library's id, never its
+    /// name or path.
+    fn library_label(&self) -> String {
+        self.library_id.to_string()
+    }
+
+    /// Run `emit` unless the library has been
+    /// [forgotten](ScanCoordinator::forget), holding the slot's lock so the
+    /// zeroing cannot interleave with it.
+    fn emit_metrics(&self, emit: impl FnOnce(String)) {
+        let forgotten = self.slot.forgotten.lock();
+        if !*forgotten {
+            emit(self.library_label());
+        }
+    }
+
+    /// Set `beam_library_files{library}` to the count a completed scan
+    /// found present.
+    pub fn record_file_count(&self, files: u64) {
+        self.emit_metrics(|library| {
+            metrics::gauge!("beam_library_files", "library" => library).set(files as f64);
         });
     }
 
     /// The job has its lock and is running.
     pub fn start(&self) {
         let now = self.clock.now();
-        self.update(|job| {
+        let started = self.update(|job| {
             job.state = ScanState::Running;
             job.started_at = Some(now);
         });
+        if started {
+            let _ = self.started.set(self.clock.monotonic());
+            self.emit_metrics(|library| {
+                metrics::gauge!("beam_scan_in_progress", "library" => library).set(1.0);
+            });
+        }
     }
 
     /// Record the scan's progress so far.
@@ -533,33 +612,68 @@ impl ScanTicket {
     /// The scan finished.
     pub fn succeed(&self, progress: ScanProgress) {
         let now = self.clock.now();
-        self.update(|job| {
+        let mut trigger = None;
+        let succeeded = self.update(|job| {
             job.state = ScanState::Succeeded;
             job.finished_at = Some(now);
             job.progress = progress;
+            trigger = Some(job.trigger);
+        });
+        let Some(trigger) = trigger.filter(|_| succeeded) else {
+            return;
+        };
+        let elapsed = self
+            .started
+            .get()
+            .map(|started| self.clock.monotonic().saturating_duration_since(*started));
+        self.emit_metrics(|library| {
+            if let Some(elapsed) = elapsed {
+                metrics::histogram!(
+                    "beam_scan_duration_seconds",
+                    "library" => library.clone(),
+                    "trigger" => trigger.label(),
+                )
+                .record(elapsed.as_secs_f64());
+            }
+            metrics::gauge!(
+                "beam_scan_last_success_timestamp_seconds",
+                "library" => library.clone()
+            )
+            .set((now - DateTime::UNIX_EPOCH).as_seconds_f64());
+            metrics::gauge!("beam_scan_in_progress", "library" => library).set(0.0);
         });
     }
 
     /// The scan stopped. `failure` must name no filesystem path.
     pub fn fail(&self, failure: impl Into<String>) {
+        self.end_failed(failure.into());
+    }
+
+    /// Fail the job with `failure`, and count it unless it was cancelled.
+    fn end_failed(&self, failure: String) {
         let now = self.clock.now();
-        let failure = failure.into();
-        self.update(|job| {
+        let cancelled = failure == CANCELLED;
+        let failed = self.update(|job| {
             job.state = ScanState::Failed;
             job.finished_at = Some(now);
             job.failure = Some(failure);
+        });
+        if !failed {
+            return;
+        }
+        self.emit_metrics(|library| {
+            if !cancelled {
+                metrics::counter!("beam_scan_failures_total", "library" => library.clone())
+                    .increment(1);
+            }
+            metrics::gauge!("beam_scan_in_progress", "library" => library).set(0.0);
         });
     }
 }
 
 impl Drop for ScanTicket {
     fn drop(&mut self) {
-        let now = self.clock.now();
-        self.update(|job| {
-            job.state = ScanState::Failed;
-            job.finished_at = Some(now);
-            job.failure = Some(INTERRUPTED.to_string());
-        });
+        self.end_failed(INTERRUPTED.to_string());
     }
 }
 

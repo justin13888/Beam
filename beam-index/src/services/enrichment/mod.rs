@@ -369,7 +369,27 @@ impl MetadataEnrichmentService {
 
     /// Processes up to `policy.batch_size` due rows. Stops early if the
     /// provider reports rate-limiting.
+    ///
+    /// Then refreshes `beam_enrichment_pending` (issue #457) -- even when no
+    /// provider is configured, since titles keep queueing up regardless.
     pub async fn sweep_once(&self) -> SweepReport {
+        let report = self.sweep_due().await;
+        self.record_queue_depth().await;
+        report
+    }
+
+    /// Set `beam_enrichment_pending` to the titles still pending
+    /// enrichment, due or backing off. A count that fails leaves the gauge
+    /// as it was.
+    async fn record_queue_depth(&self) {
+        match self.state_repo.count_by_status().await {
+            Ok(counts) => metrics::gauge!("beam_enrichment_pending").set(counts.pending as f64),
+            Err(err) => warn!(error = %err, "failed to count the enrichment queue"),
+        }
+    }
+
+    /// [`Self::sweep_once`]'s sweep, without the queue gauge.
+    async fn sweep_due(&self) -> SweepReport {
         if self.provider.available_providers().is_empty() {
             return SweepReport {
                 skipped_no_providers: true,
@@ -2953,6 +2973,65 @@ mod tests {
         // Zero tallies must not mint a series at all.
         assert_eq!(outcome_count("unmatched"), None);
         assert_eq!(outcome_count("rate_limited"), None);
+    }
+
+    /// Every sweep gauges the queue it leaves behind (issue #457): with no
+    /// provider configured nothing drains it, so the gauge shows every
+    /// queued title; a sweep that enriches a title takes it off.
+    #[tokio::test]
+    async fn every_sweep_gauges_the_titles_still_pending() {
+        use crate::test_metrics::MetricsCapture;
+
+        let capture = MetricsCapture::new();
+        let _recorder = capture.install();
+        let pending = || capture.snapshot().gauge("beam_enrichment_pending", &[]);
+
+        let (idle, movie_repo, _shows, state_repo, _genres, _clock) =
+            harness(InMemoryEnrichmentProvider::new(&[]));
+        for title in ["The Matrix", "Ghost"] {
+            queue_movie(&movie_repo, &state_repo, title).await;
+        }
+        assert!(idle.sweep_once().await.skipped_no_providers);
+        assert_eq!(pending(), Some(2.0));
+
+        let provider = InMemoryEnrichmentProvider::new(&["tmdb"])
+            .with_movie_search(
+                "The Matrix",
+                vec![MovieSearchHit {
+                    external_ref: ExternalMediaRef::new("tmdb", "603"),
+                    title: "The Matrix".to_string(),
+                    original_title: None,
+                    year: Some(1999),
+                    popularity: Some(80.0),
+                    vote_average: Some(8.7),
+                }],
+            )
+            .with_movie_enrichment(MovieEnrichment {
+                tmdb_id: Some(603),
+                title: "The Matrix".to_string(),
+                year: Some(1999),
+                ..Default::default()
+            });
+        let (service, movie_repo, _shows, state_repo, _genres, _clock) = harness(provider);
+        queue_movie(&movie_repo, &state_repo, "The Matrix").await;
+        assert_eq!(service.sweep_once().await.enriched, 1);
+        assert_eq!(pending(), Some(0.0));
+    }
+
+    /// Queue the 1999 movie `title` for enrichment.
+    async fn queue_movie(
+        movie_repo: &InMemoryMovieRepository,
+        state_repo: &InMemoryEnrichmentStateRepository,
+        title: &str,
+    ) {
+        let movie = movie_repo
+            .find_or_create_by_identity(CreateMovie::new(title.to_string(), Some(1999), None))
+            .await
+            .unwrap();
+        state_repo
+            .ensure_pending(EnrichmentTargetId::Movie(movie.id))
+            .await
+            .unwrap();
     }
 
     /// A pinned movie, queued as the indexer queues a newly pinned one.

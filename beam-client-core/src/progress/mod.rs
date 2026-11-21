@@ -7,8 +7,10 @@
 //! same policy, in the core, so every native client inherits it rather than
 //! each picking its own interval.
 
+pub mod last;
 pub mod queue;
 
+pub use last::{LastPositions, RecordedPosition};
 pub use queue::{ProgressQueue, QueuedProgress, SendFailure, backoff_secs};
 
 use crate::clock::Clock;
