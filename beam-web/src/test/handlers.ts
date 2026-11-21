@@ -41,6 +41,13 @@ export const handlers = [
 		`${BASE_URL}/v1/sessions/:id`,
 		() => new HttpResponse(null, { status: 204 }),
 	),
+	http.get(`${BASE_URL}/v1/me/language-preferences`, () =>
+		HttpResponse.json<Schemas["LanguagePreferenceSettings"]>({
+			audio_languages: [],
+			subtitle_languages: [],
+			subtitle_mode: "forced_only",
+		}),
+	),
 
 	// ── browse ───────────────────────────────────────────────────────────
 	http.get(`${BASE_URL}/v1/media`, () =>

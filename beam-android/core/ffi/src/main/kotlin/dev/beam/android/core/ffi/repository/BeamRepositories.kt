@@ -18,6 +18,7 @@ import uniffi.beam_client_core.DeviceProfile
 import uniffi.beam_client_core.DeviceSession
 import uniffi.beam_client_core.EpisodeSummary
 import uniffi.beam_client_core.HistoryPage
+import uniffi.beam_client_core.LanguagePreferences
 import uniffi.beam_client_core.LibraryFileSummary
 import uniffi.beam_client_core.LibrarySummary
 import uniffi.beam_client_core.MediaDetail
@@ -301,6 +302,12 @@ internal class BeamSessionRepository
         override suspend fun revoke(sessionId: String) = changes.watching { client.revokeSession(sessionId) }
 
         override suspend fun logoutEverywhere() = changes.watching { client.logoutEverywhere() }
+
+        override suspend fun languagePreferences(): LanguagePreferences =
+            changes.watching { client.languagePreferences() }
+
+        override suspend fun setLanguagePreferences(preferences: LanguagePreferences): LanguagePreferences =
+            changes.watching { client.setLanguagePreferences(preferences) }
     }
 
 @Singleton

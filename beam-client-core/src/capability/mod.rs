@@ -19,6 +19,7 @@
 pub mod codec;
 pub mod rebuffer;
 pub mod select;
+pub mod start_tracks;
 
 pub use codec::{AudioCodec, VideoCodec};
 pub use rebuffer::RebufferDetector;
@@ -26,6 +27,7 @@ pub use select::{
     MediaSourceView, Playability, QualityPolicy, RejectedSource, RejectionReason, SourceSelection,
     select_downgrade, select_source,
 };
+pub use start_tracks::{StartSubtitle, StartTracks};
 
 /// One decoder the device reports through `MediaCodecList`.
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]

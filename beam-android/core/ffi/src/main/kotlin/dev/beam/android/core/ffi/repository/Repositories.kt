@@ -13,6 +13,7 @@ import uniffi.beam_client_core.DeviceProfile
 import uniffi.beam_client_core.DeviceSession
 import uniffi.beam_client_core.EpisodeSummary
 import uniffi.beam_client_core.HistoryPage
+import uniffi.beam_client_core.LanguagePreferences
 import uniffi.beam_client_core.LibraryFileSummary
 import uniffi.beam_client_core.LibrarySummary
 import uniffi.beam_client_core.MediaDetail
@@ -259,7 +260,7 @@ public interface TelemetryRepository {
     public suspend fun flush(): TelemetryFlush
 }
 
-/** The signed-in devices on the profile screen. */
+/** The signed-in account: its devices, and its language preferences. */
 public interface SessionRepository {
     /** Every device signed in as this user. */
     public suspend fun sessions(): List<DeviceSession>
@@ -269,6 +270,15 @@ public interface SessionRepository {
 
     /** End every session everywhere, including this one. */
     public suspend fun logoutEverywhere()
+
+    /**
+     * The audio and subtitle languages this user prefers, which the server
+     * reads to name the tracks playback starts on.
+     */
+    public suspend fun languagePreferences(): LanguagePreferences
+
+    /** Replace them, answering them as the server stored them. */
+    public suspend fun setLanguagePreferences(preferences: LanguagePreferences): LanguagePreferences
 }
 
 /** The administrative surface, available only to administrators. */

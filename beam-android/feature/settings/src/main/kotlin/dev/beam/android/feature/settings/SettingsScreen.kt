@@ -36,6 +36,7 @@ import dev.beam.android.core.designsystem.supportsDynamicColor
 import dev.beam.android.core.model.PaletteSource
 import dev.beam.android.core.model.QualityPreference
 import dev.beam.android.core.model.ThemeMode
+import uniffi.beam_client_core.LanguagePreferences
 import uniffi.beam_client_core.ServerSummary
 import uniffi.beam_client_core.SessionState
 import java.text.DateFormat
@@ -80,6 +81,7 @@ public fun SettingsRoute(
         onSignOut = viewModel::signOut,
         onSignOutEverywhere = viewModel::signOutEverywhere,
         onDismissError = viewModel::clearError,
+        onLanguagePreferences = viewModel::setLanguagePreferences,
         modifier = modifier,
     )
 }
@@ -105,6 +107,7 @@ internal fun SettingsScreen(
     onRemoveServer: (String) -> Unit = {},
     onAddServer: () -> Unit = {},
     onDismissError: () -> Unit = {},
+    onLanguagePreferences: (LanguagePreferences) -> Unit = {},
 ) {
     var confirmingSignOutEverywhere by remember { mutableStateOf(false) }
     var removing by remember { mutableStateOf<ServerSummary?>(null) }
@@ -308,6 +311,9 @@ internal fun SettingsScreen(
                 checked = preferences.allowSoftwareDecode,
                 onChange = onAllowSoftwareDecode,
             )
+        }
+        state.languages?.let { languages ->
+            languagePreferenceItems(languages = languages, onChange = onLanguagePreferences)
         }
 
         item(key = "downloads-header") { SectionHeader(title = "Downloads") }

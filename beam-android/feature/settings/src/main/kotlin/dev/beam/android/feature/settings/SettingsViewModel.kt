@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import uniffi.beam_client_core.BeamException
 import uniffi.beam_client_core.DeviceSession
+import uniffi.beam_client_core.LanguagePreferences
 import uniffi.beam_client_core.ServerSummary
 import uniffi.beam_client_core.SessionState
 import uniffi.beam_client_core.UserSummary
@@ -47,6 +48,11 @@ public data class SettingsUiState(
     val hasSwitchedServer: Boolean = false,
     /** Why the last action the viewer asked for did not happen, until dismissed. */
     val error: String? = null,
+    /**
+     * The audio and subtitle languages the viewer prefers, as the server
+     * stores them; null until they have been read, and the section hidden.
+     */
+    val languages: LanguagePreferences? = null,
 )
 
 /** Preferences, the account, and this device's trust decisions. */
@@ -117,6 +123,7 @@ public class SettingsViewModel
                     server
                         ?.let { runCatching { servers.trustedCertificates(it.id) }.getOrNull() }
                         .orEmpty()
+                val languages = user?.let { runCatching { sessions.languagePreferences() }.getOrNull() }
 
                 mutableState.update {
                     it.copy(
@@ -124,6 +131,7 @@ public class SettingsViewModel
                         user = user,
                         sessions = devices,
                         trustedCertificates = certificates,
+                        languages = languages,
                     )
                 }
             }
@@ -146,6 +154,25 @@ public class SettingsViewModel
 
         /** Allow or forbid downloads without Wi-Fi. */
         public fun setDownloadOverCellular(enabled: Boolean): Unit = edit { it.copy(downloadOverCellular = enabled) }
+
+        /**
+         * Store the viewer's language preferences on the server, which names
+         * the tracks every later playback starts on from them. The section
+         * then shows what the server stored -- `ja` as `jpn` -- and a refusal
+         * is said, leaving the stored preferences as they were.
+         */
+        public fun setLanguagePreferences(preferences: LanguagePreferences) {
+            viewModelScope.launch {
+                try {
+                    val stored = sessions.setLanguagePreferences(preferences)
+                    mutableState.update { it.copy(languages = stored) }
+                } catch (failure: BeamException) {
+                    mutableState.update {
+                        it.copy(error = "Could not save your languages. ${failure.toFailure().message}")
+                    }
+                }
+            }
+        }
 
         /** Revoke one signed-in device. */
         public fun revokeSession(sessionId: String) {

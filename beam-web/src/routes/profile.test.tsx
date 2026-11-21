@@ -140,6 +140,116 @@ describe("/profile", () => {
 		expect(getLocation()).toBe("/profile");
 	});
 
+	describe("playback languages", () => {
+		function serveLanguages(
+			stored: components["schemas"]["LanguagePreferenceSettings"],
+		) {
+			server.use(
+				http.get(`${BASE_URL}/v1/me/language-preferences`, () =>
+					HttpResponse.json(stored),
+				),
+			);
+		}
+
+		it("shows the stored preferences and saves edits as the server stores them", async () => {
+			const requests = recordRequests();
+			serveSessions();
+			serveLanguages({
+				audio_languages: ["eng"],
+				subtitle_languages: [],
+				subtitle_mode: "forced_only",
+			});
+			// The server answers each language as the code tracks carry.
+			server.use(
+				http.put(`${BASE_URL}/v1/me/language-preferences`, () =>
+					HttpResponse.json<
+						components["schemas"]["LanguagePreferenceSettings"]
+					>({
+						audio_languages: ["jpn", "eng"],
+						subtitle_languages: ["eng"],
+						subtitle_mode: "on",
+					}),
+				),
+			);
+			const user = userEvent.setup();
+			renderRoute("/profile");
+
+			const audio = await screen.findByLabelText("Audio languages");
+			expect(audio).toHaveValue("eng");
+			expect(screen.getByLabelText("Subtitles")).toHaveValue("forced_only");
+
+			await user.clear(audio);
+			await user.type(audio, "ja, English");
+			await user.type(screen.getByLabelText("Subtitle languages"), "en,");
+			await user.selectOptions(screen.getByLabelText("Subtitles"), "on");
+			await user.click(screen.getByRole("button", { name: "Save languages" }));
+
+			await waitFor(() =>
+				expect(
+					requests.matching("PUT", "/v1/me/language-preferences")[0]?.body,
+				).toEqual({
+					audio_languages: ["ja", "English"],
+					subtitle_languages: ["en"],
+					subtitle_mode: "on",
+				}),
+			);
+			await waitFor(() =>
+				expect(screen.getByLabelText("Audio languages")).toHaveValue(
+					"jpn, eng",
+				),
+			);
+		});
+
+		it("offers a retry when the preferences cannot be read", async () => {
+			const requests = recordRequests();
+			serveSessions();
+			server.use(
+				http.get(`${BASE_URL}/v1/me/language-preferences`, () =>
+					problem(500, "boom", "#internal"),
+				),
+			);
+			const user = userEvent.setup();
+			renderRoute("/profile");
+
+			expect(
+				await screen.findByText(/Failed to load language preferences/),
+			).toBeInTheDocument();
+			serveLanguages({
+				audio_languages: ["fre"],
+				subtitle_languages: [],
+				subtitle_mode: "off",
+			});
+			await user.click(screen.getByRole("button", { name: "Retry" }));
+
+			expect(await screen.findByLabelText("Audio languages")).toHaveValue(
+				"fre",
+			);
+			expect(
+				requests.matching("GET", "/v1/me/language-preferences").length,
+			).toBeGreaterThan(1);
+		});
+
+		it("says why the server refused a language", async () => {
+			serveSessions();
+			server.use(
+				http.put(`${BASE_URL}/v1/me/language-preferences`, () =>
+					problem(422, '"klingon" is not a language', "#validation-failed"),
+				),
+			);
+			const user = userEvent.setup();
+			renderRoute("/profile");
+
+			const audio = await screen.findByLabelText("Audio languages");
+			await user.type(audio, "klingon");
+			await user.click(screen.getByRole("button", { name: "Save languages" }));
+
+			expect(
+				await screen.findByText(/"klingon" is not a language/),
+			).toBeInTheDocument();
+			expect(screen.getByLabelText("Audio languages")).toHaveValue("klingon");
+		});
+	});
+
 	it("shows an error state when the sessions request fails", async () => {
 		serveSessions(500);
 		renderRoute("/profile");

@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import type { components } from "@/api.gen";
+import { LanguagePreferencesForm } from "@/components/LanguagePreferencesForm";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/hooks/auth";
 import { apiClient } from "@/lib/apiClient";
@@ -213,6 +214,17 @@ export function ProfilePage() {
 						</Button>
 					</div>
 				</div>
+			</div>
+
+			{/* Playback languages */}
+			<div className="mt-8 rounded-xl bg-gray-800 p-8 shadow-2xl border border-gray-700">
+				<h2 className="mb-2 text-xl font-bold text-white">
+					Playback languages
+				</h2>
+				<p className="mb-6 text-sm text-gray-400">
+					The audio and subtitles every title starts on, on every device.
+				</p>
+				<LanguagePreferencesForm />
 			</div>
 
 			{/* Active sessions */}
