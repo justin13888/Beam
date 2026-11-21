@@ -564,7 +564,33 @@ internal class ExoBeamPlayer(
         )
         reporter.stop()
         forceReport()
-        mutableState.update { it.copy(error = error.asPlaybackFailure(), isBuffering = false) }
+        val failure = error.asPlaybackFailure()
+        mutableState.update { it.copy(error = failure, isBuffering = false) }
+        if (failure.requiresSignIn) confirmSessionWithCore()
+    }
+
+    /**
+     * Let the core see the refusal the player just got.
+     *
+     * The stream is fetched by Media3's own connection, so a `401` on it never
+     * reaches the core's session machine, which is what tells the app to send
+     * the viewer to sign in. One secured call through the core puts the same
+     * cookie in front of the server: if the server refuses it there too, the
+     * core moves the session to `Expired` and announces it, exactly as for any
+     * API call. The core decides, not this class -- a stray `401` from a proxy
+     * in front of the stream does not sign anyone out while the server still
+     * honours the session. The cheapest secured call the repository offers is
+     * one row of "continue watching"; its answer, and its failure, are only
+     * the side effect.
+     */
+    private fun confirmSessionWithCore() {
+        scope.launch {
+            try {
+                repository.continueWatching(SESSION_PROBE_LIMIT)
+            } catch (_: BeamException) {
+                // The expiry, if that is what this was, is already announced.
+            }
+        }
     }
 
     private fun publishTracks(tracks: Tracks) {
@@ -582,5 +608,8 @@ internal class ExoBeamPlayer(
          * to recompose the player chrome on every frame.
          */
         const val POSITION_POLL_MS: Long = 500L
+
+        /** One row: the call is asked for its session check, not its answer. */
+        const val SESSION_PROBE_LIMIT: UInt = 1u
     }
 }

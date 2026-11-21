@@ -99,4 +99,9 @@ public data class PlaybackFailure(
      * than to retry the same bytes and fail identically.
      */
     val suggestsAnotherSource: Boolean = false,
+    /**
+     * Whether the server refused the session itself, so the way on is to sign
+     * in again rather than to retry or to pick another file.
+     */
+    val requiresSignIn: Boolean = false,
 )
