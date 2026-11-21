@@ -9,22 +9,80 @@ use std::path::Path;
 
 use super::{
     API_LATENCY_BUCKETS, DESCRIPTIONS, Kind, LONG_OPERATION_BUCKETS, LONG_OPERATION_HISTOGRAMS,
-    builder, describe, record_build_info,
+    UPKEEP_INTERVAL, Upkeep, builder, register, spawn_upkeep,
 };
 
 /// Render the production recorder after `record` ran against it, with every
-/// description registered and the build recorded, as `install` does.
+/// description registered and the build recorded by the same [`register`]
+/// `install` calls.
 fn render(record: impl FnOnce()) -> String {
     let recorder = builder()
         .expect("the bucket configuration is valid")
         .build_recorder();
     let handle = recorder.handle();
     ::metrics::with_local_recorder(&recorder, || {
-        describe();
-        record_build_info();
+        register();
         record();
     });
     handle.render()
+}
+
+// ─── upkeep ─────────────────────────────────────────────────────────────────
+
+/// Counts how often it was asked to drain.
+#[derive(Clone, Default)]
+struct CountingUpkeep(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl CountingUpkeep {
+    fn runs(&self) -> usize {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl Upkeep for CountingUpkeep {
+    fn run_upkeep(&self) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Lets the spawned task run to its next await without moving time.
+async fn settle() {
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+}
+
+/// With nothing scraping, upkeep is the only thing that drains histograms, so
+/// it must keep running once per interval -- not once, and not in a busy loop.
+#[tokio::test(start_paused = true)]
+async fn upkeep_drains_once_at_start_and_once_per_interval_after() {
+    let upkeep = CountingUpkeep::default();
+    let task = spawn_upkeep(upkeep.clone());
+
+    settle().await;
+    assert_eq!(upkeep.runs(), 1, "upkeep runs as soon as it starts");
+
+    tokio::time::advance(UPKEEP_INTERVAL - std::time::Duration::from_millis(1)).await;
+    settle().await;
+    assert_eq!(upkeep.runs(), 1, "nothing more before the interval elapses");
+
+    tokio::time::advance(std::time::Duration::from_millis(1)).await;
+    settle().await;
+    assert_eq!(upkeep.runs(), 2, "one more drain at the interval");
+
+    tokio::time::advance(UPKEEP_INTERVAL * 3).await;
+    settle().await;
+    assert_eq!(
+        upkeep.runs(),
+        3,
+        "a late wake-up drains once rather than catching up on missed ticks"
+    );
+
+    tokio::time::advance(UPKEEP_INTERVAL).await;
+    settle().await;
+    assert_eq!(upkeep.runs(), 4, "and keeps going for as long as it runs");
+
+    task.abort();
 }
 
 /// The `le` bounds of `name`'s bucket series, in rendered order, without `+Inf`.

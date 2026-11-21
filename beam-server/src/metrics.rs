@@ -165,9 +165,18 @@ pub fn builder() -> Result<PrometheusBuilder, BuildError> {
 /// owns upkeep: hand the returned handle to [`spawn_upkeep`].
 pub fn install() -> Result<PrometheusHandle, BuildError> {
     let handle = builder()?.install_recorder()?;
+    register();
+    Ok(handle)
+}
+
+/// Everything [`install`] does to a recorder once it is current: describe
+/// every metric and record the build.
+///
+/// Separate so a test can run exactly this against a local recorder; it is
+/// the one sequence `install` and that test share.
+pub fn register() {
     describe();
     record_build_info();
-    Ok(handle)
 }
 
 /// Register every entry of [`DESCRIPTIONS`] with the current recorder.
@@ -219,15 +228,30 @@ pub fn record_build_info() {
     .set(1.0);
 }
 
+/// A recorder whose histogram samples must be drained periodically.
+///
+/// The seam [`spawn_upkeep`] runs against, so its schedule can be tested
+/// without a global recorder.
+pub trait Upkeep: Send + 'static {
+    /// Drain buffered histogram samples.
+    fn run_upkeep(&self);
+}
+
+impl Upkeep for PrometheusHandle {
+    fn run_upkeep(&self) {
+        PrometheusHandle::run_upkeep(self);
+    }
+}
+
 /// Drain histogram samples every [`UPKEEP_INTERVAL`] for as long as the
-/// process runs.
-pub fn spawn_upkeep(handle: PrometheusHandle) -> tokio::task::JoinHandle<()> {
+/// process runs, starting at once.
+pub fn spawn_upkeep(target: impl Upkeep) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(UPKEEP_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             interval.tick().await;
-            handle.run_upkeep();
+            target.run_upkeep();
         }
     })
 }

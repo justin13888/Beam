@@ -79,6 +79,41 @@ async fn metrics_endpoint_renders_prometheus_text_when_a_recorder_is_installed()
     );
 }
 
+/// A scrape samples the process as it is at the scrape: the `process_*`
+/// series come from rendering `/metrics`, not from anything recorded before.
+///
+/// Linux only, the platform the server ships on; elsewhere the collector may
+/// report nothing, which is its documented behaviour.
+#[cfg(target_os = "linux")]
+#[test]
+fn metrics_endpoint_samples_the_process_series_at_each_scrape() {
+    let recorder = PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    let rt = runtime();
+
+    assert!(
+        !handle.render().contains("process_resident_memory_bytes"),
+        "nothing is sampled before the scrape"
+    );
+
+    // A current-thread runtime inside the local-recorder scope, so the
+    // handler's sampling lands in the recorder the state's handle renders.
+    let body = metrics::with_local_recorder(&recorder, || {
+        rt.block_on(async {
+            let client = TestClient::new(service(Some(handle.clone()), |_| {}));
+            let response = client.get("/metrics").send().await;
+            assert_eq!(response.status(), StatusCode::OK);
+            response.text().to_owned()
+        })
+    });
+
+    assert!(
+        body.lines()
+            .any(|line| line.starts_with("process_resident_memory_bytes ")),
+        "a scrape must carry the process's resident memory, got: {body}"
+    );
+}
+
 /// The route is mounted in every build; only its answer depends on
 /// configuration. Under Salvo this was a 404, because the route itself was
 /// conditional -- which made the served surface differ from the document.

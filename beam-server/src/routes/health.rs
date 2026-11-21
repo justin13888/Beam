@@ -130,8 +130,9 @@ pub async fn health_check(Inject(state): Inject<AppState>) -> HealthReply {
 /// passed, 0 when it failed.
 ///
 /// Recorded by the same probe run that answers `/v1/health`, so the gauge and
-/// the endpoint never disagree, and it is as fresh as the orchestrator's
-/// liveness and readiness probes keep it.
+/// the endpoint never disagree, and it is as fresh as whatever calls
+/// `/v1/health` keeps it. Under the Helm chart that is the startup and
+/// readiness probes; its liveness probe is a TCP check and runs no probe.
 fn record_dependency_up(dependency: &'static str, check: &DependencyCheck) {
     let up = match check.status {
         CheckStatus::Ok => 1.0,
