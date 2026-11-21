@@ -55,9 +55,10 @@ internal object MediaModule {
 
     /**
      * The image loader's and the download manager's network path. Asks the
-     * core for the active server on every call, so signing out, signing in
-     * again or switching servers takes effect on the next fetch rather than
-     * on the next launch.
+     * core on every call for the session of the server the request goes to,
+     * active or not, so signing out or signing in again takes effect on the
+     * next fetch rather than on the next launch, and a download from one
+     * server keeps its session after the viewer switches to another.
      */
     @Provides
     @Singleton
@@ -65,12 +66,23 @@ internal object MediaModule {
         clients: BeamHttpClientFactory,
         client: BeamClient,
     ): ServerCallFactory =
-        ServerCallFactory(clients) {
-            // No active server, or not signed in to it: artwork is fetched
-            // unauthenticated, and the server answers 401 exactly as it would
-            // for any other signed-out request.
+        ServerCallFactory.signedInServers(
+            clients,
+            servers = {
+                // The core reads the list from memory and never refuses it;
+                // this keeps a refusal from failing the fetch all the same.
+                try {
+                    client.listServers()
+                } catch (_: BeamException) {
+                    emptyList()
+                }
+            },
+        ) { serverId ->
+            // Not signed in to that server, or forgotten since: the request
+            // goes out unauthenticated, and the server answers 401 exactly as
+            // it would for any other signed-out request.
             try {
-                client.serverHttpConfig()
+                client.serverHttpConfigFor(serverId)
             } catch (_: BeamException) {
                 null
             }
