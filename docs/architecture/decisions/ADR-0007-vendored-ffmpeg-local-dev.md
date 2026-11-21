@@ -47,7 +47,8 @@ images and CI continue to dynamically link a system-provided FFmpeg.
   dropped connection failed the build. Mitigated (#281): `mise run deps:ffmpeg-source`, which every
   Rust task depends on, fetches the branch once per host into a cache with retries, and a git
   `url.insteadOf` rewrite in `mise.toml`'s `[env]` points the build script's clone at it. The
-  compile itself is still repeated per build directory.
+  compile itself was still repeated per build directory, and often twice within one: see the
+  amendment below.
 - Static-linking FFmpeg into a *distributed* artifact (a container image, a release binary) has
   different licensing implications than a developer's local test binary — specifically, this ADR does
   **not** extend to container images or CI, which deliberately keep dynamically linking a
@@ -59,3 +60,46 @@ images and CI continue to dynamically link a system-provided FFmpeg.
   build might (no proprietary codec libraries), which is sufficient for `beam-index`'s probing
   use case (which relies on natively-supported decoders) but would not be sufficient if some future
   use case needed encoding via a licensed codec library locally.
+
+## Amendment: one FFmpeg build per host (2026-11-20, issue #478)
+
+The `build` feature compiles FFmpeg inside its build script's `OUT_DIR`, which is private to one
+target directory and one build-script hash. `bindgen` is a build-dependency of `ffmpeg-sys-next`
+only, so any change in host-side feature unification between cargo invocations -- another `-p`
+selection, `--all-targets` -- re-hashes it, gives the build script a new `OUT_DIR`, and compiles
+FFmpeg from scratch: about 1 GB and several minutes per copy, through a `configure` whose thousands
+of probes sccache cannot cache. One host with nine worktrees held fifteen such copies.
+
+The local default is now a second feature, `prebuilt-ffmpeg`, which enables `ffmpeg-next/static`
+without `build`. `mise run deps:ffmpeg-build`, which every Rust task depends on, compiles FFmpeg once
+per host into `BEAM_FFMPEG_CACHE`, keyed by the `ffmpeg-sys-next` version Cargo.lock resolves, the
+source mirror's commit, the feature set and the host triple. It drives `ffmpeg-sys-next`'s own
+build script, with the feature set `vendored-ffmpeg` gives it, so the FFmpeg is the same LGPL-only
+static build this ADR chose and no configure flag is restated. `ffmpeg-sys-next` then finds it
+through pkg-config (`PKG_CONFIG_PATH`, set by `mise.toml` only when `prebuilt-ffmpeg` is selected),
+so the FFmpeg no longer depends on `OUT_DIR`, the `bindgen` hash or the package selection. That is
+also what lets `rust:clippy:affected` and `rust:test:affected` scope cargo to the packages a change
+affects (ADR-0009) without rebuilding FFmpeg for each new selection.
+
+`vendored-ffmpeg` keeps working unchanged, and `mutation-testing` still uses it, so cargo-mutants'
+scratch copies still compile FFmpeg per copy. CI and container images are unaffected: they set
+`BEAM_CARGO_FEATURES=""` and link the system FFmpeg, and both `deps:ffmpeg-*` tasks are no-ops there.
+
+The same change makes Rust compiles cacheable across worktrees: `mise.toml` exports
+`SCCACHE_BASEDIRS` with the checkout root (so `target/`, `OUT_DIR` and the crate paths hash the same
+in every worktree) and the cargo home, and the Rust tasks `mise run ci` and CI run set
+`CARGO_INCREMENTAL=0`, because sccache refuses incremental compiles. The host's sccache setup itself
+stays outside the repository; see `docs/operations/configuration.md`.
+
+Nested checkouts inherit the enclosing checkout's default. mise loads every `mise.toml` from the
+filesystem root down, so a worktree nested inside another checkout (as `.claude/worktrees/*` is)
+reads that checkout's `[env]` first, and `BEAM_CARGO_FEATURES`'s `env.` template -- which exists so
+an explicit caller value wins -- then keeps the outer checkout's value rather than applying its own
+default. Two consequences follow while the outer checkout and a nested one disagree. A nested
+checkout of this change under an older outer checkout resolves `vendored-ffmpeg`, so its gates run
+the old path unless `BEAM_CARGO_FEATURES` is exported explicitly. A nested checkout of an older
+branch under an outer checkout that carries this change resolves `prebuilt-ffmpeg`, a feature its
+own `Cargo.toml` lacks, and every Rust task in it fails until it merges this change (or exports
+`BEAM_CARGO_FEATURES=beam-index/vendored-ffmpeg,beam-server/vendored-ffmpeg`). Branches in flight
+when this lands should therefore merge the default branch before their next Rust task; once both
+sides carry this change they agree and the inheritance is invisible.

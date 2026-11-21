@@ -111,7 +111,7 @@ when the module is first imported, which is before any test interceptor installs
 could never see a request the app made, and that is *why* every test had mocked the client away.
 `apiClient` now resolves `fetch` per call.
 
-`ts:typecheck` and `ts:test` both run in `mise run ci`, in the pre-push hook, and in CI's
+`ts:typecheck` and `ts:test` both run in `mise run ci` and in CI's
 `ts-typecheck` and `ts-test` jobs; `ts-test` runs `ts:coverage`, which enforces the threshold below.
 `ts:typecheck` regenerates the gitignored `api.gen.ts` from the committed `openapi.json` first (see
 [architecture/api.md](architecture/api.md#openapi-docs-and-codegen)), so the doubles are checked
