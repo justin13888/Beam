@@ -33,6 +33,7 @@ image = { version = "0.25.10", default-features = false, features = ["jpeg", "pn
 kynos = { workspace = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
+metrics-process = { workspace = true }
 mutants = { workspace = true }
 sea-orm = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
@@ -54,6 +55,8 @@ beam-auth = { path = "../beam-auth", features = ["test-utils"] }
 beam-domain = { path = "../beam-domain", features = ["test-utils"] }
 beam-index = { path = "../beam-index", features = ["test-utils"] }
 metrics-util = { workspace = true }
+# Paused time, so the metrics upkeep schedule is tested without waiting on it.
+tokio = { workspace = true, features = ["test-util"] }
 mockall = "0.15.0"
 # The harness of the opt-in `e2e-server` tier (tests/e2e_server.rs). An empty
 # library unless that feature is on.
