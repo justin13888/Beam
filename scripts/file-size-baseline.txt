@@ -14,7 +14,6 @@ limit .kt 312
 limit .kts 312
 
 beam-android/app/src/main/kotlin/dev/beam/android/ui/BeamApp.kt
-beam-android/core/ffi/src/main/kotlin/dev/beam/android/core/ffi/repository/Repositories.kt
 beam-android/core/ffi/src/test/kotlin/dev/beam/android/core/ffi/DeviceProfilesTest.kt
 beam-android/core/media/src/main/kotlin/dev/beam/android/core/media/player/ExoBeamPlayer.kt
 beam-android/core/media/src/test/kotlin/dev/beam/android/core/media/download/DownloadArtworkTest.kt
