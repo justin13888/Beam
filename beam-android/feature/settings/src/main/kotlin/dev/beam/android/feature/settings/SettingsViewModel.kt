@@ -102,14 +102,15 @@ public class SettingsViewModel
          * queued progress and the downloads fetched from it. The active one is
          * signed out of instead, which is the account row's button.
          *
-         * The downloads go only once the core has forgotten the server: a
-         * removal that failed leaves the server listed, and its downloads must
-         * still be there with it.
+         * The downloads go whatever the core answers: it unlists the server
+         * before any write that can fail, so a removal that reports failure
+         * has already forgotten it, and keeping the downloads would orphan
+         * them under a server nothing lists.
          */
         public fun removeServer(serverId: String) {
             if (mutableState.value.server?.id == serverId) return
             viewModelScope.launch {
-                runCatching { servers.removeServer(serverId) }.onFailure { return@launch }
+                runCatching { servers.removeServer(serverId) }
                 runCatching { downloads.removeServer(serverId) }
             }
         }

@@ -58,19 +58,18 @@ class ServerDownloadsTest {
         }
 
     @Test
-    fun `a server the core failed to forget keeps its downloads`() =
+    fun `a removal the core reports as failed still deletes its downloads`() =
         runTest {
             val model = viewModel()
             testScheduler.advanceUntilIdle()
 
+            // The core's forget_server unlists the server before any storage
+            // write that can fail, so a failed removal has already forgotten
+            // it; downloads kept back would belong to no listed server.
             servers.failWith = BeamException.Network("the connection dropped", true)
             model.removeServer("cabin")
             testScheduler.advanceUntilIdle()
 
-            assertEquals(
-                "the server is still listed, so its downloads stay with it",
-                listOf("h1", "c1"),
-                downloads.current.map { it.fileId },
-            )
+            assertEquals(listOf("h1"), downloads.current.map { it.fileId })
         }
 }
