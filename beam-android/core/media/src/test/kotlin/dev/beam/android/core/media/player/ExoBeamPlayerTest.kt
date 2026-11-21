@@ -157,7 +157,7 @@ class ExoBeamPlayerTest {
             val player = player(scope)
             player.play(REQUEST)
             scope.runCurrent()
-            playback.failWith = BeamException.Network("connection reset")
+            playback.failWith = BeamException.Network("connection reset", retryable = true)
 
             player.onPlayerError(badStatus(401))
             scope.runCurrent()
