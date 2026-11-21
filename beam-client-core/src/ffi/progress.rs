@@ -67,7 +67,8 @@ impl BeamClient {
         // had. Recorded after the send, so the device's storage never holds
         // back the position the server keeps, and after the queue retires an
         // acknowledged sample, so a failure here cannot leave an older one
-        // queued to overwrite it.
+        // queued to overwrite it. On a failed send it is recorded after the
+        // sample is queued, so a failure here cannot lose the retry.
         let recorded = self.last_positions(&server_id);
         match TransportFailure::capture(client.report_playback_progress(wire_file_id, &body)).await
         {
@@ -84,7 +85,6 @@ impl BeamClient {
                 // produced a request. Clearing it lets the retry happen.
                 throttle.reset(&file_id);
                 let mapped = self.fail(&server_id, &failure).await;
-                recorded.record(&file_id, position, duration).await?;
 
                 // A rejected body, a forbidden file, a title that no longer
                 // exists: the identical request fails identically forever.
@@ -103,6 +103,7 @@ impl BeamClient {
                 // exactly that kind of interruption. Those are queued, and
                 // `flush_progress` sends them once the user has acted.
                 if mapped.is_permanent() {
+                    recorded.record(&file_id, position, duration).await?;
                     return Ok(ProgressOutcome::Dropped {
                         reason: mapped.to_string(),
                     });
@@ -118,9 +119,13 @@ impl BeamClient {
                 let not_before_unix = failure.retry_after_secs.map_or(now, |seconds| {
                     now.saturating_add(i64::try_from(seconds).unwrap_or(i64::MAX))
                 });
+                // Queued before it is recorded: the queued sample is the one
+                // copy bound for the server, so a record the device cannot
+                // write must not cost it. The queue also answers an offline
+                // Play, so the position survives even then.
                 queue
                     .enqueue(QueuedProgress {
-                        file_id,
+                        file_id: file_id.clone(),
                         position_secs: position,
                         duration_secs: duration,
                         captured_at_unix: now,
@@ -129,6 +134,7 @@ impl BeamClient {
                         not_before_unix,
                     })
                     .await?;
+                recorded.record(&file_id, position, duration).await?;
                 let pending = queue.len().await?;
                 Ok(ProgressOutcome::Queued {
                     pending: u32::try_from(pending).unwrap_or(u32::MAX),

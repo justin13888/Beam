@@ -749,3 +749,27 @@ async fn storage_that_cannot_record_the_position_does_not_hold_back_the_send() {
     assert!(matches!(error, BeamError::Storage { .. }), "{error:?}");
     assert_eq!(backend.recorded().len(), 1, "the send went out first");
 }
+
+/// A failed send's sample is the one copy bound for the server, so it is
+/// queued before the device records the position: a record that cannot be
+/// written fails the call without costing the retry.
+#[tokio::test]
+async fn storage_that_cannot_record_the_position_does_not_lose_the_queued_retry() {
+    let (client, id, storage, _clock) = clocked_client().await;
+    answer_with(
+        &client,
+        &id,
+        vec![crate::transport::CannedAnswer::Unreachable],
+    );
+    storage.set_failure(FailureMode::FailWritesUnder("progress_last/"));
+
+    let error = client
+        .report_progress(FILE_A.to_owned(), 120.0, Some(7200.0), true)
+        .await
+        .expect_err("the record could not be written");
+
+    assert!(matches!(error, BeamError::Storage { .. }), "{error:?}");
+    let queued = queued(&storage, &id).await;
+    assert_eq!(queued.len(), 1, "the retry sample was queued first");
+    assert_eq!(queued[0].position_secs, 120.0);
+}
