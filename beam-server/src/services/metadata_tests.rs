@@ -247,6 +247,9 @@ pub(super) mod tests {
             air_date: None,
             runtime: None,
             thumbnail_url: None,
+            numbering: beam_domain::utils::media_path::EpisodeNumbering::Standard,
+            absolute_number: None,
+            absolute_season_number: None,
             created_at: chrono::Utc::now(),
         };
         let episode_id = ep.id;
@@ -462,6 +465,9 @@ pub(super) mod tests {
             air_date: None,
             runtime: None,
             thumbnail_url: None,
+            numbering: beam_domain::utils::media_path::EpisodeNumbering::Standard,
+            absolute_number: None,
+            absolute_season_number: None,
             created_at: chrono::Utc::now(),
         };
         let episode_id = ep.id;
@@ -653,6 +659,9 @@ pub(super) mod tests {
             air_date: None,
             runtime: None,
             thumbnail_url: Some("https://image.tmdb.org/t/p/w300/still.jpg".to_string()),
+            numbering: beam_domain::utils::media_path::EpisodeNumbering::Standard,
+            absolute_number: None,
+            absolute_season_number: None,
             created_at: chrono::Utc::now(),
         };
         let episode_id = episode.id;

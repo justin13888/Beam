@@ -687,6 +687,7 @@ async fn reclassification_moves_a_season_folder_husk_onto_its_series() {
                 title: "Show Name".to_string(),
                 runtime: Some(legacy_runtime),
                 air_date: None,
+                numbering: beam_domain::utils::media_path::EpisodeNumbering::Standard,
             })
             .await
             .unwrap();
