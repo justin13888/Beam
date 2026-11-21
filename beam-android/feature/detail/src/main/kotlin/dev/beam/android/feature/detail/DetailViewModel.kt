@@ -136,9 +136,31 @@ public class DetailViewModel
             refresh()
         }
 
+        /** Whether the page has been on screen before, so [onShown] can tell a return from the first visit. */
+        private var shownBefore = false
+
         /** Reload the title. */
         public fun refresh() {
             mutableState.value = LoadState.Loading(mutableState.value.previous())
+            viewModelScope.launch { reload() }
+        }
+
+        /**
+         * The page came on screen: read the title again unless this is its
+         * first visit, which [init] already loads.
+         *
+         * This view model outlives the page under the player on the back
+         * stack, and playing moves the title's resume point. Without a reread,
+         * Play and Resume on return would start from where the viewer was
+         * before they last played -- and write that older point back over the
+         * server's newer one (issue #466). The reread keeps the page on screen
+         * rather than showing a spinner over it.
+         */
+        public fun onShown() {
+            if (!shownBefore) {
+                shownBefore = true
+                return
+            }
             viewModelScope.launch { reload() }
         }
 

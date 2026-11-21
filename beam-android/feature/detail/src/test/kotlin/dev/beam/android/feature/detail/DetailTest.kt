@@ -404,6 +404,45 @@ class DetailTest {
         }
 
     @Test
+    fun `returning from the player resumes from the server's newer point`() =
+        runTest {
+            // The view model survives under the player; Play on return must not
+            // start -- and then report -- the point from before the viewer played.
+            val catalog =
+                FakeCatalogRepository().apply { details[MEDIA_ID] = Fixtures.movieDetail(Fixtures.movie()) }
+            val playback =
+                FakePlaybackRepository().apply {
+                    selection =
+                        SourceSelection(
+                            source = Fixtures.source(fileId = "uhd"),
+                            playability = Playability.Hardware,
+                            audioTrackIndex = null,
+                            reason = "",
+                            rejected = emptyList(),
+                        )
+                }
+            val model = viewModel(catalog = catalog, playback = playback)
+            model.onShown()
+            testScheduler.advanceUntilIdle()
+            assertEquals(
+                0.0,
+                model.state.value.valueOrNull!!
+                    .play()!!
+                    .startPositionSecs,
+                0.0,
+            )
+
+            // The viewer played to 20 minutes, stopped, and came back.
+            catalog.details[MEDIA_ID] = Fixtures.movieDetail(Fixtures.movie().copy(startPositionSecs = 1_200.0))
+            model.onShown()
+            testScheduler.advanceUntilIdle()
+
+            val state = model.state.value.valueOrNull!!
+            assertEquals(1_200.0, state.play()!!.startPositionSecs, 0.0)
+            assertTrue(state.canResume)
+        }
+
+    @Test
     fun `a film with nowhere to resume plays from the start and offers no restart`() =
         runTest {
             val state = loaded(Fixtures.movieDetail(Fixtures.movie()))

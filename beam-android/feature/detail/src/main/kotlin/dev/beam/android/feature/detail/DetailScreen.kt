@@ -40,6 +40,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.beam.android.core.designsystem.BeamSizes
 import dev.beam.android.core.designsystem.BeamSpacing
@@ -63,6 +64,12 @@ public fun DetailRoute(
     viewModel: DetailViewModel = hiltViewModel(),
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    // On every return -- from the player above it on the back stack, or from
+    // the background -- so Play starts from the server's current resume point.
+    LifecycleResumeEffect(viewModel) {
+        viewModel.onShown()
+        onPauseOrDispose {}
+    }
     DetailScreen(
         state = state,
         onPlay = onPlay,
