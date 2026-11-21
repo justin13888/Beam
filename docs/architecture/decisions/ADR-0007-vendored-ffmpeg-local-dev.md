@@ -78,8 +78,8 @@ build script, with the feature set `vendored-ffmpeg` gives it, so the FFmpeg is 
 static build this ADR chose and no configure flag is restated. `ffmpeg-sys-next` then finds it
 through pkg-config (`PKG_CONFIG_PATH`, set by `mise.toml` only when `prebuilt-ffmpeg` is selected),
 so the FFmpeg no longer depends on `OUT_DIR`, the `bindgen` hash or the package selection. That is
-also what lets the pre-push hook scope cargo to the packages a push affects (ADR-0009) without
-rebuilding FFmpeg for each new selection.
+also what lets `rust:clippy:affected` and `rust:test:affected` scope cargo to the packages a change
+affects (ADR-0009) without rebuilding FFmpeg for each new selection.
 
 `vendored-ffmpeg` keeps working unchanged, and `mutation-testing` still uses it, so cargo-mutants'
 scratch copies still compile FFmpeg per copy. CI and container images are unaffected: they set

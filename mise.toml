@@ -39,8 +39,7 @@ hk = "1.57.0"
 # releases as `cargo-nextest-<semver>`, which is the version string mise wants.
 "github:nextest-rs/nextest" = "cargo-nextest-0.9.143"
 # The vendored FFmpeg build (ADR-0007, BEAM_CARGO_FEATURES below) assembles its
-# x86 SIMD with nasm, so every Rust task -- and so every Rust pre-push step --
-# needs it on PATH. Pinned here rather than left to the host's package manager
+# x86 SIMD with nasm, so every Rust task needs it on PATH. Pinned here rather than left to the host's package manager
 # so a fresh macOS or Linux checkout needs nothing mise does not provide.
 # conda-forge is the source because it is the one registry that publishes nasm
 # for linux-64, linux-aarch64, osx-64 and osx-arm64 alike; nasm.us ships Linux
@@ -120,7 +119,7 @@ SCCACHE_BASEDIRS = "{{ config_root }}{% if config_root | canonicalize != config_
 # third-party vfox plugin, and it has no NDK entry at all. `android:sdk`
 # bootstraps it with Google's own tooling instead, and every task that drives
 # Gradle or the NDK depends on it, so a fresh checkout provisions itself on the
-# first `mise run android:*` -- which is what the pre-push hook runs.
+# first `mise run android:*` -- which is what `mise run ci` runs.
 #
 # The location is owned by this file rather than read from the environment.
 # An ambient ANDROID_HOME is exactly what went wrong before: it named whatever
@@ -170,7 +169,7 @@ PKG_CONFIG_PATH = "{% if 'prebuilt-ffmpeg' in env.BEAM_CARGO_FEATURES %}{{ env.B
 # https://github.com/FFmpeg/FFmpeg` into its OUT_DIR whenever that OUT_DIR has
 # no libavutil.a -- so on every fresh worktree, every `target/` cleanup, every
 # profile and every cargo-mutants scratch copy. One network blip there fails a
-# whole pre-push. `deps:ffmpeg-source` fetches the branch once into this bare
+# whole `mise run ci`. `deps:ffmpeg-source` fetches the branch once into this bare
 # repository, with retries, and every Rust task that can vendor FFmpeg depends
 # on it.
 #
@@ -529,7 +528,7 @@ description = "Format Rust code"
 run = "cargo fmt"
 
 # The pre-push hook's `rust-fmt` step: only the pushed files, since pre-commit
-# already ran rustfmt over each staged one. `rust:fmt` stays the whole-tree
+# already ran rustfmt over each staged one, and no compile. `rust:fmt` stays the whole-tree
 # gate `ci` runs.
 [tasks."rust:fmt:files"]
 description = "Check the formatting of the given Rust files"
@@ -549,7 +548,7 @@ done
 rustfmt --edition 2024 --check $files
 '''
 
-# CARGO_INCREMENTAL=0 on the tasks the hooks and CI run (#478): sccache refuses
+# CARGO_INCREMENTAL=0 on the tasks `ci` and CI run (#478): sccache refuses
 # incremental compiles, so a dev-profile workspace crate built incrementally is
 # never cached, and every fresh worktree recompiled every workspace crate even
 # when another had built the identical source. A plain `cargo` at a terminal
@@ -573,14 +572,14 @@ depends = ["deps:ffmpeg-build"]
 env = { CARGO_INCREMENTAL = "0" }
 run = 'cargo test --workspace ${BEAM_CARGO_FEATURES:+--features "$BEAM_CARGO_FEATURES"}'
 
-# The pre-push hook's Rust gates (#478): clippy and the tests over only the
-# workspace members the pushed files belong to and the members that depend on
-# them, as scripts/affected-rust-packages.sh selects. A push that touches a
+# Quick local checks of a change, which no hook runs (#478): clippy and the
+# tests over only the workspace members the given files belong to and the
+# members that depend on them, as scripts/affected-rust-packages.sh selects. A change that touches a
 # workspace-wide input (Cargo.lock, the root Cargo.toml, rust-toolchain.toml,
 # .cargo/**) selects `--workspace`, so it lints and tests what `rust:clippy` and
-# `rust:test` do; a push touching no member runs no cargo at all, and FFmpeg is
+# `rust:test` do; a change touching no member runs no cargo at all, and FFmpeg is
 # fetched or built only for a selection whose features link it, so a
-# beam-client-core push never waits on it. The full
+# beam-client-core change never waits on it. The full
 # workspace gates stay `rust:clippy` and `rust:test`, which `ci` runs before a
 # merge (ADR-0009).
 [tasks."rust:clippy:affected"]
@@ -912,8 +911,8 @@ description = "Run the beam-web test suite"
 depends = ["deps:js"]
 run = "bun run --filter beam-web test"
 
-# The pre-push hook's `ts-test` step (#478): vitest's related mode over the
-# pushed beam-web sources, which runs only the tests whose import graph reaches
+# A quick local check, which no hook runs (#478): vitest's related mode over the
+# given beam-web sources, which runs only the tests whose import graph reaches
 # one of them. A changed file outside the source graph -- a package.json, a
 # config, the OpenAPI document, a tsconfig -- can affect every test without
 # being imported by any, and a deleted file leaves no import graph to follow,
@@ -1255,7 +1254,7 @@ fi
 # Gradle task depends on this one, which is why it has to stay the ~2 GB set.
 packages="platform-tools platforms/android-37.2 build-tools/37.0.0 ndk/29.0.14206865"
 
-# Every Android task depends on this one, including each pre-push step, so an
+# Every Android task depends on this one, including each `ci` step, so an
 # already provisioned SDK must cost nothing: no CLI start-up, no network. Every
 # installed package carries a package.xml, the SDK's own record of what is in
 # that directory, so its presence is the marker; anything without one goes
@@ -1374,10 +1373,9 @@ set -eu
 # The same guard `core:apple` carries, repeated here because a guard in a run
 # block does not protect a `depends` edge: mise resolves and runs dependencies
 # before the dependent's run block, so `core:apple`'s check never gets to
-# prevent this task. Without this, a Linux contributor pushing a
-# `beam-client-core` change runs a full cdylib build, a `uniffi_bindgen`
-# compile and a Swift generation -- for output only macOS can consume -- from
-# hook steps hk.pkl describes as a no-op. The Swift bindings and the
+# prevent this task. Without this, `mise run ci` on Linux runs a full cdylib
+# build, a `uniffi_bindgen` compile and a Swift generation -- for output only
+# macOS can consume -- from apple:* tasks that describe themselves as no-ops. The Swift bindings and the
 # XCFramework that carries them are assembled on Darwin alone.
 if [ "$(uname -s)" != "Darwin" ]; then
     echo "core:bindgen:swift: skipping -- the Swift bindings are only consumed on macOS."
@@ -1539,8 +1537,8 @@ set -eu
 android="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/android"
 
 # The emulator and its system image live here rather than in `android:sdk`:
-# they are ~10 GB, and `android:sdk` is a dependency of every Gradle task and
-# pre-push step, none of which boots a device. The image has to match the
+# they are ~10 GB, and `android:sdk` is a dependency of every Gradle task,
+# none of which boots a device. The image has to match the
 # host's architecture -- an x86_64 image is one an Apple silicon Mac cannot
 # boot.
 case "$(uname -m)" in
@@ -2347,7 +2345,7 @@ set -eu
 # It runs from inside beam-android/ because ktlint walks the whole tree under
 # its working directory and only then matches each file against the globs.
 # From the repository root that walk enters target/, which clippy -- running
-# alongside this in the pre-push hook -- rewrites, so ktlint failed with a
+# alongside this in `mise run ci` -- rewrites, so ktlint failed with a
 # NoSuchFileException on a file clippy had just deleted (#248).
 cd beam-android
 ktlint --relative '**/*.kt' '!**/build/**'
@@ -2364,8 +2362,7 @@ run = "ktlint --format --relative '**/*.kt' '!**/build/**'"
 # The chained Gradle tasks -- lint, test, screenshot, minify -- are ordered
 # against each other because they all drive ./gradlew against one project,
 # which serialises on its own lock anyway, so running them at once only
-# contends. The pre-push hook chains its Android steps for that same reason,
-# but it carries three of these four: see hk.pkl for why minify stays out.
+# contends.
 #
 # Every Gradle task here runs `exec ./gradlew`, so the Gradle client replaces
 # the task's shell. When hk aborts a hook step because another step failed, its
@@ -2860,7 +2857,7 @@ depends = [
     "ts:test",
     # Regenerates api.gen.ts from the committed openapi.json first (it is
     # gitignored), so it passes on a fresh checkout; ci.yml's ts-typecheck job
-    # and the pre-push hook in hk.pkl enforce the same.
+    # enforces the same.
     "ts:typecheck",
     "docs:build",
     "android:lint",

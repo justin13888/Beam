@@ -1,7 +1,6 @@
 #!/bin/sh
 # affected-rust-packages.sh FILE... -- the cargo package selection a change
-# needs, for the pre-push hook's `rust:clippy:affected` and `rust:test:affected`
-# (#478).
+# needs, for `rust:clippy:affected` and `rust:test:affected` (#478).
 #
 # Prints the arguments to splice into a cargo command, on one line:
 #
