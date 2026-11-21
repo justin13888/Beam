@@ -280,7 +280,17 @@ require it; a browser client served elsewhere needs `server.webUrl` set to its o
 `NOTES.txt` says so on install.
 
 **Metrics.** `metrics.enabled` sets `BEAM_ENABLE_METRICS` and adds `prometheus.io/*` annotations to
-the pod for an in-cluster scraper.
+the pod for an in-cluster scraper. The Prometheus Operator (kube-prometheus-stack) ignores those
+annotations; for it, three objects each sit behind their own flag, and the chart refuses any of them
+without `metrics.enabled`:
+
+| Flag | Object |
+|---|---|
+| `metrics.serviceMonitor.enabled` | A `ServiceMonitor` scraping `/metrics` through the server Service (`interval`, `scrapeTimeout`, `relabelings`, `metricRelabelings`). kube-prometheus-stack selects ServiceMonitors by its `release` label unless configured otherwise: set it in `metrics.serviceMonitor.labels`. |
+| `metrics.prometheusRule.enabled` | A `PrometheusRule`: `BeamTargetDown` and `BeamDependencyDown` (critical); `BeamHighErrorRatio`, `BeamHighApiLatency`, `BeamDatabasePoolSaturated`, `BeamLibraryScanStale`, `BeamLibraryScanFailing`, `BeamWatcherErrors` and `BeamProviderFailing` (warning); `BeamWatcherPolling` (info). Thresholds are values beside the flag; `alertLabels` adds labels to every alert. Expressions select series by the `namespace` and `service` labels the ServiceMonitor gives them, so a Prometheus scraping Beam another way must attach the same two. |
+| `metrics.grafanaDashboard.enabled` | A `ConfigMap` holding `charts/beam/dashboards/beam.json` (HTTP, streaming, database, indexing and watcher, enrichment, sign-in, process), labelled `grafana_dashboard: "1"` for the Grafana sidecar by default. |
+
+The metric families these rely on are [NFR-408](../requirements/non-functional.md#nfr-4xx--operability).
 
 **Images.** `image.tag` defaults to `v<appVersion>`, the tag the release that carries the chart
 publishes. No release has been cut yet, so until one is, build and push `beam-server/Containerfile`
@@ -295,5 +305,8 @@ is hardened, liveness does not probe `/v1/health`, the ingress routes the server
 grace period outlasts `BEAM_SHUTDOWN_TIMEOUT_SECS`, the `watch` and `scan` values reach the env vars
 they name, and only a `hostPath` library that opts in carries `mountPropagation` -- and that the
 chart refuses to render a library on a source it cannot make read-only, or with mount propagation
-off a `hostPath` or in any mode but `HostToContainer`. All three run in
+off a `hostPath` or in any mode but `HostToContainer`. It also asserts the `ServiceMonitor`,
+`PrometheusRule` and dashboard each render only when enabled, and first runs `check:chart-rules`,
+which checks the rendered rule with `promtool check rules` and runs the alert unit tests in
+`charts/beam/ci/prometheusrule-test.yaml` with `promtool test rules`. All three run in
 `mise run ci`, CI's `helm-chart` job, and the pre-push hook.

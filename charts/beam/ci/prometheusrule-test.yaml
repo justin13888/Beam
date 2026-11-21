@@ -1,0 +1,210 @@
+# promtool rule unit tests for the chart's PrometheusRule, run by
+# `mise run check:chart-rules` against the rule full-values.yaml renders
+# (release `beam` in namespace `default`, alertLabels team: media,
+# scanStaleHours 72). Each case states when an alert fires and when it stays
+# silent on given series, which `promtool check rules` -- a parse -- cannot.
+rule_files:
+  - full-values.rules.json
+
+evaluation_interval: 1m
+
+tests:
+  # The server creates a library's failure counter at 1 on its first failure,
+  # so the library's first failure is a series appearing at 1, not an increase.
+  - name: a library's first scan failure since process start fires
+    interval: 1m
+    input_series:
+      - series: 'beam_scan_failures_total{namespace="default",service="beam",library="1"}'
+        values: '_x30 1x150'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: BeamLibraryScanFailing
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: BeamLibraryScanFailing
+        exp_alerts: &scan_failing
+          - exp_labels:
+              severity: warning
+              team: media
+              namespace: default
+              service: beam
+              library: "1"
+            exp_annotations:
+              summary: A Beam library scan failed.
+              description: >-
+                A scan of library 1 failed or was interrupted in the last hour;
+                the server log has the cause.
+      # An hour after the counter appeared, with no further failure.
+      - eval_time: 100m
+        alertname: BeamLibraryScanFailing
+        exp_alerts: []
+
+  - name: a later scan failure fires and an old flat counter stays silent
+    interval: 1m
+    input_series:
+      - series: 'beam_scan_failures_total{namespace="default",service="beam",library="1"}'
+        values: '2x99 3x60'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: BeamLibraryScanFailing
+        exp_alerts: []
+      - eval_time: 110m
+        alertname: BeamLibraryScanFailing
+        exp_alerts: *scan_failing
+
+  - name: another release's failures do not fire this release's alert
+    interval: 1m
+    input_series:
+      - series: 'beam_scan_failures_total{namespace="other",service="beam",library="1"}'
+        values: '_x30 1x60'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: BeamLibraryScanFailing
+        exp_alerts: []
+
+  - name: a library's first watcher error since process start fires
+    interval: 1m
+    input_series:
+      - series: 'beam_watcher_errors_total{namespace="default",service="beam",library="1"}'
+        values: '_x30 1x60'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: BeamWatcherErrors
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: BeamWatcherErrors
+        exp_alerts: &watcher_errors
+          - exp_labels:
+              severity: warning
+              team: media
+              namespace: default
+              service: beam
+              library: "1"
+            exp_annotations:
+              summary: Beam's filesystem watcher is failing.
+              description: >-
+                The watcher of library 1 reported errors in the last 15 minutes,
+                so changes may reach Beam only at the next scan.
+      - eval_time: 60m
+        alertname: BeamWatcherErrors
+        exp_alerts: []
+
+  - name: a later watcher error fires
+    interval: 1m
+    input_series:
+      - series: 'beam_watcher_errors_total{namespace="default",service="beam",library="1"}'
+        values: '4x39 5x30'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: BeamWatcherErrors
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: BeamWatcherErrors
+        exp_alerts: *watcher_errors
+
+  - name: a target that stops answering fires after five minutes
+    interval: 1m
+    input_series:
+      - series: 'up{namespace="default",service="beam",job="beam"}'
+        values: '1x10 0x10'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: BeamTargetDown
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: BeamTargetDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              team: media
+              namespace: default
+              service: beam
+              job: beam
+            exp_annotations:
+              summary: Beam's /metrics cannot be scraped.
+              description: >-
+                Prometheus has not scraped beam in default for 5 minutes: the
+                server is down, restarting, or metrics are disabled.
+
+  - name: a failing dependency fires after five minutes
+    interval: 1m
+    input_series:
+      - series: 'beam_dependency_up{namespace="default",service="beam",dependency="database"}'
+        values: '1x10 0x10'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: BeamDependencyDown
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: BeamDependencyDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              team: media
+              namespace: default
+              service: beam
+              dependency: database
+            exp_annotations:
+              summary: A Beam dependency fails its health probe.
+              description: >-
+                The database check of /v1/health has failed for 5 minutes, so
+                the server answers 503 and is not ready.
+
+  - name: a library never scanned is not stale, one past the threshold is
+    interval: 1m
+    input_series:
+      # Never scanned: the gauge reads 0.
+      - series: 'beam_scan_last_success_timestamp_seconds{namespace="default",service="beam",library="1"}'
+        values: '0x4500'
+      # Last scanned at the epoch's first hour.
+      - series: 'beam_scan_last_success_timestamp_seconds{namespace="default",service="beam",library="2"}'
+        values: '3600x4500'
+    alert_rule_test:
+      # 70h after that scan: under the 72h threshold.
+      - eval_time: 71h
+        alertname: BeamLibraryScanStale
+        exp_alerts: []
+      - eval_time: 74h
+        alertname: BeamLibraryScanStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              team: media
+              namespace: default
+              service: beam
+              library: "2"
+            exp_annotations:
+              summary: A Beam library has not been scanned successfully.
+              description: >-
+                Library 2 last finished a scan 3d 1h 0m 0s ago (threshold
+                72h).
+
+  - name: a polled library fires after thirty minutes, a watched one never
+    interval: 1m
+    input_series:
+      - series: 'beam_watcher_mode{namespace="default",service="beam",library="1",mode="poll"}'
+        values: '1x40'
+      - series: 'beam_watcher_mode{namespace="default",service="beam",library="2",mode="native"}'
+        values: '1x40'
+      - series: 'beam_watcher_mode{namespace="default",service="beam",library="2",mode="poll"}'
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: BeamWatcherPolling
+        exp_alerts: []
+      - eval_time: 31m
+        alertname: BeamWatcherPolling
+        exp_alerts:
+          - exp_labels:
+              severity: info
+              team: media
+              namespace: default
+              service: beam
+              library: "1"
+              mode: poll
+            exp_annotations:
+              summary: A Beam library is polled rather than watched.
+              description: >-
+                Library 1 is observed by polling: it is on a network
+                filesystem, or past the node's fs.inotify.max_user_watches. New
+                files take up to watch.pollIntervalSeconds to appear.

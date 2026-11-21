@@ -86,6 +86,12 @@ impl LibraryRepository for FlakyListings {
     async fn count_files(&self, library_id: Uuid) -> Result<u64, sea_orm::DbErr> {
         self.inner.count_files(library_id).await
     }
+    async fn count_titles(
+        &self,
+        library_id: Uuid,
+    ) -> Result<beam_domain::models::LibraryTitleCounts, sea_orm::DbErr> {
+        self.inner.count_titles(library_id).await
+    }
     async fn update_scan_progress(
         &self,
         library_id: Uuid,

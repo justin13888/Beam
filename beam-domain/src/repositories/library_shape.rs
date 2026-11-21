@@ -28,10 +28,11 @@ pub mod in_memory {
 
     use super::*;
     use crate::models::file::MediaFileContent;
+    use crate::models::library::LibraryTitleCounts;
     use crate::models::library_shape::{FilesByContentType, NamedCount};
     use crate::models::stream::StreamType;
     use crate::repositories::file::in_memory::InMemoryFileRepository;
-    use crate::repositories::library::in_memory::InMemoryLibraryRepository;
+    use crate::repositories::library::in_memory::{InMemoryLibraryRepository, live_title_counts};
     use crate::repositories::movie::in_memory::InMemoryMovieRepository;
     use crate::repositories::show::in_memory::InMemoryShowRepository;
     use crate::repositories::stream::in_memory::InMemoryMediaStreamRepository;
@@ -84,24 +85,13 @@ pub mod in_memory {
                 .collect();
 
             let mut files = FilesByContentType::default();
-            let mut live_entries = HashSet::new();
-            let mut live_episodes = HashSet::new();
             let mut containers = BTreeMap::new();
             let mut file_sizes = FileSizeHistogram::default();
             let mut total_bytes = 0u64;
             for file in &present {
                 match &file.content {
-                    Some(MediaFileContent::Movie { movie_entry_id, .. }) => {
-                        files.movie += 1;
-                        live_entries.insert(*movie_entry_id);
-                    }
-                    Some(MediaFileContent::Episode {
-                        episode_id,
-                        last_episode_number: _,
-                    }) => {
-                        files.episode += 1;
-                        live_episodes.insert(*episode_id);
-                    }
+                    Some(MediaFileContent::Movie { .. }) => files.movie += 1,
+                    Some(MediaFileContent::Episode { .. }) => files.episode += 1,
                     None => files.unclassified += 1,
                 }
                 let container = file
@@ -113,27 +103,14 @@ pub mod in_memory {
                 total_bytes += file.size_bytes;
             }
 
-            let movies: HashSet<Uuid> = {
-                let entries = self.movies.entries.lock().unwrap();
-                live_entries
-                    .iter()
-                    .filter_map(|id| entries.get(id).map(|e| e.movie_id))
-                    .collect()
-            };
-            let seasons: HashSet<Uuid> = {
-                let episodes = self.shows.episodes.lock().unwrap();
-                live_episodes
-                    .iter()
-                    .filter_map(|id| episodes.get(id).map(|e| e.season_id))
-                    .collect()
-            };
-            let shows: HashSet<Uuid> = {
-                let all = self.shows.seasons.lock().unwrap();
-                seasons
-                    .iter()
-                    .filter_map(|id| all.get(id).map(|s| s.show_id))
-                    .collect()
-            };
+            let contents: Vec<MediaFileContent> =
+                present.iter().filter_map(|f| f.content.clone()).collect();
+            let LibraryTitleCounts {
+                movies,
+                shows,
+                seasons,
+                episodes,
+            } = live_title_counts(&contents, &self.movies, &self.shows);
 
             let present_ids: HashSet<Uuid> = present.iter().map(|f| f.id).collect();
             let mut video = BTreeMap::new();
@@ -155,13 +132,10 @@ pub mod in_memory {
 
             Ok(LibraryShape {
                 libraries: self.libraries.libraries.lock().unwrap().len() as u64,
-                movies: movies.len() as u64,
-                shows: shows.len() as u64,
-                seasons: seasons.len() as u64,
-                episodes: live_episodes
-                    .iter()
-                    .filter(|id| self.shows.episodes.lock().unwrap().contains_key(id))
-                    .count() as u64,
+                movies,
+                shows,
+                seasons,
+                episodes,
                 files,
                 containers: sorted(containers),
                 video_codecs: sorted(video),

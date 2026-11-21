@@ -293,6 +293,115 @@ fn every_emitted_metric_is_described_and_every_description_is_emitted() {
     assert!(stale.is_empty(), "described but emitted nowhere: {stale:?}");
 }
 
+// ─── the Helm chart's alerts and dashboard name only described metrics ──────
+
+/// Every identifier in `text` that starts `beam_` or `process_` at a word
+/// boundary: the metric names a PromQL expression or a dashboard query uses.
+fn referenced_names(text: &str) -> BTreeSet<String> {
+    let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let mut names = BTreeSet::new();
+    for prefix in ["beam_", "process_"] {
+        for (start, _) in text.match_indices(prefix) {
+            if text[..start].chars().next_back().is_some_and(is_ident) {
+                continue;
+            }
+            let end = text[start..]
+                .find(|c: char| !is_ident(c))
+                .map_or(text.len(), |offset| start + offset);
+            names.insert(text[start..end].to_owned());
+        }
+    }
+    names
+}
+
+/// The chart files whose queries name metrics: the PrometheusRule template and
+/// every dashboard under `charts/beam/dashboards`.
+fn chart_query_files() -> Vec<std::path::PathBuf> {
+    let chart = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("beam-server sits inside the workspace")
+        .join("charts/beam");
+    let mut files = vec![chart.join("templates/prometheusrule.yaml")];
+    let dashboards = chart.join("dashboards");
+    for entry in std::fs::read_dir(&dashboards)
+        .unwrap_or_else(|error| panic!("reading {}: {error}", dashboards.display()))
+    {
+        let path = entry.expect("a directory entry").path();
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "json")
+        {
+            files.push(path);
+        }
+    }
+    files
+}
+
+/// The chart's alerts and dashboard (issue #459) are only as good as the
+/// series they query: a renamed or removed metric would leave an alert that
+/// never fires and a panel that is silently empty. Every name they use must
+/// be one this server describes -- a `DESCRIPTIONS` entry, or a `process_*`
+/// series the collector renders with HELP text -- read from the server
+/// itself, not from a list kept beside the chart.
+///
+/// Linux only, for the reason the process-series test above gives.
+#[cfg(target_os = "linux")]
+#[test]
+fn every_metric_the_chart_queries_is_described_by_the_server() {
+    let exposition = render(super::collect_process);
+    let mut described: BTreeSet<String> = DESCRIPTIONS
+        .iter()
+        .map(|description| description.name.to_owned())
+        .collect();
+    described.extend(exposition.lines().filter_map(|line| {
+        let name = line.strip_prefix("# HELP ")?.split_once(' ')?.0;
+        name.starts_with("process_").then(|| name.to_owned())
+    }));
+    let histograms: BTreeSet<&str> = DESCRIPTIONS
+        .iter()
+        .filter(|description| description.kind == Kind::Histogram)
+        .map(|description| description.name)
+        .collect();
+
+    for file in chart_query_files() {
+        let text = std::fs::read_to_string(&file)
+            .unwrap_or_else(|error| panic!("reading {}: {error}", file.display()));
+        let referenced = referenced_names(&text);
+        assert!(
+            !referenced.is_empty(),
+            "{} names no metric; the scan must find its queries",
+            file.display()
+        );
+        for name in &referenced {
+            // A histogram is queried through the series the exporter derives
+            // from it, never by its own name.
+            let queried = ["_bucket", "_sum", "_count"]
+                .iter()
+                .find_map(|suffix| {
+                    name.strip_suffix(suffix)
+                        .filter(|base| histograms.contains(base))
+                })
+                .unwrap_or(name);
+            assert!(
+                described.contains(queried),
+                "{} queries {name}, which the server does not describe",
+                file.display()
+            );
+        }
+    }
+}
+
+#[test]
+fn the_chart_query_scan_finds_names_at_word_boundaries_only() {
+    let names = referenced_names(
+        r#"rate(beam_http_requests_total{a="b"}[5m]) / process_open_fds and my_beam_x, "beam.json""#,
+    );
+    assert_eq!(
+        names.into_iter().collect::<Vec<_>>(),
+        ["beam_http_requests_total", "process_open_fds"]
+    );
+}
+
 #[test]
 fn descriptions_name_each_metric_once() {
     let mut seen = BTreeSet::new();

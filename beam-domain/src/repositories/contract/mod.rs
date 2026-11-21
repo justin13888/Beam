@@ -399,14 +399,21 @@ pub mod fixture {
     }
 
     /// Everything the [`crate::library_repository_contract`] suite needs: a
-    /// store of its own -- listing and counting are global -- and the file
-    /// store whose rows a library's file count is read from.
+    /// store of its own -- listing and counting are global -- the file store
+    /// whose rows a library's file count is read from, and the title stores
+    /// its title count resolves those files through.
     pub trait LibraryRepositoryFixture: Send + Sync {
         /// The repository under contract, empty when the fixture is made.
         fn repo(&self) -> &dyn crate::repositories::LibraryRepository;
 
         /// The file store sharing the repository's backing store.
         fn files(&self) -> &dyn crate::repositories::FileRepository;
+
+        /// The movie store sharing the repository's backing store.
+        fn movies(&self) -> &dyn crate::repositories::MovieRepository;
+
+        /// The show store sharing the repository's backing store.
+        fn shows(&self) -> &dyn crate::repositories::ShowRepository;
     }
 
     /// Everything the [`crate::media_stream_repository_contract`] suite

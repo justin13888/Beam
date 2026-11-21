@@ -1,0 +1,328 @@
+{
+  "title": "Beam",
+  "uid": "beam-server",
+  "description": "Beam media server: HTTP, streaming, database, indexing and watcher, enrichment, sign-in and process. Every metric here is one beam-server describes; a test in beam-server/src/metrics_tests.rs fails on any it does not.",
+  "tags": ["beam"],
+  "editable": true,
+  "graphTooltip": 1,
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {},
+  "annotations": { "list": [] },
+  "links": [],
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "label": "Data source",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0
+      },
+      {
+        "name": "namespace",
+        "label": "Namespace",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "query": { "query": "label_values(beam_build_info, namespace)", "refId": "namespace" },
+        "definition": "label_values(beam_build_info, namespace)",
+        "refresh": 2,
+        "sort": 1,
+        "current": {},
+        "hide": 0
+      },
+      {
+        "name": "service",
+        "label": "Service",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "query": { "query": "label_values(beam_build_info{namespace=\"$namespace\"}, service)", "refId": "service" },
+        "definition": "label_values(beam_build_info{namespace=\"$namespace\"}, service)",
+        "refresh": 2,
+        "sort": 1,
+        "current": {},
+        "hide": 0
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1, "type": "row", "title": "HTTP", "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }, "panels": []
+    },
+    {
+      "id": 2, "type": "timeseries", "title": "Requests by status",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum by (status) (rate(beam_http_requests_total{namespace=\"$namespace\",service=\"$service\"}[$__rate_interval]))", "legendFormat": "{{status}}" }
+      ]
+    },
+    {
+      "id": 3, "type": "timeseries", "title": "5xx ratio",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(beam_http_requests_total{namespace=\"$namespace\",service=\"$service\",status=~\"5..\"}[$__rate_interval])) / sum(rate(beam_http_requests_total{namespace=\"$namespace\",service=\"$service\"}[$__rate_interval]))", "legendFormat": "5xx" }
+      ]
+    },
+    {
+      "id": 4, "type": "timeseries", "title": "Requests in flight",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum(beam_http_requests_in_flight{namespace=\"$namespace\",service=\"$service\"})", "legendFormat": "in flight" }
+      ]
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "p95 time to response head, by route",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 9 },
+      "fieldConfig": { "defaults": { "unit": "s", "min": 0 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.95, sum by (le, route) (rate(beam_http_request_duration_seconds_bucket{namespace=\"$namespace\",service=\"$service\"}[$__rate_interval])))", "legendFormat": "{{route}}" }
+      ]
+    },
+    {
+      "id": 6, "type": "timeseries", "title": "Responses dropped before their end, by route",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 9 },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum by (route) (increase(beam_http_response_disconnects_total{namespace=\"$namespace\",service=\"$service\"}[$__rate_interval]))", "legendFormat": "{{route}}" }
+      ]
+    },
+    {
+      "id": 7, "type": "timeseries", "title": "Rate-limit refusals, by route class",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 17 },
+      "fieldConfig": { "defaults": { "unit": "reqps", "min": 0 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum by (route_class) (rate(beam_rate_limited_total{namespace=\"$namespace\",service=\"$service\"}[$__rate_interval]))", "legendFormat": "{{route_class}}" }
+      ]
+    },
+    {
+      "id": 8, "type": "timeseries", "title": "Sign-ins and session-store errors",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 17 },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum by (flow, result) (increase(beam_auth_logins_total{namespace=\"$namespace\",service=\"$service\"}[$__rate_interval]))", "legendFormat": "{{flow}} {{result}}" },
+        { "refId": "B", "expr": "sum(increase(beam_session_store_errors_total{namespace=\"$namespace\",service=\"$service\"}[$__rate_interval]))", "legendFormat": "session-store errors" }
+      ]
+    },
+    {
+      "id": 9, "type": "row", "title": "Streaming", "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 25 }, "panels": []
+    },
+    {
+      "id": 10, "type": "timeseries", "title": "Media bytes served, by endpoint",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 26 },
+      "fieldConfig": { "defaults": { "unit": "Bps", "min": 0 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum by (endpoint) (rate(beam_stream_bytes_total{namespace=\"$namespace\",service=\"$service\"}[$__rate_interval]))", "legendFormat": "{{endpoint}}" }
+      ]
+    },
+    {
+      "id": 11, "type": "timeseries", "title": "Active bodies, by endpoint",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 26 },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum by (endpoint) (beam_streams_active{namespace=\"$namespace\",service=\"$service\"})", "legendFormat": "{{endpoint}}" }
+      ]
+    },
+    {
+      "id": 12, "type": "timeseries", "title": "Bodies aborted, by endpoint",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 26 },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum by (endpoint) (increase(beam_stream_aborted_total{namespace=\"$namespace\",service=\"$service\"}[$__rate_interval]))", "legendFormat": "{{endpoint}}" }
+      ]
+    },
+    {
+      "id": 13, "type": "row", "title": "Database", "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 34 }, "panels": []
+    },
+    {
+      "id": 14, "type": "timeseries", "title": "Pool connections",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 35 },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum by (state) (beam_db_pool_connections{namespace=\"$namespace\",service=\"$service\"})", "legendFormat": "{{state}}" },
+        { "refId": "B", "expr": "max(beam_db_pool_max{namespace=\"$namespace\",service=\"$service\"})", "legendFormat": "max" }
+      ]
+    },
+    {
+      "id": 15, "type": "timeseries", "title": "p95 connection acquire wait",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 35 },
+      "fieldConfig": { "defaults": { "unit": "s", "min": 0 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.95, sum by (le) (rate(beam_db_acquire_duration_seconds_bucket{namespace=\"$namespace\",service=\"$service\"}[$__rate_interval])))", "legendFormat": "p95" }
+      ]
+    },
+    {
+      "id": 16, "type": "timeseries", "title": "Database errors and dependency health",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 35 },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum by (kind) (increase(beam_db_errors_total{namespace=\"$namespace\",service=\"$service\"}[$__rate_interval]))", "legendFormat": "error: {{kind}}" },
+        { "refId": "B", "expr": "min by (dependency) (beam_dependency_up{namespace=\"$namespace\",service=\"$service\"})", "legendFormat": "up: {{dependency}}" }
+      ]
+    },
+    {
+      "id": 17, "type": "row", "title": "Indexing and watcher", "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 43 }, "panels": []
+    },
+    {
+      "id": 18, "type": "timeseries", "title": "Time since last successful scan, by library",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 44 },
+      "fieldConfig": { "defaults": { "unit": "s", "min": 0 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "time() - beam_scan_last_success_timestamp_seconds{namespace=\"$namespace\",service=\"$service\"} and beam_scan_last_success_timestamp_seconds{namespace=\"$namespace\",service=\"$service\"} > 0", "legendFormat": "{{library}}" }
+      ]
+    },
+    {
+      "id": 19, "type": "timeseries", "title": "Scans in progress and failures, by library",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 44 },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "beam_scan_in_progress{namespace=\"$namespace\",service=\"$service\"}", "legendFormat": "scanning {{library}}" },
+        { "refId": "B", "expr": "increase(beam_scan_failures_total{namespace=\"$namespace\",service=\"$service\"}[$__rate_interval])", "legendFormat": "failed {{library}}" }
+      ]
+    },
+    {
+      "id": 20, "type": "timeseries", "title": "p95 scan duration, by trigger",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 44 },
+      "fieldConfig": { "defaults": { "unit": "s", "min": 0 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.95, sum by (le, trigger) (rate(beam_scan_duration_seconds_bucket{namespace=\"$namespace\",service=\"$service\"}[1h])))", "legendFormat": "{{trigger}}" }
+      ]
+    },
+    {
+      "id": 21, "type": "timeseries", "title": "Files processed and library size",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 52 },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum by (result) (increase(beam_index_files_processed_total{namespace=\"$namespace\",service=\"$service\"}[$__rate_interval]))", "legendFormat": "processed: {{result}}" },
+        { "refId": "B", "expr": "beam_library_files{namespace=\"$namespace\",service=\"$service\"}", "legendFormat": "files: {{library}}" },
+        { "refId": "C", "expr": "sum(increase(beam_index_divergence_warnings_total{namespace=\"$namespace\",service=\"$service\"}[$__rate_interval]))", "legendFormat": "runtime divergence warnings" }
+      ]
+    },
+    {
+      "id": 22, "type": "timeseries", "title": "Watcher events and errors, by library",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 52 },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum by (library, kind) (increase(beam_watcher_events_total{namespace=\"$namespace\",service=\"$service\"}[$__rate_interval]))", "legendFormat": "{{kind}} {{library}}" },
+        { "refId": "B", "expr": "increase(beam_watcher_errors_total{namespace=\"$namespace\",service=\"$service\"}[$__rate_interval])", "legendFormat": "errors {{library}}" }
+      ]
+    },
+    {
+      "id": 23, "type": "timeseries", "title": "Watcher mode and backlog",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 52 },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "beam_watcher_mode{namespace=\"$namespace\",service=\"$service\",mode=\"poll\"} == 1", "legendFormat": "polled {{library}}" },
+        { "refId": "B", "expr": "beam_watcher_pending_paths{namespace=\"$namespace\",service=\"$service\"}", "legendFormat": "pending paths" },
+        { "refId": "C", "expr": "beam_watcher_deferred_paths{namespace=\"$namespace\",service=\"$service\"}", "legendFormat": "deferred paths" }
+      ]
+    },
+    {
+      "id": 24, "type": "row", "title": "Enrichment", "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 60 }, "panels": []
+    },
+    {
+      "id": 25, "type": "timeseries", "title": "Provider requests, by provider and result",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 61 },
+      "fieldConfig": { "defaults": { "unit": "reqps", "min": 0 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum by (provider, result) (rate(beam_provider_requests_total{namespace=\"$namespace\",service=\"$service\"}[$__rate_interval]))", "legendFormat": "{{provider}} {{result}}" },
+        { "refId": "B", "expr": "sum by (provider) (rate(beam_provider_rate_limited_total{namespace=\"$namespace\",service=\"$service\"}[$__rate_interval]))", "legendFormat": "{{provider}} rate limited" }
+      ]
+    },
+    {
+      "id": 26, "type": "timeseries", "title": "p95 provider response time",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 61 },
+      "fieldConfig": { "defaults": { "unit": "s", "min": 0 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.95, sum by (le, provider) (rate(beam_provider_request_duration_seconds_bucket{namespace=\"$namespace\",service=\"$service\"}[$__rate_interval])))", "legendFormat": "{{provider}}" }
+      ]
+    },
+    {
+      "id": 27, "type": "timeseries", "title": "Enrichment outcomes and backlog",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 61 },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum by (outcome) (increase(beam_enrichment_outcomes_total{namespace=\"$namespace\",service=\"$service\"}[$__rate_interval]))", "legendFormat": "{{outcome}}" },
+        { "refId": "B", "expr": "beam_enrichment_pending{namespace=\"$namespace\",service=\"$service\"}", "legendFormat": "pending titles" },
+        { "refId": "C", "expr": "beam_trickplay_pending{namespace=\"$namespace\",service=\"$service\"}", "legendFormat": "trickplay pending" },
+        { "refId": "D", "expr": "increase(beam_trickplay_failures_total{namespace=\"$namespace\",service=\"$service\"}[$__rate_interval])", "legendFormat": "trickplay failures" }
+      ]
+    },
+    {
+      "id": 28, "type": "row", "title": "Process", "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 69 }, "panels": []
+    },
+    {
+      "id": 29, "type": "timeseries", "title": "CPU",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 70 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "rate(process_cpu_seconds_total{namespace=\"$namespace\",service=\"$service\"}[$__rate_interval])", "legendFormat": "{{pod}}" }
+      ]
+    },
+    {
+      "id": 30, "type": "timeseries", "title": "Resident memory",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 6, "x": 6, "y": 70 },
+      "fieldConfig": { "defaults": { "unit": "bytes", "min": 0 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "process_resident_memory_bytes{namespace=\"$namespace\",service=\"$service\"}", "legendFormat": "{{pod}}" }
+      ]
+    },
+    {
+      "id": 31, "type": "timeseries", "title": "File descriptors and threads",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 70 },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "process_open_fds{namespace=\"$namespace\",service=\"$service\"}", "legendFormat": "open fds" },
+        { "refId": "B", "expr": "process_max_fds{namespace=\"$namespace\",service=\"$service\"}", "legendFormat": "max fds" },
+        { "refId": "C", "expr": "process_threads{namespace=\"$namespace\",service=\"$service\"}", "legendFormat": "threads" }
+      ]
+    },
+    {
+      "id": 32, "type": "stat", "title": "Uptime and build",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 70 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "value_and_name" },
+      "targets": [
+        { "refId": "A", "expr": "time() - process_start_time_seconds{namespace=\"$namespace\",service=\"$service\"} and on (pod) beam_build_info{namespace=\"$namespace\",service=\"$service\"}", "legendFormat": "{{pod}}" },
+        { "refId": "B", "expr": "beam_build_info{namespace=\"$namespace\",service=\"$service\"}", "legendFormat": "{{version}} ({{commit}})", "instant": true }
+      ]
+    }
+  ]
+}
