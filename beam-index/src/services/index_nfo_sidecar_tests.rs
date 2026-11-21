@@ -8,13 +8,13 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 
+use super::test_harness::IndexServiceBuilder;
 use super::*;
 use crate::library_file::test_support::snapshot;
 use crate::probe::metadata::{ChapterMetadata, MetadataError};
 use crate::services::admin_log::LocalAdminLogService;
 use crate::services::hash::{HashService, LocalHashService, MockHashService};
 use crate::services::media_info::{LocalMediaInfoService, MockMediaInfoService};
-use crate::services::notification::InMemoryNotificationService;
 use beam_domain::models::applied_nfo::AppliedNfo;
 use beam_domain::models::enrichment::{EnrichmentState, EnrichmentTargetId};
 use beam_domain::models::file::{CreateMediaFile, FileClassification, UpdateMediaFile};
@@ -29,7 +29,6 @@ use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
 use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
 use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
 use beam_domain::repositories::sidecar_subtitle::in_memory::InMemorySidecarSubtitleRepository;
-use beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository;
 use beam_domain::repositories::{
     AdminLogRepository, AppliedNfoRepository, EnrichmentStateRepository, FileRepository,
 };
@@ -289,37 +288,32 @@ impl Harness {
                 Arc::new(LocalMediaInfoService::default()),
             ),
         };
-        let service = LocalIndexService::new(
-            library_repo,
-            file_reads.clone(),
-            movie_repo.clone(),
-            show_repo.clone(),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-            hasher,
-            prober,
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(LocalAdminLogService::new(
-                admin_log_repo.clone() as Arc<dyn AdminLogRepository>
-            )),
-            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-        )
-        .with_enrichment_repo(Arc::new(store_fault_tests::FaultyEnrichmentQueue {
-            inner: enrichment_repo.clone(),
-            faults: faults.clone(),
-        }))
-        .with_sidecar_repo(Arc::new(store_fault_tests::FaultySidecars {
-            inner: sidecar_repo.clone(),
-            faults: faults.clone(),
-        }))
-        .with_chapter_repo(Arc::new(store_fault_tests::FaultyChapters {
-            inner: chapter_repo.clone(),
-            faults: faults.clone(),
-        }))
-        .with_applied_nfo_repo(Arc::new(store_fault_tests::FaultyAppliedNfos {
-            inner: applied_nfo_repo.clone(),
-            faults: faults.clone(),
-        }))
-        .with_clock(clock);
+        let service = IndexServiceBuilder::new()
+            .library_repo(library_repo)
+            .file_repo(file_reads.clone())
+            .movie_repo(movie_repo.clone())
+            .show_repo(show_repo.clone())
+            .hash_service(hasher)
+            .media_info(prober)
+            .admin_log_repo(admin_log_repo.clone())
+            .build()
+            .with_enrichment_repo(Arc::new(store_fault_tests::FaultyEnrichmentQueue {
+                inner: enrichment_repo.clone(),
+                faults: faults.clone(),
+            }))
+            .with_sidecar_repo(Arc::new(store_fault_tests::FaultySidecars {
+                inner: sidecar_repo.clone(),
+                faults: faults.clone(),
+            }))
+            .with_chapter_repo(Arc::new(store_fault_tests::FaultyChapters {
+                inner: chapter_repo.clone(),
+                faults: faults.clone(),
+            }))
+            .with_applied_nfo_repo(Arc::new(store_fault_tests::FaultyAppliedNfos {
+                inner: applied_nfo_repo.clone(),
+                faults: faults.clone(),
+            }))
+            .with_clock(clock);
 
         Self {
             _dir: dir,
@@ -379,6 +373,28 @@ impl Harness {
             .reconcile_path(self.library.id, self.root.join(rel), kind)
             .await
             .unwrap()
+    }
+
+    /// Re-stamp the row at `rel` as classified by the rules version before
+    /// this one, as a build before them left it.
+    async fn classify_by_older_rules(&self, rel: &str) {
+        let MediaFile {
+            id,
+            content,
+            status,
+            ..
+        } = self.file(rel);
+        self.file_repo
+            .set_classification(
+                id,
+                FileClassification {
+                    content,
+                    status,
+                    classifier_version: CLASSIFIER_VERSION - 1,
+                },
+            )
+            .await
+            .unwrap();
     }
 
     fn file(&self, rel: &str) -> MediaFile {
@@ -689,14 +705,8 @@ async fn a_file_placed_by_its_tags_keeps_its_place_when_it_is_reclassified() {
     // As the next classifier version would find the row; and a re-probe
     // would no longer see the tags, so only the stored ones can place it.
     h.tags.lock().unwrap().clear();
-    let id = h.file("The Office/The Dundies.m4v").id;
-    h.file_repo
-        .files
-        .lock()
-        .unwrap()
-        .get_mut(&id)
-        .unwrap()
-        .classifier_version = CLASSIFIER_VERSION - 1;
+    h.classify_by_older_rules("The Office/The Dundies.m4v")
+        .await;
     h.scan().await;
 
     let file = h.file("The Office/The Dundies.m4v");
@@ -1347,13 +1357,7 @@ async fn a_row_from_older_rules_is_reclassified_by_the_nfo_beside_it() {
 
     // As a build before this NFO support left it.
     let id = h.file("Lost/Pilot Part One.mkv").id;
-    h.file_repo
-        .files
-        .lock()
-        .unwrap()
-        .get_mut(&id)
-        .unwrap()
-        .classifier_version = CLASSIFIER_VERSION - 1;
+    h.classify_by_older_rules("Lost/Pilot Part One.mkv").await;
     h.write(
         "Lost/Pilot Part One.nfo",
         "<episodedetails><season>1</season><episode>1</episode></episodedetails>",
@@ -1512,7 +1516,9 @@ async fn a_rescan_writes_nothing_for_a_subtitle_with_a_sub_microsecond_mtime() {
     );
     h.scan().await;
 
-    // Mark the row, so a rewrite -- which stamps it afresh -- shows.
+    // Mark the row, so a rewrite -- which stamps it afresh -- shows. Through
+    // the double's map: `upsert_by_path` stamps `updated_at` with the time it
+    // writes, so no trait method can leave a row with a chosen stamp.
     let marker = DateTime::<Utc>::UNIX_EPOCH;
     h.sidecar_repo
         .rows
@@ -2127,14 +2133,29 @@ async fn an_nfo_whose_stat_stamp_is_unchanged_is_not_read_again() {
     let stamp = hints::change_stamp(&crate::library_file::FileMeta::from(
         &std::fs::symlink_metadata(&nfo).unwrap(),
     ));
-    let stale = |stamp: Option<String>| {
-        let mut rows = h.applied_nfo_repo.rows.lock().unwrap();
-        let row = rows.get_mut(&nfo).unwrap();
-        row.content_hash = "stale".to_string();
-        row.change_stamp = stamp;
-    };
+    async fn stale(h: &Harness, nfo: &std::path::Path, stamp: Option<String>) {
+        use beam_domain::models::applied_nfo::RecordAppliedNfo;
+        use beam_domain::repositories::AppliedNfoRepository;
 
-    stale(stamp);
+        let recorded = h
+            .applied_nfo_repo
+            .find_by_path(nfo)
+            .await
+            .unwrap()
+            .expect("the NFO is recorded");
+        h.applied_nfo_repo
+            .record_by_path(RecordAppliedNfo {
+                library_id: recorded.library_id,
+                path: recorded.path,
+                size_bytes: recorded.size_bytes,
+                content_hash: "stale".to_string(),
+                change_stamp: stamp,
+            })
+            .await
+            .unwrap();
+    }
+
+    stale(&h, &nfo, stamp).await;
     h.scan().await;
     assert_eq!(
         h.movie_of("Matrix/matrix.mkv").pinned_ref.as_deref(),
@@ -2142,7 +2163,7 @@ async fn an_nfo_whose_stat_stamp_is_unchanged_is_not_read_again() {
         "not read, so not re-applied"
     );
 
-    stale(None);
+    stale(&h, &nfo, None).await;
     h.scan().await;
     assert_eq!(
         h.movie_of("Matrix/matrix.mkv").pinned_ref.as_deref(),
