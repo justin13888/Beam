@@ -1278,30 +1278,21 @@ mod local_index_service_adapter {
     use beam_domain::repositories::LibraryRepository;
     use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
     use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
-    use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
-    use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
-    use beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository;
 
     use super::*;
-    use crate::services::admin_log::NoOpAdminLogService;
     use crate::services::hash::{HashConfig, LocalHashService};
     use crate::services::index::LocalIndexService;
+    use crate::services::index::test_harness::IndexServiceBuilder;
     use crate::services::media_info::LocalMediaInfoService;
-    use crate::services::notification::InMemoryNotificationService;
 
     fn service(library_repo: Arc<InMemoryLibraryRepository>) -> Arc<LocalIndexService> {
-        Arc::new(LocalIndexService::new(
-            library_repo,
-            Arc::new(InMemoryFileRepository::default()),
-            Arc::new(InMemoryMovieRepository::default()),
-            Arc::new(InMemoryShowRepository::default()),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-            Arc::new(LocalHashService::new(HashConfig::default())),
-            Arc::new(LocalMediaInfoService::default()),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(NoOpAdminLogService),
-            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-        ))
+        Arc::new(
+            IndexServiceBuilder::new()
+                .library_repo(library_repo)
+                .hash_service(Arc::new(LocalHashService::new(HashConfig::default())))
+                .media_info(Arc::new(LocalMediaInfoService::default()))
+                .build(),
+        )
     }
 
     /// The admin status reads `enabled` from the status the watches are
@@ -1399,18 +1390,14 @@ mod local_index_service_adapter {
             .await
             .unwrap();
         let file_repo = Arc::new(InMemoryFileRepository::default());
-        let indexer: Arc<dyn BackgroundIndexer> = Arc::new(LocalIndexService::new(
-            library_repo,
-            file_repo.clone(),
-            Arc::new(InMemoryMovieRepository::default()),
-            Arc::new(InMemoryShowRepository::default()),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-            Arc::new(LocalHashService::new(HashConfig::default())),
-            Arc::new(LocalMediaInfoService::default()),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(NoOpAdminLogService),
-            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-        ));
+        let indexer: Arc<dyn BackgroundIndexer> = Arc::new(
+            IndexServiceBuilder::new()
+                .library_repo(library_repo)
+                .file_repo(file_repo.clone())
+                .hash_service(Arc::new(LocalHashService::new(HashConfig::default())))
+                .media_info(Arc::new(LocalMediaInfoService::default()))
+                .build(),
+        );
         let watcher = Arc::new(InMemoryFsWatcher::new());
         let clock = Arc::new(TestClock::new());
 
@@ -1476,18 +1463,16 @@ mod local_index_service_adapter {
             .await
             .unwrap();
         let file_repo = Arc::new(InMemoryFileRepository::default());
-        let index_service = Arc::new(LocalIndexService::new(
-            library_repo,
-            file_repo.clone(),
-            Arc::new(InMemoryMovieRepository::default()),
-            Arc::new(InMemoryShowRepository::default()),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-            Arc::new(LocalHashService::new(HashConfig { num_threads: 1 })),
-            Arc::new(LocalMediaInfoService::default()),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(NoOpAdminLogService),
-            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-        ));
+        let index_service = Arc::new(
+            IndexServiceBuilder::new()
+                .library_repo(library_repo)
+                .file_repo(file_repo.clone())
+                .hash_service(Arc::new(LocalHashService::new(HashConfig {
+                    num_threads: 1,
+                })))
+                .media_info(Arc::new(LocalMediaInfoService::default()))
+                .build(),
+        );
         let old = temp.path().join("Movie.2019.mkv");
         std::fs::write(&old, b"not really a movie").unwrap();
         index_service
@@ -1584,18 +1569,14 @@ mod local_index_service_adapter {
             .unwrap();
 
         let file_repo = Arc::new(InMemoryFileRepository::default());
-        let index_service = Arc::new(LocalIndexService::new(
-            library_repo,
-            file_repo.clone(),
-            Arc::new(InMemoryMovieRepository::default()),
-            Arc::new(InMemoryShowRepository::default()),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-            Arc::new(LocalHashService::new(HashConfig::default())),
-            Arc::new(LocalMediaInfoService::default()),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(NoOpAdminLogService),
-            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-        ));
+        let index_service = Arc::new(
+            IndexServiceBuilder::new()
+                .library_repo(library_repo)
+                .file_repo(file_repo.clone())
+                .hash_service(Arc::new(LocalHashService::new(HashConfig::default())))
+                .media_info(Arc::new(LocalMediaInfoService::default()))
+                .build(),
+        );
         let indexer: Arc<dyn BackgroundIndexer> = index_service;
 
         let path = temp.path().join("Movie.2019.mkv");
