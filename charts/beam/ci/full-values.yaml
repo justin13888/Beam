@@ -1,7 +1,9 @@
 # Every optional server feature on, secrets from existing Secrets, media
 # readable through a supplemental group, and libraries on three source kinds
-# the chart forces read-only (a claim, NFS and a CSI driver) plus a hostPath,
-# which has no readOnly field and whose type the chart pins to Directory.
+# the chart forces read-only (a claim, NFS and a CSI driver) plus two
+# hostPaths, which have no readOnly field and whose type the chart pins to
+# Directory -- one opting in to HostToContainer mount propagation, one not --
+# and every watcher and settle value moved off its default.
 server:
   publicUrl: https://beam.example.test
   podSecurityContext:
@@ -48,9 +50,19 @@ libraries:
         nodePublishSecretRef:
           name: smb-credentials
   - name: local
+    mountPropagation: HostToContainer
     volume:
       hostPath:
         path: /srv/media/local
+  - name: archive
+    volume:
+      hostPath:
+        path: /srv/media/archive
+watch:
+  pollIntervalSeconds: 60
+  debounceMs: 500
+scan:
+  settleSeconds: 10
 persistence:
   data:
     existingClaim: beam-data
