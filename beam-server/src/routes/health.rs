@@ -105,6 +105,7 @@ pub async fn health_check(Inject(state): Inject<AppState>) -> HealthReply {
     // Destructured so a new dependency cannot be added without deciding here
     // whether it degrades the server.
     let HealthChecks { database } = &checks;
+    record_dependency_up("database", database);
     let status = if database.status == CheckStatus::Ok {
         HealthState::Healthy
     } else {
@@ -123,6 +124,20 @@ pub async fn health_check(Inject(state): Inject<AppState>) -> HealthReply {
         HealthState::Healthy => HealthReply::Healthy(body),
         HealthState::Degraded => HealthReply::Degraded(body),
     }
+}
+
+/// Export one probe's result as `beam_dependency_up{dependency}`: 1 when it
+/// passed, 0 when it failed.
+///
+/// Recorded by the same probe run that answers `/v1/health`, so the gauge and
+/// the endpoint never disagree, and it is as fresh as the orchestrator's
+/// liveness and readiness probes keep it.
+fn record_dependency_up(dependency: &'static str, check: &DependencyCheck) {
+    let up = match check.status {
+        CheckStatus::Ok => 1.0,
+        CheckStatus::Error => 0.0,
+    };
+    metrics::gauge!("beam_dependency_up", "dependency" => dependency).set(up);
 }
 
 #[cfg(test)]

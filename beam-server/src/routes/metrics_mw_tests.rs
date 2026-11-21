@@ -365,3 +365,98 @@ fn a_body_dropped_before_delivery_is_counted_as_a_disconnect() {
         "an abandoned body still reports how long it lasted"
     );
 }
+
+// ─── requests in flight ─────────────────────────────────────────────────────
+
+/// The current value of the unlabelled `beam_http_requests_in_flight` gauge,
+/// as Prometheus would scrape it.
+///
+/// Read from a rendered exposition rather than a `DebuggingRecorder`
+/// snapshot: a snapshot drains each gauge to zero, so it reports the change
+/// since the last one, not the level.
+fn in_flight(handle: &PrometheusHandle) -> Option<f64> {
+    handle.render().lines().find_map(|line| {
+        line.strip_prefix("beam_http_requests_in_flight ")
+            .map(|value| value.parse().expect("a numeric gauge"))
+    })
+}
+
+/// A handler that never answers, standing in for one still working when its
+/// client leaves.
+#[kynos::get("/stalled", operation_id = "stalled")]
+async fn stalled() -> kynos::extract::body::text::Text {
+    std::future::pending::<()>().await;
+    kynos::extract::body::text::Text("never".to_owned())
+}
+
+#[test]
+fn every_request_the_router_handles_is_counted_in_flight_and_released() {
+    let recorder = PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    let rt = runtime();
+
+    metrics::with_local_recorder(&recorder, || {
+        rt.block_on(async {
+            let client = TestClient::new(service(None, |_| {}));
+            let _matched = client.get("/v1/health").send().await;
+            let _unmatched = client.get("/nope").send().await;
+        });
+    });
+
+    assert_eq!(
+        in_flight(&handle),
+        Some(0.0),
+        "the served router must hold the gauge, and release it once each response is produced"
+    );
+}
+
+#[test]
+fn a_request_abandoned_mid_handler_is_released_from_the_in_flight_gauge() {
+    let recorder = PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    let rt = runtime();
+
+    let (during, after) = metrics::with_local_recorder(&recorder, || {
+        rt.block_on(async {
+            let state = make_app_state_full(
+                |_| {},
+                Arc::new(beam_domain::services::RealClock),
+                Arc::new(InMemoryDependencyProbe::healthy()),
+                None,
+            );
+            let service = Router::new()
+                .mount(kynos::routes![stalled])
+                .intercept(super::InFlight)
+                .build(state)
+                .expect("the test router describes itself");
+
+            let mut request = Request::new(Body::empty());
+            *request.uri_mut() = "/stalled".parse().expect("a request target");
+            let mut call = Box::pin(service.call(request));
+
+            // One poll runs the interceptor into the stalled handler.
+            std::future::poll_fn(|context| {
+                assert!(call.as_mut().poll(context).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            let during = in_flight(&handle);
+
+            // The client leaving drops the future with no response produced.
+            drop(call);
+            let after = in_flight(&handle);
+            (during, after)
+        })
+    });
+
+    assert_eq!(
+        during,
+        Some(1.0),
+        "a request still being handled is in flight"
+    );
+    assert_eq!(
+        after,
+        Some(0.0),
+        "an abandoned request must not stay in flight forever"
+    );
+}

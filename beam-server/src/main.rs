@@ -159,9 +159,13 @@ async fn main() -> Result<()> {
     // `/metrics` answers 503 rather than disappearing -- the router's shape,
     // and therefore the exported description, must not depend on configuration.
     let metrics_handle = if config.enable_metrics {
-        let handle = metrics_exporter_prometheus::PrometheusBuilder::new()
-            .install_recorder()
+        // `install` also gives every `*_seconds` histogram real buckets,
+        // registers each metric's HELP text and records `beam_build_info`.
+        let handle = beam_server::metrics::install()
             .map_err(|e| eyre!("Failed to install Prometheus metrics recorder: {e}"))?;
+        // The recorder drains histogram samples only on render or upkeep, so
+        // without this task an unscraped histogram grows without bound.
+        beam_server::metrics::spawn_upkeep(handle.clone());
         info!("Metrics enabled -- Prometheus exposition at /metrics");
         Some(handle)
     } else {

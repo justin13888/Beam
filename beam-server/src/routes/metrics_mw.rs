@@ -12,6 +12,8 @@
 //!   interceptor chain, so a rate-limited `429` and a same-origin `403` are
 //!   both counted — under Salvo that depended on `HttpMetrics` being installed
 //!   as the outermost hoop, and now it is structural.
+//! * [`InFlight`] — an interceptor holding `beam_http_requests_in_flight`
+//!   up for as long as a request is being handled.
 //! * [`render_metrics`] — `GET /metrics`, rendering the [`PrometheusHandle`]
 //!   carried on [`AppState`].
 //!
@@ -38,7 +40,7 @@ use std::time::Duration;
 
 use kynos::extract::body::text::Text;
 use kynos::http::{Request, Response};
-use kynos::middleware::Observer;
+use kynos::middleware::{Continued, Interceptor, Next, Observer};
 use kynos::prelude::*;
 use kynos::router::operation::Route;
 
@@ -101,6 +103,57 @@ impl Observer<AppState> for HttpMetrics {
     }
 }
 
+/// Holds `beam_http_requests_in_flight` up while a request is being handled.
+///
+/// An interceptor rather than a pair of [`HttpMetrics`] callbacks, because an
+/// observer cannot see a request end without a response: Kynos reports a
+/// client that leaves while its handler is still working to no observer
+/// method, so an `on_request` increment would never be matched and the gauge
+/// would only ever climb. Here the decrement is a guard's `Drop`, which runs
+/// whether the handler finished or its future was abandoned.
+///
+/// Mounted on the root router, so it covers every operation, `/metrics`
+/// included, and the 404/405 the router answers itself. It reads, adds and
+/// short-circuits nothing, so it contributes nothing to the description.
+///
+/// "Handled" ends at the response head, matching
+/// `beam_http_request_duration_seconds`; a body still streaming afterwards is
+/// not counted here.
+pub struct InFlight;
+
+impl Interceptor<AppState> for InFlight {
+    type Reads = ();
+    type Adds = ();
+    type Short = std::convert::Infallible;
+
+    async fn intercept(
+        &self,
+        request: Request,
+        _reads: (),
+        _context: &AppState,
+        next: Next<'_, AppState>,
+    ) -> Result<Continued<()>, std::convert::Infallible> {
+        let _in_flight = InFlightGuard::enter();
+        Ok(next.run(request).await)
+    }
+}
+
+/// One request counted in `beam_http_requests_in_flight` until dropped.
+struct InFlightGuard;
+
+impl InFlightGuard {
+    fn enter() -> Self {
+        metrics::gauge!("beam_http_requests_in_flight").increment(1.0);
+        Self
+    }
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        metrics::gauge!("beam_http_requests_in_flight").decrement(1.0);
+    }
+}
+
 /// The `method` and `route` labels a matched or unmatched request carries.
 ///
 /// An unmatched request is labelled `<unmatched>` on *both*, which reads odd
@@ -152,10 +205,11 @@ pub enum MetricsUnavailable {
 /// explicitly marked.
 #[kynos::get("/metrics", tag = Internal, operation_id = "renderMetrics")]
 pub async fn render_metrics(Inject(state): Inject<AppState>) -> Result<Text, MetricsUnavailable> {
-    state
-        .metrics()
-        .map(|handle| Text(handle.render()))
-        .ok_or(MetricsUnavailable::NoRecorder)
+    let handle = state.metrics().ok_or(MetricsUnavailable::NoRecorder)?;
+    // Sampled into the global recorder, which is the one `handle` renders
+    // whenever a recorder is installed at all.
+    crate::metrics::collect_process();
+    Ok(Text(handle.render()))
 }
 
 #[cfg(test)]

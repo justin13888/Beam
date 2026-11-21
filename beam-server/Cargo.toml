@@ -33,6 +33,7 @@ image = { version = "0.25.10", default-features = false, features = ["jpeg", "pn
 kynos = { workspace = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
+metrics-process = { workspace = true }
 mutants = { workspace = true }
 sea-orm = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
