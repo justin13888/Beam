@@ -307,5 +307,6 @@ they name, and only a `hostPath` library that opts in carries `mountPropagation`
 chart refuses to render a library on a source it cannot make read-only, or with mount propagation
 off a `hostPath` or in any mode but `HostToContainer`. It also asserts the `ServiceMonitor`,
 `PrometheusRule` and dashboard each render only when enabled, and first runs `check:chart-rules`,
-which checks the rendered rule with `promtool check rules`. All three run in
+which checks the rendered rule with `promtool check rules` and runs the alert unit tests in
+`charts/beam/ci/prometheusrule-test.yaml` with `promtool test rules`. All three run in
 `mise run ci`, CI's `helm-chart` job, and the pre-push hook.

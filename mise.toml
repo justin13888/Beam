@@ -2255,7 +2255,8 @@ description = "Check the chart's rendered PrometheusRule with promtool, for ever
 # alone. Each scenario's rule is rendered, unwrapped and checked: the PromQL
 # parses, every alert's annotation template parses, and no group or alert
 # name repeats. At least one scenario must render a rule, or the check would
-# pass by checking nothing. Which metrics the rules name is held by a test in
+# pass by checking nothing. Then promtool's rule unit tests in
+# charts/beam/ci/prometheusrule-test.yaml run against full-values.yaml's rule. Which metrics the rules name is held by a test in
 # beam-server/src/metrics_tests.rs instead, against the server's own
 # descriptions.
 #
@@ -2285,6 +2286,16 @@ if [ "$checked" -eq 0 ]; then
   echo "FAIL  no scenario in charts/beam/ci renders the PrometheusRule"
   exit 1
 fi
+# Firing behaviour: the unit tests beside the scenarios feed each alert series
+# and state when it fires and when it stays silent, against the rule
+# full-values.yaml renders.
+if [ ! -f "$out/full-values.rules.json" ]; then
+  echo "FAIL  charts/beam/ci/full-values.yaml no longer renders the PrometheusRule its unit tests run against"
+  exit 1
+fi
+cp charts/beam/ci/prometheusrule-test.yaml "$out/"
+echo "== promtool test rules (charts/beam/ci/prometheusrule-test.yaml)"
+promtool test rules "$out/prometheusrule-test.yaml"
 '''
 
 [tasks."check:chart-invariants"]

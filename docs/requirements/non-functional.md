@@ -207,7 +207,8 @@ requirements (referenced below as FR-xxx).
 
   The Helm chart ships a ServiceMonitor, a PrometheusRule and a Grafana dashboard over these
   families, each behind its own flag under `metrics`; `check:chart-rules` runs `promtool check rules`
-  on the rendered rule.
+  on the rendered rule, and `promtool test rules` on the unit tests in
+  `charts/beam/ci/prometheusrule-test.yaml`, which state when each alert fires and when it stays silent.
 
 ## NFR-5xx — Privacy
 
