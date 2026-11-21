@@ -285,9 +285,11 @@ impl Harness {
             updated_at: now,
         };
         let id = movie.id;
-        // No `MovieRepository` method stores a movie without an identity
-        // key -- every one is created keyed -- so a pre-key row is put in
-        // the double's map, as the shared contract's own fixture does.
+        // `rekey(id, None, v)` could leave a created movie keyless, but no
+        // `MovieRepository` method sets the chosen `created_at` -- creation
+        // stamps the wall clock -- or leaves the row with no rules version,
+        // as a pre-key build did. So the row is put in the double's map,
+        // as the shared contract's own fixture does.
         self.movie_repo.movies.lock().unwrap().insert(id, movie);
         for rel in rels {
             let entry = self
@@ -340,9 +342,11 @@ impl Harness {
             updated_at: now,
         };
         let id = show.id;
-        // No `ShowRepository` method stores a show without an identity key
-        // -- every one is created keyed -- so a pre-key row is put in the
-        // double's map, as the shared contract's own fixture does.
+        // `rekey(id, None, v)` could leave a created show keyless, but no
+        // `ShowRepository` method sets the chosen `created_at` -- creation
+        // stamps the wall clock -- or leaves the row with no rules version,
+        // as a pre-key build did. So the row is put in the double's map,
+        // as the shared contract's own fixture does.
         self.show_repo.shows.lock().unwrap().insert(id, show);
         let season = self.show_repo.find_or_create_season(id, 1).await.unwrap();
         for (n, rel) in rels.iter().enumerate() {

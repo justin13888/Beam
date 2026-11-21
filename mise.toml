@@ -2141,6 +2141,10 @@ description = "Assert the rendered Helm chart keeps one Recreate replica, read-o
 #      hostPath that sets it, and then only HostToContainer. The chart refuses
 #      it on any other source and refuses any other mode: Bidirectional would
 #      let the pod mount onto the host.
+#  13. BEAM_LIBRARIES declares exactly the scenario's libraries, in order, each
+#      by its name at the /videos path the chart mounts it on, so the server
+#      creates every mounted library at boot (issue #455); a scenario with no
+#      libraries sets no BEAM_LIBRARIES.
 #
 # The directory argument points the gate at a copy of the chart; that is how
 # its negative cases are exercised without editing the tracked one.
@@ -2375,6 +2379,26 @@ for (const scenario of scenarios.sort()) {
       m.mountPropagation === want && (want === undefined || want === "HostToContainer"),
       `${tag} ${m.mountPath} has mountPropagation ${JSON.stringify(want)} (got ${JSON.stringify(m.mountPropagation)})`,
     );
+  }
+
+  // 13.
+  const wantDeclared = (values.libraries ?? []).map((l) => ({ name: l.name, path: `/videos/${l.name}` }));
+  const declaredRaw = env.get("BEAM_LIBRARIES");
+  if (wantDeclared.length === 0) {
+    check(declaredRaw === undefined, `${tag} no libraries, so no BEAM_LIBRARIES (got ${JSON.stringify(declaredRaw)})`);
+  } else {
+    let declared;
+    try {
+      declared = JSON.parse(declaredRaw ?? "");
+    } catch {
+      declared = undefined;
+    }
+    check(
+      JSON.stringify(declared) === JSON.stringify(wantDeclared),
+      `${tag} BEAM_LIBRARIES declares each library at its mount (want ${JSON.stringify(wantDeclared)}, got ${JSON.stringify(declaredRaw)})`,
+    );
+    for (const { path } of declared ?? [])
+      check(libraryMounts.some((m) => m.mountPath === path), `${tag} declared library path ${path} is a library mount`);
   }
 }
 process.exit(status);

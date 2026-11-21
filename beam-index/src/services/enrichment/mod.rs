@@ -267,6 +267,25 @@ pub struct SweepReport {
     pub skipped_no_providers: bool,
 }
 
+/// Pokes the enrichment worker into sweeping now rather than at its next
+/// interval. The indexer holds one so a title it queues is enriched within
+/// seconds (issue #449); the periodic sweep stays the backstop for a wake
+/// that is lost or that arrives mid-sweep.
+pub trait EnrichmentWake: Send + Sync + std::fmt::Debug {
+    /// Ask for a sweep. Cheap and non-blocking; several wakes before the
+    /// worker next waits collapse into one sweep.
+    fn wake(&self);
+}
+
+/// The worker's own handle, [`MetadataEnrichmentService::notify_handle`]:
+/// a wake while it sweeps is kept as a permit, so the titles queued during
+/// that sweep are swept straight after it.
+impl EnrichmentWake for tokio::sync::Notify {
+    fn wake(&self) {
+        self.notify_one();
+    }
+}
+
 #[derive(Debug)]
 pub struct MetadataEnrichmentService {
     state_repo: Arc<dyn EnrichmentStateRepository>,

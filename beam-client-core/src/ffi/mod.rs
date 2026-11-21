@@ -9,10 +9,11 @@
 //! [`BeamClient`] is defined here with the server registry, sign-in and the
 //! plumbing every request shares. Each API resource adds its own exported
 //! `impl` block in a submodule: `playback`, `catalog`, `progress`, `telemetry`
-//! and `admin`.
+//! and `admin`. `device_login` adds the device grant's poll loop.
 
 mod admin;
 mod catalog;
+mod device_login;
 mod playback;
 mod progress;
 mod telemetry;
@@ -617,10 +618,9 @@ impl BeamClient {
     /// Begin signing in without a browser, by the OAuth 2.0 device
     /// authorization grant (ADR-0017).
     ///
-    /// Show the prompt's user code and verification address, then call
-    /// [`Self::poll_device_login`] every `interval_secs` until it signs in or
-    /// fails. The pacing is the caller's: the core has no timer, and the
-    /// server refuses a poll that comes too soon anyway.
+    /// Show the prompt's user code and verification address, then hand the
+    /// prompt to [`Self::await_device_login`], which polls at the pace RFC
+    /// 8628 sets until it signs in or fails.
     ///
     /// # Errors
     ///
@@ -648,7 +648,8 @@ impl BeamClient {
         })
     }
 
-    /// Poll a device login once.
+    /// Poll a device login once. [`Self::await_device_login`] is the loop
+    /// over this a client wants; this is the single step it repeats.
     ///
     /// On approval the issued credential goes through exactly what a lifted
     /// cookie does -- installed, confirmed against `/v1/me`, persisted -- so a

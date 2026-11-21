@@ -86,8 +86,11 @@ impl BackgroundIndexer for LocalIndexService {
 
 /// Spawn the metadata-enrichment sweep loop. Runs forever, sweeping
 /// `interval` apart unless poked sooner via
-/// [`MetadataEnrichmentService::notify_handle`] (e.g. from a scan that just
-/// queued new titles). Safe to call with a service backed by
+/// [`MetadataEnrichmentService::notify_handle`]: by the indexer at the end of
+/// a scan or watcher reconcile that queued titles, when it was given the
+/// handle through
+/// [`LocalIndexService::with_enrichment_wake`](crate::services::index::LocalIndexService::with_enrichment_wake),
+/// and by an administrator's refresh. Safe to call with a service backed by
 /// `NoopEnrichmentProvider` -- every sweep short-circuits immediately since
 /// no providers are configured.
 pub fn spawn_enrichment_worker(

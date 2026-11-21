@@ -445,7 +445,30 @@ impl AppServices {
             beam_index::repositories::SqlTrickplayRepository::new(db.clone()),
         );
 
-        let index_service = Arc::new(
+        let enrichment_provider = build_enrichment_provider(config, clock.clone())?;
+
+        // Built before the indexer, which wakes it when it queues a title.
+        let enrichment_service = Arc::new(
+            MetadataEnrichmentService::new(
+                enrichment_repo.clone(),
+                movie_repo.clone(),
+                show_repo.clone(),
+                genre_repo.clone(),
+                person_repo.clone(),
+                collection_repo.clone(),
+                enrichment_provider.clone(),
+                admin_log_service.clone(),
+                notification_service.clone(),
+                clock.clone(),
+            )
+            .with_policy(EnrichmentPolicy {
+                batch_size: config.enrich_batch_size,
+                min_confidence: config.enrich_min_confidence,
+                ..EnrichmentPolicy::default()
+            }),
+        );
+
+        let index_service = Arc::new(wake_enrichment_from_indexer(
             LocalIndexService::new(
                 library_repo.clone(),
                 file_repo.clone(),
@@ -469,29 +492,8 @@ impl AppServices {
                 beam_index::repositories::SqlAppliedNfoRepository::new(db.clone()),
             ))
             .with_user_list_repo(user_list_repo.clone()),
-        );
-
-        let enrichment_provider = build_enrichment_provider(config, clock.clone())?;
-
-        let enrichment_service = Arc::new(
-            MetadataEnrichmentService::new(
-                enrichment_repo.clone(),
-                movie_repo.clone(),
-                show_repo.clone(),
-                genre_repo.clone(),
-                person_repo.clone(),
-                collection_repo.clone(),
-                enrichment_provider.clone(),
-                admin_log_service.clone(),
-                notification_service.clone(),
-                clock.clone(),
-            )
-            .with_policy(EnrichmentPolicy {
-                batch_size: config.enrich_batch_size,
-                min_confidence: config.enrich_min_confidence,
-                ..EnrichmentPolicy::default()
-            }),
-        );
+            &enrichment_service,
+        ));
         let enrichment_control = Arc::new(EnrichmentControl::new(EnrichmentControlDeps {
             movies: movie_repo.clone(),
             shows: show_repo.clone(),
@@ -682,6 +684,17 @@ impl AppServices {
             library_watches,
         })
     }
+}
+
+/// The indexer, waking `enrichment`'s worker at the end of each scan or
+/// watcher reconcile that queued a title, so a new title is enriched within
+/// seconds rather than at the next `BEAM_ENRICH_INTERVAL_SECS` sweep (issue
+/// #449). Its own function so a test can hold `build` to it.
+pub(crate) fn wake_enrichment_from_indexer(
+    index: LocalIndexService,
+    enrichment: &MetadataEnrichmentService,
+) -> LocalIndexService {
+    index.with_enrichment_wake(enrichment.notify_handle())
 }
 
 /// Decide which [`EnrichmentProvider`] the configuration asks for.

@@ -470,3 +470,364 @@ mod served_router {
         assert_eq!(response.header("access-control-allow-origin"), None);
     }
 }
+
+mod library_declarations {
+    use super::*;
+    use std::sync::Arc;
+
+    fn declared(name: &str, path: &str) -> LibraryDeclaration {
+        LibraryDeclaration {
+            name: name.to_string(),
+            path: path.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_blank_value_declares_nothing() {
+        for raw in ["", "  \n", "[]"] {
+            assert_eq!(parse_library_declarations(raw).unwrap(), vec![], "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn names_are_trimmed_and_order_is_kept() {
+        let parsed = parse_library_declarations(
+            r#"[{"name":" Movies ","path":"/videos/movies"},{"name":"shows","path":"shows"}]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            parsed,
+            vec![
+                declared("Movies", "/videos/movies"),
+                declared("shows", "shows")
+            ]
+        );
+    }
+
+    #[test]
+    fn a_malformed_or_ambiguous_declaration_is_refused() {
+        /// Whether a refusal is the one a case expects.
+        type Expected = fn(&LibraryDeclarationError) -> bool;
+        let cases: [(&str, Expected); 7] = [
+            ("{", |e| matches!(e, LibraryDeclarationError::Json(_))),
+            (r#"{"name":"a","path":"/a"}"#, |e| {
+                matches!(e, LibraryDeclarationError::Json(_))
+            }),
+            (r#"[{"name":"a"}]"#, |e| {
+                matches!(e, LibraryDeclarationError::Json(_))
+            }),
+            (r#"[{"name":"a","path":"/a","mount":"/b"}]"#, |e| {
+                matches!(e, LibraryDeclarationError::Json(_))
+            }),
+            (
+                r#"[{"name":"a","path":"/a"},{"name":" ","path":"/b"}]"#,
+                |e| matches!(e, LibraryDeclarationError::EmptyName(1)),
+            ),
+            (
+                r#"[{"name":"a","path":""}]"#,
+                |e| matches!(e, LibraryDeclarationError::EmptyPath(name) if name == "a"),
+            ),
+            (
+                r#"[{"name":"a","path":"/a"},{"name":"a ","path":"/b"}]"#,
+                |e| matches!(e, LibraryDeclarationError::DuplicateName(name) if name == "a"),
+            ),
+        ];
+        for (raw, expected) in cases {
+            let err = parse_library_declarations(raw).expect_err(raw);
+            assert!(expected(&err), "{raw}: {err:?}");
+        }
+        let err =
+            parse_library_declarations(r#"[{"name":"a","path":"/m"},{"name":"b","path":"/m"}]"#)
+                .unwrap_err();
+        assert!(
+            matches!(&err, LibraryDeclarationError::DuplicatePath(path) if path == "/m"),
+            "{err:?}"
+        );
+    }
+
+    /// A video directory holding `movies`, `shows` and `anime`, and a data
+    /// directory beside it, all on a real filesystem: the root a declaration
+    /// names is resolved exactly as in production.
+    struct Host {
+        _tmp: tempfile::TempDir,
+        videos: std::path::PathBuf,
+        data: std::path::PathBuf,
+    }
+
+    fn host() -> Host {
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let base = tmp.path().canonicalize().expect("canonical temp dir");
+        let videos = base.join("videos");
+        for name in ["movies", "shows", "anime"] {
+            std::fs::create_dir_all(videos.join(name)).unwrap();
+        }
+        let data = base.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        Host {
+            _tmp: tmp,
+            videos,
+            data,
+        }
+    }
+
+    /// An empty library store, which outlives each boot that uses it.
+    fn no_libraries()
+    -> Arc<beam_domain::repositories::library::in_memory::InMemoryLibraryRepository> {
+        Arc::default()
+    }
+
+    /// One boot's library service over `libraries`, the store that outlives
+    /// it. The index service expects no call: declaring never scans.
+    fn boot(
+        host: &Host,
+        libraries: Arc<beam_domain::repositories::library::in_memory::InMemoryLibraryRepository>,
+    ) -> crate::services::library::LocalLibraryService {
+        use crate::services::library::{
+            LibraryServiceDependencies, LocalLibraryService, OsPathValidator,
+        };
+        LocalLibraryService::new(LibraryServiceDependencies {
+            library_repo: libraries,
+            file_repo: Arc::new(
+                beam_domain::repositories::file::in_memory::InMemoryFileRepository::default(),
+            ),
+            video_dir: host.videos.clone(),
+            data_dir: host.data.clone(),
+            notification_service: Arc::new(
+                beam_index::services::notification::InMemoryNotificationService::new(),
+            ),
+            index_service: Arc::new(beam_index::services::index::MockIndexService::new()),
+            path_validator: Arc::new(OsPathValidator),
+            watch_hook: Arc::new(beam_index::runtime::LibraryWatches::new(None)),
+        })
+    }
+
+    /// Every stored library as `(name, root)`, sorted.
+    async fn stored(
+        libraries: &beam_domain::repositories::library::in_memory::InMemoryLibraryRepository,
+    ) -> Vec<(String, std::path::PathBuf)> {
+        use beam_domain::repositories::LibraryRepository;
+        let mut stored: Vec<_> = libraries
+            .find_all()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|library| (library.name, library.root_path))
+            .collect();
+        stored.sort();
+        stored
+    }
+
+    async fn store(
+        libraries: &beam_domain::repositories::library::in_memory::InMemoryLibraryRepository,
+        name: &str,
+        root: std::path::PathBuf,
+    ) {
+        use beam_domain::repositories::LibraryRepository;
+        libraries
+            .create(beam_domain::models::CreateLibrary {
+                name: name.to_string(),
+                root_path: root,
+                description: None,
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn declared_libraries_are_created_once_across_two_boots() {
+        let host = host();
+        let libraries = no_libraries();
+        // One absolute, one relative to the video directory, as either may be
+        // declared.
+        let declarations = vec![
+            declared("Movies", &host.videos.join("movies").display().to_string()),
+            declared("Shows", "shows"),
+        ];
+
+        let first = declare_libraries(&boot(&host, libraries.clone()), &declarations).await;
+        assert!(
+            first
+                .iter()
+                .all(|report| matches!(report.outcome, Ok(LibraryDeclared::Created(_)))),
+            "{first:?}"
+        );
+        let after_first = stored(&libraries).await;
+        assert_eq!(
+            after_first,
+            vec![
+                ("Movies".to_string(), host.videos.join("movies")),
+                ("Shows".to_string(), host.videos.join("shows")),
+            ]
+        );
+
+        let second = declare_libraries(&boot(&host, libraries.clone()), &declarations).await;
+        let outcomes: Vec<_> = second
+            .iter()
+            .map(|report| match &report.outcome {
+                Ok(LibraryDeclared::AlreadyStored { stored_name }) => {
+                    (report.name.clone(), stored_name.clone())
+                }
+                other => panic!("{}: {other:?}", report.name),
+            })
+            .collect();
+        assert_eq!(
+            outcomes,
+            vec![
+                ("Movies".to_string(), "Movies".to_string()),
+                ("Shows".to_string(), "Shows".to_string()),
+            ]
+        );
+        assert_eq!(stored(&libraries).await, after_first);
+    }
+
+    #[tokio::test]
+    async fn a_library_stored_at_the_declared_root_keeps_its_own_name() {
+        let host = host();
+        let libraries = no_libraries();
+        store(&libraries, "Films", host.videos.join("movies")).await;
+
+        let reports = declare_libraries(
+            &boot(&host, libraries.clone()),
+            &[declared("Movies", "movies")],
+        )
+        .await;
+
+        assert!(
+            matches!(
+                &reports[0].outcome,
+                Ok(LibraryDeclared::AlreadyStored { stored_name }) if stored_name == "Films"
+            ),
+            "{reports:?}"
+        );
+        assert_eq!(
+            stored(&libraries).await,
+            vec![("Films".to_string(), host.videos.join("movies"))]
+        );
+    }
+
+    #[tokio::test]
+    async fn two_spellings_of_one_root_store_one_library_under_the_first_name() {
+        let host = host();
+        let libraries = no_libraries();
+        let absolute = host.videos.join("movies").display().to_string();
+        let raw = format!(
+            r#"[{{"name":"Movies","path":"movies"}},{{"name":"Films","path":"{absolute}"}}]"#
+        );
+        // The parser compares paths as written, so both spellings pass it.
+        let declarations = parse_library_declarations(&raw).unwrap();
+
+        let reports = declare_libraries(&boot(&host, libraries.clone()), &declarations).await;
+
+        assert!(
+            matches!(reports[0].outcome, Ok(LibraryDeclared::Created(_))),
+            "{reports:?}"
+        );
+        assert!(
+            matches!(
+                &reports[1].outcome,
+                Ok(LibraryDeclared::AlreadyStored { stored_name }) if stored_name == "Movies"
+            ),
+            "{reports:?}"
+        );
+        assert_eq!(
+            stored(&libraries).await,
+            vec![("Movies".to_string(), host.videos.join("movies"))]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_name_held_at_another_root_is_neither_moved_nor_duplicated() {
+        let host = host();
+        let libraries = no_libraries();
+        store(&libraries, "Movies", host.videos.join("anime")).await;
+
+        let reports = declare_libraries(
+            &boot(&host, libraries.clone()),
+            &[declared("Movies", "movies")],
+        )
+        .await;
+
+        assert!(
+            matches!(reports[0].outcome, Ok(LibraryDeclared::NameTaken)),
+            "{reports:?}"
+        );
+        assert_eq!(
+            stored(&libraries).await,
+            vec![("Movies".to_string(), host.videos.join("anime"))]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_declaration_the_root_rules_refuse_is_skipped_and_the_rest_still_apply() {
+        let host = host();
+        let libraries = no_libraries();
+        std::fs::create_dir_all(host.videos.join("shows/kids")).unwrap();
+        store(&libraries, "Shows", host.videos.join("shows")).await;
+
+        let reports = declare_libraries(
+            &boot(&host, libraries.clone()),
+            &[
+                // Inside a stored library (#186).
+                declared("Kids", "shows/kids"),
+                // Not mounted.
+                declared("Music", "music"),
+                // Outside the video directory.
+                declared(
+                    "Elsewhere",
+                    &host.data.parent().unwrap().display().to_string(),
+                ),
+                declared("Anime", "anime"),
+            ],
+        )
+        .await;
+
+        let outcome = |name: &str| {
+            &reports
+                .iter()
+                .find(|report| report.name == name)
+                .unwrap()
+                .outcome
+        };
+        assert!(matches!(
+            outcome("Kids"),
+            Err(LibraryError::PathOverlapsLibrary)
+        ));
+        assert!(matches!(
+            outcome("Music"),
+            Err(LibraryError::PathNotFound(_))
+        ));
+        assert!(matches!(
+            outcome("Elsewhere"),
+            Err(LibraryError::PathOutsideRoot(_))
+        ));
+        assert!(matches!(outcome("Anime"), Ok(LibraryDeclared::Created(_))));
+        assert_eq!(
+            stored(&libraries).await,
+            vec![
+                ("Anime".to_string(), host.videos.join("anime")),
+                ("Shows".to_string(), host.videos.join("shows")),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_data_directory_under_the_video_directory_is_never_declared_a_library() {
+        let host = host();
+        let data = host.videos.join("beam-data");
+        std::fs::create_dir_all(data.join("artwork")).unwrap();
+        let host = Host { data, ..host };
+        let libraries = no_libraries();
+
+        let reports = declare_libraries(
+            &boot(&host, libraries.clone()),
+            &[declared("Everything", ".")],
+        )
+        .await;
+
+        assert!(
+            matches!(reports[0].outcome, Err(LibraryError::PathOverlapsDataDir)),
+            "{reports:?}"
+        );
+        assert_eq!(stored(&libraries).await, vec![]);
+    }
+}

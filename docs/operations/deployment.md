@@ -177,7 +177,8 @@ reconciliation) first so it does not scale the Deployment straight back to one. 
 afterwards.
 
 **Libraries.** Each entry in `libraries` names a Kubernetes volume source and is mounted read-only
-at `/videos/<name>`; create the library in the admin UI with that path. Every source kind with a
+at `/videos/<name>`, and the chart declares it to the server in `BEAM_LIBRARIES`, so Beam creates
+the library `<name>` at that path at boot unless one is already stored there. Every source kind with a
 `readOnly` field (`persistentVolumeClaim`, `nfs`, `csi`, `iscsi`, `rbd`, `cephfs`, ...) is forced to
 `readOnly: true` as well, which also keeps the kubelet from applying the pod's `fsGroup` -- a
 recursive `chgrp` -- to the media. `hostPath` and `image` sources, which have no such field and

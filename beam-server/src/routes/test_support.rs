@@ -77,6 +77,13 @@ impl crate::services::library::LibraryService for StubLibraryService {
     ) -> Result<crate::models::Library, LibraryError> {
         unimplemented!("not called in routing tests")
     }
+    async fn declare_library(
+        &self,
+        _name: String,
+        _path: String,
+    ) -> Result<crate::services::library::LibraryDeclared, LibraryError> {
+        unimplemented!("not called in routing tests")
+    }
     async fn start_scan(
         &self,
         _library_id: uuid::Uuid,
