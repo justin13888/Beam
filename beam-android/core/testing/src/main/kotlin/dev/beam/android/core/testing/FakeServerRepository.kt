@@ -41,10 +41,11 @@ public class FakeServerRepository(
 
     /**
      * What the repository re-publishes. A replaying shared flow, as the real
-     * `ServerChanges` is: it replays nothing before [restore], and it emits
-     * every re-publication, an unchanged list included -- which a state flow
-     * would drop. Unbounded rather than suspending, so [expire] can publish
-     * without a coroutine; every subscriber still sees every list.
+     * `ServerChanges` is: it replays nothing before [restore], and is
+     * unbounded rather than suspending, so [expire] can publish without a
+     * coroutine; every subscriber still sees every list. It also re-publishes
+     * an unchanged list, which the core never announces, so a subscriber
+     * tested here is one that tolerates a repeat.
      */
     private val published =
         MutableSharedFlow<List<ServerSummary>>(replay = 1, extraBufferCapacity = Int.MAX_VALUE).apply {

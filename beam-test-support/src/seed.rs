@@ -215,6 +215,9 @@ pub async fn episode_of(db: &DatabaseConnection, show_id: Uuid) -> Result<Uuid, 
         air_date: Set(None),
         runtime_mins: Set(None),
         thumbnail_url: Set(None),
+        numbering: Set("standard".to_string()),
+        absolute_number: Set(None),
+        absolute_season_number: Set(None),
         created_at: Set(now()),
     }
     .insert(db)
