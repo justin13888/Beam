@@ -212,9 +212,7 @@ internal class BeamPlaybackRepository
             force: Boolean,
         ): ProgressOutcome = client.reportProgress(fileId, positionSecs, durationSecs, force)
 
-        // A session refused during a drain is named rather than thrown, so the
-        // drain carries on with the other servers; the `401` behind it has
-        // already been announced by the core.
+        // A refused session is named, not thrown; the core announced the `401`.
         override suspend fun drainProgress(): ProgressDrain = client.drainProgress()
 
         override fun progressRetryDelaySecs(attempt: UInt): ULong =
