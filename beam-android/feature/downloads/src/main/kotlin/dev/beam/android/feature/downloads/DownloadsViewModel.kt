@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dev.beam.android.core.ffi.repository.CatalogRepository
+import dev.beam.android.core.ffi.repository.PlaybackRepository
 import dev.beam.android.core.media.download.DownloadRepository
 import dev.beam.android.core.model.DownloadRecord
 import dev.beam.android.core.model.DownloadState
@@ -42,6 +43,7 @@ public class DownloadsViewModel
     constructor(
         private val downloads: DownloadRepository,
         private val catalog: CatalogRepository,
+        private val playback: PlaybackRepository,
     ) : ViewModel() {
         public val state: StateFlow<DownloadsUiState> =
             downloads.downloads
@@ -97,9 +99,10 @@ public class DownloadsViewModel
          * The position is the server's, through the core's start rule: the
          * title's own for a film, the episode's for a series. A downloaded file
          * is what plays with no network, so a lookup that fails or does not
-         * answer within [RESUME_LOOKUP_TIMEOUT] starts at 0 rather than holding
-         * the player back. Resuming offline from the last position this device
-         * recorded is issue #487.
+         * answer within [RESUME_LOOKUP_TIMEOUT] starts from the last position
+         * this device recorded for the file, through the same rule (issue
+         * #487), rather than holding the player back -- or at 0 where the
+         * device recorded none, or cannot read what it recorded.
          *
          * A tap while a lookup is still pending is ignored: each lookup ends
          * in a navigation, so a second tap would stack a second player.
@@ -127,14 +130,23 @@ public class DownloadsViewModel
                             title = record.title,
                             subtitle = record.subtitle,
                             artworkUrl = record.posterUrl,
-                            startPositionSecs = detail?.startPositionFor(record.episodeId) ?: 0.0,
+                            startPositionSecs =
+                                detail?.startPositionFor(record.episodeId) ?: localStartPosition(record.fileId),
                         ),
                     )
                 }
         }
 
+        /** Where the core's own record puts [fileId]'s start, or 0 where it cannot be read. */
+        private suspend fun localStartPosition(fileId: String): Double =
+            try {
+                playback.localStartPositionSecs(fileId)
+            } catch (_: BeamException) {
+                0.0
+            }
+
         private companion object {
-            /** How long Play waits on the server for a resume point before starting at 0. */
+            /** How long Play waits on the server for a resume point before using the device's own. */
             val RESUME_LOOKUP_TIMEOUT = 3.seconds
         }
     }

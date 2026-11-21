@@ -69,4 +69,6 @@ internal class BeamPlaybackRepository
 
         override fun progressRetryDelaySecs(attempt: UInt): ULong =
             uniffi.beam_client_core.progressRetryDelaySecs(attempt)
+
+        override suspend fun localStartPositionSecs(fileId: String): Double = client.localStartPositionSecs(fileId)
     }
