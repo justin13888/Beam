@@ -243,7 +243,8 @@ impl BeamClient {
     /// # Errors
     ///
     /// Returns [`BeamError::NoActiveServer`] when no server is selected,
-    /// [`BeamError::Unauthenticated`] when there is no session, and
+    /// [`BeamError::Unauthenticated`] when there is no session,
+    /// [`BeamError::BadRequest`] when `file_id` is not a UUID, and
     /// [`BeamError::InvalidServerUrl`] when the stream URL cannot be built on
     /// the server's origin.
     pub fn playback_config(&self, file_id: String) -> Result<PlaybackHttpConfig, BeamError> {
@@ -260,6 +261,11 @@ impl BeamClient {
         // -- so there is no URL accessor to name it with. Where the title's sources
         // are known, `playback_plan` takes each part's `stream_url` from them
         // instead.
+        //
+        // Validated first, like every other path identifier: interpolated
+        // unchecked, an id holding `/`, `?` or `..` would name some other
+        // resource on the server's origin and hand it the session cookie.
+        let file_id = parse_uuid("file_id", &file_id)?;
         let server_id = self.require_active()?;
         let url = self.with_context(&server_id, |context| {
             context
