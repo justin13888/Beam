@@ -68,6 +68,11 @@ linux-raw-sys = "0.12"
 pg-integration = ["beam-test-support/pg-integration"]
 test-utils = ["dep:mockall", "beam-domain/test-utils"]
 vendored-ffmpeg = ["ffmpeg-next/build"]
+# Statically link an FFmpeg that `mise run deps:ffmpeg-build` compiled once per
+# host, found through PKG_CONFIG_PATH (ADR-0007, #478). The local default: the
+# same LGPL-only static FFmpeg `vendored-ffmpeg` builds, without rebuilding it in
+# every target directory.
+prebuilt-ffmpeg = ["ffmpeg-next/static"]
 # The feature set cargo-mutants builds this package with.
 #
 # cargo-mutants builds each package on its own, so it needs one *unqualified*

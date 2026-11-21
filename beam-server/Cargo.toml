@@ -71,6 +71,7 @@ rustix = { version = "1.1", features = ["fs"] }
 # infrastructure (NFR-201); `mise run e2e:server` turns it on.
 e2e-server = ["beam-test-support/e2e-server"]
 vendored-ffmpeg = ["beam-index/vendored-ffmpeg"]
+prebuilt-ffmpeg = ["beam-index/prebuilt-ffmpeg"]
 # The feature set cargo-mutants builds this package with.
 #
 # cargo-mutants builds each package on its own, so it needs one *unqualified*

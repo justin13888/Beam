@@ -39,8 +39,7 @@ hk = "1.57.0"
 # releases as `cargo-nextest-<semver>`, which is the version string mise wants.
 "github:nextest-rs/nextest" = "cargo-nextest-0.9.143"
 # The vendored FFmpeg build (ADR-0007, BEAM_CARGO_FEATURES below) assembles its
-# x86 SIMD with nasm, so every Rust task -- and so every Rust pre-push step --
-# needs it on PATH. Pinned here rather than left to the host's package manager
+# x86 SIMD with nasm, so every Rust task needs it on PATH. Pinned here rather than left to the host's package manager
 # so a fresh macOS or Linux checkout needs nothing mise does not provide.
 # conda-forge is the source because it is the one registry that publishes nasm
 # for linux-64, linux-aarch64, osx-64 and osx-arm64 alike; nasm.us ships Linux
@@ -103,11 +102,24 @@ RUST_BACKTRACE = "1"
 # path, and a host that has never run cargo must still be able to load this
 # file. An unset CARGO_HOME means ~/.cargo, as it does to cargo and rustup.
 CARGO_HOME = "{% set cargo_home = env.CARGO_HOME | default(value=env.HOME ~ '/.cargo') %}{% if cargo_home is dir %}{{ cargo_home | canonicalize }}{% else %}{{ cargo_home }}{% endif %}"
+# Base directories sccache strips before it hashes a Rust compile (#478).
+#
+# Every path rustc sees -- the crate sources, target/, OUT_DIR, CARGO_MANIFEST_DIR
+# -- sits under this checkout's root, which differs per worktree, so without
+# this every worktree hashed differently and missed what another had built.
+# sccache strips the longest matching base dir, so naming the checkout root
+# makes those paths worktree-independent even where the host daemon already
+# lists a shorter parent. In client-side mode (SCCACHE_CLIENT_SIDE) the client
+# computes the key, so it has to be in the environment cargo runs under, which
+# is this one. The canonical spelling is listed too when it differs, for a
+# checkout reached through a symlink. The cargo home follows, and any ambient
+# value is kept after them. Harmless where sccache is not the RUSTC_WRAPPER.
+SCCACHE_BASEDIRS = "{{ config_root }}{% if config_root | canonicalize != config_root %}:{{ config_root | canonicalize }}{% endif %}:{{ env.CARGO_HOME }}{% if env.SCCACHE_BASEDIRS | default(value='') != '' %}:{{ env.SCCACHE_BASEDIRS }}{% endif %}"
 # The Android SDK is not a mise tool: the registry only reaches it through a
 # third-party vfox plugin, and it has no NDK entry at all. `android:sdk`
 # bootstraps it with Google's own tooling instead, and every task that drives
 # Gradle or the NDK depends on it, so a fresh checkout provisions itself on the
-# first `mise run android:*` -- which is what the pre-push hook runs.
+# first `mise run android:*` -- which is what `mise run ci` runs.
 #
 # The location is owned by this file rather than read from the environment.
 # An ambient ANDROID_HOME is exactly what went wrong before: it named whatever
@@ -122,24 +134,42 @@ ANDROID_SDK_ROOT = "{{ xdg_data_home }}/beam/android-sdk"
 ANDROID_HOME = "{{ env.ANDROID_SDK_ROOT }}"
 # cargo-ndk resolves the toolchain from here.
 ANDROID_NDK_HOME = "{{ env.ANDROID_SDK_ROOT }}/ndk/29.0.14206865"
-# Local dev statically vendors an LGPL-only FFmpeg (ADR-0007) so the workspace
-# builds on hosts without FFmpeg development libraries. CI sets this to "" in
-# the job environment because .github/actions/setup-ffmpeg provides a system
-# FFmpeg to link against; hosts with system FFmpeg dev libs can do the same.
+# Local dev statically links an LGPL-only FFmpeg (ADR-0007) so the workspace
+# builds on hosts without FFmpeg development libraries. `prebuilt-ffmpeg` links
+# the copy `deps:ffmpeg-build` compiles once per host (#478); the older
+# `vendored-ffmpeg` compiles the same FFmpeg inside every target directory, and
+# still works when set here explicitly. CI sets this to "" in the job
+# environment because .github/actions/setup-ffmpeg provides a system FFmpeg to
+# link against; hosts with system FFmpeg dev libs can do the same.
 #
 # The template is load-bearing: a plain assignment here takes precedence over
 # the ambient environment, so an exported BEAM_CARGO_FEATURES="" would be
 # silently ignored and CI would build a vendored FFmpeg anyway. Reading through
 # `env.` lets the caller win, and `default` only fires when it is unset -- an
 # explicitly empty value stays empty.
-BEAM_CARGO_FEATURES = "{{ env.BEAM_CARGO_FEATURES | default(value='beam-index/vendored-ffmpeg,beam-server/vendored-ffmpeg') }}"
+BEAM_CARGO_FEATURES = "{{ env.BEAM_CARGO_FEATURES | default(value='beam-index/prebuilt-ffmpeg,beam-server/prebuilt-ffmpeg') }}"
+# Where `deps:ffmpeg-build` keeps the FFmpeg prefixes it builds, one directory
+# per key (see the task), shared by every checkout on the host.
+BEAM_FFMPEG_CACHE = "{{ xdg_cache_home }}/beam/ffmpeg"
+# This checkout's link to the prefix it builds against, which
+# `deps:ffmpeg-build` points at the right key every time a Rust task runs. A
+# per-checkout link rather than the keyed path itself because the key depends
+# on Cargo.lock and the source mirror, which this file cannot compute, and two
+# checkouts on different lockfiles must each see their own. It lives under the
+# gitignored target/, so `cargo clean` removes it and the next task restores it.
+BEAM_FFMPEG_PREFIX = "{{ config_root }}/target/beam-ffmpeg"
+# ffmpeg-sys-next without `build` finds FFmpeg through pkg-config, and with
+# `static` asks for the static link line, Libs.private included. Prepended
+# only when `prebuilt-ffmpeg` is selected, so a host or CI job linking the
+# system FFmpeg resolves exactly what it did before.
+PKG_CONFIG_PATH = "{% if 'prebuilt-ffmpeg' in env.BEAM_CARGO_FEATURES %}{{ env.BEAM_FFMPEG_PREFIX }}/lib/pkgconfig{% if env.PKG_CONFIG_PATH | default(value='') != '' %}:{{ env.PKG_CONFIG_PATH }}{% endif %}{% else %}{{ env.PKG_CONFIG_PATH | default(value='') }}{% endif %}"
 # The vendored build's FFmpeg source, fetched once per host (#281).
 #
 # ffmpeg-sys-next's build.rs runs `git clone --depth=1 -b release/X.Y
 # https://github.com/FFmpeg/FFmpeg` into its OUT_DIR whenever that OUT_DIR has
 # no libavutil.a -- so on every fresh worktree, every `target/` cleanup, every
 # profile and every cargo-mutants scratch copy. One network blip there fails a
-# whole pre-push. `deps:ffmpeg-source` fetches the branch once into this bare
+# whole `mise run ci`. `deps:ffmpeg-source` fetches the branch once into this bare
 # repository, with retries, and every Rust task that can vendor FFmpeg depends
 # on it.
 #
@@ -283,7 +313,9 @@ if [ "${usage_mutants:-false}" = "true" ]; then
     ' beam-index/Cargo.toml beam-server/Cargo.toml)
 fi
 case "$features" in
-    *vendored-ffmpeg*) ;;
+    # `prebuilt-ffmpeg` links what `deps:ffmpeg-build` compiles from this
+    # same source, so it needs the mirror too.
+    *vendored-ffmpeg* | *prebuilt-ffmpeg*) ;;
     *) exit 0 ;;
 esac
 
@@ -345,6 +377,141 @@ done
 echo "deps:ffmpeg-source: $branch of $url is in $mirror"
 '''
 
+# Build the FFmpeg that the `prebuilt-ffmpeg` feature links, once per host, and
+# point this checkout's BEAM_FFMPEG_PREFIX at it (#478, ADR-0007).
+#
+# The `build` feature (`vendored-ffmpeg`) compiles FFmpeg inside the build
+# script's OUT_DIR, which is private to one target directory and one
+# build-script hash. Any change in host-side feature unification -- a different
+# `-p` selection, `--all-targets` -- re-hashes `bindgen`, a build-dependency of
+# ffmpeg-sys-next only, which gives the build script a new OUT_DIR and compiles
+# FFmpeg from scratch: about 1 GB and several minutes, and its `configure`
+# probes are calls sccache cannot cache. So every worktree paid for one or two
+# copies, and scoping a cargo command to fewer packages paid again.
+#
+# This compiles it once per key into BEAM_FFMPEG_CACHE instead. The configure
+# flags are not restated here: the task drives ffmpeg-sys-next's own build.rs,
+# through a throwaway crate that depends on the exact version Cargo.lock
+# resolves with the exact feature set `vendored-ffmpeg` gives it, and publishes
+# the `out/dist` that build.rs installs into. The key covers that version, the
+# source mirror's commit, that feature set and the host triple, so a lockfile
+# bump or a refetched branch builds a new prefix beside the old one. Delete
+# BEAM_FFMPEG_CACHE to reclaim the old ones.
+#
+# Concurrent worktrees serialise on a lock in the cache, so the second waits
+# for the first and then finds the prefix built; a no-op once it exists. The
+# prefix is published by a rename, so a build that dies half-way never leaves
+# something a later run would mistake for a finished prefix. Without `flock`
+# (macOS) two simultaneous first runs both build and one rename wins.
+#
+# A no-op, like `deps:ffmpeg-source`, when BEAM_CARGO_FEATURES does not select
+# `prebuilt-ffmpeg`: CI's system-FFmpeg jobs and the vendored build never use it.
+[tasks."deps:ffmpeg-build"]
+description = "Build the FFmpeg prebuilt-ffmpeg links once per host, and point this checkout at it"
+depends = ["deps:ffmpeg-source"]
+run = '''
+set -eu
+case "${BEAM_CARGO_FEATURES:-}" in
+    *prebuilt-ffmpeg*) ;;
+    *) exit 0 ;;
+esac
+
+# The same derivation `deps:ffmpeg-source` and `check:ffmpeg-version` use.
+resolved=$(awk '
+    $0 == "name = \"ffmpeg-sys-next\"" { seen = 1; next }
+    seen && /^version = / { gsub(/[",]/, "", $3); print $3; exit }
+' Cargo.lock)
+if [ -z "$resolved" ]; then
+    echo "deps:ffmpeg-build: Cargo.lock has no ffmpeg-sys-next package entry" >&2
+    exit 1
+fi
+branch="release/$(echo "$resolved" | cut -d. -f1,2)"
+commit=$(GIT_CONFIG_COUNT=0 git --git-dir="$BEAM_FFMPEG_SOURCE_MIRROR" rev-parse --verify "refs/heads/$branch^{commit}")
+host=$(rustc -vV | sed -n 's/^host: //p')
+# The ffmpeg-sys-next features the vendored build compiles with -- the library
+# set plus `build` and `static` -- read from cargo rather than restated.
+features=$(cargo tree --locked -p beam-index --features vendored-ffmpeg \
+    -i ffmpeg-sys-next -e features --depth 0 --prefix none --format '{f}' | head -n 1)
+case ",$features," in
+    *,build,*) ;;
+    *)
+        echo "deps:ffmpeg-build: beam-index/vendored-ffmpeg no longer enables ffmpeg-sys-next/build (got: $features)" >&2
+        exit 1
+        ;;
+esac
+key=$(printf '%s\n' "$resolved" "$commit" "$features" "$host" | GIT_CONFIG_COUNT=0 git hash-object --stdin | cut -c1-16)
+root="$BEAM_FFMPEG_CACHE"
+prefix="$root/$resolved-$key"
+
+publish_link() {
+    mkdir -p "$(dirname "$BEAM_FFMPEG_PREFIX")"
+    ln -sfn "$prefix" "$BEAM_FFMPEG_PREFIX"
+}
+
+if [ -f "$prefix/lib/libavutil.a" ]; then
+    publish_link
+    echo "deps:ffmpeg-build: no-op, FFmpeg is already built in $prefix"
+    exit 0
+fi
+
+mkdir -p "$root"
+if command -v flock > /dev/null 2>&1; then
+    exec 9> "$root/.lock"
+    flock 9
+    # Another worktree may have built it while this one waited.
+    if [ -f "$prefix/lib/libavutil.a" ]; then
+        publish_link
+        echo "deps:ffmpeg-build: no-op, FFmpeg is already built in $prefix"
+        exit 0
+    fi
+fi
+
+work="$root/.build-$resolved-$key-$$"
+stage="$root/.stage-$resolved-$key-$$"
+trap 'rm -rf "$work" "$stage"' EXIT
+rm -rf "$work" "$stage"
+mkdir -p "$work/src"
+: > "$work/src/lib.rs"
+# The workspace's lockfile and toolchain, so build.rs and its build-dependencies
+# resolve to the versions this checkout builds with.
+cp Cargo.lock rust-toolchain.toml "$work/"
+feature_list=$(printf '%s' "$features" | sed 's/[^,][^,]*/"&"/g; s/,/, /g')
+printf '%s\n' \
+    '# Generated by `mise run deps:ffmpeg-build`; see mise.toml.' \
+    '[package]' \
+    'name = "beam-ffmpeg-prefix"' \
+    'version = "0.0.0"' \
+    'edition = "2024"' \
+    'publish = false' \
+    '' \
+    '[workspace]' \
+    '' \
+    '[dependencies]' \
+    "ffmpeg-sys-next = { version = \"=$resolved\", default-features = false, features = [$feature_list] }" \
+    > "$work/Cargo.toml"
+
+echo "deps:ffmpeg-build: building FFmpeg ($branch at $commit) into $prefix"
+(cd "$work" && cargo build --quiet --target-dir "$work/target")
+
+avutil=$(find "$work/target" -path '*/out/dist/lib/libavutil.a' | head -n 1)
+if [ -z "$avutil" ]; then
+    echo "deps:ffmpeg-build: ffmpeg-sys-next's build.rs installed no libavutil.a under $work/target" >&2
+    exit 1
+fi
+dist=$(dirname "$(dirname "$avutil")")
+cp -R "$dist" "$stage"
+# FFmpeg's .pc files name the directory it was configured into.
+for pc in "$stage"/lib/pkgconfig/*.pc; do
+    sed "s|$dist|$prefix|g" "$pc" > "$pc.tmp"
+    mv "$pc.tmp" "$pc"
+done
+if [ ! -e "$prefix" ]; then
+    mv "$stage" "$prefix"
+fi
+publish_link
+echo "deps:ffmpeg-build: FFmpeg is built in $prefix"
+'''
+
 # ---------------------------------------------------------------------------
 # Rust
 #
@@ -360,24 +527,110 @@ run = "cargo fmt --check"
 description = "Format Rust code"
 run = "cargo fmt"
 
+# The pre-push hook's `rust-fmt` step: only the pushed files, since pre-commit
+# already ran rustfmt over each staged one, and no compile. `rust:fmt` stays the whole-tree
+# gate `ci` runs.
+[tasks."rust:fmt:files"]
+description = "Check the formatting of the given Rust files"
+usage = '''
+arg "[files]..." var=#true help="The .rs files to check; nothing to check when none is given"
+'''
+run = '''
+set -eu
+# A push that deletes a file can hand its path over; there is nothing to check.
+files=""
+# shellcheck disable=SC2086 # one path per word; tracked paths have no spaces
+for file in ${usage_files:-}; do
+    [ -f "$file" ] && files="$files $file"
+done
+[ -n "$files" ] || exit 0
+# shellcheck disable=SC2086 # one path per word
+rustfmt --edition 2024 --check $files
+'''
+
+# CARGO_INCREMENTAL=0 on the tasks `ci` and CI run (#478): sccache refuses
+# incremental compiles, so a dev-profile workspace crate built incrementally is
+# never cached, and every fresh worktree recompiled every workspace crate even
+# when another had built the identical source. A plain `cargo` at a terminal
+# keeps incremental builds, which is where they pay off. CI's
+# setup-rust-toolchain action already exports the same value.
 [tasks."rust:build"]
 description = "Build the Rust workspace"
-depends = ["deps:ffmpeg-source"]
+depends = ["deps:ffmpeg-build"]
+env = { CARGO_INCREMENTAL = "0" }
 run = 'cargo build --workspace ${BEAM_CARGO_FEATURES:+--features "$BEAM_CARGO_FEATURES"}'
 
 [tasks."rust:clippy"]
 description = "Lint Rust with clippy, warnings denied"
-depends = ["deps:ffmpeg-source"]
+depends = ["deps:ffmpeg-build"]
+env = { CARGO_INCREMENTAL = "0" }
 run = 'cargo clippy --workspace --all-targets ${BEAM_CARGO_FEATURES:+--features "$BEAM_CARGO_FEATURES"} -- -D warnings'
 
 [tasks."rust:test"]
 description = "Run the Rust test suite"
-depends = ["deps:ffmpeg-source"]
+depends = ["deps:ffmpeg-build"]
+env = { CARGO_INCREMENTAL = "0" }
 run = 'cargo test --workspace ${BEAM_CARGO_FEATURES:+--features "$BEAM_CARGO_FEATURES"}'
+
+# Quick local checks of a change, which no hook runs (#478): clippy and the
+# tests over only the workspace members the given files belong to and the
+# members that depend on them, as scripts/affected-rust-packages.sh selects. A change that touches a
+# workspace-wide input (Cargo.lock, the root Cargo.toml, rust-toolchain.toml,
+# .cargo/**) selects `--workspace`, so it lints and tests what `rust:clippy` and
+# `rust:test` do; a change touching no member runs no cargo at all, and FFmpeg is
+# fetched or built only for a selection whose features link it, so a
+# beam-client-core change never waits on it. The full
+# workspace gates stay `rust:clippy` and `rust:test`, which `ci` runs before a
+# merge (ADR-0009).
+[tasks."rust:clippy:affected"]
+description = "Lint, warnings denied, the workspace members the given files affect"
+env = { CARGO_INCREMENTAL = "0" }
+usage = '''
+arg "[files]..." var=#true help="Changed paths, relative to the repository root"
+'''
+run = '''
+set -eu
+# shellcheck disable=SC2086 # one path per word; tracked paths have no spaces
+selection=$(scripts/affected-rust-packages.sh ${usage_files:-})
+if [ -z "$selection" ]; then
+    echo "rust:clippy:affected: no workspace member is affected"
+    exit 0
+fi
+# Only a selection that links FFmpeg needs it built or fetched.
+case "$selection" in
+    *-ffmpeg*) mise run deps:ffmpeg-build ;;
+esac
+echo "rust:clippy:affected: cargo clippy $selection --all-targets"
+# shellcheck disable=SC2086 # the selection is a list of cargo arguments
+cargo clippy $selection --all-targets -- -D warnings
+'''
+
+[tasks."rust:test:affected"]
+description = "Run the tests of the workspace members the given files affect"
+env = { CARGO_INCREMENTAL = "0" }
+usage = '''
+arg "[files]..." var=#true help="Changed paths, relative to the repository root"
+'''
+run = '''
+set -eu
+# shellcheck disable=SC2086 # one path per word; tracked paths have no spaces
+selection=$(scripts/affected-rust-packages.sh ${usage_files:-})
+if [ -z "$selection" ]; then
+    echo "rust:test:affected: no workspace member is affected"
+    exit 0
+fi
+# Only a selection that links FFmpeg needs it built or fetched.
+case "$selection" in
+    *-ffmpeg*) mise run deps:ffmpeg-build ;;
+esac
+echo "rust:test:affected: cargo test $selection"
+# shellcheck disable=SC2086 # the selection is a list of cargo arguments
+cargo test $selection
+'''
 
 [tasks."rust:coverage"]
 description = "Run Rust tests with coverage and enforce the line/region/function thresholds"
-depends = ["deps:ffmpeg-source"]
+depends = ["deps:ffmpeg-build"]
 # --fail-under-regions is this project's branch-coverage gate. cargo-llvm-cov's
 # --branch is nightly-only (it needs -Z coverage-options=branch) and
 # rust-toolchain.toml pins stable 1.94.0, so it is simply unavailable. LLVM
@@ -397,7 +650,7 @@ run = [
 
 [tasks."rust:test:pg"]
 description = "Opt-in tier: run the repository contracts against a real Postgres"
-depends = ["deps:ffmpeg-source"]
+depends = ["deps:ffmpeg-build"]
 # Deliberately NOT part of `ci`, `rust:test`, `rust:coverage`, or the pre-push
 # hook: it is the one tier that needs infrastructure, and NFR-201 says the
 # default run must not. Bring the database up first:
@@ -406,11 +659,12 @@ depends = ["deps:ffmpeg-source"]
 # than skipping -- a tier that silently passes when it did not run is worse
 # than one that does not run.
 # `--package beam-index` means BEAM_CARGO_FEATURES' workspace-qualified names
-# do not apply; the vendored-ffmpeg toggle is spelled unqualified here instead.
+# do not apply; the FFmpeg toggle is spelled unqualified here instead.
 # (`BEAM_MUTANTS_FEATURES` carries the same unqualified name for cargo-mutants.)
 run = '''
 features="pg-integration"
 case "${BEAM_CARGO_FEATURES:-}" in
+    *prebuilt-ffmpeg*) features="$features,prebuilt-ffmpeg" ;;
     *vendored-ffmpeg*) features="$features,vendored-ffmpeg" ;;
 esac
 cargo test --package beam-index --features "$features" --test pg_integration
@@ -420,7 +674,7 @@ cargo test --package beam-migration --features pg-integration --test pg_integrat
 
 [tasks."e2e:server"]
 description = "Opt-in tier: the server end to end over Postgres, Dex and a changing library (needs a container runtime)"
-depends = ["deps:ffmpeg-source"]
+depends = ["deps:ffmpeg-build"]
 # The server end-to-end suite (#191, beam-server/tests/e2e_server.rs): the
 # beam-server binary over a real Postgres and a real Dex, signed in to through
 # the device grant and the browser flow, driven through the generated client
@@ -466,6 +720,7 @@ deps up -d --wait postgres dex
 export BEAM_E2E_DATABASE_URL="postgres://beam:password@localhost:$port/beam"
 features="beam-server/e2e-server"
 case "${BEAM_CARGO_FEATURES:-}" in
+    *prebuilt-ffmpeg*) features="$features,beam-server/prebuilt-ffmpeg" ;;
     *vendored-ffmpeg*) features="$features,beam-server/vendored-ffmpeg" ;;
 esac
 cargo test --package beam-server --features "$features" --test e2e_server -- ${usage_filter:+"$usage_filter"}
@@ -473,7 +728,7 @@ cargo test --package beam-server --features "$features" --test e2e_server -- ${u
 
 [tasks."rust:coverage:report"]
 description = "Report per-file line/region/function coverage with no threshold (calibration)"
-depends = ["deps:ffmpeg-source"]
+depends = ["deps:ffmpeg-build"]
 # No gate: this is what you calibrate rust:coverage's thresholds against, and
 # what you read between mutation runs to pick the next target. Region coverage
 # is the column to watch -- if a batch of new tests does not move it, those
@@ -656,6 +911,50 @@ description = "Run the beam-web test suite"
 depends = ["deps:js"]
 run = "bun run --filter beam-web test"
 
+# A quick local check, which no hook runs (#478): vitest's related mode over the
+# given beam-web sources, which runs only the tests whose import graph reaches
+# one of them. A changed file outside the source graph -- a package.json, a
+# config, the OpenAPI document, a tsconfig -- can affect every test without
+# being imported by any, and a deleted file leaves no import graph to follow,
+# so either runs the whole suite as `ts:test` does, which stays the gate `ci`
+# runs.
+[tasks."ts:test:related"]
+description = "Run the beam-web tests related to the given files"
+depends = ["deps:js"]
+usage = '''
+arg "[files]..." var=#true help="Changed paths, relative to the repository root"
+'''
+run = '''
+set -eu
+related=""
+full=false
+# shellcheck disable=SC2086 # one path per word; tracked paths have no spaces
+for file in ${usage_files:-}; do
+    case "$file" in
+        beam-web/*.md) continue ;;
+        # A deleted file has no import graph left to follow.
+        beam-web/*) [ -f "$file" ] || { full=true; continue; } ;;
+    esac
+    case "$file" in
+        beam-web/*.config.ts | beam-web/*.config.tsx) full=true ;;
+        beam-web/*.ts | beam-web/*.tsx) related="$related ${file#beam-web/}" ;;
+        beam-web/*.md) ;;
+        beam-web/*) full=true ;;
+    esac
+done
+cd beam-web
+if [ "$full" = true ]; then
+    echo "ts:test:related: a beam-web file outside the source graph changed, or one was deleted; running the whole suite"
+    exec bun run test
+fi
+if [ -z "$related" ]; then
+    echo "ts:test:related: no beam-web source changed"
+    exit 0
+fi
+# shellcheck disable=SC2086 # one path per word
+exec bun x --no-install vitest related --run --passWithNoTests $related
+'''
+
 [tasks."ts:e2e"]
 description = "Run the beam-web Playwright suite against the composed stack (needs a container runtime)"
 # The browser end-to-end suite (#74): OIDC login through Dex, adding and
@@ -812,7 +1111,7 @@ run = [
 description = "Export openapi.json from the Rust types and regenerate api.gen.ts"
 # The last step runs openapi-typescript, so a job that never installed the JS
 # workspace (release.yml's lockfile-sync) still gets it.
-depends = ["deps:js", "deps:ffmpeg-source"]
+depends = ["deps:js", "deps:ffmpeg-build"]
 run = [
     'cargo run --quiet --example export_openapi -p beam-server ${BEAM_CARGO_FEATURES:+--features "$BEAM_CARGO_FEATURES"} > beam-web/openapi.json',
     # Both consumers regenerate from one export. They were byte-identical by
@@ -839,7 +1138,7 @@ run = "bun run --filter beam-web codegen:openapi"
 
 [tasks."codegen:openapi:check"]
 description = "Fail when the committed OpenAPI spec differs from the one the router generates"
-depends = ["deps:ffmpeg-source"]
+depends = ["deps:ffmpeg-build"]
 # `beam-web/openapi.json` is committed so a change to the wire contract is a
 # reviewable diff rather than an invisible regeneration. This is the guard that
 # keeps it honest.
@@ -955,7 +1254,7 @@ fi
 # Gradle task depends on this one, which is why it has to stay the ~2 GB set.
 packages="platform-tools platforms/android-37.2 build-tools/37.0.0 ndk/29.0.14206865"
 
-# Every Android task depends on this one, including each pre-push step, so an
+# Every Android task depends on this one, including each `ci` step, so an
 # already provisioned SDK must cost nothing: no CLI start-up, no network. Every
 # installed package carries a package.xml, the SDK's own record of what is in
 # that directory, so its presence is the marker; anything without one goes
@@ -1074,10 +1373,9 @@ set -eu
 # The same guard `core:apple` carries, repeated here because a guard in a run
 # block does not protect a `depends` edge: mise resolves and runs dependencies
 # before the dependent's run block, so `core:apple`'s check never gets to
-# prevent this task. Without this, a Linux contributor pushing a
-# `beam-client-core` change runs a full cdylib build, a `uniffi_bindgen`
-# compile and a Swift generation -- for output only macOS can consume -- from
-# hook steps hk.pkl describes as a no-op. The Swift bindings and the
+# prevent this task. Without this, `mise run ci` on Linux runs a full cdylib
+# build, a `uniffi_bindgen` compile and a Swift generation -- for output only
+# macOS can consume -- from apple:* tasks that describe themselves as no-ops. The Swift bindings and the
 # XCFramework that carries them are assembled on Darwin alone.
 if [ "$(uname -s)" != "Darwin" ]; then
     echo "core:bindgen:swift: skipping -- the Swift bindings are only consumed on macOS."
@@ -1218,7 +1516,7 @@ xcrun xcodebuild -create-xcframework $args -output "$xcframework"
 
 [tasks."codegen:openapi:core"]
 description = "Re-export the OpenAPI document beam-client-core generates from"
-depends = ["deps:ffmpeg-source"]
+depends = ["deps:ffmpeg-build"]
 run = [
     'cargo run --quiet --example export_openapi -p beam-server ${BEAM_CARGO_FEATURES:+--features "$BEAM_CARGO_FEATURES"} > beam-client-core/api/openapi.json',
 ]
@@ -1239,8 +1537,8 @@ set -eu
 android="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/android"
 
 # The emulator and its system image live here rather than in `android:sdk`:
-# they are ~10 GB, and `android:sdk` is a dependency of every Gradle task and
-# pre-push step, none of which boots a device. The image has to match the
+# they are ~10 GB, and `android:sdk` is a dependency of every Gradle task,
+# none of which boots a device. The image has to match the
 # host's architecture -- an x86_64 image is one an Apple silicon Mac cannot
 # boot.
 case "$(uname -m)" in
@@ -2047,7 +2345,7 @@ set -eu
 # It runs from inside beam-android/ because ktlint walks the whole tree under
 # its working directory and only then matches each file against the globs.
 # From the repository root that walk enters target/, which clippy -- running
-# alongside this in the pre-push hook -- rewrites, so ktlint failed with a
+# alongside this in `mise run ci` -- rewrites, so ktlint failed with a
 # NoSuchFileException on a file clippy had just deleted (#248).
 cd beam-android
 ktlint --relative '**/*.kt' '!**/build/**'
@@ -2064,8 +2362,7 @@ run = "ktlint --format --relative '**/*.kt' '!**/build/**'"
 # The chained Gradle tasks -- lint, test, screenshot, minify -- are ordered
 # against each other because they all drive ./gradlew against one project,
 # which serialises on its own lock anyway, so running them at once only
-# contends. The pre-push hook chains its Android steps for that same reason,
-# but it carries three of these four: see hk.pkl for why minify stays out.
+# contends.
 #
 # Every Gradle task here runs `exec ./gradlew`, so the Gradle client replaces
 # the task's shell. When hk aborts a hook step because another step failed, its
@@ -2560,7 +2857,7 @@ depends = [
     "ts:test",
     # Regenerates api.gen.ts from the committed openapi.json first (it is
     # gitignored), so it passes on a fresh checkout; ci.yml's ts-typecheck job
-    # and the pre-push hook in hk.pkl enforce the same.
+    # enforces the same.
     "ts:typecheck",
     "docs:build",
     "android:lint",
