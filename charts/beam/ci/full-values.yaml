@@ -78,5 +78,29 @@ ingress:
     secretName: beam-tls
 metrics:
   enabled: true
+  serviceMonitor:
+    enabled: true
+    interval: 15s
+    scrapeTimeout: 10s
+    labels:
+      release: kube-prometheus-stack
+    relabelings:
+      - sourceLabels: [__meta_kubernetes_pod_node_name]
+        targetLabel: node
+    metricRelabelings:
+      - sourceLabels: [__name__]
+        regex: process_virtual_memory_max_bytes
+        action: drop
+  prometheusRule:
+    enabled: true
+    labels:
+      release: kube-prometheus-stack
+    alertLabels:
+      team: media
+    scanStaleHours: 72
+  grafanaDashboard:
+    enabled: true
+    annotations:
+      grafana_folder: Beam
 imagePullSecrets:
   - name: ghcr

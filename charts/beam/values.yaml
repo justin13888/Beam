@@ -232,6 +232,56 @@ metrics:
   # BEAM_ENABLE_METRICS, plus prometheus.io/* scrape annotations on the pod.
   # /metrics is served on the API port and is never routed by the ingress.
   enabled: false
+  # The three objects below are for the Prometheus Operator and the Grafana
+  # sidecar (kube-prometheus-stack). Each needs metrics.enabled: the chart
+  # refuses to render one without it, since it would scrape, alert on or chart
+  # a /metrics that answers 503.
+  serviceMonitor:
+    # A monitoring.coreos.com/v1 ServiceMonitor scraping /metrics through the
+    # server Service. The Operator ignores the prometheus.io/* annotations.
+    enabled: false
+    interval: 30s
+    # Empty uses the Prometheus default.
+    scrapeTimeout: ""
+    # Added to the ServiceMonitor's own labels: kube-prometheus-stack selects
+    # ServiceMonitors by `release: <its release name>` unless told otherwise.
+    labels: {}
+    # RelabelConfigs applied to the target before the scrape, and to each
+    # scraped series after it.
+    relabelings: []
+    metricRelabelings: []
+  prometheusRule:
+    # A monitoring.coreos.com/v1 PrometheusRule with Beam's alerts. Every
+    # expression selects the series by the `namespace` and `service` target
+    # labels the ServiceMonitor gives them, so a Prometheus scraping Beam some
+    # other way must attach the same two.
+    enabled: false
+    # Added to the PrometheusRule's labels, e.g. the `release` label
+    # kube-prometheus-stack's ruleSelector matches.
+    labels: {}
+    # Added to every alert's labels, beside its severity.
+    alertLabels: {}
+    # BeamHighErrorRatio: share of API responses that are 5xx, over 5 minutes.
+    errorRatio: 0.05
+    # BeamHighApiLatency: p95 seconds to the response head of /v1 requests.
+    latencyP95Seconds: 1
+    # BeamDatabasePoolSaturated: share of the pool's maximum in use.
+    dbPoolSaturation: 0.9
+    # BeamLibraryScanStale: hours since a library's last successful scan.
+    # Keep it above the periodic scan interval (BEAM_SCAN_INTERVAL_SECS).
+    scanStaleHours: 48
+    # BeamProviderFailing: share of a metadata provider's requests that end
+    # in a transport or provider error, over 15 minutes.
+    providerFailureRatio: 0.5
+  grafanaDashboard:
+    # A ConfigMap holding dashboards/beam.json, labelled for the Grafana
+    # dashboard sidecar.
+    enabled: false
+    # The label the sidecar watches for (kube-prometheus-stack's default).
+    labels:
+      grafana_dashboard: "1"
+    # e.g. the sidecar's folder annotation (grafana_folder: Beam).
+    annotations: {}
 
 serviceAccount:
   create: true

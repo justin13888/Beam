@@ -185,6 +185,30 @@ requirements (referenced below as FR-xxx).
   read-only (FR-202) and a liveness probe that does not depend on the database. These properties are
   asserted over the rendered chart by `check:chart-invariants`
   ([ADR-0018](../architecture/decisions/ADR-0018-kubernetes-helm-chart.md)).
+- **NFR-408**: With `BEAM_ENABLE_METRICS` on, `GET /metrics` MUST expose, in the Prometheus text
+  format and each with HELP text, at least the metric families below with the labels named. Every
+  `*_seconds` histogram MUST render as a bucketed histogram, never a summary, so it aggregates across
+  pods and feeds `histogram_quantile`. Every label value MUST come from a bounded set: a route
+  template rather than a path, a library id rather than a filesystem path. Removing or renaming a
+  family, or a label on one, is a change to this requirement. `beam-server/src/metrics.rs`
+  (`DESCRIPTIONS`) is the server's list; its tests fail on a metric emitted without a description,
+  and on any metric the Helm chart's alerts or dashboard query that the server does not describe.
+
+  | Area | Families (labels) |
+  |---|---|
+  | HTTP | `beam_http_requests_total` (`method`, `route`, `status`); `beam_http_request_duration_seconds` (`method`, `route`); `beam_http_requests_in_flight`; `beam_http_response_disconnects_total`, `beam_http_response_delivery_seconds` (`method`, `route`); `beam_rate_limited_total` (`route_class`) |
+  | Streaming | `beam_stream_bytes_total`, `beam_streams_active`, `beam_stream_aborted_total` (`endpoint`: `stream`, `download`) |
+  | Database | `beam_db_pool_connections` (`state`: `idle`, `in_use`); `beam_db_pool_max`; `beam_db_acquire_duration_seconds`; `beam_db_errors_total` (`kind`) |
+  | Health and build | `beam_dependency_up` (`dependency`); `beam_build_info` (`version`, `commit`) |
+  | Indexing and watcher | `beam_scan_duration_seconds` (`library`, `trigger`); `beam_scan_last_success_timestamp_seconds`, `beam_scan_failures_total`, `beam_scan_in_progress`, `beam_library_files` (`library`); `beam_index_files_processed_total` (`result`); `beam_index_divergence_warnings_total`; `beam_watcher_events_total` (`library`, `kind`); `beam_watcher_errors_total` (`library`); `beam_watcher_mode` (`library`, `mode`: `native`, `poll`); `beam_watcher_pending_paths`; `beam_watcher_deferred_paths` |
+  | Enrichment | `beam_provider_requests_total` (`provider`, `result`); `beam_provider_request_duration_seconds`, `beam_provider_rate_limited_total` (`provider`); `beam_enrichment_outcomes_total` (`outcome`); `beam_enrichment_pending`; `beam_trickplay_pending`; `beam_trickplay_failures_total` |
+  | Sign-in | `beam_auth_logins_total` (`flow`, `result`); `beam_session_store_errors_total` |
+  | Process | `process_cpu_seconds_total`, `process_resident_memory_bytes`, `process_open_fds`, `process_max_fds`, `process_threads`, `process_start_time_seconds` |
+
+  The Helm chart ships a ServiceMonitor, a PrometheusRule and a Grafana dashboard over these
+  families, each behind its own flag under `metrics`; `check:chart-rules` runs `promtool check rules`
+  on the rendered rule, and `promtool test rules` on the unit tests in
+  `charts/beam/ci/prometheusrule-test.yaml`, which state when each alert fires and when it stays silent.
 
 ## NFR-5xx — Privacy
 

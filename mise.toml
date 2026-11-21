@@ -77,6 +77,10 @@ ktlint = "1.8.0"
 # on amd64 and arm64, so neither needs an `os` filter.
 "aqua:helm/helm" = "4.3.0"
 "aqua:yannh/kubeconform" = "0.8.0"
+# promtool, for `check:chart-rules`: the chart's PrometheusRule is checked by
+# the same parser Prometheus loads it with. The release archive ships it
+# beside the prometheus binary.
+"aqua:prometheus/prometheus" = "3.16.0"
 
 [env]
 # Wrap the git hooks in `mise x` so contributors who have not activated mise in
@@ -2224,22 +2228,79 @@ description = "Render the Helm chart for every CI scenario and validate the mani
 # complaint.
 #
 # kubeconform fetches each schema once from its default registry and caches it
-# under the XDG cache, so only a cold cache needs the network.
+# under the XDG cache, so only a cold cache needs the network. The Prometheus
+# Operator's ServiceMonitor and PrometheusRule are not Kubernetes kinds, so
+# their schemas come from the datree CRDs catalog, which publishes one per
+# CRD version; a kind found in neither fails, rather than passing unchecked.
 run = '''
 set -eu
 cache="${XDG_CACHE_HOME:-$HOME/.cache}/beam/kubeconform"
 mkdir -p "$cache"
+# raw: mise renders this script through Tera, which would read kubeconform's
+# Go-template placeholders as its own.
+crds='{% raw %}https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json{% endraw %}'
 for kube in 1.29.0 1.37.0; do
   for values in charts/beam/ci/*-values.yaml; do
     echo "== $values against Kubernetes $kube"
     helm template beam charts/beam -f "$values" --kube-version "$kube" \
-      | kubeconform -strict -summary -kubernetes-version "$kube" -cache "$cache"
+      | kubeconform -strict -summary -kubernetes-version "$kube" -cache "$cache" \
+          -schema-location default -schema-location "$crds"
   done
 done
 '''
 
+[tasks."check:chart-rules"]
+description = "Check the chart's rendered PrometheusRule with promtool, for every CI scenario that renders one"
+# promtool reads a Prometheus rule file, which is the PrometheusRule's `spec`
+# alone. Each scenario's rule is rendered, unwrapped and checked: the PromQL
+# parses, every alert's annotation template parses, and no group or alert
+# name repeats. At least one scenario must render a rule, or the check would
+# pass by checking nothing. Then promtool's rule unit tests in
+# charts/beam/ci/prometheusrule-test.yaml run against full-values.yaml's rule. Which metrics the rules name is held by a test in
+# beam-server/src/metrics_tests.rs instead, against the server's own
+# descriptions.
+#
+# Run through check:chart-invariants' depends, so ci, CI's helm-chart job and
+# the pre-push hook all reach it without a list of their own to keep.
+run = '''
+set -eu
+out="$(mktemp -d)"
+trap 'rm -rf "$out"' EXIT
+checked=0
+for values in charts/beam/ci/*-values.yaml; do
+  name="$(basename "$values" .yaml)"
+  helm template beam charts/beam -f "$values" --show-only templates/prometheusrule.yaml \
+    > "$out/$name.yaml" 2> /dev/null || continue
+  bun -e '
+    const [from, to] = process.argv.slice(1);
+    const docs = [Bun.YAML.parse(await Bun.file(from).text())].flat().filter(Boolean);
+    const rules = docs.filter((d) => d.kind === "PrometheusRule");
+    if (rules.length !== 1) throw new Error(`${from}: expected one PrometheusRule, found ${rules.length}`);
+    await Bun.write(to, JSON.stringify(rules[0].spec));
+  ' "$out/$name.yaml" "$out/$name.rules.json"
+  echo "== promtool check rules ($values)"
+  promtool check rules "$out/$name.rules.json"
+  checked=$((checked + 1))
+done
+if [ "$checked" -eq 0 ]; then
+  echo "FAIL  no scenario in charts/beam/ci renders the PrometheusRule"
+  exit 1
+fi
+# Firing behaviour: the unit tests beside the scenarios feed each alert series
+# and state when it fires and when it stays silent, against the rule
+# full-values.yaml renders.
+if [ ! -f "$out/full-values.rules.json" ]; then
+  echo "FAIL  charts/beam/ci/full-values.yaml no longer renders the PrometheusRule its unit tests run against"
+  exit 1
+fi
+cp charts/beam/ci/prometheusrule-test.yaml "$out/"
+echo "== promtool test rules (charts/beam/ci/prometheusrule-test.yaml)"
+promtool test rules "$out/prometheusrule-test.yaml"
+'''
+
 [tasks."check:chart-invariants"]
-description = "Assert the rendered Helm chart keeps one Recreate replica, read-only libraries, a hardened pod, a liveness probe that ignores the database, an ingress that exposes only the API, a forwarded-for trust that needs the ingress, a grace period longer than the drain, and the image's user with the configured supplemental groups"
+depends = ["check:chart-rules"]
+description = "Assert the rendered Helm chart keeps one Recreate replica, read-only libraries, a hardened pod, a liveness probe that ignores the database, an ingress that exposes only the API, a forwarded-for trust that needs the ingress, a grace period longer than the drain, the image's user with the configured supplemental groups, and each monitoring object only when enabled"
 # The properties Beam's design depends on that neither the schema nor
 # kubeconform can see, asserted over what the chart actually renders for every
 # scenario in ci/ -- never over the templates' text:
@@ -2292,6 +2353,12 @@ description = "Assert the rendered Helm chart keeps one Recreate replica, read-o
 #      by its name at the /videos path the chart mounts it on, so the server
 #      creates every mounted library at boot (issue #455); a scenario with no
 #      libraries sets no BEAM_LIBRARIES.
+#  14. The ServiceMonitor, the PrometheusRule and the Grafana dashboard
+#      ConfigMap each render exactly when the scenario enables metrics and
+#      that object's flag (issue #459), and the chart refuses a flag without
+#      metrics.enabled. The ServiceMonitor scrapes /metrics on the server
+#      Service's port; the dashboard is valid JSON under the sidecar's label.
+#      The rule's own syntax is check:chart-rules', run first as a depends.
 #
 # The directory argument points the gate at a copy of the chart; that is how
 # its negative cases are exercised without editing the tracked one.
@@ -2351,6 +2418,18 @@ for library in \
     status=1
   else
     echo "ok    the chart refuses the library $library"
+  fi
+done
+
+# 14, refusal half: a monitoring object without metrics.enabled must not
+# render; the base scenario leaves metrics off.
+for object in serviceMonitor prometheusRule grafanaDashboard; do
+  if helm template beam "$chart" -f "$base" --set metrics.enabled=false \
+    --set "metrics.$object.enabled=true" > /dev/null 2>&1; then
+    echo "FAIL  the chart renders metrics.$object without metrics.enabled"
+    status=1
+  else
+    echo "ok    the chart refuses metrics.$object without metrics.enabled"
   fi
 done
 
@@ -2548,6 +2627,48 @@ for (const scenario of scenarios.sort()) {
     );
     for (const { path } of declared ?? [])
       check(libraryMounts.some((m) => m.mountPath === path), `${tag} declared library path ${path} is a library mount`);
+  }
+
+  // 14.
+  const metricsOn = (values.metrics?.enabled ?? defaults.metrics?.enabled) === true;
+  const flag = (key) => metricsOn && (values.metrics?.[key]?.enabled ?? defaults.metrics?.[key]?.enabled) === true;
+  const monitors = rendered.filter((d) => d.kind === "ServiceMonitor");
+  const rules = rendered.filter((d) => d.kind === "PrometheusRule");
+  const dashboards = rendered.filter((d) => d.kind === "ConfigMap" && d.data?.["beam.json"] !== undefined);
+  for (const [key, found] of [["serviceMonitor", monitors], ["prometheusRule", rules], ["grafanaDashboard", dashboards]])
+    check(
+      found.length === (flag(key) ? 1 : 0),
+      `${tag} metrics.${key} renders ${flag(key) ? "one object" : "nothing"} (found ${found.length})`,
+    );
+  const serverService = rendered.find((d) => d.kind === "Service" && component(d) === "server");
+  for (const monitor of monitors) {
+    const selector = monitor.spec?.selector?.matchLabels ?? {};
+    const labels = serverService?.metadata?.labels ?? {};
+    check(
+      Object.keys(selector).length > 0 && Object.entries(selector).every(([k, v]) => labels[k] === v),
+      `${tag} the ServiceMonitor selects the server Service (selector ${JSON.stringify(selector)})`,
+    );
+    const ports = new Set((serverService?.spec?.ports ?? []).map((p) => p.name));
+    const endpoints = monitor.spec?.endpoints ?? [];
+    check(
+      endpoints.length > 0 && endpoints.every((e) => ports.has(e.port) && e.path === "/metrics"),
+      `${tag} the ServiceMonitor scrapes /metrics on a server Service port (${JSON.stringify(endpoints.map((e) => [e.port, e.path]))})`,
+    );
+  }
+  for (const dashboard of dashboards) {
+    let parsed;
+    try {
+      parsed = JSON.parse(dashboard.data["beam.json"]);
+    } catch {
+      parsed = undefined;
+    }
+    check(Array.isArray(parsed?.panels) && parsed.panels.length > 0, `${tag} the dashboard ConfigMap holds a dashboard with panels`);
+    const wantLabels = values.metrics?.grafanaDashboard?.labels ?? defaults.metrics?.grafanaDashboard?.labels ?? {};
+    check(
+      Object.keys(wantLabels).length > 0 &&
+        Object.entries(wantLabels).every(([k, v]) => dashboard.metadata?.labels?.[k] === v),
+      `${tag} the dashboard ConfigMap carries the sidecar label ${JSON.stringify(wantLabels)}`,
+    );
   }
 }
 process.exit(status);
