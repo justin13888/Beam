@@ -40,10 +40,8 @@ import uniffi.beam_client_core.DownloadRequest as CoreDownloadRequest
  * state and its progress -- so this client and the Apple one cannot disagree
  * about any of them. What stays here is the transfer: Media3's
  * [DownloadManager] writes into a [Cache] that ExoPlayer can read directly,
- * and brings range-resume, retry with backoff and the constraint handling
- * that pauses on a metered network. Reimplementing those is exactly the kind
- * of thing that looks finished and then loses a viewer's 8 GB download to a
- * tunnel.
+ * with range-resume, retry with backoff and a pause on a metered network,
+ * which a reimplementation loses a viewer's 8 GB download to a tunnel over.
  *
  * Each item of a download's plan -- every part, and every subtitle file
  * beside one -- is one Media3 download, keyed by the item's id, and what
@@ -169,9 +167,13 @@ public class BeamDownloadManager internal constructor(
         recordOf(fileId)?.itemIds()?.forEach { commands.setStopReason(it, STOP_REASON_USER) }
     }
 
-    /** Resume a paused download from where it stopped. */
+    /** Resume a paused download, or retry a failed one: see [failedRequest]. */
     public suspend fun resume(fileId: String) {
-        recordOf(fileId)?.itemIds()?.forEach { commands.setStopReason(it, Download.STOP_REASON_NONE) }
+        val items = recordOf(fileId)?.itemIds() ?: return
+        val index = manager.downloadIndex
+        withContext(Dispatchers.IO) { items.associateWith(index::failedRequest) }.forEach { (item, failed) ->
+            if (failed != null) commands.add(failed) else commands.setStopReason(item, Download.STOP_REASON_NONE)
+        }
     }
 
     /** Delete a download, the bytes of every item, and the poster kept for it. */
@@ -215,9 +217,8 @@ public class BeamDownloadManager internal constructor(
      *
      * Defaults to on in [MediaDownloadRepository], which applies it to a
      * manager as it is built, and the viewer's stored cellular preference,
-     * which that repository follows, turns it off. A media file is large enough that
-     * getting this wrong costs the viewer real money, so the safe default is
-     * the one that cannot.
+     * which that repository follows, turns it off. A media file is large enough
+     * that getting this wrong costs real money, so the default cannot.
      */
     public fun setRequiresUnmeteredNetwork(required: Boolean) {
         val flags = if (required) Requirements.NETWORK_UNMETERED else Requirements.NETWORK

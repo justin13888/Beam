@@ -5,10 +5,13 @@ package dev.beam.android.core.media.download
 
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.offline.Download
+import androidx.media3.exoplayer.offline.DownloadIndex
 import androidx.media3.exoplayer.offline.DownloadManager
+import androidx.media3.exoplayer.offline.DownloadRequest
 import uniffi.beam_client_core.DownloadRecord
 import uniffi.beam_client_core.DownloadState
 import uniffi.beam_client_core.TransferReport
+import java.io.IOException
 
 /**
  * What Media3 says about one item, in the core's terms.
@@ -70,10 +73,33 @@ internal fun Download.toReport(notMetRequirements: Int): TransferReport {
  * Every download in the manager's index, in every state: unlike
  * `currentDownloads`, which leaves out a completed or failed one. Reads the
  * index's database, so it is called off the main thread.
+ *
+ * An index that cannot be read yields none: the core still lists every
+ * record it holds, as last reported, rather than the list failing.
  */
 internal fun DownloadManager.indexedDownloads(): List<Download> =
-    downloadIndex.getDownloads().use { cursor ->
-        buildList { while (cursor.moveToNext()) add(cursor.download) }
+    try {
+        downloadIndex.getDownloads().use { cursor ->
+            buildList<Download> { while (cursor.moveToNext()) add(cursor.download) }
+        }
+    } catch (_: IOException) {
+        emptyList()
+    }
+
+/**
+ * The request behind item [id] where Media3 has failed it, and `null`
+ * otherwise. Clearing a stop reason restarts a stopped download, but a
+ * terminal one keeps its state whatever its stop reason; adding its request
+ * again is what re-queues it, as Media3 merges a request into a failed
+ * download as a fresh start. An index that cannot be read yields `null`, so
+ * the caller falls back to clearing the stop reason. Reads the index's
+ * database, so it is called off the main thread.
+ */
+internal fun DownloadIndex.failedRequest(id: String): DownloadRequest? =
+    try {
+        getDownload(id)?.takeIf { it.state == Download.STATE_FAILED }?.request
+    } catch (_: IOException) {
+        null
     }
 
 /** The id of every Media3 download behind [this]: each part, then each subtitle file. */
