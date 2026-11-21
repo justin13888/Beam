@@ -24,7 +24,7 @@ import java.security.MessageDigest
  * The fetch goes through the app's own [ImageLoader] rather than a second
  * fetcher. That loader fetches through
  * [dev.beam.android.core.media.http.ServerCallFactory], which attaches the
- * active server's session cookie and trust decision, so the poster is fetched
+ * session cookie and trust decision of the server the poster is on, so it is fetched
  * under the same credential as the API -- `/v1/artwork` answers 401 without
  * it. The bytes the loader writes to its disk cache are then copied out into
  * [directory].

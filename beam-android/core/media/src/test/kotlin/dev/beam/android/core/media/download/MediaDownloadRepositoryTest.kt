@@ -44,17 +44,19 @@ import uniffi.beam_client_core.BeamClient
 import uniffi.beam_client_core.DownloadRecord
 import uniffi.beam_client_core.DownloadState
 import uniffi.beam_client_core.ServerHttpConfig
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeoutException
 
 /**
  * The downloads repository as the app builds it, against a real Media3
  * download manager, the real core, and a real server on loopback.
  *
- * Below the trait line: the core's storage, held in memory; the session the
- * transfer sends, which is whatever [active] holds; and the service start,
- * which [InProcessDownloadCommands] stands in for. No server is signed in
- * to the core, so it cannot list a title's sources and plans each file
- * alone, from the server's download route.
+ * Below the trait line: the core's storage, held in memory; each server's
+ * session, which is whatever [sessions] holds for it, in place of the
+ * core's answer; and the service start, which [InProcessDownloadCommands]
+ * stands in for. The servers themselves are the core's own list. No server
+ * is signed in to the core, so it cannot list a title's sources and plans
+ * each file alone, from the server's download route.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
@@ -67,9 +69,8 @@ class MediaDownloadRepositoryTest {
     /** The signed-in server: the bytes for [FRESH] alone, 401 for anyone else. */
     private val beam = MockWebServer()
 
-    /** The session the transfer sends: `null` while signed out. */
-    @Volatile
-    private var active: ServerHttpConfig? = null
+    /** Each signed-in server's session, by the core's server id. */
+    private val sessions = ConcurrentHashMap<String, ServerHttpConfig>()
 
     /** The `Cookie` of every request the server answered, in order. */
     private val cookies = mutableListOf<String?>()
@@ -108,7 +109,11 @@ class MediaDownloadRepositoryTest {
             MediaDownloadRepository(
                 context = context,
                 core = core,
-                calls = ServerCallFactory(BeamHttpClientFactory(BeamHttpClientFactory.shared())) { active },
+                calls =
+                    ServerCallFactory.signedInServers(
+                        BeamHttpClientFactory(BeamHttpClientFactory.shared()),
+                        servers = { core.listServers() },
+                    ) { serverId -> sessions[serverId] },
                 commands = InProcessDownloadCommands { repository.manager() },
                 cache = cache,
                 artwork = DownloadArtwork(context, temp.newFolder("artwork")) { error("no poster in this test") },
@@ -133,7 +138,6 @@ class MediaDownloadRepositoryTest {
     @Test
     fun `downloads are listed while signed out`() =
         runTest {
-            active = null
             observe()
 
             enqueue(F1, on = HOME)
@@ -146,9 +150,10 @@ class MediaDownloadRepositoryTest {
     @Test
     fun `a download picks up a new session on its next request without the manager being rebuilt`() =
         runTest {
-            active = config(STALE)
+            val home = serverId(HOME)
+            sessions[home] = config(STALE, HOME)
             // The viewer signs in again while the first attempt is in flight.
-            onRefused = { active = config(FRESH) }
+            onRefused = { sessions[home] = config(FRESH, HOME) }
             observe()
 
             enqueue(F1, on = HOME)
@@ -159,17 +164,29 @@ class MediaDownloadRepositoryTest {
         }
 
     @Test
+    fun `a download from a server that is not the active one completes under its own server's session`() =
+        runTest {
+            sessions[serverId(HOME)] = config(FRESH, HOME)
+            sessions[serverId(CABIN)] = config("beam_session=cabin", CABIN)
+            observe()
+
+            // Queued from home, then the viewer switched to signed-in cabin.
+            enqueue(F1, on = HOME)
+            core.selectServer(serverId(CABIN))
+            awaitUntil { stateOf(F1) == DownloadState.COMPLETED }
+
+            assertEquals(listOf<String?>(FRESH), synchronized(cookies) { cookies.toList() })
+        }
+
+    @Test
     fun `forgetting a server deletes its downloads and leaves other servers' alone`() =
         runTest {
             observe()
-            // One server at a time: the transfer sends the active server's
-            // session to that server's origin alone.
-            active = config(FRESH, HOME)
+            sessions[serverId(HOME)] = config(FRESH, HOME)
+            sessions[serverId(CABIN)] = config(FRESH, CABIN)
             enqueue(H1, on = HOME)
-            awaitUntil { stateOf(H1) == DownloadState.COMPLETED }
-            active = config(FRESH, CABIN)
             enqueue(C1, on = CABIN)
-            awaitUntil { stateOf(C1) == DownloadState.COMPLETED }
+            awaitUntil { stateOf(H1) == DownloadState.COMPLETED && stateOf(C1) == DownloadState.COMPLETED }
 
             repository.removeServer(serverId(CABIN))
             awaitUntil { indexed().none { it.request.id == C1 } }
