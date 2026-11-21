@@ -329,10 +329,15 @@ which does not cross-compile to Android.
   scope rip is `1080p`). The constants a platform needs to agree with the core -- the progress
   interval, the telemetry batch size, the session cookie name -- and `BeamError.is_retryable` are
   exported alongside them, so no client restates them.
+- **`download/`** — what an offline download is, for every client: the plan (every part of the
+  title's source and each subtitle file beside one, from the server's download route), the record
+  with its display fields and a local artwork path, the six states, and progress, which is `None`
+  until a total is known. Records are kept per server through `KeyValueStore`, so they render
+  offline and signed out; the platform transfers what the plan names and reports each item back.
 
 - **`ffi/`** — the UniFFI surface, a façade over the modules above. `BeamClient` lives in
   `ffi/mod.rs` with the server registry, sign-in and the shared request plumbing; each resource
-  has its own exported `impl` block in `ffi/{playback,catalog,progress,telemetry,admin}.rs`. The
+  has its own exported `impl` block in `ffi/{playback,catalog,progress,telemetry,download,admin}.rs`. The
   failures every request can have are documented once, on `BeamClient`.
 
 **Testing:** all pure or against an `InMemoryKeyValueStore`. Certificates in the TLS
@@ -355,7 +360,8 @@ plugins in `build-logic/`: `core/{model,ffi,designsystem,ui,media,testing}` and
 - **`core:media`** owns Media3. Playback and the API client are handed the same credential and
   trust decision by the core, because a mismatch surfaces as apparently corrupt media rather than
   as an auth error. Downloads go through Media3's `DownloadManager` so their bytes land in a cache
-  ExoPlayer can read directly.
+  ExoPlayer can read directly; the records the downloads screen renders are the core's
+  (`download/`), and Media3 only transfers the items each record's plan names.
 - **Auth** lifts the `beam_session` cookie from an in-app WebView on a phone, as it always has,
   and offers a secondary **Sign in with a code** that runs the device authorization grant — the
   screen shows the user code and the verification address while the core polls. Where there is no

@@ -8,12 +8,13 @@
 //!
 //! [`BeamClient`] is defined here with the server registry, sign-in and the
 //! plumbing every request shares. Each API resource adds its own exported
-//! `impl` block in a submodule: `playback`, `catalog`, `progress`, `telemetry`
-//! and `admin`. `device_login` adds the device grant's poll loop.
+//! `impl` block in a submodule: `playback`, `catalog`, `progress`, `telemetry`,
+//! `download` and `admin`. `device_login` adds the device grant's poll loop.
 
 mod admin;
 mod catalog;
 mod device_login;
+mod download;
 mod playback;
 mod progress;
 mod telemetry;
@@ -25,6 +26,7 @@ use crate::api::{MiddlewareBackend, ReqwestBackend};
 use crate::capability::DeviceProfile;
 use crate::catalog::{DeviceSession, ServerHealth};
 use crate::clock::{Clock, SystemClock};
+use crate::download::DownloadStore;
 use crate::error::BeamError;
 use crate::ports::kv::KeyValueStore;
 use crate::progress::{ProgressQueue, ProgressThrottle};
@@ -286,6 +288,8 @@ impl std::fmt::Debug for ServerContext {
 pub struct BeamClient {
     storage: Arc<dyn KeyValueStore>,
     clock: Arc<dyn Clock>,
+    /// Every server's download records, over [`Self::storage`].
+    downloads: DownloadStore,
     servers: RwLock<HashMap<String, ServerContext>>,
     active: RwLock<Option<String>>,
     device_profile: RwLock<Option<DeviceProfile>>,
@@ -404,6 +408,10 @@ impl BeamClient {
     ///
     /// Clears the record, the session cookie, and the progress queue together.
     /// Leaving any one behind would be a leak across servers.
+    ///
+    /// Its downloads are left for [`Self::remove_server_downloads`]: only the
+    /// platform can delete their bytes, and it needs the records -- which
+    /// that call answers -- to know which bytes are the server's.
     ///
     /// # Errors
     ///
@@ -975,6 +983,7 @@ impl BeamClient {
     /// asserted to the second rather than raced against the wall clock.
     fn over(storage: Arc<dyn KeyValueStore>, clock: Arc<dyn Clock>) -> Arc<Self> {
         Arc::new(Self {
+            downloads: DownloadStore::new(Arc::clone(&storage)),
             storage,
             clock,
             servers: RwLock::new(HashMap::new()),
