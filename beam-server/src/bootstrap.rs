@@ -5,9 +5,15 @@
 //! every response passes through. Both are policy, and both are the kind of
 //! thing that is only noticed when it is wrong in production.
 
+use std::collections::HashSet;
+
 use kynos::middleware::cors::Cors;
+use serde::Deserialize;
+use thiserror::Error;
+use tracing::{error, info, warn};
 
 use crate::config::{CookieSecurityVerdict, ServerConfig};
+use crate::services::library::{LibraryDeclared, LibraryError, LibraryService};
 
 /// What the startup cookie-security gate decided.
 #[derive(Debug, PartialEq, Eq)]
@@ -153,6 +159,118 @@ pub fn cors_policy(origins: &AllowedOrigins) -> Cors {
         .allow_credentials()
         // Cache the preflight for 1 hour to reduce noise.
         .max_age(std::time::Duration::from_secs(3600))
+}
+
+/// One library the deployment declares in `BEAM_LIBRARIES` (issue #455): a
+/// name, and a root that is absolute or relative to `BEAM_VIDEO_DIR`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LibraryDeclaration {
+    pub name: String,
+    pub path: String,
+}
+
+/// Why `BEAM_LIBRARIES` cannot be read.
+#[derive(Debug, Error)]
+pub enum LibraryDeclarationError {
+    #[error("must be a JSON array of {{\"name\", \"path\"}} objects: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("library {0} has an empty name")]
+    EmptyName(usize),
+    #[error("library {0:?} has an empty path")]
+    EmptyPath(String),
+    #[error("library {0:?} is declared twice")]
+    DuplicateName(String),
+    #[error("path {0:?} is declared for two libraries")]
+    DuplicatePath(String),
+}
+
+/// Parse `BEAM_LIBRARIES`: a JSON array of `{"name", "path"}` objects, or
+/// nothing at all when the value is blank.
+///
+/// Names are trimmed. Two declarations may not share a name or a path string:
+/// the second could only ever be skipped, which is a mistake in the
+/// declaration rather than something to apply.
+///
+/// Paths are compared as written, not as resolved: `BEAM_VIDEO_DIR` is not
+/// known here, and only the filesystem can say whether two spellings
+/// (`movies` and `/videos/movies`, or a symlink) name one root. Two spellings
+/// of one root are therefore caught at boot instead, where
+/// [`LibraryService::declare_library`] resolves each root: the second is
+/// reported already stored under the first's name and changes nothing.
+pub fn parse_library_declarations(
+    raw: &str,
+) -> Result<Vec<LibraryDeclaration>, LibraryDeclarationError> {
+    if raw.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let declared: Vec<LibraryDeclaration> = serde_json::from_str(raw)?;
+    let mut names = HashSet::new();
+    let mut paths = HashSet::new();
+    declared
+        .into_iter()
+        .enumerate()
+        .map(|(index, LibraryDeclaration { name, path })| {
+            let name = name.trim().to_owned();
+            if name.is_empty() {
+                return Err(LibraryDeclarationError::EmptyName(index));
+            }
+            if path.trim().is_empty() {
+                return Err(LibraryDeclarationError::EmptyPath(name));
+            }
+            if !names.insert(name.clone()) {
+                return Err(LibraryDeclarationError::DuplicateName(name));
+            }
+            if !paths.insert(path.clone()) {
+                return Err(LibraryDeclarationError::DuplicatePath(path));
+            }
+            Ok(LibraryDeclaration { name, path })
+        })
+        .collect()
+}
+
+/// What became of one declared library at boot.
+#[derive(Debug)]
+pub struct DeclarationReport {
+    pub name: String,
+    pub outcome: Result<LibraryDeclared, LibraryError>,
+}
+
+/// Create every declared library that is not stored yet, in order, through
+/// the same validation an administrator's request goes through.
+///
+/// Runs before the background indexer starts, whose startup pass then
+/// watches and scans each library created here. A declaration that cannot be
+/// applied -- its root missing, outside `BEAM_VIDEO_DIR`, or overlapping a
+/// library or the data directory -- is logged as an error and the boot goes
+/// on: the stored libraries are unaffected, and a server refusing to start
+/// over one mount would take every other library down with it.
+pub async fn declare_libraries(
+    service: &dyn LibraryService,
+    declarations: &[LibraryDeclaration],
+) -> Vec<DeclarationReport> {
+    let mut reports = Vec::with_capacity(declarations.len());
+    for LibraryDeclaration { name, path } in declarations {
+        let outcome = service.declare_library(name.clone(), path.clone()).await;
+        match &outcome {
+            Ok(LibraryDeclared::Created(library)) => {
+                info!(library_id = %library.id, "Created declared library '{name}'");
+            }
+            Ok(LibraryDeclared::AlreadyStored { stored_name }) => {
+                info!("Declared library '{name}' is already stored as '{stored_name}'");
+            }
+            Ok(LibraryDeclared::NameTaken) => warn!(
+                "Declared library '{name}' was not created: a library at another root \
+                 already has that name, and Beam never moves a stored library"
+            ),
+            Err(e) => error!(path = %path, "Declared library '{name}' was not created: {e}"),
+        }
+        reports.push(DeclarationReport {
+            name: name.clone(),
+            outcome,
+        });
+    }
+    reports
 }
 
 #[cfg(test)]

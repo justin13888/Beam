@@ -123,8 +123,11 @@ telemetry:
   existingSecretKey: url
 
 # Media libraries. Each is mounted read-only at /videos/<name> (Beam never
-# writes under a library root, FR-202); create the library in Beam's admin UI
-# with that path. `volume` is one Kubernetes volume source. Every source kind
+# writes under a library root, FR-202) and declared to the server as
+# BEAM_LIBRARIES, so Beam creates the library `name` at that path when it starts
+# and the library is not stored yet. A library already stored at the path keeps
+# its own name; Beam never renames, moves or deletes one, and removing an entry
+# here leaves its library stored. `volume` is one Kubernetes volume source. Every source kind
 # with a readOnly field (persistentVolumeClaim, nfs, csi, iscsi, rbd, cephfs,
 # ...) is forced to readOnly: true, which also keeps the kubelet from
 # applying the pod's fsGroup to your media. hostPath and image volumes are
