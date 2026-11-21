@@ -1,6 +1,7 @@
 //! Titles as the catalog lists them: browse pages, a title's detail, and the
 //! query that browses them.
 
+use super::watching::start_position_secs;
 use super::{absolute, narrow_u32, rating_percent};
 use crate::api::types as wire;
 use crate::error::BeamError;
@@ -59,6 +60,11 @@ pub struct MediaSummary {
     /// finished, and a series.
     #[uniffi(default)]
     pub resume_position_secs: f64,
+    /// Where Play starts a film, in seconds: the resume point, or 0 for one
+    /// not started, one near its end, and a series ([`start_position_secs`]).
+    /// "Play from beginning" is the caller's own 0.
+    #[uniffi(default)]
+    pub start_position_secs: f64,
     /// How many of a series' episodes the viewer has watched; 0 for a film.
     #[uniffi(default)]
     pub watched_episode_count: u32,
@@ -103,6 +109,10 @@ pub struct EpisodeSummary {
     /// Where to resume it, in seconds; 0 for one not started or just finished.
     #[uniffi(default)]
     pub resume_position_secs: f64,
+    /// Where Play starts it, in seconds: the resume point, or 0 for one not
+    /// started or near its end ([`start_position_secs`]).
+    #[uniffi(default)]
+    pub start_position_secs: f64,
 }
 
 /// One season of a series.
@@ -260,6 +270,10 @@ impl MediaSummary {
             episode_count: 0,
             played: movie.user_state.played,
             resume_position_secs: movie.user_state.position_secs,
+            start_position_secs: start_position_secs(
+                movie.user_state.position_secs,
+                movie.duration_secs,
+            ),
             watched_episode_count: 0,
         }
     }
@@ -303,6 +317,7 @@ impl MediaSummary {
             episode_count: narrow_u32(Some(show.episode_count)).unwrap_or(0),
             played: show.user_state.as_ref().is_some_and(|state| state.played),
             resume_position_secs: 0.0,
+            start_position_secs: 0.0,
             watched_episode_count: show
                 .user_state
                 .as_ref()
@@ -325,6 +340,10 @@ impl EpisodeSummary {
             file_id: episode.file_id.map(|id| id.to_string()),
             played: episode.user_state.played,
             resume_position_secs: episode.user_state.position_secs,
+            start_position_secs: start_position_secs(
+                episode.user_state.position_secs,
+                episode.duration_secs,
+            ),
         }
     }
 }
@@ -696,6 +715,46 @@ mod tests {
         let browsed = MediaDetail::from_generated(node(BROWSED_SHOW), &record());
         assert!(!browsed.summary().played);
         assert_eq!(browsed.summary().watched_episode_count, 0);
+    }
+
+    /// Play starts where the rule says, measured against the title's own
+    /// duration (issue #466): a film part-way through resumes, one within its
+    /// last stretch starts again, and an episode does the same against its
+    /// own duration. The fixture's movie runs 6300 s.
+    #[test]
+    fn a_detail_carries_where_play_starts_by_the_start_position_rule() {
+        let movie_at = |position: f64| {
+            let json = MOVIE.replace(
+                r#""position_secs":0.0"#,
+                &format!(r#""position_secs":{position:.1}"#),
+            );
+            MediaDetail::from_generated(node(&json), &record())
+                .summary()
+                .start_position_secs
+        };
+        assert!((movie_at(1200.0) - 1200.0).abs() < f64::EPSILON, "mid");
+        assert!(movie_at(6200.0).abs() < f64::EPSILON, "near the end");
+        assert!(movie_at(0.0).abs() < f64::EPSILON, "never started");
+
+        let show = SHOW.replace(
+            r#""title":"Return","source_count":1,"user_state":{"played":false,"position_secs":0.0"#,
+            r#""title":"Return","source_count":1,"user_state":{"played":false,"position_secs":3100.0"#,
+        );
+        let MediaDetail::Show { seasons, summary } =
+            MediaDetail::from_generated(node(&show), &record())
+        else {
+            panic!("a Show node must lower to a Show detail");
+        };
+        let ret = &seasons[1].episodes[0];
+        assert!((ret.resume_position_secs - 3100.0).abs() < f64::EPSILON);
+        assert!(
+            ret.start_position_secs.abs() < f64::EPSILON,
+            "3100 s of a 3120 s episode is its end"
+        );
+        assert!(
+            summary.start_position_secs.abs() < f64::EPSILON,
+            "a series plays through its episodes"
+        );
     }
 
     #[test]

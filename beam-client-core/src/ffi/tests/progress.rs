@@ -120,7 +120,7 @@ async fn a_progress_sample_the_server_refuses_is_dropped() {
 
 /// What `PUT /v1/files/{id}/progress` answers: the state the server now
 /// holds, which is what `ProgressOutcome::Sent` reports back.
-const PROGRESS_ACK: &str = r#"{"played":false,"position_secs":45.0,"play_count":0}"#;
+pub(super) const PROGRESS_ACK: &str = r#"{"played":false,"position_secs":45.0,"play_count":0}"#;
 
 /// Queue one sample for each of [`FILE_A`] then [`FILE_B`], a second
 /// apart, against a server that cannot be reached.

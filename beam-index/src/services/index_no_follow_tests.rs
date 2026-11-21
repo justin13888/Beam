@@ -14,13 +14,12 @@
 
 use std::sync::Mutex;
 
+use super::test_harness::IndexServiceBuilder;
 use super::*;
-use crate::services::admin_log::in_memory::NoOpAdminLogService;
 use crate::services::filesystem_probe::FilesystemProbe;
 use crate::services::hash::HashService;
 use crate::services::hash::LocalHashService;
 use crate::services::media_info::LocalMediaInfoService;
-use crate::services::notification::InMemoryNotificationService;
 use beam_domain::models::CreateLibrary;
 use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
 use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
@@ -28,7 +27,6 @@ use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
 use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
 use beam_domain::repositories::sidecar_subtitle::in_memory::InMemorySidecarSubtitleRepository;
 use beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository;
-use beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository;
 use beam_domain::services::TestClock;
 use tempfile::TempDir;
 
@@ -128,21 +126,22 @@ impl Harness {
         let probe = Arc::new(SwapAfterWalk::default());
         let hasher = Arc::new(SwapBeforeHash::default());
         let clock = Arc::new(TestClock::starting_at(Utc::now()));
-        let service = LocalIndexService::new(
-            library_repo,
-            file_repo.clone(),
-            Arc::new(InMemoryMovieRepository::with_files(file_repo.clone())),
-            Arc::new(InMemoryShowRepository::with_files(file_repo.clone())),
-            stream_repo.clone(),
-            hasher.clone(),
-            Arc::new(LocalMediaInfoService::default()),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(NoOpAdminLogService),
-            Arc::new(InMemoryWatchStateRepository::default()),
-        )
-        .with_filesystem_probe(probe.clone())
-        .with_sidecar_repo(sidecar_repo.clone())
-        .with_clock(clock.clone());
+        let service = IndexServiceBuilder::new()
+            .library_repo(library_repo)
+            .file_repo(file_repo.clone())
+            .movie_repo(Arc::new(InMemoryMovieRepository::with_files(
+                file_repo.clone(),
+            )))
+            .show_repo(Arc::new(InMemoryShowRepository::with_files(
+                file_repo.clone(),
+            )))
+            .stream_repo(stream_repo.clone())
+            .hash_service(hasher.clone())
+            .media_info(Arc::new(LocalMediaInfoService::default()))
+            .build()
+            .with_filesystem_probe(probe.clone())
+            .with_sidecar_repo(sidecar_repo.clone())
+            .with_clock(clock.clone());
         Self {
             dir,
             root,

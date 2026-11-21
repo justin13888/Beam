@@ -3330,7 +3330,7 @@ mod disc_tests;
 
 #[cfg(test)]
 #[path = "index_test_harness.rs"]
-mod test_harness;
+pub(crate) mod test_harness;
 
 #[cfg(test)]
 #[path = "index_streams_tests.rs"]
