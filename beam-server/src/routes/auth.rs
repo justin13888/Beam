@@ -52,7 +52,7 @@ use crate::models::auth::{
 use crate::routes::api_error::{
     ERROR_BASE, INTERNAL_DETAIL, InternalError, OIDC_UNAVAILABLE_DETAIL, ServerFault,
 };
-use crate::routes::session_auth::{SESSION_COOKIE, SessionAuth};
+use crate::routes::session_auth::{SESSION_COOKIE, SessionAuth, session_store_failed};
 use crate::routes::tags::Auth;
 
 const STATE_COOKIE: &str = "beam_oidc_state";
@@ -409,6 +409,68 @@ impl From<CookieEncodingError> for InternalError {
     }
 }
 
+// ── Sign-in metrics ──────────────────────────────────────────────────────────
+
+/// Which flow a sign-in came through: the `flow` label of
+/// `beam_auth_logins_total` ([#458](https://github.com/justin13888/beam/issues/458)).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LoginFlow {
+    /// The browser's Authorization Code callback.
+    Browser,
+    /// A device grant poll (RFC 8628).
+    Device,
+}
+
+/// How a sign-in ended: the `result` label of `beam_auth_logins_total`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LoginResult {
+    /// A session was minted.
+    Success,
+    /// The attempt was refused: the user, the identity provider's verdict, or
+    /// the attempt itself (stale, forged, expired) said no. A 4xx.
+    Failure,
+    /// Beam or the identity provider failed, so the attempt could not be
+    /// decided. A 5xx, and the result to alert on.
+    Error,
+}
+
+fn record_login(flow: LoginFlow, result: LoginResult) {
+    let flow = match flow {
+        LoginFlow::Browser => "browser",
+        LoginFlow::Device => "device",
+    };
+    let result = match result {
+        LoginResult::Success => "success",
+        LoginResult::Failure => "failure",
+        LoginResult::Error => "error",
+    };
+    metrics::counter!("beam_auth_logins_total", "flow" => flow, "result" => result).increment(1);
+}
+
+impl LoginCallbackError {
+    /// How the browser sign-in this error ended is counted.
+    fn login_result(&self) -> LoginResult {
+        match self {
+            Self::AttemptInvalid(_) | Self::LoginFailed(_) | Self::AccountDisabled(_) => {
+                LoginResult::Failure
+            }
+            Self::Internal(_) => LoginResult::Error,
+        }
+    }
+}
+
+/// How the device sign-in a failed poll ended is counted.
+fn device_login_result(error: &DevicePollError) -> LoginResult {
+    match error {
+        DevicePollError::Invalid
+        | DevicePollError::Expired
+        | DevicePollError::Denied
+        | DevicePollError::AccountDisabled
+        | DevicePollError::LoginFailed(_) => LoginResult::Failure,
+        DevicePollError::IdpUnavailable(_) | DevicePollError::Internal(_) => LoginResult::Error,
+    }
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 /// The header the session record's device fingerprint is taken from.
@@ -566,83 +628,99 @@ pub async fn oidc_callback(
     Inject(user_repo): Inject<Arc<dyn UserRepository>>,
     Inject(config): Inject<OidcRuntimeConfig>,
 ) -> Result<WithHeaders<Redirect<302>, SetCookie>, LoginCallbackError> {
-    if let Some(error) = query.error {
-        let description = query.error_description.unwrap_or_default();
-        return Err(LoginCallbackError::LoginFailed(format!(
-            "IdP returned error: {error} {description}"
-        )));
-    }
+    // Every answer the callback gives ends a sign-in, so each is counted; the
+    // block is the handler's body, so no early return can skip the count.
+    let outcome = async move {
+        if let Some(error) = query.error {
+            let description = query.error_description.unwrap_or_default();
+            return Err(LoginCallbackError::LoginFailed(format!(
+                "IdP returned error: {error} {description}"
+            )));
+        }
 
-    let state_cookie = cookies
-        .beam_oidc_state
-        .ok_or_else(|| LoginCallbackError::AttemptInvalid("Missing state cookie".into()))?;
+        let state_cookie = cookies
+            .beam_oidc_state
+            .ok_or_else(|| LoginCallbackError::AttemptInvalid("Missing state cookie".into()))?;
 
-    let query_state = query
-        .state
-        .ok_or_else(|| LoginCallbackError::AttemptInvalid("Missing state parameter".into()))?;
+        let query_state = query
+            .state
+            .ok_or_else(|| LoginCallbackError::AttemptInvalid("Missing state parameter".into()))?;
 
-    if state_cookie != query_state {
-        return Err(LoginCallbackError::AttemptInvalid(
-            "State mismatch between cookie and callback".into(),
-        ));
-    }
+        if state_cookie != query_state {
+            return Err(LoginCallbackError::AttemptInvalid(
+                "State mismatch between cookie and callback".into(),
+            ));
+        }
 
-    let pending = pending_auth_store
-        .consume(&query_state)
+        let pending = pending_auth_store
+            .consume(&query_state)
+            .await
+            .map_err(|e| LoginCallbackError::Internal(ServerFault::new(e)))?
+            .ok_or_else(|| {
+                LoginCallbackError::AttemptInvalid(
+                    "Unknown, already-used, or expired login attempt".into(),
+                )
+            })?;
+
+        let code = query
+            .code
+            .ok_or_else(|| LoginCallbackError::AttemptInvalid("Missing code parameter".into()))?;
+
+        // Every exchange failure is the same failed login. A wrong nonce among
+        // them: openidconnect's verifier reports it as a claims failure like any
+        // other, so it needs no answer of its own.
+        let identity = oidc_client
+            .exchange_code(&code, &pending.pkce_verifier, &pending.nonce)
+            .await
+            .map_err(|e| LoginCallbackError::LoginFailed(format!("Login failed: {e}")))?;
+
+        let MintedSession {
+            token,
+            user: _,
+            absolute_ttl_secs,
+        } = complete_login(
+            &identity,
+            &client_context(&headers, &forwarded),
+            user_repo.as_ref(),
+            session_store.as_ref(),
+            &config,
+        )
         .await
-        .map_err(|e| LoginCallbackError::Internal(ServerFault::new(e)))?
-        .ok_or_else(|| {
-            LoginCallbackError::AttemptInvalid(
-                "Unknown, already-used, or expired login attempt".into(),
-            )
+        .map_err(|e| match e {
+            e @ LoginError::AccountDisabled => LoginCallbackError::AccountDisabled(e.to_string()),
+            LoginError::Internal(message) => {
+                LoginCallbackError::Internal(ServerFault::new(message))
+            }
         })?;
 
-    let code = query
-        .code
-        .ok_or_else(|| LoginCallbackError::AttemptInvalid("Missing code parameter".into()))?;
+        let cookie = build_cookie(
+            SESSION_COOKIE,
+            token,
+            "/",
+            config.cookie_secure,
+            Duration::from_secs(absolute_ttl_secs),
+        );
 
-    // Every exchange failure is the same failed login. A wrong nonce among
-    // them: openidconnect's verifier reports it as a claims failure like any
-    // other, so it needs no answer of its own.
-    let identity = oidc_client
-        .exchange_code(&code, &pending.pkce_verifier, &pending.nonce)
-        .await
-        .map_err(|e| LoginCallbackError::LoginFailed(format!("Login failed: {e}")))?;
+        let redirect_path = pending.redirect_path.unwrap_or_else(|| "/".to_owned());
 
-    let MintedSession {
-        token,
-        user: _,
-        absolute_ttl_secs,
-    } = complete_login(
-        &identity,
-        &client_context(&headers, &forwarded),
-        user_repo.as_ref(),
-        session_store.as_ref(),
-        &config,
-    )
-    .await
-    .map_err(|e| match e {
-        e @ LoginError::AccountDisabled => LoginCallbackError::AccountDisabled(e.to_string()),
-        LoginError::Internal(message) => LoginCallbackError::Internal(ServerFault::new(message)),
-    })?;
+        Ok(WithHeaders::new(
+            Redirect::to(Location::try_from(format!(
+                "{}{}",
+                config.web_url, redirect_path
+            ))?),
+            SetCookie::new(&cookie)?,
+        ))
+    }
+    .await;
 
-    let cookie = build_cookie(
-        SESSION_COOKIE,
-        token,
-        "/",
-        config.cookie_secure,
-        Duration::from_secs(absolute_ttl_secs),
+    record_login(
+        LoginFlow::Browser,
+        match &outcome {
+            Ok(_) => LoginResult::Success,
+            Err(error) => error.login_result(),
+        },
     );
-
-    let redirect_path = pending.redirect_path.unwrap_or_else(|| "/".to_owned());
-
-    Ok(WithHeaders::new(
-        Redirect::to(Location::try_from(format!(
-            "{}{}",
-            config.web_url, redirect_path
-        ))?),
-        SetCookie::new(&cookie)?,
-    ))
+    outcome
 }
 
 /// Starts a device login (RFC 8628) for a client that has no browser.
@@ -748,8 +826,18 @@ pub async fn poll_device_login(
         session_store.as_ref(),
         &config,
     )
-    .await
-    .map_err(|e| match e {
+    .await;
+
+    // A poll that is still waiting ends nothing; every other answer ends the
+    // device's sign-in one way or the other.
+    match &outcome {
+        Ok(DevicePollOutcome::SignedIn(_)) => record_login(LoginFlow::Device, LoginResult::Success),
+        Ok(DevicePollOutcome::AuthorizationPending { .. } | DevicePollOutcome::SlowDown { .. }) => {
+        }
+        Err(error) => record_login(LoginFlow::Device, device_login_result(error)),
+    }
+
+    let outcome = outcome.map_err(|e| match e {
         DevicePollError::Invalid => DeviceLoginPollError::Invalid(e.to_string()),
         DevicePollError::Expired => DeviceLoginPollError::Expired(e.to_string()),
         DevicePollError::Denied => DeviceLoginPollError::Denied(e.to_string()),
@@ -820,10 +908,10 @@ pub async fn oidc_logout(
     Inject(session_store): Inject<Arc<dyn SessionStore>>,
 ) -> Result<WithHeaders<NoContent, SetCookie>, InternalError> {
     if let Some(token) = cookies.beam_session {
-        session_store
-            .delete(&token)
-            .await
-            .map_err(|e| InternalError::Internal(ServerFault::new(e)))?;
+        session_store.delete(&token).await.map_err(|e| {
+            session_store_failed();
+            InternalError::Internal(ServerFault::new(e))
+        })?;
     }
 
     Ok(WithHeaders::new(
@@ -841,7 +929,10 @@ pub async fn oidc_logout_all(
     session_store
         .delete_all_for_user(&auth.0.user_id.to_string())
         .await
-        .map_err(|e| InternalError::Internal(ServerFault::new(e)))?;
+        .map_err(|e| {
+            session_store_failed();
+            InternalError::Internal(ServerFault::new(e))
+        })?;
 
     Ok(WithHeaders::new(
         NoContent,
@@ -858,7 +949,10 @@ pub async fn oidc_list_sessions(
     let sessions = session_store
         .list_for_user(&auth.0.user_id.to_string())
         .await
-        .map_err(|e| InternalError::Internal(ServerFault::new(e)))?;
+        .map_err(|e| {
+            session_store_failed();
+            InternalError::Internal(ServerFault::new(e))
+        })?;
 
     let summaries = sessions
         .into_iter()
@@ -884,7 +978,10 @@ pub async fn oidc_delete_session(
     let deleted = session_store
         .delete_by_id(path.id, &auth.0.user_id.to_string())
         .await
-        .map_err(|e| SessionRevokeError::Internal(ServerFault::new(e)))?;
+        .map_err(|e| {
+            session_store_failed();
+            SessionRevokeError::Internal(ServerFault::new(e))
+        })?;
 
     if !deleted {
         return Err(SessionRevokeError::SessionNotFound(
@@ -903,7 +1000,10 @@ pub async fn oidc_delete_session(
         Some(token) => session_store
             .get(&token)
             .await
-            .map_err(|e| SessionRevokeError::Internal(ServerFault::new(e)))?
+            .map_err(|e| {
+                session_store_failed();
+                SessionRevokeError::Internal(ServerFault::new(e))
+            })?
             .is_some(),
         None => false,
     };

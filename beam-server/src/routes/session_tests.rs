@@ -90,6 +90,49 @@ async fn a_session_store_failure_on_logout_is_500_and_keeps_the_cookie() {
     );
 }
 
+/// `beam_session_store_errors_total` (#458): a store that cannot look a
+/// cookie up -- every signed-in request's 503 -- and one that cannot sign a
+/// session out are each one error, and a working call is none.
+#[tokio::test]
+async fn each_failed_session_store_call_is_counted() {
+    use crate::routes::test_support::Recorded;
+
+    let recorder = metrics_util::debugging::DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let _local = metrics::set_default_local_recorder(&recorder);
+    // Errors since the previous call, which drains them.
+    let errors = || {
+        Recorded::of(&snapshotter)
+            .counter("beam_session_store_errors_total", &[])
+            .unwrap_or(0)
+    };
+
+    let lookup_fails = harness_failing("lookup@example.com", SessionStoreOperation::Get);
+    let cookie = login_and_get_session_cookie(&lookup_fails, "lookup@example.com").await;
+    assert_eq!(errors(), 0, "signing in touched no failing call");
+
+    get_me(&lookup_fails, &cookie)
+        .await
+        .assert_status(StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(errors(), 1);
+
+    let delete_fails = harness_failing("delete@example.com", SessionStoreOperation::Delete);
+    let cookie = login_and_get_session_cookie(&delete_fails, "delete@example.com").await;
+    get_me(&delete_fails, &cookie)
+        .await
+        .assert_status(StatusCode::OK);
+    assert_eq!(errors(), 0, "a working lookup is no error");
+
+    delete_fails
+        .client
+        .post("/v1/logout")
+        .cookie(SESSION_COOKIE, &cookie)
+        .send()
+        .await
+        .assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(errors(), 1);
+}
+
 /// NFR-108 over the session routes: whichever store call fails, the 500's
 /// `detail` is the fixed sentence and never the store's own message.
 #[tokio::test]

@@ -932,3 +932,229 @@ proptest::proptest! {
         });
     }
 }
+
+// ─── streaming metrics (#458) ─────────────────────────────────────────────
+
+mod metered {
+    use std::sync::Arc;
+
+    use kynos::http::body::Body;
+    use kynos::http::{Request, StatusCode, header};
+    use kynos::prelude::*;
+    use kynos::response::range::source::ByteSource;
+    use kynos::router::service::Service;
+    use metrics_util::debugging::DebuggingRecorder;
+    use tempfile::TempDir;
+
+    use super::{
+        DOWNLOAD, STREAM, TEST_FILE_ID, TestFixture, make_located_file, make_test_state,
+        seed_session_token, serve,
+    };
+    use crate::routes::metrics_mw::HttpMetrics;
+    use crate::routes::stream::{
+        DeliveryEndpoint, FileByteSource, MeteredSource, download_file, head_download_file,
+        head_stream_file, stream_file,
+    };
+    use crate::routes::test_support::Recorded;
+    use crate::state::AppState;
+
+    const BYTES: &str = "beam_stream_bytes_total";
+    const ACTIVE: &str = "beam_streams_active";
+    const ABORTED: &str = "beam_stream_aborted_total";
+
+    /// The delivery operations under the HTTP observer, which is what counts a
+    /// body dropped before its end.
+    fn observed_service(fixture: &TestFixture) -> Service<AppState> {
+        Router::new()
+            .nest(
+                "/v1",
+                Router::new().mount(kynos::routes![
+                    stream_file,
+                    head_stream_file,
+                    download_file,
+                    head_download_file,
+                ]),
+            )
+            .observe(HttpMetrics)
+            .build(fixture.state.clone())
+            .expect("the delivery router describes itself")
+    }
+
+    /// The issue's own case: a ranged request is counted for exactly the
+    /// octets its `206` encloses -- not the file, not the span read rounded up.
+    #[tokio::test]
+    async fn a_ranged_stream_counts_exactly_the_bytes_it_served() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+
+        let served = serve("video.mkv", &[7u8; 200]).await;
+        served
+            .client
+            .get(STREAM)
+            .cookie("beam_session", &served.token)
+            .header("Range", "bytes=10-109")
+            .send()
+            .await
+            .assert_part(10, 109, 200);
+
+        let recorded = Recorded::of(&snapshotter);
+        let stream = [("endpoint", "stream")];
+        assert_eq!(recorded.counter(BYTES, &stream), Some(100));
+        assert_eq!(
+            recorded.counter(BYTES, &[("endpoint", "download")]),
+            None,
+            "a stream is not counted as a download"
+        );
+        assert_eq!(
+            recorded.gauge(ACTIVE, &stream),
+            Some(0.0),
+            "the body was active while read, and is not once delivered"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_download_is_counted_under_its_own_endpoint() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+
+        let served = serve("video.mkv", &[3u8; 300]).await;
+        let response = served
+            .client
+            .get(DOWNLOAD)
+            .cookie("beam_session", &served.token)
+            .send()
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let recorded = Recorded::of(&snapshotter);
+        assert_eq!(
+            recorded.counter(BYTES, &[("endpoint", "download")]),
+            Some(300)
+        );
+        assert_eq!(recorded.counter(BYTES, &[("endpoint", "stream")]), None);
+    }
+
+    /// A `HEAD` and a `304` send no content, so nothing is read, and no
+    /// stream is ever active for them.
+    #[tokio::test]
+    async fn a_bodiless_answer_serves_no_bytes_and_is_never_active() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+
+        let served = serve("video.mkv", &[1u8; 64]).await;
+        let head = served
+            .client
+            .head(STREAM)
+            .cookie("beam_session", &served.token)
+            .send()
+            .await;
+        assert_eq!(head.status(), StatusCode::OK);
+        let etag = head
+            .header("etag")
+            .expect("a delivery is tagged")
+            .to_owned();
+        served
+            .client
+            .get(STREAM)
+            .cookie("beam_session", &served.token)
+            .header("If-None-Match", &etag)
+            .send()
+            .await
+            .assert_status(StatusCode::NOT_MODIFIED);
+
+        let recorded = Recorded::of(&snapshotter);
+        assert_eq!(recorded.counter(BYTES, &[("endpoint", "stream")]), None);
+        assert_eq!(recorded.gauge(ACTIVE, &[("endpoint", "stream")]), None);
+    }
+
+    /// A player that seeks drops the body it was reading. That body is an
+    /// abort; one read to its end is not.
+    #[tokio::test]
+    async fn a_body_dropped_before_its_end_is_counted_as_aborted() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("video.mkv");
+        std::fs::write(&path, [9u8; 500]).unwrap();
+        let fixture = make_test_state(vec![make_located_file(
+            TEST_FILE_ID,
+            path.to_str().unwrap(),
+        )]);
+        let token = seed_session_token(&fixture).await;
+
+        let delivered = kynos::test::TestClient::new(observed_service(&fixture))
+            .get(STREAM)
+            .cookie("beam_session", &token)
+            .send()
+            .await;
+        assert_eq!(delivered.bytes().len(), 500);
+
+        let mut request = Request::new(Body::empty());
+        *request.uri_mut() = STREAM.parse().expect("a request target");
+        request.headers_mut().insert(
+            header::COOKIE,
+            format!("beam_session={token}")
+                .parse()
+                .expect("a cookie field"),
+        );
+        let abandoned = observed_service(&fixture).call(request).await;
+        assert_eq!(abandoned.status(), StatusCode::OK);
+        // The body's `Drop` is what reports; nothing polled it.
+        drop(abandoned);
+
+        let recorded = Recorded::of(&snapshotter);
+        assert_eq!(
+            recorded.counter(ABORTED, &[("endpoint", "stream")]),
+            Some(1),
+            "only the abandoned body is an abort"
+        );
+        assert_eq!(recorded.counter(ABORTED, &[("endpoint", "download")]), None);
+    }
+
+    /// Active from the first span read until the body lets the source go,
+    /// however many spans it reads between.
+    #[tokio::test]
+    async fn a_source_is_active_from_its_first_read_until_dropped() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("video.mkv");
+        std::fs::write(&path, [5u8; 50]).unwrap();
+        let (file, _, _) = FileByteSource::open(dir.path().to_owned(), path)
+            .await
+            .expect("the file opens");
+        let source = Arc::new(MeteredSource::new(file, DeliveryEndpoint::Download));
+        let download = [("endpoint", "download")];
+
+        assert_eq!(
+            Recorded::of(&snapshotter).gauge(ACTIVE, &download),
+            None,
+            "opening is not delivering"
+        );
+
+        source.read_span(0, 9).await.expect("a span");
+        source.read_span(10, 29).await.expect("a span");
+        let mid = Recorded::of(&snapshotter);
+        assert_eq!(
+            mid.gauge(ACTIVE, &download),
+            Some(1.0),
+            "one body, two reads"
+        );
+        assert_eq!(mid.counter(BYTES, &download), Some(30));
+
+        // A `Recorded` reads a gauge's change since the last one: the one
+        // body that was active is no longer.
+        drop(source);
+        assert_eq!(
+            Recorded::of(&snapshotter).gauge(ACTIVE, &download),
+            Some(-1.0)
+        );
+    }
+}

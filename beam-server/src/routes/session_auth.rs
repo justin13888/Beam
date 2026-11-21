@@ -88,6 +88,17 @@ pub type AdminAuth = Scoped<SessionCookie, Admin>;
 /// Convenience alias for an operation that needs any signed-in caller.
 pub type SessionAuth = Auth<SessionCookie>;
 
+/// Count one failed session-store call in `beam_session_store_errors_total`
+/// ([#458](https://github.com/justin13888/beam/issues/458)).
+///
+/// Called wherever a request handler meets a session-store failure:
+/// authenticating a cookie here, and signing out, listing and revoking
+/// sessions in `auth.rs`. A store outage answers every signed-in request with
+/// a 503, so this is the counter that pages.
+pub(crate) fn session_store_failed() {
+    metrics::counter!("beam_session_store_errors_total").increment(1);
+}
+
 /// Verifies the session cookie against the store, and the admin scope against
 /// the user row.
 ///
@@ -136,6 +147,7 @@ impl Authenticator<SessionCookie, AppState> for SessionAuthenticator {
         )
         .await
         .map_err(|e| {
+            session_store_failed();
             tracing::error!(error = %e, "session store failed while authenticating");
             AuthRejection::unavailable::<SessionCookie>()
         })?
