@@ -530,8 +530,7 @@ jobs:
     needs: [changes]
     # vitest resolves through Vite, which never type-checks, so this does not
     # need api.gen.ts at all. It runs the same set `ts:test` in the `ci` mise
-    # task and the pre-push hook enforce, plus the coverage thresholds in
-    # vitest.config.ts.
+    # task enforces, plus the coverage thresholds in vitest.config.ts.
     if: needs.changes.outputs.ts == 'true'
     runs-on: ubuntu-latest
     steps:
