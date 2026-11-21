@@ -22,6 +22,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.GraphicsMode
 
 /**
  * Which downloads count as complete, through the harness's real manager, core
@@ -30,6 +31,7 @@ import org.robolectric.RobolectricTestRunner
  * refused.
  */
 @RunWith(RobolectricTestRunner::class)
+@GraphicsMode(GraphicsMode.Mode.NATIVE)
 class CompletedDownloadsTest : DownloadRepositoryHarness() {
     @Test
     fun `only a download that has completed counts as downloaded`() =
@@ -61,11 +63,6 @@ class CompletedDownloadsTest : DownloadRepositoryHarness() {
             assertTrue(repository.isDownloaded(DONE))
             assertEquals(CompletedDownload(DONE, mediaUrl(DONE, HOME)), repository.completed(DONE))
             assertNull("never queued", repository.completed("unknown"))
-
-            // Media3 would otherwise go on retrying the refused download past
-            // this test, calling into the core it shares with the next one.
-            repository.remove(PARTIAL)
-            awaitUntil { indexedState(PARTIAL) == null }
         }
 
     @Test

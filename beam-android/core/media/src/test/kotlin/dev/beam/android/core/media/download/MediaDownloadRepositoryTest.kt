@@ -11,6 +11,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.GraphicsMode
 import uniffi.beam_client_core.DownloadRecord
 import uniffi.beam_client_core.DownloadState
 
@@ -20,6 +21,7 @@ import uniffi.beam_client_core.DownloadState
  * told about each.
  */
 @RunWith(RobolectricTestRunner::class)
+@GraphicsMode(GraphicsMode.Mode.NATIVE)
 class MediaDownloadRepositoryTest : DownloadRepositoryHarness() {
     @Test
     fun `downloads are listed while signed out`() =

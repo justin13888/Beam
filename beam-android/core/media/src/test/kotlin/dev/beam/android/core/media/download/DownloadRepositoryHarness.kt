@@ -51,6 +51,13 @@ import java.util.concurrent.TimeoutException
  * is signed in to the core unless a test signs one in, answering `/v1/me`
  * through [canned]; without that, or without a sources listing there, the
  * core plans each file alone, from the server's download route.
+ *
+ * Every subclass runs under `@GraphicsMode(NATIVE)`, as `DownloadArtworkTest`
+ * does, so that every test here that builds a core shares one Robolectric
+ * sandbox. The native core is loaded once per JVM, and each sandbox that
+ * loads the bindings registers its own key-value store callbacks with it,
+ * replacing the last sandbox's: a core built in any other sandbox then calls
+ * back into handles that sandbox never issued, and its calls never return.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 abstract class DownloadRepositoryHarness {
