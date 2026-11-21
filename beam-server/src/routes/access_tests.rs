@@ -147,6 +147,13 @@ impl LibraryService for FileLocator {
     ) -> Result<crate::models::Library, LibraryError> {
         unimplemented!("not called by the routes under test")
     }
+    async fn declare_library(
+        &self,
+        _name: String,
+        _root_path: String,
+    ) -> Result<crate::services::library::LibraryDeclared, LibraryError> {
+        unimplemented!("not called by the routes under test")
+    }
     async fn start_scan(&self, _library_id: Uuid) -> Result<crate::models::ScanJob, LibraryError> {
         unimplemented!("not called by the routes under test")
     }

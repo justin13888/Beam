@@ -568,6 +568,12 @@ mod library_declarations {
         }
     }
 
+    /// An empty library store, which outlives each boot that uses it.
+    fn no_libraries()
+    -> Arc<beam_domain::repositories::library::in_memory::InMemoryLibraryRepository> {
+        Arc::default()
+    }
+
     /// One boot's library service over `libraries`, the store that outlives
     /// it. The index service expects no call: declaring never scans.
     fn boot(
@@ -628,7 +634,7 @@ mod library_declarations {
     #[tokio::test]
     async fn declared_libraries_are_created_once_across_two_boots() {
         let host = host();
-        let libraries = Arc::new(Default::default());
+        let libraries = no_libraries();
         // One absolute, one relative to the video directory, as either may be
         // declared.
         let declarations = vec![
@@ -675,7 +681,7 @@ mod library_declarations {
     #[tokio::test]
     async fn a_library_stored_at_the_declared_root_keeps_its_own_name() {
         let host = host();
-        let libraries = Arc::new(Default::default());
+        let libraries = no_libraries();
         store(&libraries, "Films", host.videos.join("movies")).await;
 
         let reports = declare_libraries(
@@ -700,7 +706,7 @@ mod library_declarations {
     #[tokio::test]
     async fn a_name_held_at_another_root_is_neither_moved_nor_duplicated() {
         let host = host();
-        let libraries = Arc::new(Default::default());
+        let libraries = no_libraries();
         store(&libraries, "Movies", host.videos.join("anime")).await;
 
         let reports = declare_libraries(
@@ -722,7 +728,7 @@ mod library_declarations {
     #[tokio::test]
     async fn a_declaration_the_root_rules_refuse_is_skipped_and_the_rest_still_apply() {
         let host = host();
-        let libraries = Arc::new(Default::default());
+        let libraries = no_libraries();
         std::fs::create_dir_all(host.videos.join("shows/kids")).unwrap();
         store(&libraries, "Shows", host.videos.join("shows")).await;
 
@@ -778,7 +784,7 @@ mod library_declarations {
         let data = host.videos.join("beam-data");
         std::fs::create_dir_all(data.join("artwork")).unwrap();
         let host = Host { data, ..host };
-        let libraries = Arc::new(Default::default());
+        let libraries = no_libraries();
 
         let reports = declare_libraries(
             &boot(&host, libraries.clone()),
