@@ -269,6 +269,10 @@ impl DbMetadataService {
             air_date,
             runtime: _,
             thumbnail_url,
+            // Indexing state: the API lists an episode where it now is.
+            numbering: _,
+            absolute_number: _,
+            absolute_season_number: _,
             created_at: _,
         } = ep;
         Ok(EpisodeMetadata {

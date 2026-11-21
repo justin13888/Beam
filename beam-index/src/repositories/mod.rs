@@ -17,6 +17,7 @@ pub mod movie;
 pub mod person;
 pub mod playback_telemetry;
 pub mod show;
+mod show_rehome;
 pub mod sidecar_subtitle;
 pub mod stream;
 pub mod trickplay;
