@@ -1,7 +1,6 @@
 package dev.beam.android.feature.auth
 
 import android.annotation.SuppressLint
-import android.net.Uri
 import android.net.http.SslCertificate
 import android.net.http.SslError
 import android.os.Build
@@ -13,6 +12,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.net.toUri
 import uniffi.beam_client_core.pinnedCertificateAccepted
 import uniffi.beam_client_core.sessionCookieName
 
@@ -185,8 +185,8 @@ internal class SignInWebViewClient(
          * root dot, and an IPv6 literal without its brackets.
          */
         fun hostOf(url: String): String? =
-            Uri
-                .parse(url)
+            url
+                .toUri()
                 .host
                 ?.removePrefix("[")
                 ?.removeSuffix("]")
