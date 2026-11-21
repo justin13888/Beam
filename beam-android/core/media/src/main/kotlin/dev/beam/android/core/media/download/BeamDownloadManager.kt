@@ -15,6 +15,7 @@ import androidx.media3.datasource.cache.Cache
 import androidx.media3.datasource.cache.NoOpCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
 import androidx.media3.exoplayer.offline.Download
+import androidx.media3.exoplayer.offline.DownloadIndex
 import androidx.media3.exoplayer.offline.DownloadManager
 import androidx.media3.exoplayer.offline.DownloadRequest
 import androidx.media3.exoplayer.scheduler.Requirements
@@ -22,11 +23,16 @@ import dev.beam.android.core.ffi.repository.PlaybackRepository
 import dev.beam.android.core.media.http.beamDataSourceFactory
 import dev.beam.android.core.model.DownloadRecord
 import dev.beam.android.core.model.DownloadState
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.withContext
 import okhttp3.Call
 import java.io.File
+import java.io.IOException
 import java.util.concurrent.Executors
 
 /**
@@ -52,11 +58,25 @@ public class BeamDownloadManager internal constructor(
     /** The underlying manager, for the foreground service that drives it. */
     internal val raw: DownloadManager get() = manager
 
-    /** Every download, re-emitted whenever any of them changes. */
+    /**
+     * Every download, finished and failed ones included, re-emitted whenever
+     * any of them changes.
+     *
+     * The manager's own `currentDownloads` leaves out a download in a terminal
+     * state, so a list built from it alone drops a download the moment it
+     * completes -- the one the viewer most wants to find. Each change is read
+     * from the download index too, which keeps every download until it is
+     * removed; see [listed].
+     *
+     * `currentDownloads` is taken on the thread the manager reports on, where
+     * Media3 keeps it; the index is read on [Dispatchers.IO], because each read
+     * is a SQLite query the index documents must not run on the main thread.
+     * Conflated, so a burst of changes reads the index once for the latest.
+     */
     public val downloads: Flow<List<DownloadRecord>> =
         callbackFlow {
             fun publish() {
-                trySend(manager.currentDownloads.map { it.toRecord(titles, artwork) })
+                trySend(manager.currentDownloads)
             }
 
             val listener =
@@ -78,7 +98,13 @@ public class BeamDownloadManager internal constructor(
             manager.addListener(listener)
             publish()
             awaitClose { manager.removeListener(listener) }
-        }
+        }.conflate()
+            .map { current ->
+                val index = manager.downloadIndex
+                withContext(Dispatchers.IO) {
+                    index.listed(current).map { it.toRecord(titles, artwork) }
+                }
+            }
 
     /**
      * Queue a file for offline playback.
@@ -262,6 +288,32 @@ public class BeamDownloadManager internal constructor(
                 StandaloneDatabaseProvider(context),
             )
     }
+}
+
+/**
+ * Every download this index records, in its order, each replaced by its copy
+ * in [current] where it has one.
+ *
+ * [current] is the manager's live view of the downloads still in progress,
+ * and holds progress the index is only written with now and then; the index
+ * is what still holds a completed or failed download. A download in [current]
+ * that the index does not hold yet is listed after the rest.
+ *
+ * An index that cannot be read lists [current] alone: the downloads still in
+ * progress stay on screen rather than the list going blank.
+ */
+internal fun DownloadIndex.listed(current: List<Download>): List<Download> {
+    val indexed =
+        try {
+            getDownloads().use { cursor ->
+                buildList { while (cursor.moveToNext()) add(cursor.download) }
+            }
+        } catch (_: IOException) {
+            return current
+        }
+    val live = current.associateBy { it.request.id }
+    val indexedIds = indexed.mapTo(HashSet()) { it.request.id }
+    return indexed.map { live[it.request.id] ?: it } + current.filterNot { it.request.id in indexedIds }
 }
 
 internal fun Download.toRecord(
