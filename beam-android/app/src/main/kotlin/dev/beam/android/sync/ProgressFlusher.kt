@@ -8,7 +8,6 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.filter
-import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.withContext
@@ -24,26 +23,26 @@ import kotlin.time.Duration.Companion.seconds
  *
  * A position the server could not take -- no network, a server down, a
  * session refused -- is queued by the core rather than lost, and the core
- * sends the queue only when asked. This asks on two triggers:
+ * sends the queue only when asked. Each server's queue goes to that server
+ * with its own session, whichever is active, so this asks on two triggers:
  *
- * - **the active server becomes signed in**, which covers the start (the
- *   restore publishes the list, so this waits for it), a switch of server
- *   (the queue is per server, and only the active one's is sent), and a
- *   sign-in after the server refused the session;
+ * - **the set of signed-in servers changes**, which covers the start (the
+ *   restore publishes the list, so this waits for it) and a sign-in after a
+ *   server refused the session;
  * - **a network comes back** after there was none.
  *
- * and then keeps asking while anything is left. The core stops a drain at the
- * first failed send and backs that entry off, so a drain that runs while the
- * server is down leaves the queue -- and a server that recovers while the
- * device stays online fires neither trigger. So after a drain that leaves
- * entries queued for a signed-in server, this drains again on the core's own
- * backoff schedule ([retryDelay]) until the queue is empty, the session is
- * refused, or another trigger starts over.
+ * and then keeps asking while the core says something is left. The core stops
+ * a server's drain at the first failed send and backs that entry off, so a
+ * drain that runs while a server is down leaves its queue -- and a server that
+ * recovers while the device stays online fires neither trigger. The core's
+ * answer names when the next drain could send something (its back-off, or a
+ * server's `Retry-After`), so this waits exactly that long and drains again,
+ * until the core names no wait or another trigger starts over. The schedule
+ * is the core's; this keeps none of its own.
  *
  * A trigger arriving while a drain is running waits for that drain to finish
- * and then starts one more (with the retry schedule reset), so the queue is
- * never sent twice over at once; one arriving during a retry wait ends the
- * wait.
+ * and then starts one more, so the queue is never sent twice over at once;
+ * one arriving during a retry wait ends the wait.
  */
 @Singleton
 internal class ProgressFlusher
@@ -59,11 +58,11 @@ internal class ProgressFlusher
                 servers.servers
                     .map { known ->
                         known
-                            .firstOrNull { it.isActive }
-                            ?.takeIf { it.state is SessionState.Authenticated }
-                            ?.id
+                            .filter { it.state is SessionState.Authenticated }
+                            .map { it.id }
+                            .toSet()
                     }.distinctUntilChanged()
-                    .filterNotNull()
+                    .filter { it.isNotEmpty() }
                     .map { }
             // The first answer is the state at start, which the restore
             // already covers; only a return from offline is a trigger.
@@ -81,42 +80,25 @@ internal class ProgressFlusher
         }
 
         private suspend fun drainUntilEmpty() {
-            var retries = 0
-            while (withContext(NonCancellable) { flush() }) {
-                retries += 1
-                delay(retryDelay(retries))
+            var failures = 0u
+            while (true) {
+                val wait: Duration =
+                    withContext(NonCancellable) {
+                        try {
+                            // The core leaves servers that are not signed in
+                            // alone, and names no wait once nothing a drain
+                            // could send is left.
+                            val drained = playback.drainProgress()
+                            failures = 0u
+                            drained.retryInSecs?.toLong()?.seconds
+                        } catch (_: BeamException) {
+                            // A queue that could not be read backed nothing
+                            // off, so the core's schedule is asked directly.
+                            failures += 1u
+                            playback.progressRetryDelaySecs(failures).toLong().seconds
+                        }
+                    } ?: return
+                delay(wait)
             }
-        }
-
-        /** Drain once, and answer whether anything is left worth retrying. */
-        private suspend fun flush(): Boolean {
-            // Read now rather than carried from the trigger: a reconnect is
-            // only worth a drain while the server it would go to accepts us.
-            return try {
-                val active = servers.activeServer() ?: return false
-                if (active.state !is SessionState.Authenticated) return false
-                playback.flushProgress()
-                playback.pendingProgressCount() > 0u
-            } catch (_: BeamException) {
-                // Whatever was not sent stays queued, and is retried on the
-                // same schedule. A refused session is already re-published
-                // by the repository, which is how the shell learns of it,
-                // and the state check above ends the retries on the next pass.
-                true
-            }
-        }
-
-        private companion object {
-            /**
-             * The wait before the [retry]th re-drain: 2 s, 4 s, 8 s, ... capped
-             * at 64 s -- the schedule `ProgressQueue::record_failure` in
-             * beam-client-core backs a failed entry off by, so a retry lands as
-             * the entry falls due rather than before it (when the core would
-             * send nothing). A server's `Retry-After` can push an entry later;
-             * a retry before then is a local read that sends nothing.
-             */
-            fun retryDelay(retry: Int): Duration = (1L shl retry.coerceIn(1, MAX_BACKOFF_EXPONENT)).seconds
-
-            private const val MAX_BACKOFF_EXPONENT = 6
         }
     }

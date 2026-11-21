@@ -26,6 +26,7 @@ import uniffi.beam_client_core.MediaSourceView
 import uniffi.beam_client_core.PlaybackHttpConfig
 import uniffi.beam_client_core.PlaybackPlan
 import uniffi.beam_client_core.PlaybackTelemetrySummary
+import uniffi.beam_client_core.ProgressDrain
 import uniffi.beam_client_core.ProgressOutcome
 import uniffi.beam_client_core.QualityPolicy
 import uniffi.beam_client_core.ScanJob
@@ -250,9 +251,16 @@ internal class BeamPlaybackRepository
                 if (it is ProgressOutcome.Queued) changes.republishQuietly()
             }
 
-        override suspend fun flushProgress(): UInt = changes.watching { client.flushProgress() }
+        // A session refused during a drain is named rather than thrown, so the
+        // drain carries on with the other servers; the list still has to
+        // learn that the server signed out.
+        override suspend fun drainProgress(): ProgressDrain =
+            changes.watching { client.drainProgress() }.also {
+                if (it.expiredServerIds.isNotEmpty()) changes.republishQuietly()
+            }
 
-        override suspend fun pendingProgressCount(): UInt = changes.watching { client.pendingProgressCount() }
+        override fun progressRetryDelaySecs(attempt: UInt): ULong =
+            uniffi.beam_client_core.progressRetryDelaySecs(attempt)
     }
 
 @Singleton
