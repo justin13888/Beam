@@ -262,7 +262,7 @@ fn queue_invalidated_watches(event: &notify::Event, shared: &Shared) {
         .iter()
         .filter(|library| library.backend == Backend::Native)
         .filter(|library| {
-            let names_this_root = event.paths.iter().any(|path| *path == library.root);
+            let names_this_root = event.paths.contains(&library.root);
             let rescans_this_root = rescan
                 && (event.paths.is_empty()
                     || event
