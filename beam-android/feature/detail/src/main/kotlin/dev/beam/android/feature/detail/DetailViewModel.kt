@@ -11,6 +11,7 @@ import dev.beam.android.core.ffi.repository.ServerRepository
 import dev.beam.android.core.ffi.toFailure
 import dev.beam.android.core.media.download.DownloadRepository
 import dev.beam.android.core.model.LoadState
+import dev.beam.android.core.model.PlaybackRequest
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -67,6 +68,41 @@ public data class DetailUiState(
      */
     public val isSoftwareOnly: Boolean
         get() = selection?.playability is Playability.Software
+
+    /** Whether Play resumes part-way, so starting over is worth offering as its own action. */
+    public val canResume: Boolean
+        get() = summary.startPositionSecs > 0.0
+
+    /**
+     * What Play hands the player: the chosen file, from where the core says
+     * the title starts -- its resume point, or 0 for one not started or near
+     * its end (issue #466) -- or from 0 when the viewer asked to start over.
+     */
+    public fun play(fromBeginning: Boolean = false): PlaybackRequest? =
+        selection?.source?.let { source ->
+            request(source.fileId, null, summary.title, if (fromBeginning) 0.0 else summary.startPositionSecs)
+        }
+
+    /** A file the viewer picked by hand: pinned, and resumed like Play, since progress is the title's. */
+    public fun playPicked(source: MediaSourceView): PlaybackRequest =
+        request(source.fileId, null, summary.title, summary.startPositionSecs).copy(isSourcePicked = true)
+
+    /** One episode, from where the core says it starts; `null` for one with no file. */
+    public fun playEpisode(episode: EpisodeSummary): PlaybackRequest? =
+        episode.fileId?.let { fileId -> request(fileId, episode.id, episode.title, episode.startPositionSecs) }
+
+    private fun request(
+        fileId: String,
+        episodeId: String?,
+        title: String,
+        startPositionSecs: Double,
+    ) = PlaybackRequest(
+        mediaId = summary.id,
+        episodeId = episodeId,
+        fileId = fileId,
+        title = title,
+        startPositionSecs = startPositionSecs,
+    )
 }
 
 /**

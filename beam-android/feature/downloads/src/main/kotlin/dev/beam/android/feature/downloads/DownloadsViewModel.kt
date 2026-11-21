@@ -3,16 +3,22 @@ package dev.beam.android.feature.downloads
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dev.beam.android.core.ffi.repository.CatalogRepository
 import dev.beam.android.core.media.download.DownloadRepository
 import dev.beam.android.core.model.DownloadRecord
 import dev.beam.android.core.model.DownloadState
+import dev.beam.android.core.model.PlaybackRequest
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
+import uniffi.beam_client_core.BeamException
+import uniffi.beam_client_core.MediaDetail
 import javax.inject.Inject
+import kotlin.time.Duration.Companion.seconds
 
 /** Offline downloads, grouped by what the viewer can do with them. */
 public data class DownloadsUiState(
@@ -34,6 +40,7 @@ public class DownloadsViewModel
     @Inject
     constructor(
         private val downloads: DownloadRepository,
+        private val catalog: CatalogRepository,
     ) : ViewModel() {
         public val state: StateFlow<DownloadsUiState> =
             downloads.downloads
@@ -77,5 +84,64 @@ public class DownloadsViewModel
         /** Delete everything. */
         public fun removeAll() {
             viewModelScope.launch { runCatching { downloads.removeAll() } }
+        }
+
+        /**
+         * Play [record], resuming where the viewer stopped (issue #466), and
+         * hand the request to [onReady].
+         *
+         * The position is the server's, through the core's start rule: the
+         * title's own for a film, the episode's for a series. A downloaded file
+         * is what plays with no network, so a lookup that fails or does not
+         * answer within [RESUME_LOOKUP_TIMEOUT] starts at 0 rather than holding
+         * the player back.
+         */
+        public fun play(
+            record: DownloadRecord,
+            onReady: (PlaybackRequest) -> Unit,
+        ) {
+            viewModelScope.launch {
+                val detail =
+                    withTimeoutOrNull(RESUME_LOOKUP_TIMEOUT) {
+                        try {
+                            catalog.detail(record.mediaId)
+                        } catch (_: BeamException) {
+                            null
+                        }
+                    }
+                onReady(
+                    PlaybackRequest(
+                        mediaId = record.mediaId,
+                        episodeId = record.episodeId,
+                        fileId = record.fileId,
+                        title = record.title,
+                        subtitle = record.subtitle,
+                        artworkUrl = record.posterUrl,
+                        startPositionSecs = detail?.startPositionFor(record.episodeId) ?: 0.0,
+                    ),
+                )
+            }
+        }
+
+        private companion object {
+            /** How long Play waits on the server for a resume point before starting at 0. */
+            val RESUME_LOOKUP_TIMEOUT = 3.seconds
+        }
+    }
+
+/** Where the core says [episodeId] -- or, without one, the film itself -- starts. */
+private fun MediaDetail.startPositionFor(episodeId: String?): Double =
+    when (this) {
+        is MediaDetail.Movie -> {
+            summary.startPositionSecs
+        }
+
+        is MediaDetail.Show -> {
+            seasons
+                .asSequence()
+                .flatMap { it.episodes }
+                .firstOrNull { it.id == episodeId }
+                ?.startPositionSecs
+                ?: 0.0
         }
     }

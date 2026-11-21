@@ -19,6 +19,7 @@ import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.CheckCircleOutline
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Replay
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
@@ -48,6 +49,7 @@ import dev.beam.android.core.designsystem.component.BeamLoading
 import dev.beam.android.core.designsystem.component.MetaBadgeRow
 import dev.beam.android.core.designsystem.component.SectionHeader
 import dev.beam.android.core.model.LoadState
+import dev.beam.android.core.model.PlaybackRequest
 import dev.beam.android.core.model.valueOrNull
 import dev.beam.android.core.ui.Format
 import uniffi.beam_client_core.EpisodeSummary
@@ -56,7 +58,7 @@ import uniffi.beam_client_core.MediaSourceView
 /** One title's page, wired to its view model. */
 @Composable
 public fun DetailRoute(
-    onPlay: (fileId: String, episodeId: String?, title: String, isSourcePicked: Boolean) -> Unit,
+    onPlay: (PlaybackRequest) -> Unit,
     modifier: Modifier = Modifier,
     viewModel: DetailViewModel = hiltViewModel(),
 ) {
@@ -79,7 +81,7 @@ public fun DetailRoute(
 @Composable
 internal fun DetailScreen(
     state: LoadState<DetailUiState>,
-    onPlay: (fileId: String, episodeId: String?, title: String, isSourcePicked: Boolean) -> Unit,
+    onPlay: (PlaybackRequest) -> Unit,
     onSelectSeason: (UInt) -> Unit,
     onPickSource: () -> Unit,
     onDismissPicker: () -> Unit,
@@ -139,7 +141,7 @@ internal fun DetailScreen(
 @Composable
 private fun DetailContent(
     state: DetailUiState,
-    onPlay: (fileId: String, episodeId: String?, title: String, isSourcePicked: Boolean) -> Unit,
+    onPlay: (PlaybackRequest) -> Unit,
     onSelectSeason: (UInt) -> Unit,
     onPickSource: () -> Unit,
     onDismissPicker: () -> Unit,
@@ -157,7 +159,7 @@ private fun DetailContent(
                 onDismissPicker()
                 // The one place a file is chosen by hand before playback: the
                 // player pins it, so a stall never swaps it for a smaller one.
-                onPlay(source.fileId, null, summary.title, true)
+                onPlay(state.playPicked(source))
             },
             onDismiss = onDismissPicker,
         )
@@ -288,11 +290,7 @@ private fun DetailContent(
             items(state.episodes, key = { it.id }) { episode ->
                 EpisodeRow(
                     episode = episode,
-                    onPlay = {
-                        episode.fileId?.let { fileId ->
-                            onPlay(fileId, episode.id, episode.title, false)
-                        }
-                    },
+                    onPlay = { state.playEpisode(episode)?.let(onPlay) },
                     onToggleWatched = { onSetWatched(episode.id, !episode.played) },
                 )
             }
@@ -303,7 +301,7 @@ private fun DetailContent(
 @Composable
 private fun Actions(
     state: DetailUiState,
-    onPlay: (fileId: String, episodeId: String?, title: String, isSourcePicked: Boolean) -> Unit,
+    onPlay: (PlaybackRequest) -> Unit,
     onPickSource: () -> Unit,
     onDownload: (fileId: String, title: String, subtitle: String?) -> Unit,
     onSetWatched: (id: String, watched: Boolean) -> Unit,
@@ -317,17 +315,27 @@ private fun Actions(
         horizontalArrangement = Arrangement.spacedBy(BeamSpacing.Small),
     ) {
         Button(
-            onClick = {
-                playable?.let { onPlay(it.fileId, null, state.summary.title, false) }
-            },
+            onClick = { state.play()?.let(onPlay) },
             enabled = playable != null,
             modifier = Modifier.weight(1f),
         ) {
             Icon(Icons.Rounded.PlayArrow, contentDescription = null)
             Text(
-                text = if (playable == null) "Unavailable" else "Play",
+                text =
+                    when {
+                        playable == null -> "Unavailable"
+                        state.canResume -> "Resume"
+                        else -> "Play"
+                    },
                 modifier = Modifier.padding(start = BeamSpacing.Small),
             )
+        }
+
+        // Starting over stays an explicit choice: Play resumes, this does not.
+        if (playable != null && state.canResume) {
+            OutlinedButton(onClick = { state.play(fromBeginning = true)?.let(onPlay) }) {
+                Icon(Icons.Rounded.Replay, contentDescription = "Play from beginning")
+            }
         }
 
         // Offered for whichever file would play, so downloading and playing
