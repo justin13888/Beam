@@ -10,6 +10,7 @@ package dev.beam.android.core.media.download
 import android.content.Context
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.cache.Cache
+import androidx.media3.exoplayer.offline.Download
 import androidx.media3.exoplayer.offline.DownloadManager
 import dagger.hilt.android.qualifiers.ApplicationContext
 import dev.beam.android.core.ffi.preferences.PreferencesRepository
@@ -25,6 +26,7 @@ import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import java.io.IOException
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -61,8 +63,33 @@ public interface DownloadRepository {
     /** Only download over an unmetered connection. */
     public suspend fun setRequiresUnmeteredNetwork(required: Boolean)
 
-    /** Whether a file is already downloaded and playable offline. */
+    /**
+     * Whether a file is downloaded in full, and so plays offline. A download
+     * still in progress, paused, or failed is not, whatever it has fetched.
+     */
     public suspend fun isDownloaded(fileId: String): Boolean
+}
+
+/** A file downloaded in full: what the player needs to play it with no network. */
+public data class CompletedDownload(
+    val fileId: String,
+    /**
+     * The URL it was fetched from. The download cache keys its bytes by it,
+     * so playing from this URL reads them from disk.
+     */
+    val uri: String,
+)
+
+/**
+ * The completed downloads, as the player looks them up.
+ *
+ * Narrower than [DownloadRepository] because the player needs only this, and
+ * a player test then supplies one completed download without a download
+ * manager behind it.
+ */
+public fun interface CompletedDownloads {
+    /** [fileId]'s download, where it has completed; `null` otherwise. */
+    public suspend fun completed(fileId: String): CompletedDownload?
 }
 
 /**
@@ -99,6 +126,7 @@ internal class MediaDownloadRepository
         private val artwork: DownloadArtwork,
         preferences: PreferencesRepository,
     ) : DownloadRepository,
+        CompletedDownloads,
         DownloadManagerHolder {
         private var delegate: BeamDownloadManager? = null
 
@@ -169,8 +197,26 @@ internal class MediaDownloadRepository
             }
         }
 
-        override suspend fun isDownloaded(fileId: String): Boolean =
-            titles.get(fileId) != null && cache.getCachedSpans(fileId).isNotEmpty()
+        override suspend fun isDownloaded(fileId: String): Boolean = completed(fileId) != null
+
+        /**
+         * From the download index, which records each download's state.
+         *
+         * Not from the cache: a partial download has spans in it too, and
+         * the cache keys them by URL, not by file. An index that cannot be
+         * read is treated as holding no completed download, so playback falls
+         * back to streaming rather than failing.
+         */
+        override suspend fun completed(fileId: String): CompletedDownload? {
+            val download =
+                try {
+                    beamManager().raw.downloadIndex.getDownload(fileId)
+                } catch (_: IOException) {
+                    null
+                }
+            if (download == null || download.state != Download.STATE_COMPLETED) return null
+            return CompletedDownload(fileId = fileId, uri = download.request.uri.toString())
+        }
 
         /**
          * The raw manager the download service drives.

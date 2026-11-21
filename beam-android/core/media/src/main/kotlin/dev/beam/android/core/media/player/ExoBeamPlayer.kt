@@ -18,10 +18,13 @@ import androidx.media3.common.Player
 import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.cache.Cache
 import androidx.media3.exoplayer.ExoPlayer
 import dev.beam.android.core.ffi.repository.PlaybackRepository
 import dev.beam.android.core.ffi.repository.TelemetryRepository
 import dev.beam.android.core.ffi.toFailure
+import dev.beam.android.core.media.download.CompletedDownload
+import dev.beam.android.core.media.download.CompletedDownloads
 import dev.beam.android.core.media.http.BeamHttpClientFactory
 import dev.beam.android.core.media.http.beamDataSourceFactory
 import dev.beam.android.core.model.PlaybackRequest
@@ -59,6 +62,10 @@ internal class ExoBeamPlayer(
     private val repository: PlaybackRepository,
     telemetry: TelemetryRepository,
     private val clients: BeamHttpClientFactory,
+    /** Where downloads land; every file is read from here first. */
+    private val downloadCache: Cache,
+    /** Which files are downloaded in full, so they play without asking the server. */
+    private val completedDownloads: CompletedDownloads,
     private val scope: CoroutineScope,
     /**
      * Whether rebuffering on this file is sustained. The rule is the core's;
@@ -256,15 +263,17 @@ internal class ExoBeamPlayer(
         // Sources belong to a movie or an episode; a show has none of its own,
         // so an episode's are asked for by the episode.
         val titleId = request.episodeId ?: request.mediaId.takeIf { it.isNotEmpty() }
+        // A file downloaded in full plays from disk, without the core's plan.
         val plan =
-            try {
-                repository.playbackPlan(titleId, request.fileId)
-            } catch (failure: BeamException) {
-                mutableState.update {
-                    it.copy(request = request, error = failure.toFailure().asPlaybackFailure())
+            completedDownloads.completed(request.fileId)?.let(::downloadedPlan)
+                ?: try {
+                    repository.playbackPlan(titleId, request.fileId)
+                } catch (failure: BeamException) {
+                    mutableState.update {
+                        it.copy(request = request, error = failure.toFailure().asPlaybackFailure())
+                    }
+                    return false
                 }
-                return false
-            }
         if (plan.parts.isEmpty()) return false
 
         val factory =
@@ -278,6 +287,7 @@ internal class ExoBeamPlayer(
                         trustedFingerprints = plan.trustedFingerprints,
                         host = plan.pinnedHost,
                     ),
+                    downloadCache,
                 ),
             )
         // One item per part (issue #233): the player moves to the next as one
@@ -323,6 +333,35 @@ internal class ExoBeamPlayer(
         startPositionTicker()
         return true
     }
+
+    /**
+     * The plan for a file downloaded in full, built from its download alone.
+     *
+     * The core is not asked: its plan needs a session and a server, and a
+     * download is played exactly when there may be neither -- in airplane
+     * mode, or after the session has expired. A download holds one file, so
+     * the plan is that file alone, with no sidecar subtitles, which are not
+     * downloaded; it plays from the URL the download was fetched from, which
+     * is the key its bytes are cached under. No session goes with it: every
+     * byte is on disk, and the server is never asked for one.
+     */
+    private fun downloadedPlan(download: CompletedDownload): PlaybackPlan =
+        PlaybackPlan(
+            parts =
+                listOf(
+                    PlaybackPart(
+                        fileId = download.fileId,
+                        url = download.uri,
+                        durationSecs = null,
+                        sidecarSubtitles = emptyList(),
+                    ),
+                ),
+            startPartIndex = 0u,
+            headers = emptyMap(),
+            trustedFingerprints = emptyList(),
+            pinnedHost = "",
+            baseUrl = "",
+        )
 
     private fun mediaItem(
         request: PlaybackRequest,

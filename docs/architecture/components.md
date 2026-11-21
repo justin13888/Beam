@@ -355,7 +355,11 @@ plugins in `build-logic/`: `core/{model,ffi,designsystem,ui,media,testing}` and
 - **`core:media`** owns Media3. Playback and the API client are handed the same credential and
   trust decision by the core, because a mismatch surfaces as apparently corrupt media rather than
   as an auth error. Downloads go through Media3's `DownloadManager` so their bytes land in a cache
-  ExoPlayer can read directly.
+  ExoPlayer reads directly: the player's upstream is a read-only `CacheDataSource` over that cache,
+  so a cached span is read from disk and streaming writes nothing to it. A file whose download has
+  completed plays from its download record alone, without asking the core for a playback plan, so
+  it plays with no network and no session; a download holds one file, so that plan is the file
+  alone, without sidecar subtitles or later parts.
 - **Auth** lifts the `beam_session` cookie from an in-app WebView on a phone, as it always has,
   and offers a secondary **Sign in with a code** that runs the device authorization grant — the
   screen shows the user code and the verification address while the core polls. Where there is no
