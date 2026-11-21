@@ -1045,6 +1045,12 @@ else
     cache_next=
     set -- build
 fi
+# The commit beam_build_info reports. Outside a git checkout the Containerfile's
+# `unknown` default stands. The build layer this busts reruns on every commit
+# regardless, since `COPY . .` precedes it.
+if commit=$(git rev-parse HEAD 2>/dev/null); then
+    set -- "$@" --build-arg "BEAM_GIT_COMMIT=$commit"
+fi
 echo "ts:e2e: $engine $* --file beam-server/Containerfile --tag $image ."
 "$engine" "$@" --file beam-server/Containerfile --tag "$image" .
 if [ -n "$cache_next" ]; then
@@ -1664,6 +1670,71 @@ fi
 exit "$status"
 '''
 
+[tasks."check:build-commit"]
+description = "Assert every server image build passes the commit beam_build_info reports"
+# beam_build_info{commit} is compiled in from an environment variable that
+# beam-server/src/metrics.rs reads with `option_env!`. Nothing fails when an
+# image build stops passing it: the server still builds and reports
+# `unknown`, which is how every image shipped before #485. Proving it with a
+# real image build needs a container runtime and the FFmpeg stage, which
+# `ci` excludes by definition, so this guards the wiring instead: the name is
+# read from the server's own reader, and every place that builds the image has
+# to pass that name.
+#
+#   * beam-server/Containerfile: the stage that runs `cargo build` for
+#     beam-server declares it as an ARG and exports it as ENV before that RUN,
+#     and after `cargo chef cook`, so a new commit never invalidates the
+#     cached dependency layers.
+#   * release.yml: the build-push step passes it, scoped to beam-server (the
+#     matrix builds other images from the same step).
+#   * ts:e2e: its image build passes it.
+run = '''
+set -eu
+status=0
+
+name=$(sed -n 's/^const BUILD_COMMIT: .*option_env!("\([A-Z0-9_]*\)").*/\1/p' beam-server/src/metrics.rs)
+if [ -z "$name" ]; then
+    echo "beam-server/src/metrics.rs: no BUILD_COMMIT read through option_env! found" >&2
+    exit 1
+fi
+
+# Per stage: reset at every FROM, and judge the order at the beam-server build.
+if ! awk -v name="$name" '
+    /^FROM / { cook = 0; arg = 0; env = 0 }
+    /^RUN cargo chef cook/ { cook = NR }
+    $1 == "ARG" && ($2 == name || index($2, name "=") == 1) { arg = NR }
+    $1 == "ENV" && $2 == name "=${" name "}" { env = NR }
+    /^RUN cargo build .*--package beam-server/ {
+        found = 1
+        ok = cook > 0 && arg > cook && env > arg
+    }
+    END { exit (found && ok) ? 0 : 1 }
+' beam-server/Containerfile; then
+    echo "beam-server/Containerfile: the beam-server build stage must declare ARG $name and ENV $name=\${$name} after \`cargo chef cook\` and before \`cargo build\`" >&2
+    status=1
+fi
+
+if ! grep -qE "^[[:space:]]*build-args:.*matrix\.image == 'beam-server'.*$name=" .github/workflows/release.yml; then
+    echo ".github/workflows/release.yml: the image build passes no $name build-arg scoped to beam-server" >&2
+    status=1
+fi
+
+e2e=$(awk '
+    $0 == "[tasks.\"ts:e2e\"]" { inside = 1; next }
+    inside && /^\[tasks\./ { exit }
+    inside { print }
+' mise.toml)
+if ! printf '%s\n' "$e2e" | grep -qF -- "--build-arg \"$name="; then
+    echo "mise.toml: ts:e2e builds the server image without --build-arg $name" >&2
+    status=1
+fi
+
+if [ "$status" -eq 0 ]; then
+    echo "every server image build passes $name"
+fi
+exit "$status"
+'''
+
 [tasks."check:ffmpeg-build"]
 description = "Build the ffmpeg-builder stage of beam-server/Containerfile (needs a container runtime)"
 # `check:ffmpeg-version` only proves the pins agree on a version string. It
@@ -2128,7 +2199,8 @@ description = "Assert the rendered Helm chart keeps one Recreate replica, read-o
 #      server directly and could forge the header.
 #   9. The server pod's terminationGracePeriodSeconds is longer than
 #      BEAM_SHUTDOWN_TIMEOUT_SECS, so the kubelet's SIGKILL never cuts a drain
-#      short.
+#      short, and BEAM_SHUTDOWN_TIMEOUT_SECS is plain digits the server can
+#      parse -- never the exponent form Helm gives a float of a million or more.
 #  10. The server pod runs as the image's user (uid and gid 1000, which own
 #      /data in the image) and with exactly the supplemental groups the
 #      scenario sets in server.podSecurityContext.supplementalGroups -- the
@@ -2336,12 +2408,14 @@ for (const scenario of scenarios.sort()) {
     );
   }
 
-  // 9.
-  const drain = Number(env.get("BEAM_SHUTDOWN_TIMEOUT_SECS"));
+  // 9. Digits only, not Number(): Number("1e+06") is an integer to JavaScript,
+  // but the server parses the value as a plain integer and refuses it (#481).
+  const drainRaw = env.get("BEAM_SHUTDOWN_TIMEOUT_SECS");
+  const drain = /^[0-9]+$/.test(drainRaw ?? "") ? Number(drainRaw) : NaN;
   const grace = pod.terminationGracePeriodSeconds;
   check(
     Number.isInteger(drain) && Number.isInteger(grace) && grace > drain,
-    `${tag} terminationGracePeriodSeconds (${grace}) outlasts BEAM_SHUTDOWN_TIMEOUT_SECS (${JSON.stringify(env.get("BEAM_SHUTDOWN_TIMEOUT_SECS"))})`,
+    `${tag} terminationGracePeriodSeconds (${grace}) outlasts BEAM_SHUTDOWN_TIMEOUT_SECS (${JSON.stringify(drainRaw)})`,
   );
 
   // 10.
@@ -2923,6 +2997,7 @@ depends = [
     "rust:deny",
     "rust:lockfile",
     "check:ffmpeg-version",
+    "check:build-commit",
     "check:mutants-skip-fakes",
     "check:file-size",
     "check:compose-invariants",

@@ -150,6 +150,11 @@ class AuthViewModelTest {
                 "accepting must retry, not send the viewer back to the address field",
                 viewModel.state.value.loginUrl,
             )
+            assertEquals(
+                "the sign-in browser is handed the pin just recorded, so it can reach the server",
+                listOf(FINGERPRINT),
+                viewModel.state.value.trustedFingerprints,
+            )
             assertNull(viewModel.state.value.pendingTrust)
         }
 

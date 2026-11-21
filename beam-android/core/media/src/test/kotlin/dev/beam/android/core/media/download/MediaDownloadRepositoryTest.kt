@@ -21,6 +21,7 @@ import dev.beam.android.core.model.DownloadState
 import dev.beam.android.core.model.UserPreferences
 import dev.beam.android.core.testing.FakePlaybackRepository
 import dev.beam.android.core.testing.FakePreferencesRepository
+import dev.beam.android.core.testing.Fixtures
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.launch
@@ -52,9 +53,10 @@ import java.util.concurrent.TimeoutException
  * The downloads repository as the app builds it, against a real Media3
  * download manager and a real server on loopback.
  *
- * Below the trait line: the core's answer for the active server, which is
- * whatever [active] holds, and the service start, which
- * [InProcessDownloadCommands] stands in for.
+ * Below the trait line: the core's list of known servers -- [beam] as `home`,
+ * and `cabin`, which is the active one -- its answer for each server's
+ * session, which is whatever [home] and [cabin] hold, and the service start,
+ * which [InProcessDownloadCommands] stands in for.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
@@ -67,9 +69,13 @@ class MediaDownloadRepositoryTest {
     /** The signed-in server: the bytes for [FRESH] alone, 401 for anyone else. */
     private val beam = MockWebServer()
 
-    /** The core's answer for the active server: `null` while signed out. */
+    /** The core's answer for [beam]'s session: `null` while signed out. */
     @Volatile
-    private var active: ServerHttpConfig? = null
+    private var home: ServerHttpConfig? = null
+
+    /** The core's answer for the other server's session: `null` while signed out. */
+    @Volatile
+    private var cabin: ServerHttpConfig? = null
 
     /** The `Cookie` of every request the server answered, in order. */
     private val cookies = mutableListOf<String?>()
@@ -106,7 +112,22 @@ class MediaDownloadRepositoryTest {
             MediaDownloadRepository(
                 context = context,
                 playback = Playback(),
-                calls = ServerCallFactory(BeamHttpClientFactory(BeamHttpClientFactory.shared())) { active },
+                calls =
+                    ServerCallFactory.signedInServers(
+                        BeamHttpClientFactory(BeamHttpClientFactory.shared()),
+                        servers = {
+                            listOf(
+                                Fixtures.server(id = "home", isActive = false).copy(baseUrl = origin()),
+                                Fixtures.server(id = "cabin", isActive = true).copy(baseUrl = CABIN_ORIGIN),
+                            )
+                        },
+                    ) { serverId ->
+                        when (serverId) {
+                            "home" -> home
+                            "cabin" -> cabin
+                            else -> null
+                        }
+                    },
                 commands = InProcessDownloadCommands { repository.manager() },
                 cache = cache,
                 titles = titles,
@@ -131,7 +152,7 @@ class MediaDownloadRepositoryTest {
     @Test
     fun `downloads are listed while signed out`() =
         runTest {
-            active = null
+            home = null
             val listed = mutableListOf<List<DownloadRecord>>()
             backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
                 repository.downloads.collect { listed += it }
@@ -146,9 +167,9 @@ class MediaDownloadRepositoryTest {
     @Test
     fun `a download picks up a new session on its next request without the manager being rebuilt`() =
         runTest {
-            active = config(STALE)
+            home = config(STALE)
             // The viewer signs in again while the first attempt is in flight.
-            onRefused = { active = config(FRESH) }
+            onRefused = { home = config(FRESH) }
 
             enqueue("f1", serverId = "home")
             awaitUntil { stateOf("f1") == DownloadState.Completed }
@@ -157,9 +178,28 @@ class MediaDownloadRepositoryTest {
         }
 
     @Test
+    fun `a download from a server that is not the active one completes under its own server's session`() =
+        runTest {
+            // Queued from home, then the viewer switched to signed-in cabin.
+            home = config(FRESH)
+            cabin =
+                ServerHttpConfig(
+                    baseUrl = CABIN_ORIGIN,
+                    headers = mapOf("Cookie" to "beam_session=cabin"),
+                    trustedFingerprints = emptyList(),
+                    host = "cabin.beam.test",
+                )
+
+            enqueue("f1", serverId = "home")
+            awaitUntil { stateOf("f1") == DownloadState.Completed }
+
+            assertEquals(listOf<String?>(FRESH), synchronized(cookies) { cookies.toList() })
+        }
+
+    @Test
     fun `forgetting a server deletes its downloads and leaves other servers' alone`() =
         runTest {
-            active = config(FRESH)
+            home = config(FRESH)
             enqueue("h1", serverId = "home")
             enqueue("c1", serverId = "cabin")
             awaitUntil {
@@ -220,15 +260,17 @@ class MediaDownloadRepositoryTest {
 
     private fun stateOf(fileId: String): DownloadState? = current().firstOrNull { it.fileId == fileId }?.state
 
-    private fun config(cookie: String): ServerHttpConfig {
-        val origin = beam.url("/")
-        return ServerHttpConfig(
-            baseUrl = origin.toString().trimEnd('/'),
+    /** [beam]'s session, holding [cookie]. */
+    private fun config(cookie: String): ServerHttpConfig =
+        ServerHttpConfig(
+            baseUrl = origin(),
             headers = mapOf("Cookie" to cookie),
             trustedFingerprints = emptyList(),
-            host = origin.host,
+            host = beam.url("/").host,
         )
-    }
+
+    /** [beam]'s origin, normalised as the core records a server's. */
+    private fun origin(): String = beam.url("/").toString().trimEnd('/')
 
     /**
      * Where [fileId]'s bytes are served -- and so the key Media3 caches them
@@ -263,5 +305,8 @@ class MediaDownloadRepositoryTest {
         const val STALE = "beam_session=stale"
         const val FRESH = "beam_session=fresh"
         const val BODY = "media bytes"
+
+        /** The other server, which no request in these tests is sent to. */
+        const val CABIN_ORIGIN = "https://cabin.beam.test"
     }
 }

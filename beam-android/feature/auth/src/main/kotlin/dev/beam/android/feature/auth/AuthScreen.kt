@@ -136,6 +136,7 @@ internal fun AuthScreen(
             }
             SignInWebView(
                 url = loginUrl,
+                trustedFingerprints = state.trustedFingerprints,
                 onSessionCookie = onSessionCookie,
                 modifier = Modifier.fillMaxWidth().weight(1f),
             )

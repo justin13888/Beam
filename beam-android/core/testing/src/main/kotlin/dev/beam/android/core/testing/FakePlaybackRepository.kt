@@ -166,7 +166,11 @@ public class FakePlaybackRepository : PlaybackRepository {
         watched -= id
     }
 
+    /** The `limit` of every [continueWatching] request, in order. */
+    public val continueWatchingLimits: MutableList<UInt?> = mutableListOf()
+
     override suspend fun continueWatching(limit: UInt?): List<ContinueWatchingEntry> {
+        continueWatchingLimits += limit
         failWith?.let { throw it }
         return continueWatchingRows
     }

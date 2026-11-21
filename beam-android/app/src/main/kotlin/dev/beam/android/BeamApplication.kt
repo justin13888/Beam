@@ -18,13 +18,15 @@ public class BeamApplication :
     Application(),
     SingletonImageLoader.Factory {
     /**
-     * Fetches as the signed-in user from the active server.
+     * Fetches under the session of whichever signed-in server the request's
+     * origin matches -- not necessarily the active one -- and unauthenticated
+     * from any other origin.
      *
      * Load-bearing rather than tidy: posters and backdrops are served from the
      * same authenticated origin as everything else, so an image loader without
-     * the session cookie would get a 401 for every poster. It also applies the
-     * trust decision, so artwork does not fail on exactly the self-signed
-     * servers the trust prompt exists for.
+     * the session cookie would get a 401 for every poster. It also applies that
+     * server's trust decision, so artwork does not fail on exactly the
+     * self-signed servers the trust prompt exists for.
      */
     @Inject
     internal lateinit var serverCalls: ServerCallFactory

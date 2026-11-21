@@ -101,8 +101,7 @@ public class AuthViewModel
         private suspend fun beginSignIn(serverId: String) {
             mutableState.update { it.copy(serverId = serverId) }
             if (browser.hasUsableBrowser()) {
-                val url = servers.loginUrl(serverId)
-                mutableState.update { it.copy(isConnecting = false, loginUrl = url) }
+                openBrowser(serverId)
                 return
             }
             val prompt =
@@ -110,12 +109,25 @@ public class AuthViewModel
                     servers.startDeviceLogin(serverId)
                 } catch (unsupported: BeamException.Server) {
                     if (unsupported.status.toInt() != NOT_IMPLEMENTED) throw unsupported
-                    val url = servers.loginUrl(serverId)
-                    mutableState.update { it.copy(isConnecting = false, loginUrl = url) }
+                    openBrowser(serverId)
                     return
                 }
             mutableState.update { it.copy(isConnecting = false, devicePrompt = prompt) }
             startPolling(serverId, prompt)
+        }
+
+        /**
+         * Open the sign-in browser on [serverId], with the certificates the
+         * viewer accepted for it. Read here rather than once per server,
+         * because accepting a certificate begins sign-in again, and the
+         * browser must see the pin it just recorded.
+         */
+        private suspend fun openBrowser(serverId: String) {
+            val url = servers.loginUrl(serverId)
+            val fingerprints = servers.trustedCertificates(serverId)
+            mutableState.update {
+                it.copy(isConnecting = false, loginUrl = url, trustedFingerprints = fingerprints)
+            }
         }
 
         /**

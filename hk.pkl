@@ -187,6 +187,12 @@ hooks {
                 glob = List("Cargo.toml", "Cargo.lock", "beam-server/Containerfile", ".github/actions/setup-ffmpeg/action.yml")
                 check = "mise run check:ffmpeg-version"
             }
+            // The server's reader of the variable and every image build that
+            // must pass it; see the task in mise.toml.
+            ["build-commit"] {
+                glob = List("mise.toml", "beam-server/Containerfile", ".github/workflows/release.yml", "beam-server/src/metrics.rs")
+                check = "mise run check:build-commit"
+            }
             // Pure YAML/TOML parsing -- milliseconds. Narrower than ci.yml's
             // `compose` filter, which also watches dex/: the gate reads only the compose files,
             // mise.toml (for dev:up's OIDC scope and admin-claim wiring) and
