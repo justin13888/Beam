@@ -989,6 +989,7 @@ async fn a_restricted_viewer_reads_only_the_libraries_granted_to_them() {
 /// failure is -- the 500 alone would not page.
 #[tokio::test]
 async fn a_failed_revocation_on_disable_is_a_counted_session_store_error() {
+    use beam_auth::utils::repository::UserRepository;
     use beam_auth::utils::session_store::in_memory::{
         FailingSessionStore, InMemorySessionStore, SessionStoreOperation,
     };

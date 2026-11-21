@@ -1096,7 +1096,7 @@ mod metered {
 
         // Each endpoint's body, abandoned unread: the body's `Drop` is what
         // reports, and nothing polls it.
-        let abandon = |target: &str| {
+        let request_for = |target: &str| {
             let mut request = Request::new(Body::empty());
             *request.uri_mut() = target.parse().expect("a request target");
             request.headers_mut().insert(
@@ -1105,10 +1105,11 @@ mod metered {
                     .parse()
                     .expect("a cookie field"),
             );
-            observed_service(&fixture).call(request)
+            request
         };
+        let service = observed_service(&fixture);
 
-        let abandoned = abandon(STREAM).await;
+        let abandoned = service.call(request_for(STREAM)).await;
         assert_eq!(abandoned.status(), StatusCode::OK);
         drop(abandoned);
 
@@ -1120,7 +1121,7 @@ mod metered {
         );
         assert_eq!(recorded.counter(ABORTED, &[("endpoint", "download")]), None);
 
-        let abandoned = abandon(DOWNLOAD).await;
+        let abandoned = service.call(request_for(DOWNLOAD)).await;
         assert_eq!(abandoned.status(), StatusCode::OK);
         drop(abandoned);
 
