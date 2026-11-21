@@ -176,6 +176,58 @@ fn split_targets(targets: &[WatchTarget]) -> (Vec<WatchTarget>, Vec<WatchTarget>
     (movies, episodes)
 }
 
+/// Move every user's row for `from` onto `to` within `txn` -- the body of
+/// [`WatchStateRepository::carry`], shared with the show repository's
+/// re-homing of one episode onto another (issue #334), which runs it inside
+/// its own transaction. The caller has checked `from` and `to` are the same
+/// kind and differ.
+pub(crate) async fn carry_rows<C: ConnectionTrait>(
+    txn: &C,
+    from: WatchTarget,
+    to: WatchTarget,
+) -> Result<(), DbErr> {
+    let column = key_column(from);
+    let (_, _, show_id) = target_columns(to);
+    // A user with a row for both: fold the retired row into the kept one,
+    // then drop it. Everyone else's row is simply re-pointed.
+    txn.execute_raw(statement(
+        format!(
+            "UPDATE watch_state AS kept SET \
+                   position_secs = CASE WHEN gone.last_played_at > kept.last_played_at \
+                                        THEN gone.position_secs ELSE kept.position_secs END, \
+                   duration_secs = CASE WHEN gone.last_played_at > kept.last_played_at \
+                                        THEN coalesce(gone.duration_secs, kept.duration_secs) \
+                                        ELSE kept.duration_secs END, \
+                   last_file_id = CASE WHEN gone.last_played_at > kept.last_played_at \
+                                       THEN coalesce(gone.last_file_id, kept.last_file_id) \
+                                       ELSE kept.last_file_id END, \
+                   last_played_at = greatest(kept.last_played_at, gone.last_played_at), \
+                   completed = kept.completed OR gone.completed, \
+                   play_count = kept.play_count + gone.play_count, \
+                   dismissed_at = greatest(kept.dismissed_at, gone.dismissed_at) \
+                 FROM watch_state AS gone \
+                 WHERE gone.{column} = $1 AND kept.{column} = $2 AND gone.user_id = kept.user_id"
+        ),
+        vec![key(from).into(), key(to).into()],
+    ))
+    .await?;
+    txn.execute_raw(statement(
+        format!(
+            "DELETE FROM watch_state AS gone WHERE gone.{column} = $1 AND EXISTS \
+                   (SELECT 1 FROM watch_state AS kept \
+                     WHERE kept.{column} = $2 AND kept.user_id = gone.user_id)"
+        ),
+        vec![key(from).into(), key(to).into()],
+    ))
+    .await?;
+    txn.execute_raw(statement(
+        format!("UPDATE watch_state SET {column} = $2, show_id = $3 WHERE {column} = $1"),
+        vec![key(from).into(), key(to).into(), show_id.into()],
+    ))
+    .await?;
+    Ok(())
+}
+
 #[async_trait]
 impl WatchStateRepository for SqlWatchStateRepository {
     async fn record_progress(&self, report: RecordProgress) -> Result<WatchState, DbErr> {
@@ -301,45 +353,8 @@ impl WatchStateRepository for SqlWatchStateRepository {
         if key(from) == key(to) {
             return Ok(());
         }
-        let (_, _, show_id) = target_columns(to);
         let txn = self.db.begin().await?;
-        // A user with a row for both: fold the retired row into the kept one,
-        // then drop it. Everyone else's row is simply re-pointed.
-        txn.execute_raw(statement(
-            format!(
-                "UPDATE watch_state AS kept SET \
-                   position_secs = CASE WHEN gone.last_played_at > kept.last_played_at \
-                                        THEN gone.position_secs ELSE kept.position_secs END, \
-                   duration_secs = CASE WHEN gone.last_played_at > kept.last_played_at \
-                                        THEN coalesce(gone.duration_secs, kept.duration_secs) \
-                                        ELSE kept.duration_secs END, \
-                   last_file_id = CASE WHEN gone.last_played_at > kept.last_played_at \
-                                       THEN coalesce(gone.last_file_id, kept.last_file_id) \
-                                       ELSE kept.last_file_id END, \
-                   last_played_at = greatest(kept.last_played_at, gone.last_played_at), \
-                   completed = kept.completed OR gone.completed, \
-                   play_count = kept.play_count + gone.play_count, \
-                   dismissed_at = greatest(kept.dismissed_at, gone.dismissed_at) \
-                 FROM watch_state AS gone \
-                 WHERE gone.{column} = $1 AND kept.{column} = $2 AND gone.user_id = kept.user_id"
-            ),
-            vec![key(from).into(), key(to).into()],
-        ))
-        .await?;
-        txn.execute_raw(statement(
-            format!(
-                "DELETE FROM watch_state AS gone WHERE gone.{column} = $1 AND EXISTS \
-                   (SELECT 1 FROM watch_state AS kept \
-                     WHERE kept.{column} = $2 AND kept.user_id = gone.user_id)"
-            ),
-            vec![key(from).into(), key(to).into()],
-        ))
-        .await?;
-        txn.execute_raw(statement(
-            format!("UPDATE watch_state SET {column} = $2, show_id = $3 WHERE {column} = $1"),
-            vec![key(from).into(), key(to).into(), show_id.into()],
-        ))
-        .await?;
+        carry_rows(&txn, from, to).await?;
         txn.commit().await
     }
 

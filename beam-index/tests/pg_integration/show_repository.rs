@@ -13,8 +13,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 // `Uuid` and `ShowRepository` come into scope with the contract macro below.
-use beam_domain::repositories::FileRepository;
-use beam_index::repositories::{SqlFileRepository, SqlShowRepository};
+use beam_domain::repositories::{FileRepository, WatchStateRepository};
+use beam_index::repositories::{SqlFileRepository, SqlShowRepository, SqlWatchStateRepository};
 use beam_test_support::postgres::{self, ScopedSchema};
 use beam_test_support::seed;
 
@@ -22,6 +22,7 @@ struct PgFixture {
     schema: ScopedSchema,
     repo: SqlShowRepository,
     files: SqlFileRepository,
+    watch_state: SqlWatchStateRepository,
 }
 
 #[async_trait]
@@ -34,10 +35,20 @@ impl beam_domain::repositories::contract::fixture::ShowRepositoryFixture for PgF
         &self.files
     }
 
+    fn watch_state(&self) -> &dyn WatchStateRepository {
+        &self.watch_state
+    }
+
     async fn new_library(&self) -> Uuid {
         seed::library(self.schema.db().as_ref())
             .await
             .expect("seed a library")
+    }
+
+    async fn new_user(&self) -> Uuid {
+        seed::user(self.schema.db().as_ref())
+            .await
+            .expect("seed a user")
     }
 
     async fn new_unkeyed_show(
@@ -73,6 +84,7 @@ async fn setup() -> PgFixture {
     PgFixture {
         repo: SqlShowRepository::new(schema.db()),
         files: SqlFileRepository::new(schema.db()),
+        watch_state: SqlWatchStateRepository::new(schema.db()),
         schema,
     }
 }

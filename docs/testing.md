@@ -101,6 +101,13 @@ mounts the **generated route tree** over `createMemoryHistory` with a real `Auth
 records what MSW actually saw) rather than against a mocked client's call arguments, and every
 handler and factory is typed against `components["schemas"]` from the generated client.
 
+Because a route is not on screen until the auth check and the page's own query have both
+round-tripped through MSW, waits are slow under host load. Testing Library's `asyncUtilTimeout` is
+15s (`src/test/setup.ts`), and vitest's `testTimeout` and `hookTimeout` are 30s
+(`vitest.config.ts`). The second must stay above the first: at vitest's 5s default a loaded run
+killed tests before their own waits could expire, and a different handful failed each time (#480).
+A genuine break still fails fast, at the 15s wait.
+
 Nothing mocks `@tanstack/react-router` or `@/lib/apiClient`. Two collaborators are still
 substituted, both for environment reasons rather than convenience: Vidstack's `<MediaPlayer>`,
 which needs a real media element (its own logic is extracted into `playerHandlers` and tested

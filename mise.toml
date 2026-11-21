@@ -2133,6 +2133,14 @@ description = "Assert the rendered Helm chart keeps one Recreate replica, read-o
 #      /data in the image) and with exactly the supplemental groups the
 #      scenario sets in server.podSecurityContext.supplementalGroups -- the
 #      one way to let it read media a group can read.
+#  11. The watcher and settle values reach the server as the env vars they
+#      name: watch.pollIntervalSeconds as BEAM_WATCH_POLL_INTERVAL_SECS,
+#      watch.debounceMs as BEAM_WATCH_DEBOUNCE_MS and scan.settleSeconds as
+#      BEAM_SCAN_SETTLE_SECS, from the scenario or else the chart's defaults.
+#  12. A library mount carries mountPropagation only when the library is a
+#      hostPath that sets it, and then only HostToContainer. The chart refuses
+#      it on any other source and refuses any other mode: Bidirectional would
+#      let the pod mount onto the host.
 #
 # The directory argument points the gate at a copy of the chart; that is how
 # its negative cases are exercised without editing the tracked one.
@@ -2175,6 +2183,27 @@ for source in '{"emptyDir":{}}' '{"ephemeral":{"volumeClaimTemplate":{"spec":{}}
   fi
 done
 
+# 12, refusal half: mount propagation off a hostPath, or in any mode but
+# HostToContainer, must not render. The first library renders without the key.
+if ! helm template beam "$chart" -f "$base" \
+  --set-json 'libraries=[{"name":"media","volume":{"hostPath":{"path":"/srv/media"}}}]' > /dev/null 2>&1; then
+  echo "FAIL  a hostPath library without mountPropagation must render for the propagation refusal checks to mean anything"
+  status=1
+fi
+for library in \
+  '{"name":"media","mountPropagation":"HostToContainer","volume":{"nfs":{"server":"nas.test","path":"/media"}}}' \
+  '{"name":"media","mountPropagation":"HostToContainer","volume":{"persistentVolumeClaim":{"claimName":"media"}}}' \
+  '{"name":"media","mountPropagation":"Bidirectional","volume":{"hostPath":{"path":"/srv/media"}}}' \
+  '{"name":"media","mountPropagation":"None","volume":{"hostPath":{"path":"/srv/media"}}}'; do
+  if helm template beam "$chart" -f "$base" --set-json "libraries=[$library]" > /dev/null 2>&1; then
+    echo "FAIL  the chart renders the library $library"
+    status=1
+  else
+    echo "ok    the chart refuses the library $library"
+  fi
+done
+
+cp "$chart/values.yaml" "$out/chart-defaults.yaml"
 for values in "$chart"/ci/*-values.yaml; do
   name="$(basename "$values" .yaml)"
   helm template beam "$chart" -f "$values" > "$out/$name.rendered.yaml"
@@ -2184,6 +2213,7 @@ done
 bun -e '
 const dir = process.argv[1];
 const scenarios = [...new Bun.Glob("*.rendered.yaml").scanSync(dir)].map((f) => f.replace(/\.rendered\.yaml$/, ""));
+const defaults = Bun.YAML.parse(await Bun.file(`${dir}/chart-defaults.yaml`).text()) ?? {};
 
 let status = 0;
 const check = (ok, what) => {
@@ -2322,6 +2352,30 @@ for (const scenario of scenarios.sort()) {
     JSON.stringify(gotGroups) === JSON.stringify(wantGroups),
     `${tag} the server pod has the supplemental groups the values set (want ${JSON.stringify(wantGroups)}, got ${JSON.stringify(gotGroups)})`,
   );
+
+  // 11.
+  for (const [section, key, envName] of [
+    ["watch", "pollIntervalSeconds", "BEAM_WATCH_POLL_INTERVAL_SECS"],
+    ["watch", "debounceMs", "BEAM_WATCH_DEBOUNCE_MS"],
+    ["scan", "settleSeconds", "BEAM_SCAN_SETTLE_SECS"],
+  ]) {
+    const want = values[section]?.[key] ?? defaults[section]?.[key];
+    check(
+      want !== undefined && env.get(envName) === String(want),
+      `${tag} ${section}.${key} reaches the server as ${envName} (want ${JSON.stringify(want)}, got ${JSON.stringify(env.get(envName))})`,
+    );
+  }
+
+  // 12.
+  const libraries = new Map((values.libraries ?? []).map((l) => [`/videos/${l.name}`, l]));
+  for (const m of libraryMounts) {
+    const library = libraries.get(m.mountPath);
+    const want = library?.volume?.hostPath !== undefined ? library.mountPropagation : undefined;
+    check(
+      m.mountPropagation === want && (want === undefined || want === "HostToContainer"),
+      `${tag} ${m.mountPath} has mountPropagation ${JSON.stringify(want)} (got ${JSON.stringify(m.mountPropagation)})`,
+    );
+  }
 }
 process.exit(status);
 ' "$out" || status=1

@@ -9,6 +9,7 @@ mod admin;
 mod catalog;
 mod playback;
 mod progress;
+mod session_observer;
 mod telemetry;
 
 /// The library the library and scan tests name.

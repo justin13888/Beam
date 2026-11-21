@@ -348,6 +348,7 @@ impl Harness {
                     title: format!("Episode {}", n + 1),
                     runtime: None,
                     air_date: None,
+                    numbering: beam_domain::utils::media_path::EpisodeNumbering::Standard,
                 })
                 .await
                 .unwrap();
