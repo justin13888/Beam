@@ -230,6 +230,18 @@ pub const DESCRIPTIONS: &[Description] = &[
         unit: Some(Unit::Count),
         help: "Files present in the library as of its last completed scan, by library id.",
     },
+    Description {
+        name: "beam_trickplay_pending",
+        kind: Kind::Gauge,
+        unit: Some(Unit::Count),
+        help: "Files the running trickplay pass has still to make sheets for.",
+    },
+    Description {
+        name: "beam_trickplay_failures_total",
+        kind: Kind::Counter,
+        unit: Some(Unit::Count),
+        help: "Files whose trickplay sheets could not be made: left for a later pass, or undecodable.",
+    },
 ];
 
 /// The recorder's configuration: real buckets for every `*_seconds` histogram.
