@@ -64,8 +64,34 @@ impl Admin {
         }
     }
 
-    /// Add the library rooted at `root`, relative to the video directory.
+    /// Add the library rooted at `root`, relative to the video directory,
+    /// once its first scan has indexed what the root held -- so a test's own
+    /// scans are never refused behind that one.
     pub async fn add_library(&self, name: &str, root: &str) -> Uuid {
+        self.add_library_scanned(name, root).await.0
+    }
+
+    /// Add the library rooted at `root`, as [`Self::add_library`]; return it
+    /// with what its first scan found.
+    pub async fn add_library_scanned(
+        &self,
+        name: &str,
+        root: &str,
+    ) -> (Uuid, api::types::ScanProgress) {
+        let library = self.create_library(name, root).await;
+        let first = self.first_scan(library).await;
+        assert_eq!(
+            first.state,
+            api::types::ScanState::Succeeded,
+            "the first scan succeeds: {:?}",
+            first.failure
+        );
+        (library, first.progress)
+    }
+
+    /// Create the library rooted at `root`, relative to the video directory,
+    /// and return at once: its first scan is registered but may not have run.
+    pub async fn create_library(&self, name: &str, root: &str) -> Uuid {
         let body = api::types::CreateLibraryRequest {
             name: name.to_owned(),
             root_path: root.to_owned(),
@@ -76,6 +102,23 @@ impl Admin {
             .unwrap_or_else(|e| panic!("create the library {name}: {e:?}"))
             .into_inner()
             .id
+    }
+
+    /// Wait for the scan creating `library` started (FR-213) to finish, and
+    /// return it.
+    pub async fn first_scan(&self, library: Uuid) -> api::types::ScanJob {
+        let job = self
+            .api
+            .get_library_scan(library)
+            .await
+            .unwrap_or_else(|e| panic!("read the first scan: {e:?}"))
+            .into_inner();
+        assert_eq!(
+            job.trigger,
+            api::types::ScanTrigger::Created,
+            "a new library's latest scan is the one its creation started"
+        );
+        self.finished_scan(library, job.id).await
     }
 
     /// Start a scan of `library` and wait for it to finish; return the job

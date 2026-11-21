@@ -134,31 +134,50 @@ pub type MediaDelivery = Delivery<SourceFileRanges>;
 /// `<video>` element sends that automatically, so there is no separate
 /// stream-token step. Authentication itself is `SessionAuth` in the handler
 /// signature; this only resolves the file.
-async fn locate_file(
-    state: &AppState,
-    file_id: Uuid,
-) -> Result<(PathBuf, PathBuf, String), DeliveryError> {
-    let file = match state.services.library.get_file_by_id(file_id).await {
-        Ok(Some(file)) => file,
-        Ok(None) => return Err(DeliveryError::FileNotFound("File not found".into())),
+async fn locate_file(state: &AppState, file_id: Uuid) -> Result<LocatedFile, DeliveryError> {
+    match state.services.library.get_file_by_id(file_id).await {
+        Ok(Some(file)) => Ok(file),
+        Ok(None) => Err(DeliveryError::FileNotFound("File not found".into())),
         Err(err) => {
             error!(?err, "failed to look up file");
-            return Err(DeliveryError::Internal(ServerFault::logged(
+            Err(DeliveryError::Internal(ServerFault::logged(
                 "Failed to look up file",
-            )));
+            )))
         }
+    }
+}
+
+/// The file `file_id` names, if the caller may have it.
+///
+/// A grant resolved within the last few seconds is served from the access
+/// service's stream grants (issue #462), so a player's run of Range requests
+/// costs the database one policy read, one access check and one file lookup
+/// rather than one of each per request. The session is not part of that:
+/// `SessionAuth` has already resolved and touched it for this request.
+async fn granted_file(
+    state: &AppState,
+    auth: &SessionAuth,
+    file_id: Uuid,
+) -> Result<LocatedFile, DeliveryError> {
+    let user_id = auth.0.user_id;
+    let stream_grants = state.services.access.stream_grants();
+    let ticket = match stream_grants.map(|grants| grants.lookup(user_id, file_id)) {
+        Some(Ok(file)) => return Ok(file),
+        Some(Err(ticket)) => Some(ticket),
+        None => None,
     };
 
-    let LocatedFile {
-        id: _,
-        path,
-        library_root,
-        mime_type,
-    } = file;
+    // A file of a title the caller may not see is one that does not exist
+    // (issue #263).
+    if hides_file(state, auth, file_id).await? {
+        return Err(DeliveryError::FileNotFound("File not found".into()));
+    }
+    let file = locate_file(state, file_id).await?;
 
-    let content_type = mime_type.unwrap_or_else(|| "application/octet-stream".to_owned());
-
-    Ok((path, library_root, content_type))
+    if let (Some(grants), Some(ticket)) = (stream_grants, ticket) {
+        grants.remember(ticket, user_id, file_id, file.clone());
+    }
+    Ok(file)
 }
 
 /// Whether the caller's access policy hides the file `file_id`. Shared with
@@ -208,12 +227,13 @@ async fn deliver(
     conditions: &Conditions,
     attachment: bool,
 ) -> Result<MediaDelivery, DeliveryError> {
-    // A file of a title the caller may not see is one that does not exist
-    // (issue #263).
-    if hides_file(state, auth, file_id).await? {
-        return Err(DeliveryError::FileNotFound("File not found".into()));
-    }
-    let (path, library_root, content_type) = locate_file(state, file_id).await?;
+    let LocatedFile {
+        id: _,
+        path,
+        library_root,
+        mime_type,
+    } = granted_file(state, auth, file_id).await?;
+    let content_type = mime_type.unwrap_or_else(|| "application/octet-stream".to_owned());
     // Missing, or no longer a regular file reached without a link: either
     // way the file indexed is not there to serve.
     let (source, modified, length) = FileByteSource::open(library_root, path.clone())

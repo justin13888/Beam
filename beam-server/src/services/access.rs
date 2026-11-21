@@ -24,6 +24,8 @@ use beam_domain::repositories::{
     AccessPolicyRepository, FileRepository, MovieRepository, ShowRepository,
 };
 
+use crate::services::stream_cache::StreamGrantCache;
+
 /// Every store [`AccessService`] reads.
 #[derive(Debug)]
 pub struct AccessRepositories {
@@ -40,6 +42,10 @@ pub struct AccessService {
     movies: Arc<dyn MovieRepository>,
     shows: Arc<dyn ShowRepository>,
     files: Arc<dyn FileRepository>,
+    /// What `/stream` and `/download` were recently granted (issue #462),
+    /// forgotten for a user whenever their policy is replaced. `None`
+    /// resolves every request afresh.
+    stream_grants: Option<Arc<dyn StreamGrantCache>>,
 }
 
 impl AccessService {
@@ -55,7 +61,23 @@ impl AccessService {
             movies,
             shows,
             files,
+            stream_grants: None,
         }
+    }
+
+    /// This service, holding the grants file delivery resolves through
+    /// `stream_grants`, and forgetting a user's whenever [`Self::replace`]
+    /// changes their policy.
+    pub fn with_stream_grants(self, stream_grants: Arc<dyn StreamGrantCache>) -> Self {
+        Self {
+            stream_grants: Some(stream_grants),
+            ..self
+        }
+    }
+
+    /// The grants file delivery resolves through, if any.
+    pub fn stream_grants(&self) -> Option<&dyn StreamGrantCache> {
+        self.stream_grants.as_deref()
     }
 
     /// The user's policy.
@@ -64,8 +86,15 @@ impl AccessService {
     }
 
     /// Replace the user's policy; see [`AccessPolicyRepository::replace`].
+    ///
+    /// Forgets the user's cached delivery grants whether or not the write
+    /// succeeded: a failed one changed nothing, and forgetting costs one miss.
     pub async fn replace(&self, user_id: Uuid, policy: &AccessPolicy) -> Result<(), DbErr> {
-        self.policies.replace(user_id, policy).await
+        let replaced = self.policies.replace(user_id, policy).await;
+        if let Some(stream_grants) = &self.stream_grants {
+            stream_grants.forget_user(user_id);
+        }
+        replaced
     }
 
     /// Which of `titles` the policy admits. A title that does not exist is

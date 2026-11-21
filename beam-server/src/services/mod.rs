@@ -12,6 +12,7 @@ pub mod people;
 pub mod playback;
 pub mod playback_telemetry;
 pub mod sources;
+pub mod stream_cache;
 pub mod subtitle;
 pub mod telemetry;
 pub mod trickplay;

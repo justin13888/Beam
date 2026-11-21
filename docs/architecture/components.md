@@ -131,11 +131,11 @@ RPC boundary); `runtime.rs` exposes `spawn_background_indexing` and `spawn_enric
   re-registers any the watcher no longer holds, asking the watcher rather than remembering what it
   registered — the backstop to `LibraryWatches`, the `LibraryWatchHook` through which
   `beam-server`'s library service registers a library as soon as it is created (on a task of its
-  own, so the request does not wait on the walk) and unwatches it as soon as it is deleted
-  (FR-213); the watcher keeps one registration per root, so a
+  own, so the request does not wait on the walk, and then runs the library's first scan) and
+  unwatches it as soon as it is deleted (FR-213); the watcher keeps one registration per root, so a
   library re-created at a deleted one's root owns its events; `watch_status.rs` records each library's watch mode for the
   admin status); `scan.rs` (`ScanCoordinator`: one lock per library that every scan — startup,
-  periodic, newly polled, administrator's — and every watcher reconcile takes, the latest
+  periodic, newly polled, a new library's first, administrator's — and every watcher reconcile takes, the latest
   `ScanJob` per library in memory, and a catalog gate the identity-key passes hold exclusively while
   every scan and reconcile holds it shared; a scan is `begin_scan` then `run_scan`, so the server
   answers before it runs; a reconcile never waits, but is handed back `Deferred` and retried by
