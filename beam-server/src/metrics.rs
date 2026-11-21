@@ -200,6 +200,24 @@ pub const DESCRIPTIONS: &[Description] = &[
         unit: Some(Unit::Count),
         help: "Changed paths whose reconcile was deferred -- the library was being scanned, or the file was still being written -- held for a retry.",
     },
+    Description {
+        name: "beam_provider_requests_total",
+        kind: Kind::Counter,
+        unit: Some(Unit::Count),
+        help: "Requests to a metadata provider, by provider and result.",
+    },
+    Description {
+        name: "beam_provider_request_duration_seconds",
+        kind: Kind::Histogram,
+        unit: Some(Unit::Seconds),
+        help: "Time a metadata provider took to answer a request, by provider.",
+    },
+    Description {
+        name: "beam_provider_rate_limited_total",
+        kind: Kind::Counter,
+        unit: Some(Unit::Count),
+        help: "Requests a metadata provider refused for its rate limit, by provider.",
+    },
 ];
 
 /// The recorder's configuration: real buckets for every `*_seconds` histogram.

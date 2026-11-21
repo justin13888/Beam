@@ -721,11 +721,14 @@ pub(crate) fn build_enrichment_provider(
     config: &ServerConfig,
     clock: Arc<dyn Clock>,
 ) -> eyre::Result<Arc<dyn EnrichmentProvider>> {
-    let built = beam_index::providers::cameo::build_client(CameoWiringConfig {
-        tmdb_api_token: config.tmdb_api_token.clone(),
-        anilist_enabled: config.anilist_enabled,
-        metadata_language: config.metadata_language.clone(),
-    });
+    let built = beam_index::providers::cameo::build_client(
+        CameoWiringConfig {
+            tmdb_api_token: config.tmdb_api_token.clone(),
+            anilist_enabled: config.anilist_enabled,
+            metadata_language: config.metadata_language.clone(),
+        },
+        clock.clone(),
+    );
     let cameo = provider_from_build(built, config.metadata_language.as_deref())?;
     let tvdb = match beam_index::providers::tvdb::build_client(
         TvdbWiringConfig {

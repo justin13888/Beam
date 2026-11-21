@@ -28,6 +28,8 @@ use beam_domain::providers::enrichment::{
 };
 use beam_domain::services::Clock;
 
+use super::request_metrics::observed;
+
 /// The provider name: a TheTVDB match is stored as `tvdb:<id>`, as a
 /// TheTVDB pin is.
 pub const PROVIDER: &str = "tvdb";
@@ -204,7 +206,18 @@ impl TvdbEnrichmentProvider {
 
     /// `GET` `url` with the bearer token, logging in again once when the
     /// token is refused (it lasts a month, and a restart outlives none).
+    ///
+    /// Recorded as one request to `tvdb` (issue #457), whatever logging in
+    /// it took.
     async fn get<T: DeserializeOwned>(&self, url: Url) -> Result<Envelope<T>, EnrichmentError> {
+        observed(PROVIDER, &*self.clock, self.get_unobserved(url)).await
+    }
+
+    /// [`Self::get`], unrecorded.
+    async fn get_unobserved<T: DeserializeOwned>(
+        &self,
+        url: Url,
+    ) -> Result<Envelope<T>, EnrichmentError> {
         let mut fresh = false;
         loop {
             let token = self.token(fresh).await?;
