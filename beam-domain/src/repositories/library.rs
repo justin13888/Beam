@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use sea_orm::DbErr;
 use uuid::Uuid;
 
-use crate::models::library::{CreateLibrary, Library};
+use crate::models::library::{CreateLibrary, Library, LibraryTitleCounts};
 
 #[cfg_attr(any(test, feature = "test-utils"), mockall::automock)]
 #[async_trait]
@@ -21,6 +21,10 @@ pub trait LibraryRepository: Send + Sync + std::fmt::Debug {
     /// How many of the library's files are present -- a missing file (issue
     /// #179) is not counted. Zero for a library with none, or no library.
     async fn count_files(&self, library_id: Uuid) -> Result<u64, DbErr>;
+    /// How many live movies, shows, seasons and episodes the library holds
+    /// (issue #494): a title counts while one of the library's files for it
+    /// is present. All zero for a library with none, or no library.
+    async fn count_titles(&self, library_id: Uuid) -> Result<LibraryTitleCounts, DbErr>;
     /// Records a scan's progress, writing only the fields given: `None`
     /// leaves the stored value as it was. A library that does not exist --
     /// deleted while its scan ran -- is a no-op, not an error (issue #349).
@@ -41,8 +45,11 @@ pub trait LibraryRepository: Send + Sync + std::fmt::Debug {
 #[cfg(any(test, feature = "test-utils"))]
 pub mod in_memory {
     use super::*;
+    use crate::models::file::MediaFileContent;
     use crate::repositories::file::in_memory::InMemoryFileRepository;
-    use std::collections::HashMap;
+    use crate::repositories::movie::in_memory::InMemoryMovieRepository;
+    use crate::repositories::show::in_memory::InMemoryShowRepository;
+    use std::collections::{HashMap, HashSet};
     use std::sync::{Arc, Mutex};
 
     #[derive(Debug, Default)]
@@ -51,6 +58,10 @@ pub mod in_memory {
         /// The file store [`LibraryRepository::count_files`] counts from, as
         /// the SQL implementation counts the `files` table.
         files: Arc<InMemoryFileRepository>,
+        /// The title stores [`LibraryRepository::count_titles`] resolves a
+        /// file's movie entry or episode through, as the SQL joins do. Unlinked,
+        /// the double knows of no titles and counts none.
+        titles: Option<(Arc<InMemoryMovieRepository>, Arc<InMemoryShowRepository>)>,
     }
 
     impl InMemoryLibraryRepository {
@@ -60,7 +71,19 @@ pub mod in_memory {
             Self {
                 libraries: Mutex::default(),
                 files,
+                titles: None,
             }
+        }
+
+        /// This repository, counting the titles `movies` and `shows` hold.
+        #[must_use]
+        pub fn linking_titles(
+            mut self,
+            movies: Arc<InMemoryMovieRepository>,
+            shows: Arc<InMemoryShowRepository>,
+        ) -> Self {
+            self.titles = Some((movies, shows));
+            self
         }
     }
 
@@ -105,6 +128,61 @@ pub mod in_memory {
                 .count() as u64)
         }
 
+        async fn count_titles(&self, library_id: Uuid) -> Result<LibraryTitleCounts, DbErr> {
+            let Some((movies, shows)) = &self.titles else {
+                return Ok(LibraryTitleCounts::default());
+            };
+            // The library's present files, as the SQL count filters them.
+            let mut live_entries = HashSet::new();
+            let mut live_episodes = HashSet::new();
+            for file in self.files.files.lock().unwrap().values() {
+                if file.library_id != library_id || file.missing_since.is_some() {
+                    continue;
+                }
+                match &file.content {
+                    Some(MediaFileContent::Movie { movie_entry_id, .. }) => {
+                        live_entries.insert(*movie_entry_id);
+                    }
+                    Some(MediaFileContent::Episode {
+                        episode_id,
+                        last_episode_number: _,
+                    }) => {
+                        live_episodes.insert(*episode_id);
+                    }
+                    None => {}
+                }
+            }
+
+            let live_movies: HashSet<Uuid> = {
+                let entries = movies.entries.lock().unwrap();
+                live_entries
+                    .iter()
+                    .filter_map(|id| entries.get(id).map(|entry| entry.movie_id))
+                    .collect()
+            };
+            let (episodes, seasons): (u64, HashSet<Uuid>) = {
+                let all = shows.episodes.lock().unwrap();
+                let known: Vec<Uuid> = live_episodes
+                    .iter()
+                    .filter_map(|id| all.get(id).map(|episode| episode.season_id))
+                    .collect();
+                (known.len() as u64, known.into_iter().collect())
+            };
+            let live_shows: HashSet<Uuid> = {
+                let all = shows.seasons.lock().unwrap();
+                seasons
+                    .iter()
+                    .filter_map(|id| all.get(id).map(|season| season.show_id))
+                    .collect()
+            };
+            Ok(LibraryTitleCounts {
+                movies: live_movies.len() as u64,
+                shows: live_shows.len() as u64,
+                seasons: seasons.len() as u64,
+                episodes,
+            })
+        }
+
         async fn update_scan_progress(
             &self,
             library_id: Uuid,
@@ -144,12 +222,16 @@ mod contract_over_in_memory {
 
     use super::LibraryRepository;
     use super::in_memory::InMemoryLibraryRepository;
-    use crate::repositories::FileRepository;
     use crate::repositories::file::in_memory::InMemoryFileRepository;
+    use crate::repositories::movie::in_memory::InMemoryMovieRepository;
+    use crate::repositories::show::in_memory::InMemoryShowRepository;
+    use crate::repositories::{FileRepository, MovieRepository, ShowRepository};
 
     struct InMemoryFixture {
         repo: InMemoryLibraryRepository,
         files: Arc<InMemoryFileRepository>,
+        movies: Arc<InMemoryMovieRepository>,
+        shows: Arc<InMemoryShowRepository>,
     }
 
     impl LibraryRepositoryFixture for InMemoryFixture {
@@ -160,13 +242,26 @@ mod contract_over_in_memory {
         fn files(&self) -> &dyn FileRepository {
             self.files.as_ref()
         }
+
+        fn movies(&self) -> &dyn MovieRepository {
+            self.movies.as_ref()
+        }
+
+        fn shows(&self) -> &dyn ShowRepository {
+            self.shows.as_ref()
+        }
     }
 
     async fn setup() -> InMemoryFixture {
         let files = Arc::new(InMemoryFileRepository::default());
+        let movies = Arc::new(InMemoryMovieRepository::with_files(files.clone()));
+        let shows = Arc::new(InMemoryShowRepository::with_files(files.clone()));
         InMemoryFixture {
-            repo: InMemoryLibraryRepository::with_files(files.clone()),
+            repo: InMemoryLibraryRepository::with_files(files.clone())
+                .linking_titles(movies.clone(), shows.clone()),
             files,
+            movies,
+            shows,
         }
     }
 
