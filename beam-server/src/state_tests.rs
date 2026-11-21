@@ -336,3 +336,117 @@ fn each_providers_status_follows_what_is_asked_for_and_what_is_in_use() {
     assert!(hint(1).contains("BEAM_ANILIST_ENABLED"));
     assert!(hint(2).contains("BEAM_TVDB_API_KEY"));
 }
+
+/// Issue #449: the indexer `build` serves wakes the enrichment worker it
+/// builds beside it -- that worker's own handle, not some other -- when a
+/// scan queues a title. Its worker is not running here, so the wake stays on
+/// the handle as a permit, which is what is read.
+#[tokio::test]
+async fn a_scan_that_queues_a_title_wakes_the_enrichment_worker_build_wires() {
+    use beam_domain::models::CreateLibrary;
+    use beam_domain::repositories::LibraryRepository;
+    use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
+    use beam_domain::repositories::collection::in_memory::InMemoryCollectionRepository;
+    use beam_domain::repositories::enrichment::in_memory::InMemoryEnrichmentStateRepository;
+    use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
+    use beam_domain::repositories::genre::in_memory::InMemoryGenreRepository;
+    use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
+    use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
+    use beam_domain::repositories::person::in_memory::InMemoryPersonRepository;
+    use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
+    use beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository;
+    use beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository;
+    use beam_index::probe::metadata::VideoFileMetadata;
+    use beam_index::services::hash::MockHashService;
+    use beam_index::services::media_info::MockMediaInfoService;
+    use beam_index::services::notification::InMemoryNotificationService;
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let film = dir.path().join("Alien (1979)").join("Alien (1979).mkv");
+    std::fs::create_dir_all(film.parent().unwrap()).unwrap();
+    std::fs::write(&film, b"alien").unwrap();
+
+    let file_repo = Arc::new(InMemoryFileRepository::default());
+    let library_repo = Arc::new(InMemoryLibraryRepository::with_files(file_repo.clone()));
+    let movie_repo = Arc::new(InMemoryMovieRepository::with_files(file_repo.clone()));
+    let show_repo = Arc::new(InMemoryShowRepository::with_files(file_repo.clone()));
+    let enrichment_repo = Arc::new(InMemoryEnrichmentStateRepository::default());
+    let admin_log: Arc<dyn AdminLogService> = Arc::new(LocalAdminLogService::new(Arc::new(
+        InMemoryAdminLogRepository::default(),
+    )));
+    let notifications = Arc::new(InMemoryNotificationService::new());
+    let library = library_repo
+        .create(CreateLibrary {
+            name: "Films".to_string(),
+            root_path: dir.path().to_path_buf(),
+            description: None,
+        })
+        .await
+        .unwrap();
+
+    let enrichment = MetadataEnrichmentService::new(
+        enrichment_repo.clone(),
+        movie_repo.clone(),
+        show_repo.clone(),
+        Arc::new(InMemoryGenreRepository::default()),
+        Arc::new(InMemoryPersonRepository::default()),
+        Arc::new(InMemoryCollectionRepository::default()),
+        Arc::new(NoopEnrichmentProvider),
+        admin_log.clone(),
+        notifications.clone(),
+        test_clock(),
+    );
+
+    let mut hasher = MockHashService::new();
+    hasher.expect_hash_async().returning(|_| Ok(1));
+    let mut prober = MockMediaInfoService::new();
+    prober.expect_get_video_metadata().returning(|file| {
+        Ok(VideoFileMetadata {
+            file_path: file.path().to_path_buf(),
+            metadata: Default::default(),
+            best_video_stream: None,
+            best_audio_stream: None,
+            best_subtitle_stream: None,
+            duration: 60 * 60 * 1_000_000,
+            streams: vec![],
+            format_name: "matroska".to_string(),
+            format_long_name: "Matroska".to_string(),
+            file_size: 5,
+            bit_rate: 1000,
+            probe_score: 100,
+            chapters: Vec::new(),
+        })
+    });
+    let index = wake_enrichment_from_indexer(
+        LocalIndexService::new(
+            library_repo,
+            file_repo,
+            movie_repo,
+            show_repo,
+            Arc::new(InMemoryMediaStreamRepository::default()),
+            Arc::new(hasher),
+            Arc::new(prober),
+            notifications,
+            admin_log,
+            Arc::new(InMemoryWatchStateRepository::default()),
+        )
+        .with_enrichment_repo(enrichment_repo),
+        &enrichment,
+    );
+
+    let handle = enrichment.notify_handle();
+    assert!(
+        !std::pin::pin!(handle.notified()).enable(),
+        "nothing has woken the worker yet"
+    );
+
+    index
+        .scan_now(library.id, beam_index::services::ScanTrigger::Manual)
+        .await
+        .unwrap();
+
+    assert!(
+        std::pin::pin!(handle.notified()).enable(),
+        "the scan queued Alien, so it woke the worker build serves"
+    );
+}

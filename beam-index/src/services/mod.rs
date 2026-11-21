@@ -14,7 +14,7 @@ pub mod watcher;
 #[cfg(any(test, feature = "test-utils"))]
 pub use admin_log::NoOpAdminLogService;
 pub use admin_log::{AdminLogService, LocalAdminLogService};
-pub use enrichment::{EnrichmentPolicy, MetadataEnrichmentService};
+pub use enrichment::{EnrichmentPolicy, EnrichmentWake, MetadataEnrichmentService};
 pub use hash::{HashConfig, HashService, LocalHashService};
 #[cfg(any(test, feature = "test-utils"))]
 pub use index::MockIndexService;
