@@ -2224,16 +2224,23 @@ description = "Render the Helm chart for every CI scenario and validate the mani
 # complaint.
 #
 # kubeconform fetches each schema once from its default registry and caches it
-# under the XDG cache, so only a cold cache needs the network.
+# under the XDG cache, so only a cold cache needs the network. The Prometheus
+# Operator's ServiceMonitor and PrometheusRule are not Kubernetes kinds, so
+# their schemas come from the datree CRDs catalog, which publishes one per
+# CRD version; a kind found in neither fails, rather than passing unchecked.
 run = '''
 set -eu
 cache="${XDG_CACHE_HOME:-$HOME/.cache}/beam/kubeconform"
 mkdir -p "$cache"
+# raw: mise renders this script through Tera, which would read kubeconform's
+# Go-template placeholders as its own.
+crds='{% raw %}https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json{% endraw %}'
 for kube in 1.29.0 1.37.0; do
   for values in charts/beam/ci/*-values.yaml; do
     echo "== $values against Kubernetes $kube"
     helm template beam charts/beam -f "$values" --kube-version "$kube" \
-      | kubeconform -strict -summary -kubernetes-version "$kube" -cache "$cache"
+      | kubeconform -strict -summary -kubernetes-version "$kube" -cache "$cache" \
+          -schema-location default -schema-location "$crds"
   done
 done
 '''

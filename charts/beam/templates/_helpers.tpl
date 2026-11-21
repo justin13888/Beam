@@ -159,4 +159,17 @@ refuses them as well as `helm install`.
 {{- end }}
 {{- $_ := set $names .name true }}
 {{- end }}
+{{- range $object := list "serviceMonitor" "prometheusRule" "grafanaDashboard" }}
+{{- if and (get $.Values.metrics $object).enabled (not $.Values.metrics.enabled) }}
+{{- fail (printf "metrics.%s.enabled needs metrics.enabled: without it /metrics answers 503" $object) }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
+The PromQL label matchers that pick out this release's series: the `namespace`
+and `service` target labels the ServiceMonitor gives everything it scrapes.
+*/}}
+{{- define "beam.metricsSelector" -}}
+namespace="{{ .Release.Namespace }}",service="{{ include "beam.fullname" . }}"
 {{- end }}
