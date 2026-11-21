@@ -71,6 +71,42 @@ async fn a_401_announces_the_server_signed_out_exactly_once() {
     assert_eq!(server.state, SessionState::Expired);
 }
 
+/// A drain names a refused session instead of throwing it, so the platform
+/// has no error to react to: the announcement is how the app learns the
+/// server signed out, and a second drain does not repeat it.
+#[tokio::test]
+async fn a_drain_that_meets_a_401_announces_the_server_signed_out_once() {
+    let (client, id, _) = signed_in_client().await;
+    answer_with(
+        &client,
+        &id,
+        vec![crate::transport::CannedAnswer::Unreachable],
+    );
+    assert!(matches!(
+        client
+            .report_progress(FILE_A.to_owned(), 30.0, None, true)
+            .await
+            .expect("an outcome"),
+        crate::progress::ProgressOutcome::Queued { .. }
+    ));
+    let recorded = observing(&client);
+    let (status, content_type, body) = EXPIRED;
+    client
+        .use_transport(
+            &id,
+            Arc::new(CannedBackend::answering(status, content_type, body)),
+        )
+        .expect("the server is registered");
+
+    let drain = client.drain_progress().await.expect("an expiry is named");
+    assert_eq!(drain.expired_server_ids, vec![id.clone()]);
+    client.drain_progress().await.expect("drained");
+
+    let server = the_only_announcement(&client, &recorded);
+    assert_eq!(server.id, id);
+    assert_eq!(server.state, SessionState::Expired);
+}
+
 #[tokio::test]
 async fn a_completed_sign_in_is_announced_once() {
     let (client, id) = client_with_server().await;

@@ -24,6 +24,7 @@ import uniffi.beam_client_core.MediaSourceView
 import uniffi.beam_client_core.PlaybackHttpConfig
 import uniffi.beam_client_core.PlaybackPlan
 import uniffi.beam_client_core.PlaybackTelemetrySummary
+import uniffi.beam_client_core.ProgressDrain
 import uniffi.beam_client_core.ProgressOutcome
 import uniffi.beam_client_core.QualityPolicy
 import uniffi.beam_client_core.ScanJob
@@ -211,9 +212,11 @@ internal class BeamPlaybackRepository
             force: Boolean,
         ): ProgressOutcome = client.reportProgress(fileId, positionSecs, durationSecs, force)
 
-        override suspend fun flushProgress(): UInt = client.flushProgress()
+        // A refused session is named, not thrown; the core announced the `401`.
+        override suspend fun drainProgress(): ProgressDrain = client.drainProgress()
 
-        override suspend fun pendingProgressCount(): UInt = client.pendingProgressCount()
+        override fun progressRetryDelaySecs(attempt: UInt): ULong =
+            uniffi.beam_client_core.progressRetryDelaySecs(attempt)
     }
 
 @Singleton
