@@ -219,6 +219,21 @@ public class FakePlaybackRepository : PlaybackRepository {
         failedDrainAttempts += attempt
         return failedDrainRetrySecs
     }
+
+    /**
+     * What [localStartPositionSecs] answers per file: where the core's start
+     * rule puts the position this device recorded. A file absent here was
+     * never recorded, and starts at 0.
+     */
+    public val localStartPositions: MutableMap<String, Double> = mutableMapOf()
+
+    /** Set to make [localStartPositionSecs] throw, as a record that cannot be read does. */
+    public var localStartFailure: BeamException? = null
+
+    override suspend fun localStartPositionSecs(fileId: String): Double {
+        localStartFailure?.let { throw it }
+        return localStartPositions[fileId] ?: 0.0
+    }
 }
 
 /** One position report captured by [FakePlaybackRepository]. */

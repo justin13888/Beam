@@ -65,6 +65,9 @@ mod in_memory {
         FailWrites,
         /// Fail everything.
         FailAll,
+        /// Fail writes to keys starting with this prefix; everything else
+        /// succeeds, so a test can break one record and keep the rest.
+        FailWritesUnder(&'static str),
     }
 
     /// A stateful in-memory [`KeyValueStore`], for tests and for the Rust side
@@ -120,13 +123,14 @@ mod in_memory {
             self.len() == 0
         }
 
-        fn check(&self, writing: bool) -> Result<(), StorageError> {
+        fn check(&self, writing: bool, key: &str) -> Result<(), StorageError> {
             let mode = *self.failure.lock().expect("failure lock");
             let fails = match mode {
                 FailureMode::None => false,
                 FailureMode::FailAll => true,
                 FailureMode::FailReads => !writing,
                 FailureMode::FailWrites => writing,
+                FailureMode::FailWritesUnder(prefix) => writing && key.starts_with(prefix),
             };
             if fails {
                 return Err(StorageError::Unavailable {
@@ -140,24 +144,24 @@ mod in_memory {
     #[async_trait::async_trait]
     impl KeyValueStore for InMemoryKeyValueStore {
         async fn get(&self, key: String) -> Result<Option<String>, StorageError> {
-            self.check(false)?;
+            self.check(false, &key)?;
             Ok(self.plain.lock().expect("plain lock").get(&key).cloned())
         }
 
         async fn put(&self, key: String, value: String) -> Result<(), StorageError> {
-            self.check(true)?;
+            self.check(true, &key)?;
             self.plain.lock().expect("plain lock").insert(key, value);
             Ok(())
         }
 
         async fn remove(&self, key: String) -> Result<(), StorageError> {
-            self.check(true)?;
+            self.check(true, &key)?;
             self.plain.lock().expect("plain lock").remove(&key);
             Ok(())
         }
 
         async fn list_keys(&self, prefix: String) -> Result<Vec<String>, StorageError> {
-            self.check(false)?;
+            self.check(false, &prefix)?;
             Ok(self
                 .plain
                 .lock()
@@ -169,18 +173,18 @@ mod in_memory {
         }
 
         async fn get_secret(&self, key: String) -> Result<Option<String>, StorageError> {
-            self.check(false)?;
+            self.check(false, &key)?;
             Ok(self.secret.lock().expect("secret lock").get(&key).cloned())
         }
 
         async fn put_secret(&self, key: String, value: String) -> Result<(), StorageError> {
-            self.check(true)?;
+            self.check(true, &key)?;
             self.secret.lock().expect("secret lock").insert(key, value);
             Ok(())
         }
 
         async fn remove_secret(&self, key: String) -> Result<(), StorageError> {
-            self.check(true)?;
+            self.check(true, &key)?;
             self.secret.lock().expect("secret lock").remove(&key);
             Ok(())
         }

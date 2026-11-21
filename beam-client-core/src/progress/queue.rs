@@ -169,6 +169,19 @@ impl ProgressQueue {
         self.persist(&entries).await
     }
 
+    /// The unsent sample held for a file, if one is still worth sending.
+    ///
+    /// # Errors
+    ///
+    /// Propagates storage failures.
+    pub async fn find(&self, file_id: &str) -> Result<Option<QueuedProgress>, StorageError> {
+        Ok(self
+            .load()
+            .await?
+            .into_iter()
+            .find(|entry| entry.file_id == file_id))
+    }
+
     /// Entries eligible to send now, oldest first.
     ///
     /// # Errors
@@ -681,6 +694,24 @@ mod tests {
             .await
             .expect("enqueue");
         assert_eq!(queue.len().await.expect("len"), 1);
+    }
+
+    #[tokio::test]
+    async fn find_answers_only_a_sample_still_worth_sending() {
+        let clock = Arc::new(TestClock::new(1_000));
+        let (queue, _storage) = queue(Arc::clone(&clock));
+
+        queue
+            .enqueue(sample("f1", 120.0, 1_000))
+            .await
+            .expect("enqueue");
+        let found = queue.find("f1").await.expect("find").expect("queued");
+        assert!((found.position_secs - 120.0).abs() < f64::EPSILON);
+        assert_eq!(queue.find("f2").await.expect("find"), None);
+
+        // Past its age the sample is dropped, and so no longer found.
+        clock.advance_secs(MAX_AGE_SECS);
+        assert_eq!(queue.find("f1").await.expect("find"), None);
     }
 
     #[tokio::test]

@@ -541,6 +541,9 @@ impl BeamClient {
         self.storage
             .remove(format!("progress_queue/{server_id}"))
             .await?;
+        self.storage
+            .remove(crate::progress::LastPositions::storage_key(server_id))
+            .await?;
 
         // The guard is taken and released before the await: holding a
         // std::sync guard across a suspension point makes the whole future

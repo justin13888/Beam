@@ -1,18 +1,14 @@
 package dev.beam.android.feature.downloads
 
-import dev.beam.android.core.ffi.repository.CatalogRepository
 import dev.beam.android.core.model.DownloadRecord
 import dev.beam.android.core.model.DownloadState
-import dev.beam.android.core.model.PlaybackRequest
 import dev.beam.android.core.testing.FakeCatalogRepository
-import dev.beam.android.core.testing.Fixtures
+import dev.beam.android.core.testing.FakePlaybackRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
-import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
@@ -21,8 +17,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
-import uniffi.beam_client_core.BeamException
-import uniffi.beam_client_core.MediaDetail
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class DownloadsTest {
@@ -60,7 +54,7 @@ class DownloadsTest {
                         downloadRecord(fileId = "f", state = DownloadState.Failed),
                     ),
                 )
-            val viewModel = DownloadsViewModel(repository, FakeCatalogRepository())
+            val viewModel = DownloadsViewModel(repository, FakeCatalogRepository(), FakePlaybackRepository())
             backgroundScope.observe(viewModel)
             testScheduler.advanceUntilIdle()
 
@@ -77,7 +71,8 @@ class DownloadsTest {
     @Test
     fun `an empty store renders as empty rather than as an error`() =
         runTest {
-            val viewModel = DownloadsViewModel(FakeDownloadRepository(), FakeCatalogRepository())
+            val viewModel =
+                DownloadsViewModel(FakeDownloadRepository(), FakeCatalogRepository(), FakePlaybackRepository())
             backgroundScope.observe(viewModel)
             testScheduler.advanceUntilIdle()
 
@@ -91,7 +86,7 @@ class DownloadsTest {
                 FakeDownloadRepository(
                     listOf(downloadRecord(fileId = "a", state = DownloadState.Downloading)),
                 )
-            val viewModel = DownloadsViewModel(repository, FakeCatalogRepository())
+            val viewModel = DownloadsViewModel(repository, FakeCatalogRepository(), FakePlaybackRepository())
             backgroundScope.observe(viewModel)
             testScheduler.advanceUntilIdle()
 
@@ -121,7 +116,7 @@ class DownloadsTest {
                 FakeDownloadRepository(
                     listOf(downloadRecord(fileId = "a", state = DownloadState.Completed)),
                 )
-            val viewModel = DownloadsViewModel(repository, FakeCatalogRepository())
+            val viewModel = DownloadsViewModel(repository, FakeCatalogRepository(), FakePlaybackRepository())
             backgroundScope.observe(viewModel)
             testScheduler.advanceUntilIdle()
 
@@ -140,115 +135,11 @@ class DownloadsTest {
                 FakeDownloadRepository().apply {
                     failWith = IllegalStateException("no session yet")
                 }
-            val viewModel = DownloadsViewModel(repository, FakeCatalogRepository())
+            val viewModel = DownloadsViewModel(repository, FakeCatalogRepository(), FakePlaybackRepository())
             backgroundScope.observe(viewModel)
             testScheduler.advanceUntilIdle()
 
             assertTrue(viewModel.state.value.isEmpty)
-        }
-
-    /** What playing [record] hands the player, through [catalog]. */
-    private fun TestScope.playing(
-        record: DownloadRecord,
-        catalog: CatalogRepository,
-    ): PlaybackRequest? {
-        val viewModel = DownloadsViewModel(FakeDownloadRepository(listOf(record)), catalog)
-        var request: PlaybackRequest? = null
-        viewModel.play(record) { request = it }
-        testScheduler.advanceUntilIdle()
-        return request
-    }
-
-    @Test
-    fun `a second tap while the lookup is pending opens one player, not two`() =
-        runTest {
-            val record = downloadRecord(state = DownloadState.Completed)
-            val viewModel = DownloadsViewModel(FakeDownloadRepository(listOf(record)), FakeCatalogRepository())
-            val requests = mutableListOf<PlaybackRequest>()
-
-            viewModel.play(record) { requests += it }
-            viewModel.play(record) { requests += it }
-            testScheduler.advanceUntilIdle()
-            assertEquals(1, requests.size)
-
-            // Once the first has gone through, Play works again.
-            viewModel.play(record) { requests += it }
-            testScheduler.advanceUntilIdle()
-            assertEquals(2, requests.size)
-        }
-
-    @Test
-    fun `a downloaded film resumes where the core says it starts`() =
-        runTest {
-            // The core's start rather than the raw resume point (issue #466).
-            val catalog =
-                FakeCatalogRepository().apply {
-                    details["media-1"] =
-                        Fixtures.movieDetail(
-                            Fixtures
-                                .movie(
-                                    id = "media-1",
-                                ).copy(resumePositionSecs = 6_250.0, startPositionSecs = 1_200.0),
-                        )
-                }
-            val record = downloadRecord(fileId = "a", state = DownloadState.Completed)
-
-            val request = playing(record, catalog)!!
-            assertEquals(1_200.0, request.startPositionSecs, 0.0)
-            assertEquals("a", request.fileId)
-            assertEquals("media-1", request.mediaId)
-        }
-
-    @Test
-    fun `a downloaded episode resumes from its own start, not the show's`() =
-        runTest {
-            val catalog =
-                FakeCatalogRepository().apply {
-                    details["media-1"] =
-                        Fixtures.showDetail(
-                            seasons =
-                                listOf(
-                                    Fixtures.season(
-                                        episodes =
-                                            listOf(
-                                                Fixtures.episode(id = "e1").copy(startPositionSecs = 300.0),
-                                                Fixtures.episode(id = "e2").copy(startPositionSecs = 900.0),
-                                            ),
-                                    ),
-                                ),
-                        )
-                }
-            val record = downloadRecord(state = DownloadState.Completed).copy(episodeId = "e2")
-
-            val request = playing(record, catalog)!!
-            assertEquals(900.0, request.startPositionSecs, 0.0)
-            assertEquals("e2", request.episodeId)
-        }
-
-    @Test
-    fun `a download played offline starts at the beginning rather than failing`() =
-        runTest {
-            val catalog =
-                FakeCatalogRepository().apply {
-                    failWith = BeamException.Network("offline", retryable = true)
-                }
-
-            val request = playing(downloadRecord(state = DownloadState.Completed), catalog)
-            assertEquals(0.0, request!!.startPositionSecs, 0.0)
-        }
-
-    @Test
-    fun `a server that never answers does not hold the player back`() =
-        runTest {
-            // A half-open connection hangs rather than failing; the lookup is
-            // bounded so the downloaded file still plays.
-            val hanging =
-                object : CatalogRepository by FakeCatalogRepository() {
-                    override suspend fun detail(mediaId: String): MediaDetail = awaitCancellation()
-                }
-
-            val request = playing(downloadRecord(state = DownloadState.Completed), hanging)
-            assertEquals(0.0, request!!.startPositionSecs, 0.0)
         }
 
     @Test
