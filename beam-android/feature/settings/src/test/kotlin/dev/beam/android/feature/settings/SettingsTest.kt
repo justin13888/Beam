@@ -38,7 +38,8 @@ class SettingsTest {
         preferences: FakePreferencesRepository = FakePreferencesRepository(),
         servers: FakeServerRepository = signedIn(),
         sessions: FakeSessionRepository = FakeSessionRepository(),
-    ) = SettingsViewModel(preferences, servers, sessions)
+        downloads: FakeDownloadRepository = FakeDownloadRepository(),
+    ) = SettingsViewModel(preferences, servers, sessions, downloads)
 
     /**
      * One signed-in server, already restored: settings is reached only past

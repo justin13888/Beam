@@ -1,6 +1,7 @@
 package dev.beam.android.navigation
 
 import androidx.navigation3.runtime.NavKey
+import dev.beam.android.core.model.PlaybackRequest
 import kotlinx.serialization.Serializable
 
 /**
@@ -72,7 +73,23 @@ public data class Player(
     val startPositionSecs: Double = 0.0,
     /** Whether the viewer chose this file by hand; see [dev.beam.android.core.model.PlaybackRequest.isSourcePicked]. */
     val isSourcePicked: Boolean = false,
-) : Destination
+) : Destination {
+    public companion object {
+        /**
+         * The destination that plays [request], keeping where it starts
+         * (issue #466) and whether its file was picked by hand.
+         */
+        public fun of(request: PlaybackRequest): Player =
+            Player(
+                fileId = request.fileId,
+                mediaId = request.mediaId,
+                episodeId = request.episodeId,
+                title = request.title,
+                startPositionSecs = request.startPositionSecs,
+                isSourcePicked = request.isSourcePicked,
+            )
+    }
+}
 
 /** Sign-in, shown when there is no session. */
 @Serializable
