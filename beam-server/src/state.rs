@@ -52,6 +52,7 @@ use crate::{
         playback::{DbPlaybackService, PlaybackRepositories, PlaybackService},
         playback_telemetry::PlaybackTelemetryService,
         sources::{SourceCatalog, SourceRepositories},
+        stream_cache::BoundedStreamGrantCache,
         subtitle::{DbSubtitleService, SubtitleService},
         telemetry::LibraryReportService,
         trickplay::{TrickplayDependencies, TrickplayService},
@@ -187,7 +188,9 @@ impl kynos::di::Provides<OidcRuntimeConfig> for AppState {
 #[derive(Debug, Clone)]
 pub struct AppServices {
     /// Which libraries and content ratings each user may see (issue #263),
-    /// applied by every route that reads or delivers a title.
+    /// applied by every route that reads or delivers a title. Built with a
+    /// short-lived cache of file-delivery grants (issue #462); see
+    /// [`crate::services::stream_cache`].
     pub access: Arc<AccessService>,
     pub library: Arc<dyn LibraryService>,
     pub metadata: Arc<dyn MetadataService>,
@@ -603,17 +606,20 @@ impl AppServices {
             watch_status.clone(),
         ));
 
-        let access = Arc::new(AccessService::new(AccessRepositories {
-            policies: Arc::new(
-                beam_index::repositories::SqlAccessPolicyRepository::with_clock(
-                    db.clone(),
-                    clock.clone(),
+        let access = Arc::new(
+            AccessService::new(AccessRepositories {
+                policies: Arc::new(
+                    beam_index::repositories::SqlAccessPolicyRepository::with_clock(
+                        db.clone(),
+                        clock.clone(),
+                    ),
                 ),
-            ),
-            movies: movie_repo.clone(),
-            shows: show_repo.clone(),
-            files: file_repo.clone(),
-        }));
+                movies: movie_repo.clone(),
+                shows: show_repo.clone(),
+                files: file_repo.clone(),
+            })
+            .with_stream_grants(Arc::new(BoundedStreamGrantCache::new(clock.clone()))),
+        );
 
         let services = Self {
             access,
