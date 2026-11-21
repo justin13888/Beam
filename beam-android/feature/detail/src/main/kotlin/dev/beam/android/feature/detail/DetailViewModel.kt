@@ -211,7 +211,7 @@ public class DetailViewModel
                                     ?: seasons.firstOrNull()?.seasonNumber,
                             sources = sources,
                             selection = selection,
-                            downloadedFileIds = downloads.completedAmong(offeredFileIds(detail, sources, selection)),
+                            downloadedFileIds = downloads.downloadedOf(selection),
                         ),
                     )
             } catch (failure: BeamException) {

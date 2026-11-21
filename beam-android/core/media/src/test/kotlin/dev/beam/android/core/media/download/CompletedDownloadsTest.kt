@@ -4,15 +4,19 @@
 package dev.beam.android.core.media.download
 
 import android.content.Context
+import android.database.SQLException
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.database.DatabaseIOException
 import androidx.media3.datasource.ByteArrayDataSource
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.CacheWriter
 import androidx.media3.exoplayer.offline.Download
+import androidx.media3.exoplayer.offline.DownloadCursor
+import androidx.media3.exoplayer.offline.DownloadIndex
 import androidx.media3.test.utils.robolectric.RobolectricUtil.runMainLooperUntil
 import androidx.test.core.app.ApplicationProvider
 import dev.beam.android.core.ffi.repository.PlaybackRepository
@@ -133,6 +137,21 @@ class CompletedDownloadsTest {
             assertEquals(CompletedDownload(DONE, mediaUrl(DONE)), repository.completed(DONE))
             assertNull("never queued", repository.completed("unknown"))
         }
+
+    @Test
+    fun `an index that cannot be read counts as no completed download`() {
+        // What Media3's SQLite index throws when its database cannot be read.
+        val unreadable =
+            object : DownloadIndex {
+                override fun getDownload(id: String): Download? =
+                    throw DatabaseIOException(SQLException("disk I/O error"))
+
+                override fun getDownloads(vararg states: Int): DownloadCursor =
+                    throw DatabaseIOException(SQLException("disk I/O error"))
+            }
+
+        assertNull(unreadable.completedDownload(DONE))
+    }
 
     private suspend fun enqueue(fileId: String) =
         repository.enqueue(fileId = fileId, serverId = "home", mediaId = "m-$fileId", title = "Title $fileId")

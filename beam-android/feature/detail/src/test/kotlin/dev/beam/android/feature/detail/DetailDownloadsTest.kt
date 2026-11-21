@@ -66,30 +66,10 @@ class DetailDownloadsTest {
 
             val state = loaded(downloads)
 
-            assertEquals(setOf(OTHER), state.downloadedFileIds)
+            assertEquals("only the chosen file is looked up", setOf(CHOSEN), downloads.asked)
+            assertTrue(state.downloadedFileIds.isEmpty())
             assertFalse(state.playsOffline)
         }
-
-    @Test
-    fun `every file the page offers is looked up, episodes included`() {
-        val detail =
-            Fixtures.showDetail(
-                seasons =
-                    listOf(
-                        Fixtures.season(
-                            episodes =
-                                listOf(
-                                    Fixtures.episode(id = "e1", fileId = "ep-1"),
-                                    Fixtures.episode(id = "e2", fileId = null),
-                                ),
-                        ),
-                    ),
-            )
-
-        val offered = offeredFileIds(detail, listOf(Fixtures.source(fileId = OTHER)), selection())
-
-        assertEquals(setOf(OTHER, CHOSEN, "ep-1"), offered)
-    }
 
     /** A film's page with two sources, [CHOSEN] the one Play plays, over [downloads]. */
     private fun TestScope.loaded(downloads: FakeDownloadRepository): DetailUiState {

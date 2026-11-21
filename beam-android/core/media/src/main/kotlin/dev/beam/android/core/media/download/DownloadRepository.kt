@@ -11,6 +11,7 @@ import android.content.Context
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.cache.Cache
 import androidx.media3.exoplayer.offline.Download
+import androidx.media3.exoplayer.offline.DownloadIndex
 import androidx.media3.exoplayer.offline.DownloadManager
 import dagger.hilt.android.qualifiers.ApplicationContext
 import dev.beam.android.core.ffi.preferences.PreferencesRepository
@@ -26,6 +27,7 @@ import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.IOException
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -200,22 +202,16 @@ internal class MediaDownloadRepository
         override suspend fun isDownloaded(fileId: String): Boolean = completed(fileId) != null
 
         /**
-         * From the download index, which records each download's state.
+         * From the download index; see [completedDownload].
          *
-         * Not from the cache: a partial download has spans in it too, and
-         * the cache keys them by URL, not by file. An index that cannot be
-         * read is treated as holding no completed download, so playback falls
-         * back to streaming rather than failing.
+         * The manager is taken on the caller's thread, which builds it on
+         * first use where Media3 needs it built, and the index is read on
+         * [Dispatchers.IO]: each read is a SQLite query, which Media3's index
+         * documents must not run on the main thread.
          */
         override suspend fun completed(fileId: String): CompletedDownload? {
-            val download =
-                try {
-                    beamManager().raw.downloadIndex.getDownload(fileId)
-                } catch (_: IOException) {
-                    null
-                }
-            if (download == null || download.state != Download.STATE_COMPLETED) return null
-            return CompletedDownload(fileId = fileId, uri = download.request.uri.toString())
+            val index = beamManager().raw.downloadIndex
+            return withContext(Dispatchers.IO) { index.completedDownload(fileId) }
         }
 
         /**
@@ -243,6 +239,25 @@ internal class MediaDownloadRepository
                     }
             }
     }
+
+/**
+ * [fileId]'s download, where this index records it as completed.
+ *
+ * The index, not the cache: a partial download has spans in the cache too,
+ * and the cache keys them by URL, not by file. An index that cannot be read
+ * is treated as holding no completed download, so playback falls back to the
+ * core's plan rather than failing.
+ */
+internal fun DownloadIndex.completedDownload(fileId: String): CompletedDownload? {
+    val download =
+        try {
+            getDownload(fileId)
+        } catch (_: IOException) {
+            null
+        }
+    if (download == null || download.state != Download.STATE_COMPLETED) return null
+    return CompletedDownload(fileId = fileId, uri = download.request.uri.toString())
+}
 
 /**
  * Apply the stored cellular preference to [downloads]: the value stored now,
