@@ -825,11 +825,10 @@ async fn a_scan_deferral_leaves_a_kept_event_for_the_same_path_alone() {
         PathBuf::from("/videos/a.mkv"),
         Duration::from_secs(5),
     );
-    // Taking the deferral wakes the consumer, which parks on the same retry.
-    for _ in 0..100 {
-        tokio::task::yield_now().await;
-    }
-    until("the consumer to park again", || clock.waiter_count() == 3).await;
+    // Taking the deferral wakes the consumer, which parks on the same retry
+    // again. `TestClock` keeps the abandoned wait registered until the clock
+    // passes it, so parking again makes four waiters.
+    until("the consumer to park again", || clock.waiter_count() == 4).await;
     clock.advance(Duration::from_secs(5));
     for _ in 0..100 {
         tokio::task::yield_now().await;
