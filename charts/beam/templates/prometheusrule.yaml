@@ -119,7 +119,13 @@ spec:
               Library {{ "{{" }} $labels.library {{ "}}" }} last finished a scan
               {{ "{{" }} $value | humanizeDuration {{ "}}" }} ago (threshold {{ $rule.scanStaleHours }}h).
         - alert: BeamLibraryScanFailing
-          expr: increase(beam_scan_failures_total{ {{- $sel -}} }[1h]) > 0
+          # The server creates a library's counter at 1 on its first failure,
+          # so increase() alone never sees that failure: a series that has
+          # appeared within the window fires too.
+          expr: |-
+            increase(beam_scan_failures_total{ {{- $sel -}} }[1h]) > 0
+              or (beam_scan_failures_total{ {{- $sel -}} }
+                unless beam_scan_failures_total{ {{- $sel -}} } offset 1h)
           labels:
             severity: warning
             {{- with $alertLabels }}
@@ -131,7 +137,12 @@ spec:
               A scan of library {{ "{{" }} $labels.library {{ "}}" }} failed or was interrupted in
               the last hour; the server log has the cause.
         - alert: BeamWatcherErrors
-          expr: increase(beam_watcher_errors_total{ {{- $sel -}} }[15m]) > 0
+          # As BeamLibraryScanFailing: a counter created by its first error
+          # fires through the newly-appeared half.
+          expr: |-
+            increase(beam_watcher_errors_total{ {{- $sel -}} }[15m]) > 0
+              or (beam_watcher_errors_total{ {{- $sel -}} }
+                unless beam_watcher_errors_total{ {{- $sel -}} } offset 15m)
           labels:
             severity: warning
             {{- with $alertLabels }}
