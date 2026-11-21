@@ -49,6 +49,8 @@ struct RecordingIndexer {
     fail_once: std::sync::Mutex<HashSet<PathBuf>>,
     /// How many of the next library listings fail.
     failing_listings: Arc<AtomicU32>,
+    /// Where a test records the files a scan deferred.
+    scan_deferrals: Arc<ScanDeferrals>,
 }
 
 /// The library store, whose next `failing` listings fail (NFR-205).
@@ -219,6 +221,10 @@ impl BackgroundIndexer for RecordingIndexer {
             inner: self.library_repo.clone(),
             failing: self.failing_listings.clone(),
         })
+    }
+
+    fn scan_deferrals(&self) -> Arc<ScanDeferrals> {
+        self.scan_deferrals.clone()
     }
 }
 
@@ -648,6 +654,7 @@ async fn the_consumer_stops_when_the_watcher_closes() {
             run_watch_consumer(
                 watcher,
                 indexer.clone(),
+                indexer.scan_deferrals.attach(),
                 clock.clone(),
                 Duration::from_millis(2000),
             ),
@@ -723,6 +730,125 @@ async fn a_deferred_event_is_retried_once_its_delay_has_passed() {
             FsEventKind::Created
         ),
         "the retry is the event that was deferred"
+    );
+
+    tasks.abort();
+}
+
+/// A file a scan deferred as still being written is reconciled once the
+/// scan's delay has passed on the injected clock, with no watcher event and
+/// no second scan (issue #453).
+#[tokio::test]
+async fn a_file_a_scan_deferred_is_reconciled_once_its_delay_has_passed() {
+    let indexer = Arc::new(RecordingIndexer::default());
+    let clock = Arc::new(TestClock::new());
+    let watcher = Arc::new(InMemoryFsWatcher::new());
+    let library_id = Uuid::new_v4();
+
+    let tasks = spawn_background_indexing_with(
+        indexer.clone(),
+        Some(watcher.clone()),
+        clock.clone(),
+        config(3600, 2000),
+    );
+    // The maintenance interval and the poll interval.
+    until("both loops to sleep", || clock.waiter_count() == 2).await;
+    indexer.scan_deferrals.record(
+        library_id,
+        PathBuf::from("/videos/a.mkv"),
+        Duration::from_secs(30),
+    );
+    until("the consumer to wait for the retry", || {
+        clock.waiter_count() == 3
+    })
+    .await;
+
+    clock.advance(Duration::from_secs(29));
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        indexer.reconciled().is_empty(),
+        "a second short of the delay, the file is still held"
+    );
+
+    clock.advance(Duration::from_secs(1));
+    until("the retry", || indexer.reconciled().len() == 1).await;
+    assert_eq!(
+        indexer.reconciled(),
+        vec![(
+            library_id,
+            PathBuf::from("/videos/a.mkv"),
+            FsEventKind::Modified
+        )],
+    );
+    assert_eq!(indexer.scan_count(), 1, "only the startup scan ran");
+
+    tasks.abort();
+}
+
+/// A watcher event already kept for a path a scan then defers stays as it
+/// was: its own kind, at its own time.
+#[tokio::test]
+async fn a_scan_deferral_leaves_a_kept_event_for_the_same_path_alone() {
+    let indexer = Arc::new(RecordingIndexer::default());
+    let clock = Arc::new(TestClock::new());
+    let watcher = Arc::new(InMemoryFsWatcher::new());
+    let library_id = Uuid::new_v4();
+    indexer.defer_next("/videos/a.mkv", Duration::from_secs(60));
+
+    let tasks = spawn_background_indexing_with(
+        indexer.clone(),
+        Some(watcher.clone()),
+        clock.clone(),
+        config(3600, 2000),
+    );
+    until("both loops to sleep", || clock.waiter_count() == 2).await;
+    watcher.emit(FsEvent {
+        library_id,
+        path: PathBuf::from("/videos/a.mkv"),
+        kind: FsEventKind::Created,
+    });
+    until("the debounce window to open", || clock.waiter_count() == 3).await;
+    clock.advance(Duration::from_millis(2000));
+    until("the first, deferred reconcile", || {
+        indexer.reconciled().len() == 1
+    })
+    .await;
+    until("the consumer to wait for the retry", || {
+        clock.waiter_count() == 3
+    })
+    .await;
+
+    indexer.scan_deferrals.record(
+        library_id,
+        PathBuf::from("/videos/a.mkv"),
+        Duration::from_secs(5),
+    );
+    // Taking the deferral wakes the consumer, which parks on the same retry
+    // again. `TestClock` keeps the abandoned wait registered until the clock
+    // passes it, so parking again makes four waiters.
+    until("the consumer to park again", || clock.waiter_count() == 4).await;
+    clock.advance(Duration::from_secs(5));
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        indexer.reconciled().len(),
+        1,
+        "the kept event's delay, not the scan's, decides"
+    );
+
+    clock.advance(Duration::from_secs(55));
+    until("the retry", || indexer.reconciled().len() == 2).await;
+    assert_eq!(
+        indexer.reconciled()[1],
+        (
+            library_id,
+            PathBuf::from("/videos/a.mkv"),
+            FsEventKind::Created
+        ),
+        "the retry is the watcher's event"
     );
 
     tasks.abort();
@@ -1523,6 +1649,80 @@ mod local_index_service_adapter {
                 .unwrap()
                 .is_none()
         );
+        tasks.abort();
+    }
+
+    /// A copy that finished just before boot: the startup scan defers the
+    /// file, no watcher event follows, and it is indexed once the settle
+    /// window passes on the injected clock -- with no second scan (issue
+    /// #453).
+    #[tokio::test]
+    async fn a_file_the_startup_scan_deferred_is_indexed_once_it_settles() {
+        use beam_domain::repositories::FileRepository;
+
+        let settle = Duration::from_secs(30);
+        let written_at = chrono::DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let library_repo = Arc::new(InMemoryLibraryRepository::default());
+        library_repo
+            .create(CreateLibrary {
+                name: "Movies".to_string(),
+                description: None,
+                root_path: temp.path().to_path_buf(),
+            })
+            .await
+            .unwrap();
+        let path = temp.path().join("Movie.2019.mkv");
+        std::fs::write(&path, b"not really a movie").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(written_at.into())
+            .unwrap();
+
+        let clock = Arc::new(TestClock::starting_at(written_at));
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+        let indexer: Arc<dyn BackgroundIndexer> = Arc::new(
+            IndexServiceBuilder::new()
+                .library_repo(library_repo)
+                .file_repo(file_repo.clone())
+                .hash_service(Arc::new(LocalHashService::new(HashConfig::default())))
+                .media_info(Arc::new(LocalMediaInfoService::default()))
+                .build()
+                .with_clock(clock.clone())
+                .with_settle_window(settle),
+        );
+        let watcher = Arc::new(InMemoryFsWatcher::new());
+
+        let tasks = spawn_background_indexing_with(
+            indexer,
+            Some(watcher.clone()),
+            clock.clone(),
+            config(3600, 2000),
+        );
+        // The maintenance interval, the poll interval, and the retry the
+        // startup scan's deferral set the consumer waiting on.
+        until("the consumer to wait for the retry", || {
+            clock.waiter_count() == 3
+        })
+        .await;
+        let key = path.to_string_lossy().to_string();
+        assert!(
+            file_repo.find_by_path(&key).await.unwrap().is_none(),
+            "the startup scan left the file being written alone"
+        );
+
+        clock.advance(settle);
+        // Bounded like `until`; the reconcile runs on the consumer task.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while file_repo.find_by_path(&key).await.unwrap().is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the deferred file was never indexed"
+            );
+            tokio::task::yield_now().await;
+        }
         tasks.abort();
     }
 

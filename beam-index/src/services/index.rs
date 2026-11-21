@@ -28,6 +28,7 @@ use crate::services::scan::{
     ScanJob, ScanPhase, ScanProgress, ScanRefused, ScanState, ScanTicket, ScanTrigger, Settle,
     StoppedScan, settle_state,
 };
+use crate::services::scan_deferrals::ScanDeferrals;
 use crate::services::watcher::FsEventKind;
 use beam_domain::models::Library;
 use beam_domain::models::admin_log::{AdminLogCategory, AdminLogLevel};
@@ -438,6 +439,9 @@ pub struct LocalIndexService {
     missing_file_grace: Duration,
     /// How long a file must go unwritten before it is hashed (issue #181).
     settle_window: Duration,
+    /// Where a scan leaves the files it deferred, for the watch consumer to
+    /// retry (issue #453).
+    scan_deferrals: Arc<ScanDeferrals>,
     /// Which libraries' inode numbers are compared ([`Inodes`]).
     filesystem_probe: Arc<dyn FilesystemProbe>,
     /// Whether [`LocalIndexService::backfill_identity_keys`] and then
@@ -490,6 +494,7 @@ impl LocalIndexService {
             id_generator: Arc::new(UuidGenerator),
             missing_file_grace: DEFAULT_MISSING_FILE_GRACE,
             settle_window: Duration::ZERO,
+            scan_deferrals: Arc::default(),
             filesystem_probe: Arc::new(StatfsFilesystemProbe),
             identity_passes_succeeded: AtomicBool::new(false),
             scans: ScanCoordinator::new(),
@@ -512,7 +517,9 @@ impl LocalIndexService {
     /// Hash a file only once it has gone `window` without a write, measured
     /// from its modification time against the injected clock (issue #181):
     /// a file still being copied in is left alone -- a scan counts it as
-    /// deferred, a watcher event retries it once the window has passed --
+    /// deferred and hands it to the watch consumer ([`Self::scan_deferrals`]),
+    /// which retries it, as it retries a watcher event, once the window has
+    /// passed --
     /// rather than hashed and probed while partial. A file that changes
     /// while it is hashed is deferred the same way. Zero, the default, hashes
     /// every file on sight.
@@ -636,6 +643,12 @@ impl LocalIndexService {
     /// without needing their own separate handle to the same repository.
     pub fn library_repo(&self) -> &Arc<dyn LibraryRepository> {
         &self.library_repo
+    }
+
+    /// The files this service's scans deferred as still being written, for
+    /// the watch consumer to retry (issue #453).
+    pub fn scan_deferrals(&self) -> &Arc<ScanDeferrals> {
+        &self.scan_deferrals
     }
 
     /// Helper to extract and insert media streams for a file, and to replace
@@ -3060,10 +3073,16 @@ impl LocalIndexService {
                 FileOutcome::Changed => progress.changed += 1,
                 FileOutcome::Unchanged => progress.unchanged += 1,
                 // Seen, so never marked missing: a file still being copied in
-                // is on disk. The watcher, or the next scan, comes back to it.
+                // is on disk. The watch consumer retries it once the delay
+                // has passed (issue #453), or the next scan comes back to it.
+                FileOutcome::Deferred(retry_after) => {
+                    progress.deferred += 1;
+                    self.scan_deferrals
+                        .record(lib_uuid, path.clone(), retry_after);
+                }
                 // A scan never leaves a file to itself; were it to, it would
-                // be the same wait.
-                FileOutcome::Deferred(_) | FileOutcome::LeftToScan => progress.deferred += 1,
+                // be the same wait as the next scan.
+                FileOutcome::LeftToScan => progress.deferred += 1,
                 FileOutcome::Failed => progress.failed += 1,
             }
             progress.processed += 1;

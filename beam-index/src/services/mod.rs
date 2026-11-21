@@ -7,6 +7,7 @@ pub mod media_info;
 pub mod mime;
 pub mod notification;
 pub mod scan;
+pub mod scan_deferrals;
 pub mod trickplay;
 pub mod watch_status;
 pub mod watcher;
