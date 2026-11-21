@@ -140,7 +140,7 @@ class DownloadArtworkTest {
         media3.pauseDownloads()
         titles = FileDownloadTitleStore(context)
         artwork = DownloadArtwork(context, temp.newFolder("download-artwork")) { loader }
-        downloads = BeamDownloadManager(media3, titles, artwork)
+        downloads = BeamDownloadManager(media3, InProcessDownloadCommands { media3 }, titles, artwork)
     }
 
     @After
@@ -223,7 +223,7 @@ class DownloadArtworkTest {
             // A regular file where the store's directory should be: every write into it fails.
             val blocked = temp.newFile("not-a-directory")
             artwork = DownloadArtwork(context, blocked) { loader }
-            downloads = BeamDownloadManager(media3, titles, artwork)
+            downloads = BeamDownloadManager(media3, InProcessDownloadCommands { media3 }, titles, artwork)
 
             enqueue("f1", POSTER)
 
@@ -299,6 +299,19 @@ class DownloadArtworkTest {
         }
 
     @Test
+    fun `forgetting a server releases the posters only its downloads kept`() =
+        runTest {
+            enqueue("h1", POSTER, serverId = "home")
+            enqueue("c1", POSTER, serverId = "cabin")
+            enqueue("c2", OTHER_POSTER, serverId = "cabin")
+
+            downloads.removeServer("cabin")
+
+            assertTrue("still shown by the other server's download", isOnDisk(POSTER))
+            assertFalse(isOnDisk(OTHER_POSTER))
+        }
+
+    @Test
     fun `a download removed while its poster is still fetching leaves no poster behind`() =
         runTest {
             val held = Stall().also { stall = it }
@@ -319,9 +332,10 @@ class DownloadArtworkTest {
     private suspend fun enqueue(
         fileId: String,
         posterUrl: String,
+        serverId: String = "s1",
     ) = downloads.enqueue(
         fileId = fileId,
-        serverId = "s1",
+        serverId = serverId,
         mediaId = "m-$fileId",
         title = "Title $fileId",
         subtitle = null,
