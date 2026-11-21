@@ -3217,6 +3217,10 @@ impl LocalIndexService {
         // Refreshed after every completed scan (issue #457), unless the
         // library was deleted while this scan ran on past its stop timeout.
         ticket.record_file_count(total_files);
+        // Read after Phase 5 retired orphaned titles, so the gauge is what a
+        // user can browse now (issue #494).
+        let titles = self.library_repo.count_titles(lib_uuid).await?;
+        ticket.record_title_counts(titles);
 
         self.library_repo
             .update_scan_progress(lib_uuid, None, Some(end_time), Some(total_files as i32))

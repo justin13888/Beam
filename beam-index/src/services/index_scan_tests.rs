@@ -712,6 +712,59 @@ async fn a_scan_records_the_present_file_count_and_its_start_and_finish() {
     assert_eq!(files_gauge(), Some(1.0));
 }
 
+/// A completed scan sets `beam_library_titles{library,kind}` to the live
+/// titles it left the library holding, and the next scan refreshes it: a
+/// movie whose file is gone leaves the count (issue #494).
+#[tokio::test]
+async fn a_scan_records_the_live_title_count_of_each_kind() {
+    let capture = crate::test_metrics::MetricsCapture::new();
+    let _recorder = capture.install();
+    let h = Harness::settled().await;
+    let library_label = h.library.id.to_string();
+    let titles_gauge = |kind: &str| {
+        capture.snapshot().gauge(
+            "beam_library_titles",
+            &[("library", &library_label), ("kind", kind)],
+        )
+    };
+    let heat = h.write("Heat (1995).mkv");
+    h.write("The Office/Season 1/The Office S01E01.mkv");
+    h.write("The Office/Season 1/The Office S01E02.mkv");
+
+    h.scan().await;
+
+    for (kind, count) in [
+        ("movie", 1.0),
+        ("show", 1.0),
+        ("season", 1.0),
+        ("episode", 2.0),
+    ] {
+        assert_eq!(
+            titles_gauge(kind),
+            Some(count),
+            "{kind} after the first scan"
+        );
+    }
+
+    std::fs::remove_file(&heat).unwrap();
+    h.clock.advance(Duration::from_secs(60));
+
+    h.scan().await;
+
+    for (kind, count) in [
+        ("movie", 0.0),
+        ("show", 1.0),
+        ("season", 1.0),
+        ("episode", 2.0),
+    ] {
+        assert_eq!(
+            titles_gauge(kind),
+            Some(count),
+            "{kind} once the movie is gone"
+        );
+    }
+}
+
 mod rescan_properties {
     use super::*;
     use proptest::prelude::*;

@@ -156,7 +156,9 @@ impl IndexServiceBuilder {
 
 /// The in-memory catalogue stores, wired to each other as the SQL stores
 /// are joined: the library, movie and show stores read the file store, so a
-/// library's file count, and a title's files, are the files actually held.
+/// library's file count, and a title's files, are the files actually held;
+/// and the library store reads the movie and show stores, so its title count
+/// is of the titles actually held.
 pub(crate) struct IndexStores {
     pub(crate) library_repo: Arc<InMemoryLibraryRepository>,
     pub(crate) file_repo: Arc<InMemoryFileRepository>,
@@ -167,10 +169,15 @@ pub(crate) struct IndexStores {
 impl IndexStores {
     pub(crate) fn wired() -> Self {
         let file_repo = Arc::new(InMemoryFileRepository::default());
+        let movie_repo = Arc::new(InMemoryMovieRepository::with_files(file_repo.clone()));
+        let show_repo = Arc::new(InMemoryShowRepository::with_files(file_repo.clone()));
         Self {
-            library_repo: Arc::new(InMemoryLibraryRepository::with_files(file_repo.clone())),
-            movie_repo: Arc::new(InMemoryMovieRepository::with_files(file_repo.clone())),
-            show_repo: Arc::new(InMemoryShowRepository::with_files(file_repo.clone())),
+            library_repo: Arc::new(
+                InMemoryLibraryRepository::with_files(file_repo.clone())
+                    .linking_titles(movie_repo.clone(), show_repo.clone()),
+            ),
+            movie_repo,
+            show_repo,
             file_repo,
         }
     }
