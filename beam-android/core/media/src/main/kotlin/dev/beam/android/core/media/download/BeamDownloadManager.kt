@@ -101,7 +101,7 @@ public class BeamDownloadManager internal constructor(
                 // failed meanwhile is caught up from the index, which unlike
                 // `currentDownloads` holds both. Read after the listener is
                 // added, so a change racing the read is reported after it.
-                val indexed = withContext(Dispatchers.IO) { manager.indexedDownloads() }
+                val indexed = withContext(Dispatchers.IO) { manager.downloadIndex.indexedDownloads() }
                 send(core.reportDownloadTransfers(indexed.map { it.toReport(unmetAtStart) }))
                 // The requirements are read with the downloads, on Media3's
                 // thread, since the manager is not to be read from any other.

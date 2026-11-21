@@ -6,7 +6,6 @@ package dev.beam.android.core.media.download
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.offline.Download
 import androidx.media3.exoplayer.offline.DownloadIndex
-import androidx.media3.exoplayer.offline.DownloadManager
 import androidx.media3.exoplayer.offline.DownloadRequest
 import uniffi.beam_client_core.DownloadRecord
 import uniffi.beam_client_core.DownloadState
@@ -70,16 +69,16 @@ internal fun Download.toReport(notMetRequirements: Int): TransferReport {
 }
 
 /**
- * Every download in the manager's index, in every state: unlike
+ * Every download in a manager's index, in every state: unlike the manager's
  * `currentDownloads`, which leaves out a completed or failed one. Reads the
  * index's database, so it is called off the main thread.
  *
  * An index that cannot be read yields none: the core still lists every
  * record it holds, as last reported, rather than the list failing.
  */
-internal fun DownloadManager.indexedDownloads(): List<Download> =
+internal fun DownloadIndex.indexedDownloads(): List<Download> =
     try {
-        downloadIndex.getDownloads().use { cursor ->
+        getDownloads().use { cursor ->
             buildList<Download> { while (cursor.moveToNext()) add(cursor.download) }
         }
     } catch (_: IOException) {

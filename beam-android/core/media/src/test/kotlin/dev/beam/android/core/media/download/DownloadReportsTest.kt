@@ -3,9 +3,13 @@
 
 package dev.beam.android.core.media.download
 
+import android.database.SQLException
 import androidx.core.net.toUri
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.database.DatabaseIOException
 import androidx.media3.exoplayer.offline.Download
+import androidx.media3.exoplayer.offline.DownloadCursor
+import androidx.media3.exoplayer.offline.DownloadIndex
 import androidx.media3.exoplayer.offline.DownloadProgress
 import androidx.media3.exoplayer.offline.DownloadRequest
 import androidx.media3.exoplayer.scheduler.Requirements
@@ -55,6 +59,16 @@ class DownloadReportsTest {
         assertNull(download(Download.STATE_DOWNLOADING).toReport(0).failureMessage)
     }
 
+    @Test
+    fun `an index that cannot be read lists no downloads rather than failing the list`() {
+        assertEquals(emptyList<Download>(), UNREADABLE.indexedDownloads())
+    }
+
+    @Test
+    fun `an index that cannot be read has no failed request, so a resume clears the stop reason`() {
+        assertNull(UNREADABLE.failedRequest(ITEM))
+    }
+
     private fun download(
         state: Int,
         downloaded: Long = 0L,
@@ -72,5 +86,15 @@ class DownloadReportsTest {
 
     private companion object {
         const val ITEM = "f1000000-0000-4000-8000-000000000001"
+
+        /** What Media3's SQLite index throws when its database cannot be read. */
+        val UNREADABLE =
+            object : DownloadIndex {
+                override fun getDownload(id: String): Download? =
+                    throw DatabaseIOException(SQLException("disk I/O error"))
+
+                override fun getDownloads(vararg states: Int): DownloadCursor =
+                    throw DatabaseIOException(SQLException("disk I/O error"))
+            }
     }
 }

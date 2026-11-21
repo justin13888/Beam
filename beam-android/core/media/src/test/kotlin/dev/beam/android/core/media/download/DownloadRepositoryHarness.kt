@@ -184,7 +184,7 @@ abstract class DownloadRepositoryHarness {
      * Every download in the manager's index, finished ones included: the
      * manager's own `currentDownloads` leaves out a completed download.
      */
-    protected fun indexed(): List<Download> = repository.manager().indexedDownloads()
+    protected fun indexed(): List<Download> = repository.manager().downloadIndex.indexedDownloads()
 
     protected fun stateOf(fileId: String) = listed.firstOrNull { it.fileId == fileId }?.state
 
