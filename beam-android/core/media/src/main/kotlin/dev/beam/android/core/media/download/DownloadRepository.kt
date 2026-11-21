@@ -50,7 +50,7 @@ public interface DownloadRepository {
     /** Stop a download, keeping the bytes already fetched. */
     public suspend fun pause(fileId: String)
 
-    /** Resume a paused download from where it stopped. */
+    /** Resume a paused download from where it stopped, or retry a failed one. */
     public suspend fun resume(fileId: String)
 
     /** Delete a download and its bytes. */

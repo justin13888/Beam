@@ -21,12 +21,16 @@ import androidx.media3.exoplayer.scheduler.Requirements
 import dev.beam.android.core.ffi.repository.PlaybackRepository
 import dev.beam.android.core.media.http.beamDataSourceFactory
 import dev.beam.android.core.model.DownloadRecord
-import dev.beam.android.core.model.DownloadState
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.withContext
 import okhttp3.Call
 import java.io.File
+import java.io.IOException
 import java.util.concurrent.Executors
 
 /**
@@ -52,11 +56,25 @@ public class BeamDownloadManager internal constructor(
     /** The underlying manager, for the foreground service that drives it. */
     internal val raw: DownloadManager get() = manager
 
-    /** Every download, re-emitted whenever any of them changes. */
+    /**
+     * Every download, finished and failed ones included, re-emitted whenever
+     * any of them changes.
+     *
+     * The manager's own `currentDownloads` leaves out a download in a terminal
+     * state, so a list built from it alone drops a download the moment it
+     * completes -- the one the viewer most wants to find. Each change is read
+     * from the download index too, which keeps every download until it is
+     * removed; see [listed].
+     *
+     * `currentDownloads` is taken on the thread the manager reports on, where
+     * Media3 keeps it; the index is read on [Dispatchers.IO], because each read
+     * is a SQLite query the index documents must not run on the main thread.
+     * Conflated, so a burst of changes reads the index once for the latest.
+     */
     public val downloads: Flow<List<DownloadRecord>> =
         callbackFlow {
             fun publish() {
-                trySend(manager.currentDownloads.map { it.toRecord(titles, artwork) })
+                trySend(manager.currentDownloads)
             }
 
             val listener =
@@ -78,7 +96,13 @@ public class BeamDownloadManager internal constructor(
             manager.addListener(listener)
             publish()
             awaitClose { manager.removeListener(listener) }
-        }
+        }.conflate()
+            .map { current ->
+                val index = manager.downloadIndex
+                withContext(Dispatchers.IO) {
+                    index.listed(current).map { it.toRecord(titles, artwork) }
+                }
+            }
 
     /**
      * Queue a file for offline playback.
@@ -129,9 +153,31 @@ public class BeamDownloadManager internal constructor(
         commands.setStopReason(fileId, STOP_REASON_USER)
     }
 
-    /** Resume a paused download from where it stopped. */
-    public fun resume(fileId: String) {
-        commands.setStopReason(fileId, Download.STOP_REASON_NONE)
+    /**
+     * Resume a paused download from where it stopped, or retry a failed one.
+     *
+     * Clearing the stop reason restarts a stopped download, but Media3 leaves
+     * a failed one failed: a terminal download keeps its state whatever its
+     * stop reason. Adding its request again is what re-queues it, as Media3
+     * merges a request into a failed download as a fresh start. The index is
+     * read on [Dispatchers.IO], as in [downloads]; one that cannot be read
+     * falls back to clearing the stop reason.
+     */
+    public suspend fun resume(fileId: String) {
+        val index = manager.downloadIndex
+        val failed =
+            withContext(Dispatchers.IO) {
+                try {
+                    index.getDownload(fileId)?.takeIf { it.state == Download.STATE_FAILED }
+                } catch (_: IOException) {
+                    null
+                }
+            }
+        if (failed != null) {
+            commands.add(failed.request)
+        } else {
+            commands.setStopReason(fileId, Download.STOP_REASON_NONE)
+        }
     }
 
     /** Delete a download, its bytes, and the poster kept for it. */
@@ -262,44 +308,4 @@ public class BeamDownloadManager internal constructor(
                 StandaloneDatabaseProvider(context),
             )
     }
-}
-
-internal fun Download.toRecord(
-    titles: DownloadTitleStore,
-    artwork: DownloadArtwork,
-): DownloadRecord {
-    val title = titles.get(request.id)
-    return DownloadRecord(
-        fileId = request.id,
-        mediaId = title?.mediaId.orEmpty(),
-        episodeId = title?.episodeId,
-        serverId = title?.serverId.orEmpty(),
-        title = title?.title ?: request.id,
-        subtitle = title?.subtitle,
-        // The copy kept at enqueue time where there is one, so the poster
-        // renders with no network.
-        posterUrl = title?.posterUrl?.let(artwork::displayUrl),
-        state =
-            when (state) {
-                Download.STATE_QUEUED -> DownloadState.Queued
-                Download.STATE_DOWNLOADING -> DownloadState.Downloading
-                Download.STATE_COMPLETED -> DownloadState.Completed
-                Download.STATE_FAILED -> DownloadState.Failed
-                Download.STATE_STOPPED -> DownloadState.Paused
-                Download.STATE_RESTARTING -> DownloadState.Downloading
-                Download.STATE_REMOVING -> DownloadState.Paused
-                else -> DownloadState.Queued
-            },
-        downloadedBytes = bytesDownloaded,
-        // Media3 reports a negative length until the server has answered with
-        // a Content-Length, and a negative total would render as a nonsense
-        // progress bar.
-        totalBytes = contentLength.coerceAtLeast(0L),
-        failureMessage =
-            if (state == Download.STATE_FAILED) {
-                "The download stopped. It will resume when you retry it."
-            } else {
-                null
-            },
-    )
 }
