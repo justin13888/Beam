@@ -160,6 +160,24 @@ class DownloadsTest {
     }
 
     @Test
+    fun `a second tap while the lookup is pending opens one player, not two`() =
+        runTest {
+            val record = downloadRecord(state = DownloadState.Completed)
+            val viewModel = DownloadsViewModel(FakeDownloadRepository(listOf(record)), FakeCatalogRepository())
+            val requests = mutableListOf<PlaybackRequest>()
+
+            viewModel.play(record) { requests += it }
+            viewModel.play(record) { requests += it }
+            testScheduler.advanceUntilIdle()
+            assertEquals(1, requests.size)
+
+            // Once the first has gone through, Play works again.
+            viewModel.play(record) { requests += it }
+            testScheduler.advanceUntilIdle()
+            assertEquals(2, requests.size)
+        }
+
+    @Test
     fun `a downloaded film resumes where the core says it starts`() =
         runTest {
             // The core's start rather than the raw resume point (issue #466).

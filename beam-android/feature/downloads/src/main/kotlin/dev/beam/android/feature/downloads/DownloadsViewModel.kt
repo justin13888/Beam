@@ -8,6 +8,7 @@ import dev.beam.android.core.media.download.DownloadRepository
 import dev.beam.android.core.model.DownloadRecord
 import dev.beam.android.core.model.DownloadState
 import dev.beam.android.core.model.PlaybackRequest
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.catch
@@ -66,6 +67,9 @@ public class DownloadsViewModel
                 .catch { emit(DownloadsUiState()) }
                 .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), DownloadsUiState())
 
+        /** The resume lookup Play is waiting on, if any. */
+        private var pendingPlay: Job? = null
+
         /** Stop a download, keeping what has been fetched. */
         public fun pause(fileId: String) {
             viewModelScope.launch { runCatching { downloads.pause(fileId) } }
@@ -94,33 +98,39 @@ public class DownloadsViewModel
          * title's own for a film, the episode's for a series. A downloaded file
          * is what plays with no network, so a lookup that fails or does not
          * answer within [RESUME_LOOKUP_TIMEOUT] starts at 0 rather than holding
-         * the player back.
+         * the player back. Resuming offline from the last position this device
+         * recorded is issue #487.
+         *
+         * A tap while a lookup is still pending is ignored: each lookup ends
+         * in a navigation, so a second tap would stack a second player.
          */
         public fun play(
             record: DownloadRecord,
             onReady: (PlaybackRequest) -> Unit,
         ) {
-            viewModelScope.launch {
-                val detail =
-                    withTimeoutOrNull(RESUME_LOOKUP_TIMEOUT) {
-                        try {
-                            catalog.detail(record.mediaId)
-                        } catch (_: BeamException) {
-                            null
+            if (pendingPlay?.isActive == true) return
+            pendingPlay =
+                viewModelScope.launch {
+                    val detail =
+                        withTimeoutOrNull(RESUME_LOOKUP_TIMEOUT) {
+                            try {
+                                catalog.detail(record.mediaId)
+                            } catch (_: BeamException) {
+                                null
+                            }
                         }
-                    }
-                onReady(
-                    PlaybackRequest(
-                        mediaId = record.mediaId,
-                        episodeId = record.episodeId,
-                        fileId = record.fileId,
-                        title = record.title,
-                        subtitle = record.subtitle,
-                        artworkUrl = record.posterUrl,
-                        startPositionSecs = detail?.startPositionFor(record.episodeId) ?: 0.0,
-                    ),
-                )
-            }
+                    onReady(
+                        PlaybackRequest(
+                            mediaId = record.mediaId,
+                            episodeId = record.episodeId,
+                            fileId = record.fileId,
+                            title = record.title,
+                            subtitle = record.subtitle,
+                            artworkUrl = record.posterUrl,
+                            startPositionSecs = detail?.startPositionFor(record.episodeId) ?: 0.0,
+                        ),
+                    )
+                }
         }
 
         private companion object {
