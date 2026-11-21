@@ -97,8 +97,8 @@ hooks {
                 // swift-format ships inside Xcode rather than as a pinned mise
                 // tool, so unlike ktlint it simply is not there on Linux. The
                 // guard makes this a no-op where xcrun is absent instead of
-                // failing every commit; the `apple:lint` pre-push step and CI
-                // both run on macOS, so nothing goes unchecked.
+                // failing every commit; `apple:lint` in `mise run ci` and CI both
+                // run it on macOS, so nothing goes unchecked.
                 glob = List("*.swift")
                 check = "! command -v xcrun > /dev/null 2>&1 || xcrun swift-format lint --strict {{files}}"
                 fix = "! command -v xcrun > /dev/null 2>&1 || xcrun swift-format format --in-place {{files}}"
@@ -111,8 +111,8 @@ hooks {
                 // dependency installs node_modules on a fresh checkout's first
                 // JS commit and is skipped, without starting bun, after that.
                 // This is the only pre-commit step that needs it, so there is
-                // no parallel-install race to serialise (compare `js-deps`
-                // below). See the tasks in mise.toml for the biome flags.
+                // no parallel-install race to serialise. See the tasks in
+                // mise.toml for the biome flags.
                 glob = List("*.ts", "*.tsx", "*.js", "*.mjs", "*.cjs", "*.astro")
                 check = "mise run ts:biome {{files}}"
                 fix = "mise run ts:biome:fix {{files}}"
