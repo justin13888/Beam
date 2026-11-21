@@ -11,7 +11,6 @@ import uniffi.beam_client_core.BeamClient
 import uniffi.beam_client_core.BrowseQuery
 import uniffi.beam_client_core.ContinueWatchingEntry
 import uniffi.beam_client_core.DeviceLoginPrompt
-import uniffi.beam_client_core.DeviceLoginStep
 import uniffi.beam_client_core.DeviceProfile
 import uniffi.beam_client_core.DeviceSession
 import uniffi.beam_client_core.EpisodeSummary
@@ -108,10 +107,10 @@ internal class BeamServerRepository
 
         override suspend fun startDeviceLogin(serverId: String): DeviceLoginPrompt = client.startDeviceLogin(serverId)
 
-        override suspend fun pollDeviceLogin(
+        override suspend fun awaitDeviceLogin(
             serverId: String,
-            deviceHandle: String,
-        ): DeviceLoginStep = client.pollDeviceLogin(serverId, deviceHandle)
+            prompt: DeviceLoginPrompt,
+        ): UserSummary = client.awaitDeviceLogin(serverId, prompt)
 
         override suspend fun completeLogin(
             serverId: String,

@@ -6,7 +6,6 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import dev.beam.android.core.ffi.repository.ServerRepository
 import dev.beam.android.core.ffi.toFailure
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -14,7 +13,6 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import uniffi.beam_client_core.BeamException
 import uniffi.beam_client_core.DeviceLoginPrompt
-import uniffi.beam_client_core.DeviceLoginStep
 import javax.inject.Inject
 
 /**
@@ -146,53 +144,27 @@ public class AuthViewModel
             devicePolling?.cancel()
             devicePolling =
                 viewModelScope.launch {
-                    pollDeviceLogin(serverId, prompt.deviceHandle, prompt.intervalSecs)
+                    awaitDeviceLogin(serverId, prompt)
                 }
         }
 
         /**
-         * Poll until the viewer approves, refuses, or the code expires.
+         * Wait until the viewer approves, refuses, or the code expires.
          *
-         * A failure that a later poll could get past -- a retryable server
-         * error, a rate limit, a lost connection -- does not end the login:
-         * the viewer may be halfway through approving it on their phone. The
-         * next poll waits the current interval, or as long as a rate limit
-         * asks if that is longer. Anything else (a refusal, an expiry, a flow
-         * the server no longer knows) ends it with the failure shown.
+         * The polling -- its interval, `slow_down`, `Retry-After`, polling
+         * through a failure a later poll could get past -- is the core's,
+         * written once for every client. Only what ends the flow reaches
+         * here: a sign-in, or a failure shown to the viewer.
          */
-        private suspend fun pollDeviceLogin(
+        private suspend fun awaitDeviceLogin(
             serverId: String,
-            deviceHandle: String,
-            firstIntervalSecs: UInt,
+            prompt: DeviceLoginPrompt,
         ) {
-            var intervalSecs = firstIntervalSecs.toLong()
-            var waitSecs = intervalSecs
-            while (true) {
-                delay(waitSecs * MILLIS_PER_SECOND)
-                waitSecs = intervalSecs
-                val step =
-                    try {
-                        servers.pollDeviceLogin(serverId, deviceHandle)
-                    } catch (failure: BeamException) {
-                        if (failure is BeamException.RateLimited) {
-                            waitSecs = maxOf(intervalSecs, failure.retryAfterSecs.toLong())
-                            continue
-                        }
-                        if (failure.keepsDeviceLoginAlive()) continue
-                        mutableState.update { it.copy(devicePrompt = null).withFailure(failure) }
-                        return
-                    }
-                when (step) {
-                    is DeviceLoginStep.Waiting -> {
-                        intervalSecs = step.intervalSecs.toLong()
-                        waitSecs = intervalSecs
-                    }
-
-                    is DeviceLoginStep.SignedIn -> {
-                        mutableState.update { it.copy(devicePrompt = null, isSignedIn = true) }
-                        return
-                    }
-                }
+            try {
+                servers.awaitDeviceLogin(serverId, prompt)
+                mutableState.update { it.copy(devicePrompt = null, isSignedIn = true) }
+            } catch (failure: BeamException) {
+                mutableState.update { it.copy(devicePrompt = null).withFailure(failure) }
             }
         }
 
@@ -258,17 +230,8 @@ public class AuthViewModel
                 copy(error = failure.toFailure().message)
             }
 
-        /** Whether a poll that failed this way is worth repeating. */
-        private fun BeamException.keepsDeviceLoginAlive(): Boolean =
-            when (this) {
-                is BeamException.Server -> retryable
-                is BeamException.Network -> retryable
-                else -> false
-            }
-
         private companion object {
             /** The status a server without the device grant answers. */
             const val NOT_IMPLEMENTED = 501
-            const val MILLIS_PER_SECOND = 1_000L
         }
     }

@@ -8,7 +8,6 @@ import uniffi.beam_client_core.AdminUserPage
 import uniffi.beam_client_core.BrowseQuery
 import uniffi.beam_client_core.ContinueWatchingEntry
 import uniffi.beam_client_core.DeviceLoginPrompt
-import uniffi.beam_client_core.DeviceLoginStep
 import uniffi.beam_client_core.DeviceProfile
 import uniffi.beam_client_core.DeviceSession
 import uniffi.beam_client_core.EpisodeSummary
@@ -71,11 +70,15 @@ public interface ServerRepository {
      */
     public suspend fun startDeviceLogin(serverId: String): DeviceLoginPrompt
 
-    /** Poll a device login once; signs in on approval. */
-    public suspend fun pollDeviceLogin(
+    /**
+     * Poll the device login [prompt] began until it signs in, at the pace RFC
+     * 8628 sets; the core owns the loop. Throws whatever ends the flow -- a
+     * refusal, an expiry, an unknown flow. Cancelling the coroutine stops it.
+     */
+    public suspend fun awaitDeviceLogin(
         serverId: String,
-        deviceHandle: String,
-    ): DeviceLoginStep
+        prompt: DeviceLoginPrompt,
+    ): UserSummary
 
     /** Hand over a cookie lifted from the browser, and verify it. */
     public suspend fun completeLogin(
