@@ -9,7 +9,7 @@
 
 pub mod queue;
 
-pub use queue::{ProgressQueue, QueuedProgress, SendFailure};
+pub use queue::{ProgressQueue, QueuedProgress, SendFailure, backoff_secs};
 
 use crate::clock::Clock;
 use std::collections::HashMap;
@@ -29,6 +29,37 @@ pub const REPORT_INTERVAL_SECS: i64 = 15;
 #[must_use]
 pub fn progress_report_interval_secs() -> i64 {
     REPORT_INTERVAL_SECS
+}
+
+/// Seconds to wait before retrying a progress drain that failed outright for
+/// the `attempt`th time in a row (counting from one).
+///
+/// A drain that fails outright -- the queue could not be read -- backed no
+/// entry off, so its answer cannot say when to try again. This is the queue's
+/// own schedule, [`backoff_secs`], so the platform waits exactly as long as a
+/// failed send would have, and keeps no copy of the schedule to drift.
+#[uniffi::export]
+#[must_use]
+pub fn progress_retry_delay_secs(attempt: u32) -> u64 {
+    backoff_secs(attempt.max(1)).unsigned_abs()
+}
+
+/// What one [`crate::ffi::BeamClient::drain_progress`] did, and when the next
+/// is worth running.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ProgressDrain {
+    /// Samples the servers accepted.
+    pub sent: u32,
+    /// Samples still queued, across every server.
+    pub pending: u32,
+    /// Seconds until the next drain could send something: when the first
+    /// entry held for a signed-in server falls due. `None` when no signed-in
+    /// server holds anything, which is when the platform stops retrying and
+    /// waits for its own triggers -- a sign-in, or a return to the network.
+    pub retry_in_secs: Option<u64>,
+    /// Servers whose session was refused during this drain. Each is now
+    /// signed out, and its samples wait for the user to sign in again.
+    pub expired_server_ids: Vec<String>,
 }
 
 /// What happened to a reported position.
