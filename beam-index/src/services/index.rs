@@ -3195,6 +3195,9 @@ impl LocalIndexService {
         // Update scan finish time
         let end_time = self.clock.now();
         let total_files = self.library_repo.count_files(lib_uuid).await?;
+        // Refreshed after every completed scan (issue #457).
+        metrics::gauge!("beam_library_files", "library" => lib_uuid.to_string())
+            .set(total_files as f64);
 
         self.library_repo
             .update_scan_progress(lib_uuid, None, Some(end_time), Some(total_files as i32))

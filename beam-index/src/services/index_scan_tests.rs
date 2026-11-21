@@ -651,7 +651,15 @@ async fn a_rescan_of_every_library_skips_one_already_being_scanned() {
 /// and is not counted.
 #[tokio::test]
 async fn a_scan_records_the_present_file_count_and_its_start_and_finish() {
+    let capture = crate::test_metrics::MetricsCapture::new();
+    let _recorder = capture.install();
     let h = Harness::settled().await;
+    let library_label = h.library.id.to_string();
+    let files_gauge = || {
+        capture
+            .snapshot()
+            .gauge("beam_library_files", &[("library", &library_label)])
+    };
     h.write("Heat (1995).mkv");
     let alien = h.write("Alien (1979).mkv");
     *h.hasher.advance_per_hash.lock() = Duration::from_secs(1);
@@ -672,6 +680,7 @@ async fn a_scan_records_the_present_file_count_and_its_start_and_finish() {
         "finished once both files were hashed"
     );
     assert_eq!(stored.last_scan_file_count, Some(2));
+    assert_eq!(files_gauge(), Some(2.0), "the gauge follows the count");
 
     std::fs::remove_file(&alien).unwrap();
     h.clock.advance(Duration::from_secs(60));
@@ -700,6 +709,7 @@ async fn a_scan_records_the_present_file_count_and_its_start_and_finish() {
         Some(1),
         "the missing file is not counted"
     );
+    assert_eq!(files_gauge(), Some(1.0));
 }
 
 mod rescan_properties {

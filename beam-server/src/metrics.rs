@@ -218,6 +218,18 @@ pub const DESCRIPTIONS: &[Description] = &[
         unit: Some(Unit::Count),
         help: "Requests a metadata provider refused for its rate limit, by provider.",
     },
+    Description {
+        name: "beam_enrichment_pending",
+        kind: Kind::Gauge,
+        unit: Some(Unit::Count),
+        help: "Titles waiting for metadata enrichment, due or backing off, as of the last sweep.",
+    },
+    Description {
+        name: "beam_library_files",
+        kind: Kind::Gauge,
+        unit: Some(Unit::Count),
+        help: "Files present in the library as of its last completed scan, by library id.",
+    },
 ];
 
 /// The recorder's configuration: real buckets for every `*_seconds` histogram.
