@@ -179,16 +179,7 @@ private fun BeamNavDisplay(
 
                         TopLevel.Downloads -> {
                             DownloadsRoute(
-                                onPlay = { record ->
-                                    backStack.add(
-                                        Player(
-                                            fileId = record.fileId,
-                                            mediaId = record.mediaId,
-                                            episodeId = record.episodeId,
-                                            title = record.title,
-                                        ),
-                                    )
-                                },
+                                onPlay = { request -> backStack.add(Player.of(request)) },
                             )
                         }
 
@@ -219,17 +210,7 @@ private fun BeamNavDisplay(
                 entry<MediaDetail> {
                     ProvideArguments(it, MediaDetail.serializer()) {
                         DetailRoute(
-                            onPlay = { fileId, episodeId, title, isSourcePicked ->
-                                backStack.add(
-                                    Player(
-                                        fileId = fileId,
-                                        mediaId = it.mediaId,
-                                        episodeId = episodeId,
-                                        title = title,
-                                        isSourcePicked = isSourcePicked,
-                                    ),
-                                )
-                            },
+                            onPlay = { request -> backStack.add(Player.of(request)) },
                         )
                     }
                 }

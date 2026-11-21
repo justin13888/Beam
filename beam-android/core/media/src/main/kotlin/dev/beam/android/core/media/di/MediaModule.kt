@@ -23,11 +23,13 @@ import dev.beam.android.core.ffi.repository.PlaybackRepository
 import dev.beam.android.core.ffi.repository.TelemetryRepository
 import dev.beam.android.core.media.download.BeamDownloadManager
 import dev.beam.android.core.media.download.DownloadArtwork
+import dev.beam.android.core.media.download.DownloadCommands
 import dev.beam.android.core.media.download.DownloadManagerHolder
 import dev.beam.android.core.media.download.DownloadRepository
 import dev.beam.android.core.media.download.DownloadTitleStore
 import dev.beam.android.core.media.download.FileDownloadTitleStore
 import dev.beam.android.core.media.download.MediaDownloadRepository
+import dev.beam.android.core.media.download.ServiceDownloadCommands
 import dev.beam.android.core.media.http.BeamHttpClientFactory
 import dev.beam.android.core.media.http.ServerCallFactory
 import dev.beam.android.core.media.player.BeamPlayer
@@ -52,9 +54,10 @@ internal object MediaModule {
     fun httpClientFactory(client: OkHttpClient): BeamHttpClientFactory = BeamHttpClientFactory(client)
 
     /**
-     * The image loader's network path. Asks the core for the active server on
-     * every call, so signing out or switching servers takes effect on the
-     * next fetch rather than on the next launch.
+     * The image loader's and the download manager's network path. Asks the
+     * core for the active server on every call, so signing out, signing in
+     * again or switching servers takes effect on the next fetch rather than
+     * on the next launch.
      */
     @Provides
     @Singleton
@@ -121,6 +124,13 @@ internal object MediaModule {
     fun downloadCache(
         @ApplicationContext context: Context,
     ): Cache = BeamDownloadManager.cache(context)
+
+    /** Every change to a download goes to the foreground download service. */
+    @Provides
+    @Singleton
+    fun downloadCommands(
+        @ApplicationContext context: Context,
+    ): DownloadCommands = ServiceDownloadCommands(context)
 
     @Provides
     @Singleton

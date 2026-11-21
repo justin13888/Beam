@@ -68,6 +68,8 @@ class CellularPreferenceTest {
 
         override suspend fun removeAll() = Unit
 
+        override suspend fun removeServer(serverId: String) = Unit
+
         override suspend fun setRequiresUnmeteredNetwork(required: Boolean) {
             unmeteredRequirements += required
         }

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-use beam_domain::models::Library;
+use beam_domain::models::{CreateLibrary, Library};
 use beam_domain::repositories::LibraryRepository;
 use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
 use beam_domain::services::TestClock;
@@ -141,20 +141,21 @@ impl RecordingIndexer {
             .insert(PathBuf::from(path), delay);
     }
 
-    fn store(&self, library: &Library) {
+    /// Store a library called `name` rooted at `root`, as an administrator
+    /// creating it would.
+    async fn store(&self, name: &str, root: &str) -> Library {
         self.library_repo
-            .libraries
-            .lock()
+            .create(CreateLibrary {
+                name: name.to_string(),
+                root_path: PathBuf::from(root),
+                description: None,
+            })
+            .await
             .unwrap()
-            .insert(library.id, library.clone());
     }
 
-    fn delete(&self, library_id: Uuid) {
-        self.library_repo
-            .libraries
-            .lock()
-            .unwrap()
-            .remove(&library_id);
+    async fn delete(&self, library_id: Uuid) {
+        self.library_repo.delete(library_id).await.unwrap();
     }
 }
 
@@ -357,13 +358,7 @@ async fn libraries_are_watched_once_each_and_new_ones_picked_up_next_cycle() {
     let clock = Arc::new(TestClock::new());
     let watcher = Arc::new(InMemoryFsWatcher::new());
 
-    let first = library("first", "/videos/first");
-    indexer
-        .library_repo
-        .libraries
-        .lock()
-        .unwrap()
-        .insert(first.id, first.clone());
+    let first = indexer.store("first", "/videos/first").await;
 
     let tasks = spawn_background_indexing_with(
         indexer.clone(),
@@ -378,13 +373,7 @@ async fn libraries_are_watched_once_each_and_new_ones_picked_up_next_cycle() {
 
     // A library created after startup is registered on the next cycle, and the
     // already-watched one is not registered twice.
-    let second = library("second", "/videos/second");
-    indexer
-        .library_repo
-        .libraries
-        .lock()
-        .unwrap()
-        .insert(second.id, second.clone());
+    let second = indexer.store("second", "/videos/second").await;
     until("the maintenance loop and the poller to sleep", || {
         clock.waiter_count() == 2
     })
@@ -872,8 +861,7 @@ async fn a_library_the_hook_registered_is_not_registered_again_by_the_refresh() 
     })
     .await;
 
-    let created = library("created", "/videos/created");
-    indexer.store(&created);
+    let created = indexer.store("created", "/videos/created").await;
     watches.library_created(&created).await;
     clock.advance(Duration::from_secs(60));
     until("the next cycle to finish", || clock.waiter_count() == 2).await;
@@ -887,10 +875,8 @@ async fn deleted_libraries_are_unwatched_on_the_next_cycle() {
     let indexer = Arc::new(RecordingIndexer::default());
     let clock = Arc::new(TestClock::new());
     let watcher = Arc::new(InMemoryFsWatcher::new());
-    let kept = library("kept", "/videos/kept");
-    let deleted = library("deleted", "/videos/deleted");
-    indexer.store(&kept);
-    indexer.store(&deleted);
+    let kept = indexer.store("kept", "/videos/kept").await;
+    let deleted = indexer.store("deleted", "/videos/deleted").await;
 
     let tasks = spawn_background_indexing_with(
         indexer.clone(),
@@ -907,7 +893,7 @@ async fn deleted_libraries_are_unwatched_on_the_next_cycle() {
     })
     .await;
 
-    indexer.delete(deleted.id);
+    indexer.delete(deleted.id).await;
     until("the maintenance loop and the poller to sleep", || {
         clock.waiter_count() == 2
     })
@@ -927,8 +913,7 @@ async fn a_library_recreated_at_a_deleted_ones_root_is_watched_under_its_new_id(
     let indexer = Arc::new(RecordingIndexer::default());
     let clock = Arc::new(TestClock::new());
     let watcher = Arc::new(InMemoryFsWatcher::new());
-    let original = library("Movies", "/videos/movies");
-    indexer.store(&original);
+    let original = indexer.store("Movies", "/videos/movies").await;
 
     let tasks = spawn_background_indexing_with(
         indexer.clone(),
@@ -942,9 +927,8 @@ async fn a_library_recreated_at_a_deleted_ones_root_is_watched_under_its_new_id(
     .await;
 
     // Deleted and registered again at the same path between two cycles.
-    indexer.delete(original.id);
-    let recreated = library("Movies", "/videos/movies");
-    indexer.store(&recreated);
+    indexer.delete(original.id).await;
+    let recreated = indexer.store("Movies", "/videos/movies").await;
     until("the maintenance loop and the poller to sleep", || {
         clock.waiter_count() == 2
     })
@@ -978,10 +962,8 @@ async fn the_startup_scan_starts_after_the_watches_and_no_library_scan_overlaps_
         watcher: Some(watcher.clone()),
         ..Default::default()
     });
-    let native = library("local", "/videos/local");
-    let polled = library("share", "/mnt/share");
-    indexer.store(&native);
-    indexer.store(&polled);
+    let native = indexer.store("local", "/videos/local").await;
+    let polled = indexer.store("share", "/mnt/share").await;
     watcher.register_as(polled.id, WatchMode::Polling(PollReason::NetworkFilesystem));
 
     let tasks = spawn_background_indexing_with(
@@ -1061,8 +1043,7 @@ async fn a_library_registered_as_polled_after_startup_is_scanned_once() {
     })
     .await;
 
-    let polled = library("share", "/mnt/share");
-    indexer.store(&polled);
+    let polled = indexer.store("share", "/mnt/share").await;
     watcher.register_as(polled.id, WatchMode::Polling(PollReason::NetworkFilesystem));
     clock.advance(Duration::from_secs(60));
     until("the polled library's scan", || {
@@ -1098,8 +1079,7 @@ async fn a_library_whose_demotion_failed_is_watched_again_next_cycle() {
     let indexer = Arc::new(RecordingIndexer::default());
     let clock = Arc::new(TestClock::new());
     let watcher = Arc::new(InMemoryFsWatcher::new());
-    let lost = library("big", "/videos/big");
-    indexer.store(&lost);
+    let lost = indexer.store("big", "/videos/big").await;
 
     let tasks = spawn_background_indexing_with(
         indexer.clone(),
@@ -1135,8 +1115,7 @@ async fn a_refresh_that_cannot_list_the_libraries_is_retried_next_cycle() {
     let indexer = Arc::new(RecordingIndexer::default());
     let clock = Arc::new(TestClock::new());
     let watcher = Arc::new(InMemoryFsWatcher::new());
-    let first = library("first", "/videos/first");
-    indexer.store(&first);
+    let first = indexer.store("first", "/videos/first").await;
     indexer.failing_listings.store(1, Ordering::SeqCst);
 
     let tasks = spawn_background_indexing_with(
@@ -1179,10 +1158,8 @@ async fn a_library_that_could_not_be_watched_is_tried_again_next_cycle() {
     let indexer = Arc::new(RecordingIndexer::default());
     let clock = Arc::new(TestClock::new());
     let watcher = Arc::new(InMemoryFsWatcher::new());
-    let refused = library("refused", "/videos/refused");
-    let fine = library("fine", "/videos/fine");
-    indexer.store(&refused);
-    indexer.store(&fine);
+    let refused = indexer.store("refused", "/videos/refused").await;
+    let fine = indexer.store("fine", "/videos/fine").await;
     watcher.fail_next_watch(refused.id);
 
     let tasks = spawn_background_indexing_with(
@@ -1215,8 +1192,7 @@ async fn a_library_the_poll_moves_to_polling_is_scanned_once() {
     let indexer = Arc::new(RecordingIndexer::default());
     let clock = Arc::new(TestClock::new());
     let watcher = Arc::new(InMemoryFsWatcher::new());
-    let demoted = library("big", "/videos/big");
-    indexer.store(&demoted);
+    let demoted = indexer.store("big", "/videos/big").await;
 
     let tasks = spawn_background_indexing_with(
         indexer.clone(),
@@ -1278,30 +1254,21 @@ mod local_index_service_adapter {
     use beam_domain::repositories::LibraryRepository;
     use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
     use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
-    use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
-    use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
-    use beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository;
 
     use super::*;
-    use crate::services::admin_log::NoOpAdminLogService;
     use crate::services::hash::{HashConfig, LocalHashService};
     use crate::services::index::LocalIndexService;
+    use crate::services::index::test_harness::IndexServiceBuilder;
     use crate::services::media_info::LocalMediaInfoService;
-    use crate::services::notification::InMemoryNotificationService;
 
     fn service(library_repo: Arc<InMemoryLibraryRepository>) -> Arc<LocalIndexService> {
-        Arc::new(LocalIndexService::new(
-            library_repo,
-            Arc::new(InMemoryFileRepository::default()),
-            Arc::new(InMemoryMovieRepository::default()),
-            Arc::new(InMemoryShowRepository::default()),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-            Arc::new(LocalHashService::new(HashConfig::default())),
-            Arc::new(LocalMediaInfoService::default()),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(NoOpAdminLogService),
-            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-        ))
+        Arc::new(
+            IndexServiceBuilder::new()
+                .library_repo(library_repo)
+                .hash_service(Arc::new(LocalHashService::new(HashConfig::default())))
+                .media_info(Arc::new(LocalMediaInfoService::default()))
+                .build(),
+        )
     }
 
     /// The admin status reads `enabled` from the status the watches are
@@ -1399,18 +1366,14 @@ mod local_index_service_adapter {
             .await
             .unwrap();
         let file_repo = Arc::new(InMemoryFileRepository::default());
-        let indexer: Arc<dyn BackgroundIndexer> = Arc::new(LocalIndexService::new(
-            library_repo,
-            file_repo.clone(),
-            Arc::new(InMemoryMovieRepository::default()),
-            Arc::new(InMemoryShowRepository::default()),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-            Arc::new(LocalHashService::new(HashConfig::default())),
-            Arc::new(LocalMediaInfoService::default()),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(NoOpAdminLogService),
-            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-        ));
+        let indexer: Arc<dyn BackgroundIndexer> = Arc::new(
+            IndexServiceBuilder::new()
+                .library_repo(library_repo)
+                .file_repo(file_repo.clone())
+                .hash_service(Arc::new(LocalHashService::new(HashConfig::default())))
+                .media_info(Arc::new(LocalMediaInfoService::default()))
+                .build(),
+        );
         let watcher = Arc::new(InMemoryFsWatcher::new());
         let clock = Arc::new(TestClock::new());
 
@@ -1476,18 +1439,16 @@ mod local_index_service_adapter {
             .await
             .unwrap();
         let file_repo = Arc::new(InMemoryFileRepository::default());
-        let index_service = Arc::new(LocalIndexService::new(
-            library_repo,
-            file_repo.clone(),
-            Arc::new(InMemoryMovieRepository::default()),
-            Arc::new(InMemoryShowRepository::default()),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-            Arc::new(LocalHashService::new(HashConfig { num_threads: 1 })),
-            Arc::new(LocalMediaInfoService::default()),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(NoOpAdminLogService),
-            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-        ));
+        let index_service = Arc::new(
+            IndexServiceBuilder::new()
+                .library_repo(library_repo)
+                .file_repo(file_repo.clone())
+                .hash_service(Arc::new(LocalHashService::new(HashConfig {
+                    num_threads: 1,
+                })))
+                .media_info(Arc::new(LocalMediaInfoService::default()))
+                .build(),
+        );
         let old = temp.path().join("Movie.2019.mkv");
         std::fs::write(&old, b"not really a movie").unwrap();
         index_service
@@ -1584,18 +1545,14 @@ mod local_index_service_adapter {
             .unwrap();
 
         let file_repo = Arc::new(InMemoryFileRepository::default());
-        let index_service = Arc::new(LocalIndexService::new(
-            library_repo,
-            file_repo.clone(),
-            Arc::new(InMemoryMovieRepository::default()),
-            Arc::new(InMemoryShowRepository::default()),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-            Arc::new(LocalHashService::new(HashConfig::default())),
-            Arc::new(LocalMediaInfoService::default()),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(NoOpAdminLogService),
-            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-        ));
+        let index_service = Arc::new(
+            IndexServiceBuilder::new()
+                .library_repo(library_repo)
+                .file_repo(file_repo.clone())
+                .hash_service(Arc::new(LocalHashService::new(HashConfig::default())))
+                .media_info(Arc::new(LocalMediaInfoService::default()))
+                .build(),
+        );
         let indexer: Arc<dyn BackgroundIndexer> = index_service;
 
         let path = temp.path().join("Movie.2019.mkv");

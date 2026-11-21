@@ -2,16 +2,12 @@
 
 use super::test_harness::*;
 use super::*;
-use crate::services::admin_log::NoOpAdminLogService;
 use crate::services::hash::MockHashService;
 use crate::services::media_info::MockMediaInfoService;
-use crate::services::notification::InMemoryNotificationService;
 use beam_domain::models::MediaFile;
 use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
 use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
-use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
 use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
-use beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository;
 use std::path::PathBuf;
 use tempfile::TempDir;
 
@@ -223,18 +219,13 @@ fn make_multi_source_scan_service(
     mock_media_info
         .expect_get_video_metadata()
         .returning(|_| Ok(make_video_metadata()));
-    LocalIndexService::new(
-        lib_repo,
-        file_repo,
-        Arc::new(InMemoryMovieRepository::default()),
-        show_repo,
-        Arc::new(InMemoryMediaStreamRepository::default()),
-        Arc::new(mock_hash),
-        Arc::new(mock_media_info),
-        Arc::new(InMemoryNotificationService::new()),
-        Arc::new(NoOpAdminLogService),
-        Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-    )
+    IndexServiceBuilder::new()
+        .library_repo(lib_repo)
+        .file_repo(file_repo)
+        .show_repo(show_repo)
+        .hash_service(Arc::new(mock_hash))
+        .media_info(Arc::new(mock_media_info))
+        .build()
 }
 
 fn episode_id_of(file: &MediaFile) -> Uuid {

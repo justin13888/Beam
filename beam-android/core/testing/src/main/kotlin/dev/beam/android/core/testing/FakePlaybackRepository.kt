@@ -9,6 +9,7 @@ import uniffi.beam_client_core.HistoryPage
 import uniffi.beam_client_core.MediaSourceView
 import uniffi.beam_client_core.PlaybackHttpConfig
 import uniffi.beam_client_core.PlaybackPlan
+import uniffi.beam_client_core.ProgressDrain
 import uniffi.beam_client_core.ProgressOutcome
 import uniffi.beam_client_core.QualityPolicy
 import uniffi.beam_client_core.SourceSelection
@@ -59,14 +60,23 @@ public class FakePlaybackRepository : PlaybackRepository {
     /** What [reportProgress] returns. */
     public var progressOutcome: ProgressOutcome = ProgressOutcome.Sent(0.0)
 
-    /** How many positions are queued; [flushProgress] sends them all. */
+    /** How many positions are queued; [drainProgress] sends them all. */
     public var pending: UInt = 0u
 
-    /** How many times [flushProgress] was called. */
-    public var flushCalls: Int = 0
+    /** How many times [drainProgress] was called. */
+    public var drainCalls: Int = 0
 
-    /** Set while the server is unreachable: [flushProgress] sends nothing and keeps [pending]. */
+    /** Set while the server is unreachable: [drainProgress] sends nothing and keeps [pending]. */
     public var serverDown: Boolean = false
+
+    /** The wait [drainProgress] names while [serverDown] leaves something queued. */
+    public var retryInSecs: ULong = 2uL
+
+    /** The wait [progressRetryDelaySecs] names after a drain threw. */
+    public var failedDrainRetrySecs: ULong = 2uL
+
+    /** Every attempt number [progressRetryDelaySecs] was asked about, in order. */
+    public val failedDrainAttempts: MutableList<UInt> = mutableListOf()
 
     override suspend fun setDeviceProfile(profile: DeviceProfile) {
         deviceProfile = profile
@@ -183,20 +193,27 @@ public class FakePlaybackRepository : PlaybackRepository {
         return progressOutcome
     }
 
-    override suspend fun flushProgress(): UInt {
-        flushCalls += 1
+    override suspend fun drainProgress(): ProgressDrain {
+        drainCalls += 1
         failWith?.let { throw it }
         // The core does not throw for an unreachable server: it stops at the
-        // first failed send, backs that entry off and answers what it sent.
-        if (serverDown) return 0u
+        // first failed send, backs that entry off and names when it is due.
+        if (serverDown) {
+            return ProgressDrain(
+                sent = 0u,
+                pending = pending,
+                retryInSecs = retryInSecs.takeIf { pending > 0u },
+                expiredServerIds = emptyList(),
+            )
+        }
         val sent = pending
         pending = 0u
-        return sent
+        return ProgressDrain(sent = sent, pending = 0u, retryInSecs = null, expiredServerIds = emptyList())
     }
 
-    override suspend fun pendingProgressCount(): UInt {
-        failWith?.let { throw it }
-        return pending
+    override fun progressRetryDelaySecs(attempt: UInt): ULong {
+        failedDrainAttempts += attempt
+        return failedDrainRetrySecs
     }
 }
 
