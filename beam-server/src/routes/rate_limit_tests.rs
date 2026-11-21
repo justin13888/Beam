@@ -142,6 +142,46 @@ async fn a_burst_is_allowed_and_then_refused_with_a_problem_document() {
     assert_eq!(document["status"], 429);
 }
 
+/// `beam_rate_limited_total{route_class}` (#458) counts each refusal under the
+/// budget that ran out, and never an allowed request.
+#[tokio::test]
+async fn each_refusal_is_counted_under_its_class() {
+    use crate::routes::test_support::Recorded;
+
+    let recorder = metrics_util::debugging::DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let _local = metrics::set_default_local_recorder(&recorder);
+    // Refusals as `[auth, search]` since the previous call, which drains them.
+    let refused = || {
+        let recorded = Recorded::of(&snapshotter);
+        ["auth", "search"].map(|class| {
+            recorded
+                .counter("beam_rate_limited_total", &[("route_class", class)])
+                .unwrap_or(0)
+        })
+    };
+
+    let auth = auth(1);
+    assert_eq!(get(&auth.client, CLIENT).await.status(), StatusCode::OK);
+    assert_eq!(refused(), [0, 0], "an allowed request is not refused");
+    for _ in 0..2 {
+        assert_eq!(
+            get(&auth.client, CLIENT).await.status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+    }
+    assert_eq!(refused(), [2, 0]);
+
+    let search = harness(Class::Search, |config| {
+        config.rate_limit_search_per_minute = 1;
+    });
+    get(&search.client, CLIENT).await;
+    get(&search.client, CLIENT)
+        .await
+        .assert_status(StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(refused(), [0, 1], "each refusal is its own class's");
+}
+
 #[tokio::test]
 async fn distinct_clients_get_independent_budgets() {
     // Capacity 1: each distinct client gets its own single token.

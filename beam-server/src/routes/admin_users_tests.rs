@@ -983,3 +983,82 @@ async fn a_restricted_viewer_reads_only_the_libraries_granted_to_them() {
         StatusCode::NOT_FOUND
     );
 }
+
+/// `beam_session_store_errors_total` (#458): a store that cannot revoke a
+/// disabled account's sessions is one error, as every other session-store
+/// failure is -- the 500 alone would not page.
+#[tokio::test]
+async fn a_failed_revocation_on_disable_is_a_counted_session_store_error() {
+    use beam_auth::utils::repository::UserRepository;
+    use beam_auth::utils::session_store::in_memory::{
+        FailingSessionStore, InMemorySessionStore, SessionStoreOperation,
+    };
+
+    use crate::routes::test_support::{Recorded, served_client, state_with};
+
+    let recorder = metrics_util::debugging::DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let _local = metrics::set_default_local_recorder(&recorder);
+
+    let users = Arc::new(InMemoryUserRepository::default());
+    let sessions = Arc::new(FailingSessionStore::new(
+        InMemorySessionStore::default(),
+        SessionStoreOperation::DeleteAllForUser,
+    ));
+    let state = state_with(|services| {
+        services.user_repo = users.clone();
+        services.session_store = sessions.clone();
+    });
+    let client = served_client(state);
+
+    let admin = users
+        .create(CreateUser {
+            oidc_issuer: "https://test.example".to_string(),
+            oidc_subject: "admin-subj".to_string(),
+            email: None,
+            display_name: "Admin".to_string(),
+            avatar_url: None,
+            is_admin: true,
+        })
+        .await
+        .unwrap();
+    let target = users
+        .create(CreateUser {
+            oidc_issuer: "https://test.example".to_string(),
+            oidc_subject: "target-subj".to_string(),
+            email: None,
+            display_name: "Target".to_string(),
+            avatar_url: None,
+            is_admin: false,
+        })
+        .await
+        .unwrap();
+    let now = chrono::Utc::now().timestamp();
+    let admin_token = sessions
+        .create(
+            &SessionData {
+                user_id: admin.id.to_string(),
+                device_hash: "admin-device".to_string(),
+                ip: "127.0.0.1".to_string(),
+                created_at: now,
+                last_active: now,
+            },
+            86400,
+            86400,
+        )
+        .await
+        .unwrap();
+
+    client
+        .patch(&format!("/v1/admin/users/{}", target.id))
+        .cookie("beam_session", &admin_token)
+        .json(&UpdateAdminUserRequest { disabled: true })
+        .send()
+        .await
+        .assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+
+    assert_eq!(
+        Recorded::of(&snapshotter).counter("beam_session_store_errors_total", &[]),
+        Some(1)
+    );
+}
