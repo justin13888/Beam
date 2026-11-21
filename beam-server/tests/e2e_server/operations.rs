@@ -237,16 +237,21 @@ async fn the_admin_event_stream_reports_a_scan_as_it_runs() {
         Some(&api::types::ScanPhase::Completed),
         "{phases:?}"
     );
+    // The library's first scan, when it was created, indexed both files.
     assert_eq!(
-        (progress.added_count, progress.failed_count),
-        (2, 0),
+        (
+            progress.added_count,
+            progress.unchanged_count,
+            progress.failed_count
+        ),
+        (0, 2, 0),
         "the end reports what the scan found: {progress:?}"
     );
 
     // The stream's account and the job's agree.
     let finished = admin.finished_scan(library, job).await;
     assert_eq!(finished.state, api::types::ScanState::Succeeded);
-    assert_eq!(finished.progress.added_count, progress.added_count);
+    assert_eq!(finished.progress.unchanged_count, progress.unchanged_count);
 
     admin.finish().await;
 }

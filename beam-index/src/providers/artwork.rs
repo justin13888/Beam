@@ -7,8 +7,11 @@
 //! The transport glue is deliberately thin, and the decisions it makes are
 //! pulled out into [`checked_url`], [`classify`] and [`artwork_request`] --
 //! pure functions with no socket in them, which is what lets the policy be
-//! tested exhaustively without a TLS listener. Everything above this adapter
-//! substitutes `InMemoryArtworkFetcher` instead.
+//! tested exhaustively without a TLS listener. What only a connection can
+//! show -- the per-chunk body ceiling and the redirect policy -- is tested
+//! against a local TLS stand-in on 127.0.0.1, reached through
+//! [`ReqwestArtworkFetcher::with_root_certificate`]. Everything above this
+//! adapter substitutes `InMemoryArtworkFetcher` instead.
 
 use std::time::Duration;
 
@@ -123,11 +126,35 @@ impl ReqwestArtworkFetcher {
     /// accident. Redirects are followed only while they stay on `https`, so a
     /// CDN cannot walk Beam down to cleartext.
     pub fn new(limits: ArtworkFetchLimits) -> Result<Self, reqwest::Error> {
+        Self::build(limits, Vec::new())
+    }
+
+    /// As [`Self::new`], but also trusting `root` alongside the platform's
+    /// roots -- for a provider mirror behind a private CA, and the seam the
+    /// TLS stand-in tests use to reach a listener with a self-signed
+    /// certificate. Nothing else about the client differs, so a test through
+    /// here exercises the same redirect policy and body ceiling as production.
+    pub fn with_root_certificate(
+        limits: ArtworkFetchLimits,
+        root: reqwest::Certificate,
+    ) -> Result<Self, reqwest::Error> {
+        Self::build(limits, vec![root])
+    }
+
+    fn build(
+        limits: ArtworkFetchLimits,
+        extra_roots: Vec<reqwest::Certificate>,
+    ) -> Result<Self, reqwest::Error> {
         let redirect = reqwest::redirect::Policy::custom(|attempt| {
             // Named rather than chained, because the two reasons to refuse are
             // different -- one is a redirect loop, the other a downgrade to
             // cleartext -- while the answer to both is the same.
-            let looping = attempt.previous().len() >= MAX_REDIRECTS;
+            //
+            // `previous()` holds every URL already requested, the original one
+            // included, so it is one longer than the redirects followed so
+            // far: `>` lets exactly `MAX_REDIRECTS` through, as reqwest's own
+            // `Policy::limited` does.
+            let looping = attempt.previous().len() > MAX_REDIRECTS;
             let downgraded = attempt.url().scheme() != "https";
             if looping || downgraded {
                 attempt.stop()
@@ -140,6 +167,7 @@ impl ReqwestArtworkFetcher {
             .timeout(limits.timeout)
             .redirect(redirect)
             .user_agent(concat!("Beam/", env!("CARGO_PKG_VERSION")))
+            .tls_certs_merge(extra_roots)
             .build()?;
 
         Ok(Self {
@@ -195,6 +223,8 @@ impl ArtworkFetcher for ReqwestArtworkFetcher {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
 
     #[test]
@@ -338,5 +368,263 @@ mod tests {
             vec!["accept".to_string()],
             "unexpected outbound headers"
         );
+    }
+
+    const CEILING: u64 = 1024;
+
+    fn trusting(root: reqwest::Certificate) -> ReqwestArtworkFetcher {
+        ReqwestArtworkFetcher::with_root_certificate(
+            ArtworkFetchLimits {
+                timeout: Duration::from_secs(5),
+                max_bytes: CEILING,
+            },
+            root,
+        )
+        .expect("the client builds")
+    }
+
+    /// A body sent without `Content-Length` gets past `classify`, so only the
+    /// per-chunk check in `fetch` stands between it and an unbounded buffer.
+    /// The body exactly at the ceiling is the control: it must still arrive.
+    #[tokio::test]
+    async fn an_undeclared_body_over_the_ceiling_is_refused_while_it_is_read() {
+        let half = usize::try_from(CEILING / 2).expect("fits");
+        let (server, root) = stand_in::https(Arc::new(move |path: &str| match path {
+            "/over.png" => stand_in::chunked_png(&[half, half + 1]),
+            "/exact.png" => stand_in::chunked_png(&[half, half]),
+            _ => stand_in::not_found(),
+        }))
+        .await;
+        let fetcher = trusting(root);
+
+        assert_eq!(
+            fetcher.fetch(&server.url("https", "/over.png")).await,
+            Err(ArtworkFetchError::TooLarge { limit: CEILING }),
+        );
+
+        let exact = fetcher
+            .fetch(&server.url("https", "/exact.png"))
+            .await
+            .expect("a body at the ceiling is accepted");
+        assert_eq!(exact.format, ImageFormat::Png);
+        assert_eq!(exact.bytes.len() as u64, CEILING);
+    }
+
+    /// A redirect off `https` is not followed: the redirect itself comes back
+    /// as the provider's answer, and the cleartext stand-in -- which would
+    /// have served a perfectly good image -- never sees a request.
+    #[tokio::test]
+    async fn a_redirect_down_to_cleartext_is_not_followed() {
+        let cleartext = stand_in::http(Arc::new(|_: &str| stand_in::png_with_length(16))).await;
+        let target = cleartext.url("http", "/poster.png");
+        let (server, root) = stand_in::https(Arc::new(move |path: &str| match path {
+            "/downgrade.png" => stand_in::redirect(&target),
+            _ => stand_in::not_found(),
+        }))
+        .await;
+
+        assert_eq!(
+            trusting(root)
+                .fetch(&server.url("https", "/downgrade.png"))
+                .await,
+            Err(ArtworkFetchError::Upstream { status: 302 }),
+        );
+        assert_eq!(server.requested(), vec!["/downgrade.png".to_string()]);
+        assert!(
+            cleartext.requested().is_empty(),
+            "{:?}",
+            cleartext.requested()
+        );
+    }
+
+    /// `MAX_REDIRECTS` counts redirects, not requests: a chain of exactly that
+    /// many arrives, and one more stops at the redirect it refused -- whose
+    /// target is never requested.
+    #[tokio::test]
+    async fn a_redirect_chain_is_followed_up_to_the_cap_and_no_further() {
+        let (server, root) = stand_in::https(Arc::new(|path: &str| {
+            match path
+                .strip_prefix("/chain/")
+                .and_then(|hops| hops.parse::<usize>().ok())
+            {
+                Some(0) => stand_in::png_with_length(16),
+                Some(hops) => stand_in::redirect(&format!("/chain/{}", hops - 1)),
+                None => stand_in::not_found(),
+            }
+        }))
+        .await;
+        let fetcher = trusting(root);
+
+        let over = MAX_REDIRECTS + 1;
+        assert_eq!(
+            fetcher
+                .fetch(&server.url("https", &format!("/chain/{over}")))
+                .await,
+            Err(ArtworkFetchError::Upstream { status: 302 }),
+        );
+        let followed: Vec<String> = (1..=over)
+            .rev()
+            .map(|hops| format!("/chain/{hops}"))
+            .collect();
+        assert_eq!(server.requested(), followed);
+
+        let at_cap = fetcher
+            .fetch(&server.url("https", &format!("/chain/{MAX_REDIRECTS}")))
+            .await
+            .expect("a chain of exactly MAX_REDIRECTS is followed");
+        assert_eq!(at_cap.bytes.len(), 16);
+    }
+
+    /// A TLS listener on 127.0.0.1 with a fresh self-signed certificate, and a
+    /// plain one for the cleartext end of a downgrade. Each answers one
+    /// request per connection with whatever bytes its route returns for the
+    /// path, and records the paths it was asked for.
+    mod stand_in {
+        use std::net::SocketAddr;
+        use std::sync::Arc;
+
+        use parking_lot::Mutex;
+        use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        use tokio_rustls::TlsAcceptor;
+        use tokio_rustls::rustls::ServerConfig;
+        use tokio_rustls::rustls::crypto::aws_lc_rs;
+        use tokio_rustls::rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+
+        pub(super) type Route = Arc<dyn Fn(&str) -> Vec<u8> + Send + Sync>;
+
+        pub(super) struct StandIn {
+            address: SocketAddr,
+            requested: Arc<Mutex<Vec<String>>>,
+        }
+
+        impl StandIn {
+            pub(super) fn url(&self, scheme: &str, path: &str) -> String {
+                format!("{scheme}://{}{path}", self.address)
+            }
+
+            pub(super) fn requested(&self) -> Vec<String> {
+                self.requested.lock().clone()
+            }
+        }
+
+        pub(super) async fn https(route: Route) -> (StandIn, reqwest::Certificate) {
+            // An IP SAN, so the URL names 127.0.0.1 directly and nothing
+            // depends on how `localhost` resolves on the host.
+            let certified = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string()])
+                .expect("a self-signed certificate");
+            let certificate = certified.cert.der().clone();
+            let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+                certified.signing_key.serialize_der(),
+            ));
+            // An explicit provider: more than one is compiled into rustls in
+            // this workspace, so there is no process default to fall back on.
+            let config =
+                ServerConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
+                    .with_safe_default_protocol_versions()
+                    .expect("the default protocol versions")
+                    .with_no_client_auth()
+                    .with_single_cert(vec![certificate.clone()], key)
+                    .expect("the server config");
+            let acceptor = TlsAcceptor::from(Arc::new(config));
+            let root = reqwest::Certificate::from_der(&certificate).expect("a DER certificate");
+
+            let (listener, stand_in) = bind().await;
+            let requested = Arc::clone(&stand_in.requested);
+            tokio::spawn(async move {
+                while let Ok((tcp, _)) = listener.accept().await {
+                    let (acceptor, route, requested) =
+                        (acceptor.clone(), Arc::clone(&route), Arc::clone(&requested));
+                    tokio::spawn(async move {
+                        if let Ok(tls) = acceptor.accept(tcp).await {
+                            serve(tls, &route, &requested).await;
+                        }
+                    });
+                }
+            });
+            (stand_in, root)
+        }
+
+        pub(super) async fn http(route: Route) -> StandIn {
+            let (listener, stand_in) = bind().await;
+            let requested = Arc::clone(&stand_in.requested);
+            tokio::spawn(async move {
+                while let Ok((tcp, _)) = listener.accept().await {
+                    let (route, requested) = (Arc::clone(&route), Arc::clone(&requested));
+                    tokio::spawn(async move { serve(tcp, &route, &requested).await });
+                }
+            });
+            stand_in
+        }
+
+        async fn bind() -> (TcpListener, StandIn) {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("a free port");
+            let address = listener.local_addr().expect("its address");
+            let stand_in = StandIn {
+                address,
+                requested: Arc::default(),
+            };
+            (listener, stand_in)
+        }
+
+        async fn serve<S>(mut stream: S, route: &Route, requested: &Mutex<Vec<String>>)
+        where
+            S: AsyncRead + AsyncWrite + Unpin,
+        {
+            let mut head = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+                match stream.read(&mut buffer).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(read) => head.extend_from_slice(&buffer[..read]),
+                }
+            }
+            let path = String::from_utf8_lossy(&head)
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or_default()
+                .to_string();
+            let response = route(&path);
+            requested.lock().push(path);
+            // Errors here mean the client hung up, which is its business.
+            let _ = stream.write_all(&response).await;
+            let _ = stream.shutdown().await;
+        }
+
+        /// A PNG body sent in the given chunk sizes, with no `Content-Length`.
+        pub(super) fn chunked_png(chunks: &[usize]) -> Vec<u8> {
+            let mut response = b"HTTP/1.1 200 OK\r\nContent-Type: image/png\r\n\
+                Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+                .to_vec();
+            for &size in chunks {
+                response.extend_from_slice(format!("{size:x}\r\n").as_bytes());
+                response.extend(std::iter::repeat_n(b'p', size));
+                response.extend_from_slice(b"\r\n");
+            }
+            response.extend_from_slice(b"0\r\n\r\n");
+            response
+        }
+
+        pub(super) fn png_with_length(size: usize) -> Vec<u8> {
+            let mut response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\n\
+                 Content-Length: {size}\r\nConnection: close\r\n\r\n"
+            )
+            .into_bytes();
+            response.extend(std::iter::repeat_n(b'p', size));
+            response
+        }
+
+        pub(super) fn redirect(location: &str) -> Vec<u8> {
+            format!(
+                "HTTP/1.1 302 Found\r\nLocation: {location}\r\n\
+                 Content-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            .into_bytes()
+        }
+
+        pub(super) fn not_found() -> Vec<u8> {
+            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec()
+        }
     }
 }

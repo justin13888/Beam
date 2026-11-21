@@ -24,8 +24,7 @@ async fn a_scanned_library_is_browsed_searched_and_streamed() {
         &Video::new(550).container(common::Container::Matroska),
     );
 
-    let library = admin.add_library("Films", "films").await;
-    let progress = admin.scan_ok(library).await;
+    let (library, progress) = admin.add_library_scanned("Films", "films").await;
     assert_eq!(
         (progress.added_count, progress.failed_count),
         (2, 0),
@@ -306,8 +305,7 @@ async fn the_committed_probe_fixtures_index_with_their_codecs() {
             format!("films/{name}/{name}.{extension}"),
         );
     }
-    let library = admin.add_library("Films", "films").await;
-    let progress = admin.scan_ok(library).await;
+    let (library, progress) = admin.add_library_scanned("Films", "films").await;
     assert_eq!(
         (progress.added_count, progress.failed_count),
         (4, 0),
