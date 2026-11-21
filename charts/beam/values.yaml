@@ -136,6 +136,17 @@ telemetry:
 # configMap, ...) are refused by the schema. The pod reads media as uid 1000,
 # gid 1000 and server.podSecurityContext.supplementalGroups.
 #
+# A hostPath library may set `mountPropagation: HostToContainer`, so a disk
+# the host mounts or remounts under the path after the pod started (a USB
+# drive, a NAS automount) shows up inside the pod instead of staying stale.
+# It is opt-in, hostPath-only, and never Bidirectional: the pod only ever
+# receives mounts, it never propagates its own back to the host.
+#
+# Libraries on a network filesystem (NFS, CephFS, SMB through a CSI driver,
+# ...) cannot be watched natively: Beam polls them every
+# watch.pollIntervalSeconds instead, so new files there take up to that long,
+# plus scan.settleSeconds, to appear. See docs/operations/deployment.md.
+#
 # libraries:
 #   - name: movies
 #     volume:
@@ -146,7 +157,30 @@ telemetry:
 #       nfs:
 #         server: nas.lan
 #         path: /export/anime
+#   - name: usb
+#     mountPropagation: HostToContainer
+#     volume:
+#       hostPath:
+#         path: /media/usb
 libraries: []
+
+# The filesystem watcher that picks up library changes between full rescans.
+# Local roots get native events (inotify); roots on a network filesystem, and
+# libraries past the node's fs.inotify.max_user_watches, are polled.
+watch:
+  # BEAM_WATCH_POLL_INTERVAL_SECS: seconds between walks of every polled
+  # library. Lower means new files on network storage appear sooner, at the
+  # cost of walking the whole library that often. At least 1.
+  pollIntervalSeconds: 300
+  # BEAM_WATCH_DEBOUNCE_MS: bursts of events for one path within this many
+  # milliseconds collapse into one.
+  debounceMs: 2000
+
+scan:
+  # BEAM_SCAN_SETTLE_SECS: seconds a file must go without a write before it is
+  # hashed and probed, so a file still being copied in is not indexed while
+  # partial. 0 indexes every file on sight.
+  settleSeconds: 30
 
 persistence:
   # Server-writable state at /data (artwork cache and the like). Disabled

@@ -113,6 +113,15 @@ spec:
               value: {{ .Values.metrics.enabled | quote }}
             - name: BEAM_RATE_LIMIT_TRUST_FORWARDED_FOR
               value: {{ include "beam.trustForwardedFor" . | quote }}
+            {{- /* int64 first: Helm reads YAML numbers as float64, and quoting
+                   one of a million or more renders "1e+06", which the server
+                   cannot parse as an integer. */}}
+            - name: BEAM_WATCH_POLL_INTERVAL_SECS
+              value: {{ .Values.watch.pollIntervalSeconds | int64 | quote }}
+            - name: BEAM_WATCH_DEBOUNCE_MS
+              value: {{ .Values.watch.debounceMs | int64 | quote }}
+            - name: BEAM_SCAN_SETTLE_SECS
+              value: {{ .Values.scan.settleSeconds | int64 | quote }}
             - name: RUST_LOG
               value: {{ .Values.server.logLevel | quote }}
             - name: BEAM_DATABASE_URL
@@ -252,6 +261,13 @@ spec:
             - name: library-{{ .name }}
               mountPath: /videos/{{ .name }}
               readOnly: true
+              {{- /* Opt-in, and the schema admits it only on a hostPath
+                     library and only as HostToContainer: never
+                     Bidirectional, which would let the pod mount onto the
+                     host. */}}
+              {{- with .mountPropagation }}
+              mountPropagation: {{ . }}
+              {{- end }}
             {{- end }}
       volumes:
         - name: data
