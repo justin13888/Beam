@@ -153,7 +153,7 @@ class MediaDownloadRepositoryTest {
     fun `downloads are listed while signed out`() =
         runTest {
             home = null
-            val listed = mutableListOf<List<DownloadRecord>>()
+            val listed = java.util.concurrent.CopyOnWriteArrayList<List<DownloadRecord>>()
             backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
                 repository.downloads.collect { listed += it }
             }
