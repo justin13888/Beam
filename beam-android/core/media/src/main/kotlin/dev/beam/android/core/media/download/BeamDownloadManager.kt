@@ -30,6 +30,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 import okhttp3.Call
 import java.io.File
+import java.io.IOException
 import java.util.concurrent.Executors
 
 /**
@@ -152,9 +153,31 @@ public class BeamDownloadManager internal constructor(
         commands.setStopReason(fileId, STOP_REASON_USER)
     }
 
-    /** Resume a paused download from where it stopped. */
-    public fun resume(fileId: String) {
-        commands.setStopReason(fileId, Download.STOP_REASON_NONE)
+    /**
+     * Resume a paused download from where it stopped, or retry a failed one.
+     *
+     * Clearing the stop reason restarts a stopped download, but Media3 leaves
+     * a failed one failed: a terminal download keeps its state whatever its
+     * stop reason. Adding its request again is what re-queues it, as Media3
+     * merges a request into a failed download as a fresh start. The index is
+     * read on [Dispatchers.IO], as in [downloads]; one that cannot be read
+     * falls back to clearing the stop reason.
+     */
+    public suspend fun resume(fileId: String) {
+        val index = manager.downloadIndex
+        val failed =
+            withContext(Dispatchers.IO) {
+                try {
+                    index.getDownload(fileId)?.takeIf { it.state == Download.STATE_FAILED }
+                } catch (_: IOException) {
+                    null
+                }
+            }
+        if (failed != null) {
+            commands.add(failed.request)
+        } else {
+            commands.setStopReason(fileId, Download.STOP_REASON_NONE)
+        }
     }
 
     /** Delete a download, its bytes, and the poster kept for it. */

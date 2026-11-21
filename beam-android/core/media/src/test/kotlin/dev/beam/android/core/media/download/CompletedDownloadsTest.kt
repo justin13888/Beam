@@ -70,6 +70,9 @@ class CompletedDownloadsTest {
 
     private val context: Context = ApplicationProvider.getApplicationContext()
     private val server = MockWebServer()
+
+    /** Whether the server has recovered, and serves [RETRIED] in full. */
+    @Volatile private var recovered = false
     private lateinit var repository: MediaDownloadRepository
 
     @Before
@@ -85,7 +88,9 @@ class CompletedDownloadsTest {
         server.dispatcher =
             object : Dispatcher() {
                 override fun dispatch(request: RecordedRequest): MockResponse =
-                    if (request.url.encodedPath == "/v1/files/$DONE/stream") {
+                    if (request.url.encodedPath == "/v1/files/$DONE/stream" ||
+                        (recovered && request.url.encodedPath == "/v1/files/$RETRIED/stream")
+                    ) {
                         MockResponse.Builder().body(BODY).build()
                     } else {
                         MockResponse.Builder().code(503).build()
@@ -169,6 +174,20 @@ class CompletedDownloadsTest {
         }
 
     @Test
+    fun `resuming a failed download retries it`() =
+        runTest {
+            repository.manager().minRetryCount = 0
+            enqueue(RETRIED)
+            runMainLooperUntil { stateOf(RETRIED) == Download.STATE_FAILED }
+
+            recovered = true
+            repository.resume(RETRIED)
+            runMainLooperUntil { stateOf(RETRIED) == Download.STATE_COMPLETED }
+
+            assertEquals(CompletedDownload(RETRIED, mediaUrl(RETRIED)), repository.completed(RETRIED))
+        }
+
+    @Test
     fun `an index that cannot be read counts as no completed download`() {
         // What Media3's SQLite index throws when its database cannot be read.
         val unreadable =
@@ -209,6 +228,7 @@ class CompletedDownloadsTest {
     private companion object {
         const val DONE = "done"
         const val PARTIAL = "partial"
+        const val RETRIED = "retried"
         const val BODY = "media bytes"
     }
 }
