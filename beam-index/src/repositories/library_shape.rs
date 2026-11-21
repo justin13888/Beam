@@ -14,23 +14,34 @@ use beam_domain::utils::telemetry::{FileSizeBucket, FileSizeHistogram, UNKNOWN_L
 
 /// Only what a user could browse: a soft-deleted file (issue #179) is in no
 /// count, and neither is anything reached only through one.
-const PRESENT: &str = "f.missing_since IS NULL";
+pub(crate) const PRESENT: &str = "f.missing_since IS NULL";
+
+/// The `movies`, `shows`, `seasons` and `episodes` columns: the titles that
+/// are live -- reached through at least one file `files` admits, a condition
+/// on the alias `f`. The one SQL definition of a live title, shared by the
+/// report across every library ([`PRESENT`]) and one library's count
+/// (`SqlLibraryRepository::count_titles`, issue #494), so the two cannot
+/// drift apart.
+pub(crate) fn live_title_columns(files: &str) -> String {
+    format!(
+        "(SELECT COUNT(DISTINCT me.movie_id) FROM files f \
+            JOIN movie_entries me ON me.id = f.movie_entry_id WHERE {files}) AS movies, \
+         (SELECT COUNT(DISTINCT se.show_id) FROM files f \
+            JOIN episodes e ON e.id = f.episode_id \
+            JOIN seasons se ON se.id = e.season_id WHERE {files}) AS shows, \
+         (SELECT COUNT(DISTINCT e.season_id) FROM files f \
+            JOIN episodes e ON e.id = f.episode_id WHERE {files}) AS seasons, \
+         (SELECT COUNT(DISTINCT f.episode_id) FROM files f \
+            WHERE ({files}) AND f.episode_id IS NOT NULL) AS episodes"
+    )
+}
 
 /// Titles, seasons and episodes that are live -- reached through at least one
 /// present file -- and every library.
 fn titles_sql() -> String {
     format!(
-        "SELECT \
-           (SELECT COUNT(*) FROM libraries) AS libraries, \
-           (SELECT COUNT(DISTINCT me.movie_id) FROM files f \
-              JOIN movie_entries me ON me.id = f.movie_entry_id WHERE {PRESENT}) AS movies, \
-           (SELECT COUNT(DISTINCT se.show_id) FROM files f \
-              JOIN episodes e ON e.id = f.episode_id \
-              JOIN seasons se ON se.id = e.season_id WHERE {PRESENT}) AS shows, \
-           (SELECT COUNT(DISTINCT e.season_id) FROM files f \
-              JOIN episodes e ON e.id = f.episode_id WHERE {PRESENT}) AS seasons, \
-           (SELECT COUNT(DISTINCT f.episode_id) FROM files f \
-              WHERE {PRESENT} AND f.episode_id IS NOT NULL) AS episodes"
+        "SELECT (SELECT COUNT(*) FROM libraries) AS libraries, {}",
+        live_title_columns(PRESENT)
     )
 }
 
@@ -84,7 +95,7 @@ fn streams_sql() -> String {
 
 /// A non-negative count column. `COUNT` is never negative; a negative value
 /// would be a driver fault, and zero is the honest reading of one.
-fn count(row: &QueryResult, column: &str) -> Result<u64, DbErr> {
+pub(crate) fn count(row: &QueryResult, column: &str) -> Result<u64, DbErr> {
     let value: i64 = row.try_get("", column)?;
     Ok(u64::try_from(value).unwrap_or(0))
 }

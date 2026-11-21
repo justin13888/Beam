@@ -8,24 +8,18 @@ use uuid::Uuid;
 use beam_domain::models::{CreateLibrary, Library, LibraryTitleCounts};
 use beam_domain::repositories::LibraryRepository;
 
-/// Live titles of one library (`$1`), by kind: what the library's present
-/// files reach, as `SqlLibraryShapeRepository` counts them across every
-/// library. A missing file (issue #179) keeps nothing live.
-const COUNT_TITLES_SQL: &str = "\
-    SELECT \
-      (SELECT COUNT(DISTINCT me.movie_id) FROM files f \
-         JOIN movie_entries me ON me.id = f.movie_entry_id \
-         WHERE f.library_id = $1 AND f.missing_since IS NULL) AS movies, \
-      (SELECT COUNT(DISTINCT se.show_id) FROM files f \
-         JOIN episodes e ON e.id = f.episode_id \
-         JOIN seasons se ON se.id = e.season_id \
-         WHERE f.library_id = $1 AND f.missing_since IS NULL) AS shows, \
-      (SELECT COUNT(DISTINCT e.season_id) FROM files f \
-         JOIN episodes e ON e.id = f.episode_id \
-         WHERE f.library_id = $1 AND f.missing_since IS NULL) AS seasons, \
-      (SELECT COUNT(DISTINCT f.episode_id) FROM files f \
-         WHERE f.library_id = $1 AND f.missing_since IS NULL \
-           AND f.episode_id IS NOT NULL) AS episodes";
+use super::library_shape::{PRESENT, count, live_title_columns};
+
+/// Live titles of one library (`$1`), by kind: the live titles
+/// `SqlLibraryShapeRepository` counts across every library, from the same
+/// [`live_title_columns`], narrowed to the library's own present files. A
+/// missing file (issue #179) keeps nothing live.
+fn count_titles_sql() -> String {
+    format!(
+        "SELECT {}",
+        live_title_columns(&format!("{PRESENT} AND f.library_id = $1"))
+    )
+}
 
 /// SQL-based implementation of the LibraryRepository trait.
 #[derive(Debug, Clone)]
@@ -100,22 +94,16 @@ impl LibraryRepository for SqlLibraryRepository {
             .db
             .query_one_raw(Statement::from_sql_and_values(
                 DbBackend::Postgres,
-                COUNT_TITLES_SQL,
+                count_titles_sql(),
                 [library_id.into()],
             ))
             .await?
             .ok_or_else(|| DbErr::RecordNotFound("an aggregate returned no row".to_string()))?;
-        let count = |column: &str| -> Result<u64, DbErr> {
-            // `COUNT` is never negative; zero is the honest reading of a
-            // driver fault that made one so.
-            let value: i64 = row.try_get("", column)?;
-            Ok(u64::try_from(value).unwrap_or(0))
-        };
         Ok(LibraryTitleCounts {
-            movies: count("movies")?,
-            shows: count("shows")?,
-            seasons: count("seasons")?,
-            episodes: count("episodes")?,
+            movies: count(&row, "movies")?,
+            shows: count(&row, "shows")?,
+            seasons: count(&row, "seasons")?,
+            episodes: count(&row, "episodes")?,
         })
     }
 

@@ -87,6 +87,64 @@ pub mod in_memory {
         }
     }
 
+    /// The live titles the files holding `contents` reach, by kind, resolved
+    /// through `movies` and `shows` as the SQL joins resolve them: an entry
+    /// or episode neither store knows of reaches nothing. The one in-memory
+    /// definition of a live title, shared by [`LibraryRepository::count_titles`]
+    /// over one library's present files and the library-shape double over
+    /// every present file, as `live_title_columns` is shared by the SQL
+    /// implementations.
+    pub fn live_title_counts(
+        contents: &[MediaFileContent],
+        movies: &InMemoryMovieRepository,
+        shows: &InMemoryShowRepository,
+    ) -> LibraryTitleCounts {
+        let mut live_entries = HashSet::new();
+        let mut live_episodes = HashSet::new();
+        for content in contents {
+            match content {
+                MediaFileContent::Movie { movie_entry_id, .. } => {
+                    live_entries.insert(*movie_entry_id);
+                }
+                MediaFileContent::Episode {
+                    episode_id,
+                    last_episode_number: _,
+                } => {
+                    live_episodes.insert(*episode_id);
+                }
+            }
+        }
+
+        let live_movies: HashSet<Uuid> = {
+            let entries = movies.entries.lock().unwrap();
+            live_entries
+                .iter()
+                .filter_map(|id| entries.get(id).map(|entry| entry.movie_id))
+                .collect()
+        };
+        let (episodes, seasons): (u64, HashSet<Uuid>) = {
+            let all = shows.episodes.lock().unwrap();
+            let known: Vec<Uuid> = live_episodes
+                .iter()
+                .filter_map(|id| all.get(id).map(|episode| episode.season_id))
+                .collect();
+            (known.len() as u64, known.into_iter().collect())
+        };
+        let live_shows: HashSet<Uuid> = {
+            let all = shows.seasons.lock().unwrap();
+            seasons
+                .iter()
+                .filter_map(|id| all.get(id).map(|season| season.show_id))
+                .collect()
+        };
+        LibraryTitleCounts {
+            movies: live_movies.len() as u64,
+            shows: live_shows.len() as u64,
+            seasons: seasons.len() as u64,
+            episodes,
+        }
+    }
+
     #[async_trait]
     impl LibraryRepository for InMemoryLibraryRepository {
         async fn find_all(&self) -> Result<Vec<Library>, DbErr> {
@@ -133,54 +191,16 @@ pub mod in_memory {
                 return Ok(LibraryTitleCounts::default());
             };
             // The library's present files, as the SQL count filters them.
-            let mut live_entries = HashSet::new();
-            let mut live_episodes = HashSet::new();
-            for file in self.files.files.lock().unwrap().values() {
-                if file.library_id != library_id || file.missing_since.is_some() {
-                    continue;
-                }
-                match &file.content {
-                    Some(MediaFileContent::Movie { movie_entry_id, .. }) => {
-                        live_entries.insert(*movie_entry_id);
-                    }
-                    Some(MediaFileContent::Episode {
-                        episode_id,
-                        last_episode_number: _,
-                    }) => {
-                        live_episodes.insert(*episode_id);
-                    }
-                    None => {}
-                }
-            }
-
-            let live_movies: HashSet<Uuid> = {
-                let entries = movies.entries.lock().unwrap();
-                live_entries
-                    .iter()
-                    .filter_map(|id| entries.get(id).map(|entry| entry.movie_id))
-                    .collect()
-            };
-            let (episodes, seasons): (u64, HashSet<Uuid>) = {
-                let all = shows.episodes.lock().unwrap();
-                let known: Vec<Uuid> = live_episodes
-                    .iter()
-                    .filter_map(|id| all.get(id).map(|episode| episode.season_id))
-                    .collect();
-                (known.len() as u64, known.into_iter().collect())
-            };
-            let live_shows: HashSet<Uuid> = {
-                let all = shows.seasons.lock().unwrap();
-                seasons
-                    .iter()
-                    .filter_map(|id| all.get(id).map(|season| season.show_id))
-                    .collect()
-            };
-            Ok(LibraryTitleCounts {
-                movies: live_movies.len() as u64,
-                shows: live_shows.len() as u64,
-                seasons: seasons.len() as u64,
-                episodes,
-            })
+            let contents: Vec<MediaFileContent> = self
+                .files
+                .files
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|file| file.library_id == library_id && file.missing_since.is_none())
+                .filter_map(|file| file.content.clone())
+                .collect();
+            Ok(live_title_counts(&contents, movies, shows))
         }
 
         async fn update_scan_progress(
