@@ -119,9 +119,12 @@ class CompletedDownloadsTest {
                 null,
             ).cache()
 
-            enqueue(PARTIAL)
+            // DONE first: the manager runs one download at a time, and PARTIAL
+            // never finishes.
             enqueue(DONE)
             runMainLooperUntil { stateOf(DONE) == Download.STATE_COMPLETED }
+            enqueue(PARTIAL)
+            runMainLooperUntil { stateOf(PARTIAL) != null }
 
             assertTrue(downloads.cache.getCachedSpans(mediaUrl(PARTIAL)).isNotEmpty())
             assertFalse("bytes on disk are not a finished download", repository.isDownloaded(PARTIAL))
