@@ -57,8 +57,24 @@ public class MetadataListViewModel
             loader.refresh()
         }
 
-        /** Read the first page again, as after returning from a title. */
+        /** Read the first page again. */
         public fun refresh(): Unit = loader.refresh()
+
+        private var titlesClosedSeen: Int? = null
+
+        /**
+         * Read the first page again when [count], the Title pages closed over
+         * the list so far, has moved since the list last looked: a fix-match
+         * there moves the title out of the unmatched list. The first count seen
+         * is covered by the list's own first read, and the same count again --
+         * the list rebuilt after a rotation or a return from another tab --
+         * reads nothing, keeping the pages already loaded.
+         */
+        public fun titlesClosed(count: Int) {
+            val seen = titlesClosedSeen
+            titlesClosedSeen = count
+            if (seen != null && seen != count) loader.refresh()
+        }
 
         /** Read the next page. */
         public fun loadMore(): Unit = loader.loadMore()
@@ -112,6 +128,17 @@ public class TitleMetadataViewModel
             if (id == mediaId) return
             mediaId = id
             mutableState.value = TitleMetadataUiState()
+            read(id)
+        }
+
+        /** Read the title again after a read that failed, so it can be retried without leaving the page. */
+        public fun retry() {
+            val id = mediaId ?: return
+            mutableState.update { it.copy(error = null) }
+            read(id)
+        }
+
+        private fun read(id: String) {
             viewModelScope.launch {
                 try {
                     show(admin.mediaEnrichment(id))

@@ -13,7 +13,8 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -71,8 +72,10 @@ internal sealed interface AdminPage : NavKey {
 @Composable
 public fun AdminRoute(modifier: Modifier = Modifier) {
     val backStack = rememberNavBackStack(AdminPage.Dashboard)
-    val open: (AdminPage) -> Unit = { backStack.add(it) }
-    val back: () -> Unit = { if (backStack.size > 1) backStack.removeLastOrNull() }
+    var titlesClosed by rememberSaveable { mutableIntStateOf(0) }
+    val navigation = remember(backStack) { AdminNavigation(backStack, onTitleClosed = { titlesClosed++ }) }
+    val open: (AdminPage) -> Unit = navigation::open
+    val back: () -> Unit = navigation::back
     NavDisplay(
         backStack = backStack,
         modifier = modifier,
@@ -88,12 +91,37 @@ public fun AdminRoute(modifier: Modifier = Modifier) {
                 entry<AdminPage.Logs> { LogsRoute(onBack = back) }
                 entry<AdminPage.Events> { EventsRoute(onBack = back) }
                 entry<AdminPage.Metadata> {
-                    MetadataListRoute(onBack = back, onOpenTitle = { id, title -> open(AdminPage.Title(id, title)) })
+                    MetadataListRoute(
+                        titlesClosed = titlesClosed,
+                        onBack = back,
+                        onOpenTitle = { id, title -> open(AdminPage.Title(id, title)) },
+                    )
                 }
                 entry<AdminPage.Title> { page -> TitleMetadataRoute(page.mediaId, page.title, onBack = back) }
                 entry<AdminPage.LibraryTelemetry> { LibraryTelemetryRoute(onBack = back) }
             },
     )
+}
+
+/**
+ * Moves through the admin area's [backStack]. The dashboard is its root and is
+ * never closed; closing a Title page is reported, so the metadata list under it
+ * reads again on that return and on no other.
+ */
+internal class AdminNavigation(
+    private val backStack: MutableList<NavKey>,
+    private val onTitleClosed: () -> Unit,
+) {
+    /** Open [page] over the current one. */
+    fun open(page: AdminPage) {
+        backStack.add(page)
+    }
+
+    /** Close the current page, unless it is the dashboard. */
+    fun back() {
+        if (backStack.size <= 1) return
+        if (backStack.removeAt(backStack.lastIndex) is AdminPage.Title) onTitleClosed()
+    }
 }
 
 @Composable
@@ -129,17 +157,17 @@ private fun EventsRoute(onBack: () -> Unit) {
 
 @Composable
 private fun MetadataListRoute(
+    titlesClosed: Int,
     onBack: () -> Unit,
     onOpenTitle: (mediaId: String, title: String) -> Unit,
 ) {
     val viewModel: MetadataListViewModel = hiltViewModel()
     val state by viewModel.state.collectAsStateWithLifecycle()
     val status by viewModel.status.collectAsStateWithLifecycle()
-    // The list leaves composition while a title is open over it, and a fix-match
-    // there moves the title out of the unmatched list; read it again on return.
-    // The first showing is the view model's own first read.
-    var shown by rememberSaveable { mutableStateOf(false) }
-    LaunchedEffect(Unit) { if (shown) viewModel.refresh() else shown = true }
+    // A fix-match on a title opened from the list moves it out of the unmatched
+    // list. The view model reads again only when this count has moved, so a
+    // rotation or a return from another tab keeps the pages already loaded.
+    LaunchedEffect(titlesClosed) { viewModel.titlesClosed(titlesClosed) }
     MetadataListScreen(
         state = state,
         status = status,
@@ -169,6 +197,7 @@ private fun TitleMetadataRoute(
         onClearMatch = viewModel::clearMatch,
         onToggleLock = viewModel::toggleLock,
         onSaveLocks = viewModel::saveLocks,
+        onRetry = viewModel::retry,
         onMessageShown = viewModel::clearMessage,
     )
 }

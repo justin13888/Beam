@@ -53,6 +53,7 @@ internal fun TitleMetadataScreen(
     onToggleLock: (MetadataField) -> Unit,
     onSaveLocks: () -> Unit,
     modifier: Modifier = Modifier,
+    onRetry: () -> Unit = {},
     onMessageShown: () -> Unit = {},
 ) {
     val snackbarHost = remember { SnackbarHostState() }
@@ -98,7 +99,7 @@ internal fun TitleMetadataScreen(
                 }
 
                 state.error != null -> {
-                    BeamErrorState(message = state.error)
+                    BeamErrorState(message = state.error, onRetry = onRetry)
                 }
 
                 else -> {

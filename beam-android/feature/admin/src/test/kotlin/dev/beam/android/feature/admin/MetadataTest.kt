@@ -228,6 +228,35 @@ class MetadataTest {
         }
 
     @Test
+    fun `a title that failed to read is read again on retry, without leaving the page`() =
+        runTest {
+            val admin =
+                FakeAdminRepository().apply {
+                    enrichments += AdminFixtures.enrichment(mediaId = "dark")
+                    failWith = BeamException.Network("connection reset", retryable = true)
+                }
+            val viewModel = TitleMetadataViewModel(admin)
+            viewModel.open("dark")
+            testScheduler.advanceUntilIdle()
+            assertNotNull(viewModel.state.value.error)
+
+            // Opening the same title again is a configuration change, and reads nothing.
+            admin.failWith = null
+            viewModel.open("dark")
+            testScheduler.advanceUntilIdle()
+            assertNotNull(viewModel.state.value.error)
+
+            viewModel.retry()
+            testScheduler.advanceUntilIdle()
+            assertNull(viewModel.state.value.error)
+            assertEquals(
+                "dark",
+                viewModel.state.value.enrichment
+                    ?.mediaId,
+            )
+        }
+
+    @Test
     fun `a show offers no release date or runtime to lock`() {
         val show = lockableFields(MediaKind.SHOW)
         assertFalse(MetadataField.RELEASE_DATE in show)
