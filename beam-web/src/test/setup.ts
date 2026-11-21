@@ -10,7 +10,9 @@ import { server } from "./server";
 // the full run. Five seconds was not enough either: under CPU contention a
 // batch of tests lands at 5.1-5.8s and fails together, and CI runners are
 // slower than a dev machine. Fifteen still fails fast on a genuine break --
-// the alternative, sprinkling per-call timeouts, hides the reason.
+// the alternative, sprinkling per-call timeouts, hides the reason. Vitest's
+// per-test `testTimeout` in `vitest.config.ts` must stay above this, or it
+// kills the test before this wait can expire (#480).
 configure({ asyncUtilTimeout: 15_000 });
 
 // Browser APIs jsdom does not implement. These are environment gaps, not

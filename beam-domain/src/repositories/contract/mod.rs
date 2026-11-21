@@ -128,8 +128,15 @@ pub mod fixture {
         /// The file repository over the same store.
         fn files(&self) -> &dyn crate::repositories::FileRepository;
 
+        /// The watch-state repository over the same store, which re-homing
+        /// an episode onto another carries rows through.
+        fn watch_state(&self) -> &dyn crate::repositories::WatchStateRepository;
+
         /// A library that exists as far as the backing store is concerned.
         async fn new_library(&self) -> Uuid;
+
+        /// A user that exists as far as the backing store is concerned.
+        async fn new_user(&self) -> Uuid;
 
         /// A show titled `title`, created at `created_at`, with no identity
         /// key -- a row from before keys existed, which the trait itself can

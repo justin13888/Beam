@@ -515,6 +515,7 @@ mod tests {
                 title: "Good News About Hell".to_string(),
                 runtime: None,
                 air_date: None,
+                numbering: beam_domain::utils::media_path::EpisodeNumbering::Standard,
             })
             .await
             .expect("episode is created");
