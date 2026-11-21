@@ -230,8 +230,8 @@ scan:
   settleSeconds: 30
 ```
 
-The admin UI's system status tab (`GET /v1/admin/status`, the `watcher` object) shows which mode
-each library is in: `native`, `polling` with a `poll_reason` of `network_filesystem`,
+The `watcher` object in the admin status response (`GET /v1/admin/status`; the admin UI does not
+display it yet) shows which mode each library is in: `native`, `polling` with a `poll_reason` of `network_filesystem`,
 `watch_limit_reached` or `native_unavailable`, or `unwatched` when `BEAM_WATCH_ENABLED` is false.
 
 **inotify limits.** A native watch costs one inotify watch per directory in the library, counted
