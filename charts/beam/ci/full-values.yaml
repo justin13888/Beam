@@ -59,7 +59,9 @@ libraries:
       hostPath:
         path: /srv/media/archive
 watch:
-  pollIntervalSeconds: 60
+  # A million or more, which Helm reads as a float and would render as
+  # "1e+06" unless the chart converts it to an integer first.
+  pollIntervalSeconds: 1000000
   debounceMs: 500
 scan:
   settleSeconds: 10
