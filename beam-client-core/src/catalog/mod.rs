@@ -27,7 +27,8 @@ pub use enrichment::{
     PinSource,
 };
 pub use library::{
-    FileContentType, FileIndexStatus, LibraryFileSummary, LibrarySummary, ScanJob, ScanJobState,
+    FileContentType, FileIndexStatus, LibraryChanges, LibraryFileSummary, LibrarySummary, ScanJob,
+    ScanJobState,
 };
 #[cfg(test)]
 pub(crate) use library_report::PREVIEW_JSON;

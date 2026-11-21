@@ -299,6 +299,47 @@ async fn libraries_are_every_library_on_the_server() {
     assert_eq!(request.url.path(), "/v1/libraries");
 }
 
+/// The change feed (issue #454) is polled with the cursor the last answer
+/// gave, and answers the libraries to refetch.
+#[tokio::test]
+async fn library_changes_are_polled_from_the_cursor_passed() {
+    let body =
+        r#"{"cursor":"e.7","reset":false,"library_ids":["00000000-0000-0000-0000-0000000000a1"]}"#;
+    let (client, backend) = one_answer(200, body).await;
+
+    let changes = client
+        .library_changes(Some("e.5".to_owned()))
+        .await
+        .expect("answered");
+
+    assert_eq!(changes.cursor, "e.7");
+    assert!(!changes.reset);
+    assert_eq!(
+        changes.library_ids,
+        vec!["00000000-0000-0000-0000-0000000000a1".to_owned()]
+    );
+    let request = the_request(&backend);
+    assert_eq!(request.method, reqwest::Method::GET);
+    assert_eq!(request.url.path(), "/v1/libraries/changes");
+    assert_eq!(
+        query_of(&request).get("since").map(String::as_str),
+        Some("e.5")
+    );
+}
+
+/// A first poll sends no cursor, and a reset says to refetch everything.
+#[tokio::test]
+async fn a_first_library_changes_poll_sends_no_cursor() {
+    let (client, backend) =
+        one_answer(200, r#"{"cursor":"e.0","reset":true,"library_ids":[]}"#).await;
+
+    let changes = client.library_changes(None).await.expect("answered");
+
+    assert!(changes.reset);
+    assert!(changes.library_ids.is_empty());
+    assert!(!query_of(&the_request(&backend)).contains_key("since"));
+}
+
 #[tokio::test]
 async fn one_library_is_asked_for_by_its_id() {
     let (client, backend) = one_answer(200, LIBRARY).await;
