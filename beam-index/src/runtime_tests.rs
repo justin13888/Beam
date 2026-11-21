@@ -654,6 +654,7 @@ async fn the_consumer_stops_when_the_watcher_closes() {
             run_watch_consumer(
                 watcher,
                 indexer.clone(),
+                indexer.scan_deferrals.attach(),
                 clock.clone(),
                 Duration::from_millis(2000),
             ),
