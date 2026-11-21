@@ -69,10 +69,12 @@ public interface DownloadRepository {
  * A [DownloadRepository] whose manager is built on first use.
  *
  * The manager holds no credential: its requests go out through [calls], which
- * asks the core for the active server's session on each one. So it can be built
- * signed out -- the downloads list renders offline and signed out alike -- and a
- * download queued under one session carries on under the next, after a sign-in
- * or a server switch, without the manager being rebuilt. Every change goes
+ * asks the core on each one for the session of the server it goes to. So it can
+ * be built signed out -- the downloads list renders offline and signed out
+ * alike -- a download queued under one session carries on under the next after
+ * a sign-in, and a download from one server keeps that server's session after
+ * the viewer switches to another, all without the manager being rebuilt. Every
+ * change goes
  * through [commands], which reach [BeamDownloadService], so the transfer runs in
  * a foreground service rather than dying with the app's process.
  *

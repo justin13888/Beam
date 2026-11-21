@@ -8,9 +8,11 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import uniffi.beam_client_core.ServerHttpConfig
+import uniffi.beam_client_core.ServerSummary
+import java.util.concurrent.ConcurrentHashMap
 
 /**
- * Fetches as the signed-in user from the active server, and as nobody from
+ * Fetches as the signed-in user from a server's own origin, and as nobody from
  * anywhere else.
  *
  * Artwork is served from the same authenticated origin as the API
@@ -24,29 +26,35 @@ import uniffi.beam_client_core.ServerHttpConfig
  * can sign out or switch servers while the app is running, and a loader
  * built at app start would otherwise keep sending the first server's cookie.
  *
- * Both are also scoped to the active server's origin, because the cookie is a
- * bearer credential: a request anywhere else goes out on the plain client,
- * and a redirect off the server's origin loses the credential at the hop
- * where it leaves (see [CredentialInterceptor]).
+ * Both are also scoped to the origin of the server they belong to, because the
+ * cookie is a bearer credential: a request anywhere else goes out on the plain
+ * client, and a redirect off the server's origin loses the credential at the
+ * hop where it leaves (see [CredentialInterceptor]).
  *
- * @param server the active server's config, or `null` when there is no signed-in
- *   server -- in which case every call goes out unauthenticated.
+ * The server is chosen by the request, not by which one is active: a download
+ * queued from one server is still transferring when the viewer switches to
+ * another, and its remaining requests must go out under its own server's
+ * session (see [signedInServers]).
+ *
+ * @param server the config of the server a request's URL goes to, or `null`
+ *   when no signed-in server serves it -- in which case the call goes out
+ *   unauthenticated.
  */
 public class ServerCallFactory internal constructor(
     private val clients: BeamHttpClientFactory,
-    private val server: () -> ServerHttpConfig?,
+    private val server: (url: HttpUrl) -> ServerHttpConfig?,
 ) : Call.Factory {
     /**
-     * The client built for the last config seen. A config changes only on a
-     * sign-in, sign-out, server switch or new trust decision, so rebuilding
-     * per call would be pure waste; the wrapper shares the base client's
-     * connection pool either way.
+     * The client built for the last config seen from each origin. A config
+     * changes only on a sign-in, sign-out or new trust decision, so rebuilding
+     * per call would be pure waste; each wrapper shares the base client's
+     * connection pool either way. One entry per server, so requests to two
+     * servers in turn do not rebuild on every switch.
      */
-    @Volatile
-    private var authenticated: Pair<ServerHttpConfig, OkHttpClient>? = null
+    private val authenticated = ConcurrentHashMap<String, Pair<ServerHttpConfig, OkHttpClient>>()
 
     override fun newCall(request: Request): Call {
-        val config = server()
+        val config = server(request.url)
         val origin = config?.let { it.baseUrl.toHttpUrlOrNull() }
         if (config == null || origin == null || !request.url.sameOrigin(origin)) {
             return clients.trusting(emptyList(), host = "").newCall(request)
@@ -58,7 +66,7 @@ public class ServerCallFactory internal constructor(
         config: ServerHttpConfig,
         origin: HttpUrl,
     ): OkHttpClient {
-        authenticated?.let { (cachedConfig, client) -> if (cachedConfig == config) return client }
+        authenticated[config.baseUrl]?.let { (cachedConfig, client) -> if (cachedConfig == config) return client }
         val client =
             clients
                 // The pins hold only on connections to the host the core
@@ -68,8 +76,31 @@ public class ServerCallFactory internal constructor(
                 .newBuilder()
                 .addNetworkInterceptor(CredentialInterceptor(origin, config.headers))
                 .build()
-        authenticated = config to client
+        authenticated[config.baseUrl] = config to client
         return client
+    }
+
+    internal companion object {
+        /**
+         * A factory that sends each request under the session of the known
+         * server whose origin it goes to.
+         *
+         * The core keys a server by its origin, so at most one server matches.
+         *
+         * @param servers every known server, signed in or not.
+         * @param configFor the config of one server by id, or `null` when it
+         *   has no session.
+         */
+        fun signedInServers(
+            clients: BeamHttpClientFactory,
+            servers: () -> List<ServerSummary>,
+            configFor: (serverId: String) -> ServerHttpConfig?,
+        ): ServerCallFactory =
+            ServerCallFactory(clients) { url ->
+                servers()
+                    .firstOrNull { server -> server.baseUrl.toHttpUrlOrNull()?.let(url::sameOrigin) == true }
+                    ?.let { server -> configFor(server.id) }
+            }
     }
 }
 
