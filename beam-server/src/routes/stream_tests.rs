@@ -1094,17 +1094,22 @@ mod metered {
             .await;
         assert_eq!(delivered.bytes().len(), 500);
 
-        let mut request = Request::new(Body::empty());
-        *request.uri_mut() = STREAM.parse().expect("a request target");
-        request.headers_mut().insert(
-            header::COOKIE,
-            format!("beam_session={token}")
-                .parse()
-                .expect("a cookie field"),
-        );
-        let abandoned = observed_service(&fixture).call(request).await;
+        // Each endpoint's body, abandoned unread: the body's `Drop` is what
+        // reports, and nothing polls it.
+        let abandon = |target: &str| {
+            let mut request = Request::new(Body::empty());
+            *request.uri_mut() = target.parse().expect("a request target");
+            request.headers_mut().insert(
+                header::COOKIE,
+                format!("beam_session={token}")
+                    .parse()
+                    .expect("a cookie field"),
+            );
+            observed_service(&fixture).call(request)
+        };
+
+        let abandoned = abandon(STREAM).await;
         assert_eq!(abandoned.status(), StatusCode::OK);
-        // The body's `Drop` is what reports; nothing polled it.
         drop(abandoned);
 
         let recorded = Recorded::of(&snapshotter);
@@ -1114,6 +1119,24 @@ mod metered {
             "only the abandoned body is an abort"
         );
         assert_eq!(recorded.counter(ABORTED, &[("endpoint", "download")]), None);
+
+        let abandoned = abandon(DOWNLOAD).await;
+        assert_eq!(abandoned.status(), StatusCode::OK);
+        drop(abandoned);
+
+        let recorded = Recorded::of(&snapshotter);
+        assert_eq!(
+            recorded.counter(ABORTED, &[("endpoint", "download")]),
+            Some(1),
+            "an abandoned download is counted under its own endpoint"
+        );
+        assert_eq!(
+            recorded
+                .counter(ABORTED, &[("endpoint", "stream")])
+                .unwrap_or(0),
+            0,
+            "the stream counter did not move since the last read"
+        );
     }
 
     /// Active from the first span read until the body lets the source go,
