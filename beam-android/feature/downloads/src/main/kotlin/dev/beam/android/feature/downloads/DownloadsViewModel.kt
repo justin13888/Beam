@@ -5,8 +5,6 @@ import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dev.beam.android.core.ffi.repository.CatalogRepository
 import dev.beam.android.core.media.download.DownloadRepository
-import dev.beam.android.core.model.DownloadRecord
-import dev.beam.android.core.model.DownloadState
 import dev.beam.android.core.model.PlaybackRequest
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.SharingStarted
@@ -17,6 +15,8 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import uniffi.beam_client_core.BeamException
+import uniffi.beam_client_core.DownloadRecord
+import uniffi.beam_client_core.DownloadState
 import uniffi.beam_client_core.MediaDetail
 import javax.inject.Inject
 import kotlin.time.Duration.Companion.seconds
@@ -47,18 +47,18 @@ public class DownloadsViewModel
             downloads.downloads
                 .map { records ->
                     DownloadsUiState(
-                        completed = records.filter { it.state == DownloadState.Completed },
+                        completed = records.filter { it.state == DownloadState.COMPLETED },
                         inProgress =
                             records.filter {
                                 it.state in
                                     setOf(
-                                        DownloadState.Queued,
-                                        DownloadState.Downloading,
-                                        DownloadState.Paused,
-                                        DownloadState.WaitingForNetwork,
+                                        DownloadState.QUEUED,
+                                        DownloadState.DOWNLOADING,
+                                        DownloadState.PAUSED,
+                                        DownloadState.WAITING_FOR_NETWORK,
                                     )
                             },
-                        failed = records.filter { it.state == DownloadState.Failed },
+                        failed = records.filter { it.state == DownloadState.FAILED },
                     )
                 }
                 // A download store that cannot be opened -- no session yet, or a
@@ -126,7 +126,7 @@ public class DownloadsViewModel
                             fileId = record.fileId,
                             title = record.title,
                             subtitle = record.subtitle,
-                            artworkUrl = record.posterUrl,
+                            artworkUrl = record.artworkUri(),
                             startPositionSecs = detail?.startPositionFor(record.episodeId) ?: 0.0,
                         ),
                     )

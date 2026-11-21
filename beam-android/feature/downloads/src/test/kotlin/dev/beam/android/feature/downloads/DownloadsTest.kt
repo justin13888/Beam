@@ -1,11 +1,10 @@
 package dev.beam.android.feature.downloads
 
 import dev.beam.android.core.ffi.repository.CatalogRepository
-import dev.beam.android.core.model.DownloadRecord
-import dev.beam.android.core.model.DownloadState
 import dev.beam.android.core.model.PlaybackRequest
 import dev.beam.android.core.testing.FakeCatalogRepository
 import dev.beam.android.core.testing.Fixtures
+import dev.beam.android.core.testing.downloadRecord
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -22,6 +21,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import uniffi.beam_client_core.BeamException
+import uniffi.beam_client_core.DownloadRecord
+import uniffi.beam_client_core.DownloadState
 import uniffi.beam_client_core.MediaDetail
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -52,12 +53,12 @@ class DownloadsTest {
             val repository =
                 FakeDownloadRepository(
                     listOf(
-                        downloadRecord(fileId = "a", state = DownloadState.Completed),
-                        downloadRecord(fileId = "b", state = DownloadState.Downloading),
-                        downloadRecord(fileId = "c", state = DownloadState.Paused),
-                        downloadRecord(fileId = "d", state = DownloadState.WaitingForNetwork),
-                        downloadRecord(fileId = "e", state = DownloadState.Queued),
-                        downloadRecord(fileId = "f", state = DownloadState.Failed),
+                        downloadRecord(fileId = "a", state = DownloadState.COMPLETED),
+                        downloadRecord(fileId = "b", state = DownloadState.DOWNLOADING),
+                        downloadRecord(fileId = "c", state = DownloadState.PAUSED),
+                        downloadRecord(fileId = "d", state = DownloadState.WAITING_FOR_NETWORK),
+                        downloadRecord(fileId = "e", state = DownloadState.QUEUED),
+                        downloadRecord(fileId = "f", state = DownloadState.FAILED),
                     ),
                 )
             val viewModel = DownloadsViewModel(repository, FakeCatalogRepository())
@@ -89,7 +90,7 @@ class DownloadsTest {
         runTest {
             val repository =
                 FakeDownloadRepository(
-                    listOf(downloadRecord(fileId = "a", state = DownloadState.Downloading)),
+                    listOf(downloadRecord(fileId = "a", state = DownloadState.DOWNLOADING)),
                 )
             val viewModel = DownloadsViewModel(repository, FakeCatalogRepository())
             backgroundScope.observe(viewModel)
@@ -98,7 +99,7 @@ class DownloadsTest {
             viewModel.pause("a")
             testScheduler.advanceUntilIdle()
             assertEquals(
-                DownloadState.Paused,
+                DownloadState.PAUSED,
                 viewModel.state.value.inProgress
                     .single()
                     .state,
@@ -107,7 +108,7 @@ class DownloadsTest {
             viewModel.resume("a")
             testScheduler.advanceUntilIdle()
             assertEquals(
-                DownloadState.Downloading,
+                DownloadState.DOWNLOADING,
                 viewModel.state.value.inProgress
                     .single()
                     .state,
@@ -119,7 +120,7 @@ class DownloadsTest {
         runTest {
             val repository =
                 FakeDownloadRepository(
-                    listOf(downloadRecord(fileId = "a", state = DownloadState.Completed)),
+                    listOf(downloadRecord(fileId = "a", state = DownloadState.COMPLETED)),
                 )
             val viewModel = DownloadsViewModel(repository, FakeCatalogRepository())
             backgroundScope.observe(viewModel)
@@ -162,7 +163,7 @@ class DownloadsTest {
     @Test
     fun `a second tap while the lookup is pending opens one player, not two`() =
         runTest {
-            val record = downloadRecord(state = DownloadState.Completed)
+            val record = downloadRecord(state = DownloadState.COMPLETED)
             val viewModel = DownloadsViewModel(FakeDownloadRepository(listOf(record)), FakeCatalogRepository())
             val requests = mutableListOf<PlaybackRequest>()
 
@@ -191,7 +192,7 @@ class DownloadsTest {
                                 ).copy(resumePositionSecs = 6_250.0, startPositionSecs = 1_200.0),
                         )
                 }
-            val record = downloadRecord(fileId = "a", state = DownloadState.Completed)
+            val record = downloadRecord(fileId = "a", state = DownloadState.COMPLETED)
 
             val request = playing(record, catalog)!!
             assertEquals(1_200.0, request.startPositionSecs, 0.0)
@@ -218,11 +219,25 @@ class DownloadsTest {
                                 ),
                         )
                 }
-            val record = downloadRecord(state = DownloadState.Completed).copy(episodeId = "e2")
+            val record = downloadRecord(state = DownloadState.COMPLETED, episodeId = "e2")
 
             val request = playing(record, catalog)!!
             assertEquals(900.0, request.startPositionSecs, 0.0)
             assertEquals("e2", request.episodeId)
+        }
+
+    @Test
+    fun `a download plays under the poster kept on disk, not a URL`() =
+        runTest {
+            val record =
+                downloadRecord(state = DownloadState.COMPLETED, artworkPath = "/data/files/download-artwork/ab12")
+
+            val request = playing(record, FakeCatalogRepository())!!
+            assertEquals("file:/data/files/download-artwork/ab12", request.artworkUrl)
+            assertEquals(
+                null,
+                playing(downloadRecord(state = DownloadState.COMPLETED), FakeCatalogRepository())!!.artworkUrl,
+            )
         }
 
     @Test
@@ -233,7 +248,7 @@ class DownloadsTest {
                     failWith = BeamException.Network("offline", retryable = true)
                 }
 
-            val request = playing(downloadRecord(state = DownloadState.Completed), catalog)
+            val request = playing(downloadRecord(state = DownloadState.COMPLETED), catalog)
             assertEquals(0.0, request!!.startPositionSecs, 0.0)
         }
 
@@ -247,7 +262,7 @@ class DownloadsTest {
                     override suspend fun detail(mediaId: String): MediaDetail = awaitCancellation()
                 }
 
-            val request = playing(downloadRecord(state = DownloadState.Completed), hanging)
+            val request = playing(downloadRecord(state = DownloadState.COMPLETED), hanging)
             assertEquals(0.0, request!!.startPositionSecs, 0.0)
         }
 
@@ -255,9 +270,9 @@ class DownloadsTest {
     fun `the status line shows progress against the total once it is known`() {
         val record =
             downloadRecord(
-                state = DownloadState.Downloading,
-                downloadedBytes = 500L * 1024 * 1024,
-                totalBytes = 4L * 1024 * 1024 * 1024,
+                state = DownloadState.DOWNLOADING,
+                downloadedBytes = 500uL * 1024uL * 1024uL,
+                totalBytes = 4uL * 1024uL * 1024uL * 1024uL,
             )
 
         assertTrue(record.statusLine().contains(" of "))
@@ -267,9 +282,9 @@ class DownloadsTest {
     fun `the status line does not invent a total it does not have`() {
         val record =
             downloadRecord(
-                state = DownloadState.Downloading,
-                downloadedBytes = 1024L,
-                totalBytes = 0L,
+                state = DownloadState.DOWNLOADING,
+                downloadedBytes = 1024uL,
+                totalBytes = null,
             )
 
         assertTrue(!record.statusLine().contains(" of "))
@@ -278,7 +293,8 @@ class DownloadsTest {
     @Test
     fun `a failed download explains that retrying resumes rather than restarts`() {
         val record =
-            downloadRecord(state = DownloadState.Failed).copy(
+            downloadRecord(
+                state = DownloadState.FAILED,
                 failureMessage = "The download stopped. It will resume when you retry it.",
             )
 

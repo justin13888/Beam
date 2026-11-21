@@ -13,17 +13,14 @@ import androidx.media3.datasource.cache.SimpleCache
 import androidx.media3.exoplayer.offline.Download
 import androidx.media3.test.utils.robolectric.RobolectricUtil.runMainLooperUntil
 import androidx.test.core.app.ApplicationProvider
-import dev.beam.android.core.ffi.repository.PlaybackRepository
 import dev.beam.android.core.media.http.BeamHttpClientFactory
 import dev.beam.android.core.media.http.ServerCallFactory
-import dev.beam.android.core.model.DownloadRecord
-import dev.beam.android.core.model.DownloadState
 import dev.beam.android.core.model.UserPreferences
-import dev.beam.android.core.testing.FakePlaybackRepository
 import dev.beam.android.core.testing.FakePreferencesRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
@@ -34,7 +31,6 @@ import mockwebserver3.MockWebServer
 import mockwebserver3.RecordedRequest
 import org.junit.After
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -44,17 +40,21 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.shadows.ShadowNetworkCapabilities
-import uniffi.beam_client_core.PlaybackHttpConfig
+import uniffi.beam_client_core.BeamClient
+import uniffi.beam_client_core.DownloadRecord
+import uniffi.beam_client_core.DownloadState
 import uniffi.beam_client_core.ServerHttpConfig
 import java.util.concurrent.TimeoutException
 
 /**
  * The downloads repository as the app builds it, against a real Media3
- * download manager and a real server on loopback.
+ * download manager, the real core, and a real server on loopback.
  *
- * Below the trait line: the core's answer for the active server, which is
- * whatever [active] holds, and the service start, which
- * [InProcessDownloadCommands] stands in for.
+ * Below the trait line: the core's storage, held in memory; the session the
+ * transfer sends, which is whatever [active] holds; and the service start,
+ * which [InProcessDownloadCommands] stands in for. No server is signed in
+ * to the core, so it cannot list a title's sources and plans each file
+ * alone, from the server's download route.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
@@ -67,7 +67,7 @@ class MediaDownloadRepositoryTest {
     /** The signed-in server: the bytes for [FRESH] alone, 401 for anyone else. */
     private val beam = MockWebServer()
 
-    /** The core's answer for the active server: `null` while signed out. */
+    /** The session the transfer sends: `null` while signed out. */
     @Volatile
     private var active: ServerHttpConfig? = null
 
@@ -78,10 +78,13 @@ class MediaDownloadRepositoryTest {
     @Volatile
     private var onRefused: () -> Unit = {}
 
+    /** What the repository last listed. */
+    @Volatile
+    private var listed: List<DownloadRecord> = emptyList()
+
     private lateinit var database: StandaloneDatabaseProvider
     private lateinit var cache: SimpleCache
-    private lateinit var titles: DownloadTitleStore
-    private lateinit var artwork: DownloadArtwork
+    private lateinit var core: BeamClient
     private lateinit var repository: MediaDownloadRepository
 
     @Before
@@ -100,17 +103,15 @@ class MediaDownloadRepositoryTest {
         beam.start()
         database = StandaloneDatabaseProvider(context)
         cache = SimpleCache(temp.newFolder("downloads"), NoOpCacheEvictor(), database)
-        titles = FileDownloadTitleStore(context)
-        artwork = DownloadArtwork(context, temp.newFolder("artwork")) { error("no poster in this test") }
+        core = BeamClient(InMemoryKeyValueStore())
         repository =
             MediaDownloadRepository(
                 context = context,
-                playback = Playback(),
+                core = core,
                 calls = ServerCallFactory(BeamHttpClientFactory(BeamHttpClientFactory.shared())) { active },
                 commands = InProcessDownloadCommands { repository.manager() },
                 cache = cache,
-                titles = titles,
-                artwork = artwork,
+                artwork = DownloadArtwork(context, temp.newFolder("artwork")) { error("no poster in this test") },
                 preferences = FakePreferencesRepository(UserPreferences(downloadOverCellular = true)),
             )
         // A Media3 manager starts paused, and the download service resumes
@@ -124,6 +125,7 @@ class MediaDownloadRepositoryTest {
         repository.manager().release()
         cache.release()
         database.close()
+        core.close()
         beam.close()
         Dispatchers.resetMain()
     }
@@ -132,15 +134,13 @@ class MediaDownloadRepositoryTest {
     fun `downloads are listed while signed out`() =
         runTest {
             active = null
-            val listed = mutableListOf<List<DownloadRecord>>()
-            backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
-                repository.downloads.collect { listed += it }
-            }
+            observe()
 
-            enqueue("f1", serverId = "home")
-            awaitUntil { listed.lastOrNull().orEmpty().isNotEmpty() }
+            enqueue(F1, on = HOME)
+            awaitUntil { listed.isNotEmpty() }
 
-            assertEquals(listOf("f1"), listed.last().map(DownloadRecord::fileId))
+            assertEquals(listOf(F1), listed.map(DownloadRecord::fileId))
+            assertEquals("its server is the one it was queued on", serverId(HOME), listed.single().serverId)
         }
 
     @Test
@@ -149,32 +149,42 @@ class MediaDownloadRepositoryTest {
             active = config(STALE)
             // The viewer signs in again while the first attempt is in flight.
             onRefused = { active = config(FRESH) }
+            observe()
 
-            enqueue("f1", serverId = "home")
-            awaitUntil { stateOf("f1") == DownloadState.Completed }
+            enqueue(F1, on = HOME)
+            awaitUntil { stateOf(F1) == DownloadState.COMPLETED }
 
             assertEquals(listOf<String?>(STALE, FRESH), synchronized(cookies) { cookies.toList() })
+            assertTrue("completion survives in the core", repository.isDownloaded(F1))
         }
 
     @Test
     fun `forgetting a server deletes its downloads and leaves other servers' alone`() =
         runTest {
-            active = config(FRESH)
-            enqueue("h1", serverId = "home")
-            enqueue("c1", serverId = "cabin")
-            awaitUntil {
-                stateOf("h1") == DownloadState.Completed && stateOf("c1") == DownloadState.Completed
-            }
+            observe()
+            // One server at a time: the transfer sends the active server's
+            // session to that server's origin alone.
+            active = config(FRESH, HOME)
+            enqueue(H1, on = HOME)
+            awaitUntil { stateOf(H1) == DownloadState.COMPLETED }
+            active = config(FRESH, CABIN)
+            enqueue(C1, on = CABIN)
+            awaitUntil { stateOf(C1) == DownloadState.COMPLETED }
 
-            repository.removeServer("cabin")
-            awaitUntil { stateOf("c1") == null }
+            repository.removeServer(serverId(CABIN))
+            awaitUntil { indexed().none { it.request.id == C1 } }
 
-            assertEquals(listOf("h1"), current().map(DownloadRecord::fileId))
-            assertEquals(listOf("h1"), titles.all().map(DownloadTitle::fileId))
-            assertNull(titles.get("c1"))
-            assertTrue("the removed download's bytes are gone", cache.getCachedSpans(mediaUrl("c1")).isEmpty())
-            assertTrue("the kept download's bytes stay", cache.getCachedSpans(mediaUrl("h1")).isNotEmpty())
+            assertEquals(listOf(H1), core.downloads().map(DownloadRecord::fileId))
+            assertTrue("the removed download's bytes are gone", cache.getCachedSpans(mediaUrl(C1, CABIN)).isEmpty())
+            assertTrue("the kept download's bytes stay", cache.getCachedSpans(mediaUrl(H1, HOME)).isNotEmpty())
         }
+
+    /** Collect the repository's list into [listed], as the downloads screen would. */
+    private fun TestScope.observe() {
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            repository.downloads.collect { listed = it }
+        }
+    }
 
     /**
      * Run the main looper, which Media3 reports every download change on,
@@ -189,23 +199,24 @@ class MediaDownloadRepositoryTest {
             val manager = repository.manager()
             throw AssertionError(
                 "paused ${manager.downloadsPaused}, unmet requirements ${manager.notMetRequirements}, " +
-                    "downloads $downloads, cookies ${synchronized(cookies) { cookies.toList() }}",
+                    "downloads $downloads, listed ${listed.map { it.fileId to it.state }}, " +
+                    "cookies ${synchronized(cookies) { cookies.toList() }}",
                 timeout,
             )
         }
     }
 
+    /** Queue [fileId] with [on] as the active server, which is where the core queues it. */
     private suspend fun enqueue(
         fileId: String,
-        serverId: String,
-    ) = repository.enqueue(
-        fileId = fileId,
-        serverId = serverId,
-        mediaId = "m-$fileId",
-        title = "Title $fileId",
-        subtitle = null,
-        posterUrl = null,
-    )
+        on: String,
+    ) {
+        core.selectServer(serverId(on))
+        repository.enqueue(fileId = fileId, mediaId = "m-$fileId", title = "Title $fileId")
+    }
+
+    /** The core's id for the server at [origin], registering it on first use. */
+    private suspend fun serverId(origin: String): String = core.addServer(origin(origin), null).id
 
     /**
      * Every download in the manager's index, finished ones included: the
@@ -216,36 +227,33 @@ class MediaDownloadRepositoryTest {
             buildList { while (cursor.moveToNext()) add(cursor.download) }
         }
 
-    private fun current(): List<DownloadRecord> = indexed().map { it.toRecord(titles, artwork) }
+    private fun stateOf(fileId: String) = listed.firstOrNull { it.fileId == fileId }?.state
 
-    private fun stateOf(fileId: String): DownloadState? = current().firstOrNull { it.fileId == fileId }?.state
+    /** The session [cookie] on the server named [server]. */
+    private fun config(
+        cookie: String,
+        server: String = HOME,
+    ) = ServerHttpConfig(
+        baseUrl = origin(server),
+        headers = mapOf("Cookie" to cookie),
+        trustedFingerprints = emptyList(),
+        host = server,
+    )
 
-    private fun config(cookie: String): ServerHttpConfig {
-        val origin = beam.url("/")
-        return ServerHttpConfig(
-            baseUrl = origin.toString().trimEnd('/'),
-            headers = mapOf("Cookie" to cookie),
-            trustedFingerprints = emptyList(),
-            host = origin.host,
-        )
-    }
+    /**
+     * The loopback server under one of two names, so the core registers two
+     * servers that answer from the same place.
+     */
+    private fun origin(name: String): String = "http://$name:${beam.port}"
 
     /**
      * Where [fileId]'s bytes are served -- and so the key Media3 caches them
      * under, since a download request carries no custom cache key.
      */
-    private fun mediaUrl(fileId: String): String = beam.url("/v1/files/$fileId/stream").toString()
-
-    /** Media URLs on the loopback server; everything else is the shared fake's. */
-    private inner class Playback : PlaybackRepository by FakePlaybackRepository() {
-        override suspend fun playbackConfig(fileId: String): PlaybackHttpConfig =
-            PlaybackHttpConfig(
-                url = mediaUrl(fileId),
-                headers = emptyMap(),
-                trustedFingerprints = emptyList(),
-                pinnedHost = beam.hostName,
-            )
-    }
+    private fun mediaUrl(
+        fileId: String,
+        server: String,
+    ): String = "${origin(server)}/v1/files/$fileId/download"
 
     private inner class BeamServer : Dispatcher() {
         override fun dispatch(request: RecordedRequest): MockResponse {
@@ -263,5 +271,10 @@ class MediaDownloadRepositoryTest {
         const val STALE = "beam_session=stale"
         const val FRESH = "beam_session=fresh"
         const val BODY = "media bytes"
+        const val HOME = "localhost"
+        const val CABIN = "127.0.0.1"
+        const val F1 = "f1000000-0000-4000-8000-000000000001"
+        const val H1 = "a1000000-0000-4000-8000-000000000001"
+        const val C1 = "c1000000-0000-4000-8000-000000000001"
     }
 }

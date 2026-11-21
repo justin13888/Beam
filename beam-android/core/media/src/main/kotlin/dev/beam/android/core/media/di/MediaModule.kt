@@ -26,8 +26,6 @@ import dev.beam.android.core.media.download.DownloadArtwork
 import dev.beam.android.core.media.download.DownloadCommands
 import dev.beam.android.core.media.download.DownloadManagerHolder
 import dev.beam.android.core.media.download.DownloadRepository
-import dev.beam.android.core.media.download.DownloadTitleStore
-import dev.beam.android.core.media.download.FileDownloadTitleStore
 import dev.beam.android.core.media.download.MediaDownloadRepository
 import dev.beam.android.core.media.download.ServiceDownloadCommands
 import dev.beam.android.core.media.http.BeamHttpClientFactory
@@ -131,12 +129,6 @@ internal object MediaModule {
     fun downloadCommands(
         @ApplicationContext context: Context,
     ): DownloadCommands = ServiceDownloadCommands(context)
-
-    @Provides
-    @Singleton
-    fun downloadTitles(
-        @ApplicationContext context: Context,
-    ): DownloadTitleStore = FileDownloadTitleStore(context)
 
     /**
      * Fetched through the app's own image loader, so a poster kept for a
