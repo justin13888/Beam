@@ -41,5 +41,14 @@ internal class FakeDownloadRepository : DownloadRepository {
 
     override suspend fun setRequiresUnmeteredNetwork(required: Boolean) = Unit
 
-    override suspend fun isDownloaded(fileId: String): Boolean = false
+    /** The files whose downloads have completed; any other download is still partial. */
+    val completed: MutableSet<String> = mutableSetOf()
+
+    /** Every file [isDownloaded] was asked about. */
+    val asked: MutableSet<String> = mutableSetOf()
+
+    override suspend fun isDownloaded(fileId: String): Boolean {
+        asked += fileId
+        return fileId in completed
+    }
 }

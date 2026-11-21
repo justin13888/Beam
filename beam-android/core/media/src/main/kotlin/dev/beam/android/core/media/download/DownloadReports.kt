@@ -76,12 +76,5 @@ internal fun DownloadManager.indexedDownloads(): List<Download> =
         buildList { while (cursor.moveToNext()) add(cursor.download) }
     }
 
-/** Whether [fileId] -- a download, or a part of one -- is complete among [this]. */
-internal fun List<DownloadRecord>.holdsCompleted(fileId: String): Boolean =
-    any { record ->
-        record.state == DownloadState.COMPLETED &&
-            (record.fileId == fileId || record.plan.parts.any { it.fileId == fileId })
-    }
-
 /** The id of every Media3 download behind [this]: each part, then each subtitle file. */
 internal fun DownloadRecord.itemIds(): List<String> = plan.parts.map { it.fileId } + plan.subtitles.map { it.sidecarId }

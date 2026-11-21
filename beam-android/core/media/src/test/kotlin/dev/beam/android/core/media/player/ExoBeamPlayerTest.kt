@@ -24,6 +24,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -45,6 +46,8 @@ class ExoBeamPlayerTest {
     private val playback = FakePlaybackRepository()
     private val telemetry = FakeTelemetryRepository()
 
+    @get:Rule val downloads = DownloadCacheRule()
+
     @After
     fun tearDown() {
         exoPlayer.release()
@@ -57,6 +60,8 @@ class ExoBeamPlayerTest {
             repository = playback,
             telemetry = telemetry,
             clients = BeamHttpClientFactory(BeamHttpClientFactory.shared()),
+            downloadCache = downloads.cache,
+            completedDownloads = { null },
             scope = scope,
             rebuffers = NeverSustained,
         )

@@ -17,6 +17,7 @@
 //!   guarantee `If-Range` exists to provide.
 
 use std::path::{Path as FsPath, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::SystemTime;
 
 use bytes::Bytes;
@@ -110,6 +111,95 @@ impl ByteSource for FileByteSource {
         file.read_exact(&mut buffer).await?;
 
         Ok(Bytes::from(buffer))
+    }
+}
+
+/// Which delivery endpoint a body is served through: the `endpoint` label of
+/// the streaming metrics ([#458](https://github.com/justin13888/beam/issues/458)).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeliveryEndpoint {
+    /// `/v1/files/{file_id}/stream`, played in place.
+    Stream,
+    /// `/v1/files/{file_id}/download`, saved as an attachment.
+    Download,
+}
+
+impl DeliveryEndpoint {
+    /// The `endpoint` label value.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Stream => "stream",
+            Self::Download => "download",
+        }
+    }
+
+    /// The endpoint whose body-carrying operation is `operation_id`.
+    ///
+    /// Read by the HTTP observer, which learns of a dropped body only through
+    /// the route it was served on. The `HEAD` operations send no body, so they
+    /// have none to abandon.
+    pub(crate) fn of_operation(operation_id: &str) -> Option<Self> {
+        match operation_id {
+            "streamFile" => Some(Self::Stream),
+            "downloadFile" => Some(Self::Download),
+            _ => None,
+        }
+    }
+}
+
+/// A [`FileByteSource`] that reports what it delivers.
+///
+/// Kynos's range body reads its source one span at a time as the client
+/// takes the bytes, and holds the source until the body is finished or
+/// dropped. So every span read is counted into `beam_stream_bytes_total` as
+/// it goes, and the first read marks the body active in `beam_streams_active`
+/// until the source is dropped with it. A `HEAD`, a `304` or a refused range
+/// reads nothing and is never active.
+///
+/// The bytes are those handed to the body: a client that leaves mid-span is
+/// counted for the span it was being sent.
+pub struct MeteredSource {
+    inner: FileByteSource,
+    endpoint: DeliveryEndpoint,
+    /// Whether a span has been read, and so the body counted active.
+    active: AtomicBool,
+}
+
+impl MeteredSource {
+    fn new(inner: FileByteSource, endpoint: DeliveryEndpoint) -> Self {
+        Self {
+            inner,
+            endpoint,
+            active: AtomicBool::new(false),
+        }
+    }
+}
+
+impl ByteSource for MeteredSource {
+    type Error = std::io::Error;
+
+    async fn complete_length(&self) -> Result<u64, Self::Error> {
+        self.inner.complete_length().await
+    }
+
+    async fn read_span(&self, first: u64, last: u64) -> Result<Bytes, Self::Error> {
+        if !self.active.swap(true, Ordering::Relaxed) {
+            metrics::gauge!("beam_streams_active", "endpoint" => self.endpoint.label())
+                .increment(1.0);
+        }
+        let span = self.inner.read_span(first, last).await?;
+        metrics::counter!("beam_stream_bytes_total", "endpoint" => self.endpoint.label())
+            .increment(span.len() as u64);
+        Ok(span)
+    }
+}
+
+impl Drop for MeteredSource {
+    fn drop(&mut self) {
+        if *self.active.get_mut() {
+            metrics::gauge!("beam_streams_active", "endpoint" => self.endpoint.label())
+                .decrement(1.0);
+        }
     }
 }
 
@@ -243,7 +333,12 @@ async fn deliver(
             DeliveryError::SourceFileMissing("Source video file not found".into())
         })?;
 
-    let mut served = Served::<_, SourceFileRanges>::new(source)
+    let endpoint = if attachment {
+        DeliveryEndpoint::Download
+    } else {
+        DeliveryEndpoint::Stream
+    };
+    let mut served = Served::<_, SourceFileRanges>::new(MeteredSource::new(source, endpoint))
         .content_type(&content_type)
         .etag(validator(modified, length))
         .last_modified(modified)

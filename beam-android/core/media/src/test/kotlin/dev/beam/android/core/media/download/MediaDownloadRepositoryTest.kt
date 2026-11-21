@@ -46,7 +46,7 @@ class MediaDownloadRepositoryTest : DownloadRepositoryHarness() {
             awaitUntil { stateOf(F1) == DownloadState.COMPLETED }
 
             assertEquals(listOf<String?>(STALE, FRESH), synchronized(cookies) { cookies.toList() })
-            assertTrue("completion survives in the core", repository.isDownloaded(F1))
+            assertTrue("the completed download plays offline", repository.isDownloaded(F1))
         }
 
     @Test
@@ -96,7 +96,7 @@ class MediaDownloadRepositoryTest : DownloadRepositoryHarness() {
             observe()
             awaitUntil { stateOf(F1) == DownloadState.COMPLETED }
 
-            assertTrue("completion reached the core", repository.isDownloaded(F1))
+            assertTrue("the completed download plays offline", repository.isDownloaded(F1))
         }
 
     private companion object {

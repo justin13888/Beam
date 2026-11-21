@@ -22,6 +22,7 @@ import dagger.hilt.components.SingletonComponent
 import dev.beam.android.core.ffi.repository.PlaybackRepository
 import dev.beam.android.core.ffi.repository.TelemetryRepository
 import dev.beam.android.core.media.download.BeamDownloadManager
+import dev.beam.android.core.media.download.CompletedDownloads
 import dev.beam.android.core.media.download.DownloadArtwork
 import dev.beam.android.core.media.download.DownloadCommands
 import dev.beam.android.core.media.download.DownloadManagerHolder
@@ -126,8 +127,20 @@ internal object MediaModule {
         repository: PlaybackRepository,
         telemetry: TelemetryRepository,
         clients: BeamHttpClientFactory,
+        downloadCache: Cache,
+        completedDownloads: CompletedDownloads,
         scope: CoroutineScope,
-    ): BeamPlayer = ExoBeamPlayer(context, player, repository, telemetry, clients, scope)
+    ): BeamPlayer =
+        ExoBeamPlayer(
+            context = context,
+            exoPlayer = player,
+            repository = repository,
+            telemetry = telemetry,
+            clients = clients,
+            downloadCache = downloadCache,
+            completedDownloads = completedDownloads,
+            scope = scope,
+        )
 
     @Provides
     @Singleton
@@ -179,4 +192,9 @@ public abstract class MediaBindsModule {
     @Binds
     @Singleton
     internal abstract fun downloadManagerHolder(impl: MediaDownloadRepository): DownloadManagerHolder
+
+    /** The player's view of the same manager: which downloads have completed. */
+    @Binds
+    @Singleton
+    internal abstract fun completedDownloads(impl: MediaDownloadRepository): CompletedDownloads
 }

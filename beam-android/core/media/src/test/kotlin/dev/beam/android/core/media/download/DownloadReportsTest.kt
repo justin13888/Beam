@@ -9,9 +9,7 @@ import androidx.media3.exoplayer.offline.Download
 import androidx.media3.exoplayer.offline.DownloadProgress
 import androidx.media3.exoplayer.offline.DownloadRequest
 import androidx.media3.exoplayer.scheduler.Requirements
-import dev.beam.android.core.testing.downloadRecord
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -55,19 +53,6 @@ class DownloadReportsTest {
     fun `only a failure carries a message`() {
         assertTrue(download(Download.STATE_FAILED).toReport(0).failureMessage!!.contains("retry"))
         assertNull(download(Download.STATE_DOWNLOADING).toReport(0).failureMessage)
-    }
-
-    @Test
-    fun `only a completed download or part of one counts as downloaded`() {
-        val records =
-            listOf(
-                downloadRecord(fileId = "done", state = DownloadState.COMPLETED),
-                downloadRecord(fileId = "partial", state = DownloadState.PAUSED),
-            )
-
-        assertTrue(records.holdsCompleted("done"))
-        assertFalse(records.holdsCompleted("partial"))
-        assertFalse(records.holdsCompleted("unknown"))
     }
 
     private fun download(
