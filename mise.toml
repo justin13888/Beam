@@ -2128,7 +2128,8 @@ description = "Assert the rendered Helm chart keeps one Recreate replica, read-o
 #      server directly and could forge the header.
 #   9. The server pod's terminationGracePeriodSeconds is longer than
 #      BEAM_SHUTDOWN_TIMEOUT_SECS, so the kubelet's SIGKILL never cuts a drain
-#      short.
+#      short, and BEAM_SHUTDOWN_TIMEOUT_SECS is plain digits the server can
+#      parse -- never the exponent form Helm gives a float of a million or more.
 #  10. The server pod runs as the image's user (uid and gid 1000, which own
 #      /data in the image) and with exactly the supplemental groups the
 #      scenario sets in server.podSecurityContext.supplementalGroups -- the
@@ -2336,12 +2337,14 @@ for (const scenario of scenarios.sort()) {
     );
   }
 
-  // 9.
-  const drain = Number(env.get("BEAM_SHUTDOWN_TIMEOUT_SECS"));
+  // 9. Digits only, not Number(): Number("1e+06") is an integer to JavaScript,
+  // but the server parses the value as a plain integer and refuses it (#481).
+  const drainRaw = env.get("BEAM_SHUTDOWN_TIMEOUT_SECS");
+  const drain = /^[0-9]+$/.test(drainRaw ?? "") ? Number(drainRaw) : NaN;
   const grace = pod.terminationGracePeriodSeconds;
   check(
     Number.isInteger(drain) && Number.isInteger(grace) && grace > drain,
-    `${tag} terminationGracePeriodSeconds (${grace}) outlasts BEAM_SHUTDOWN_TIMEOUT_SECS (${JSON.stringify(env.get("BEAM_SHUTDOWN_TIMEOUT_SECS"))})`,
+    `${tag} terminationGracePeriodSeconds (${grace}) outlasts BEAM_SHUTDOWN_TIMEOUT_SECS (${JSON.stringify(drainRaw)})`,
   );
 
   // 10.

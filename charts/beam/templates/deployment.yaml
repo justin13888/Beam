@@ -112,8 +112,9 @@ spec:
             {{- end }}
             - name: BEAM_AUTO_MIGRATE
               value: {{ .Values.server.autoMigrate | quote }}
+            {{- /* int64 first, as for the watcher values below. */}}
             - name: BEAM_SHUTDOWN_TIMEOUT_SECS
-              value: {{ .Values.server.shutdownTimeoutSeconds | quote }}
+              value: {{ .Values.server.shutdownTimeoutSeconds | int64 | quote }}
             - name: BEAM_ENABLE_METRICS
               value: {{ .Values.metrics.enabled | quote }}
             - name: BEAM_RATE_LIMIT_TRUST_FORWARDED_FOR
