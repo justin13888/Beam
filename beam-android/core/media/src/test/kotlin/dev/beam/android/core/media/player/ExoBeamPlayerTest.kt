@@ -131,6 +131,45 @@ class ExoBeamPlayerTest {
         }
 
     @Test
+    fun `a stream refused with 401 while the core still honours the session is offered as a retry`() =
+        runTest {
+            val scope = TestScope(testScheduler)
+            val player = player(scope)
+            player.play(REQUEST)
+            scope.runCurrent()
+
+            player.onPlayerError(badStatus(401))
+            scope.runCurrent()
+
+            assertEquals(listOf<UInt?>(1u), playback.continueWatchingLimits)
+            val error = player.state.value.error
+            assertNotNull(error)
+            assertFalse("nothing will send the viewer to sign in", error!!.requiresSignIn)
+            assertTrue("the refusal came from in front of the server", error.isRetryable)
+            assertEquals("The server refused to send this file.", error.message)
+            player.stop()
+        }
+
+    @Test
+    fun `a session check that fails for another reason does not leave the viewer at a sign-in prompt`() =
+        runTest {
+            val scope = TestScope(testScheduler)
+            val player = player(scope)
+            player.play(REQUEST)
+            scope.runCurrent()
+            playback.failWith = BeamException.Network("connection reset")
+
+            player.onPlayerError(badStatus(401))
+            scope.runCurrent()
+
+            val error = player.state.value.error
+            assertNotNull(error)
+            assertFalse(error!!.requiresSignIn)
+            assertTrue(error.isRetryable)
+            player.stop()
+        }
+
+    @Test
     fun `a stream refused for access does not question the session`() =
         runTest {
             val scope = TestScope(testScheduler)

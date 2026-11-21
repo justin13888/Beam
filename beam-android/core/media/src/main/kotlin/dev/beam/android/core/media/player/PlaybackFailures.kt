@@ -42,7 +42,7 @@ internal fun PlaybackException.asPlaybackFailure(): PlaybackFailure {
                 }
 
                 errorCode == PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS -> {
-                    "The server refused to send this file."
+                    SERVER_REFUSED_MESSAGE
                 }
 
                 else -> {
@@ -56,6 +56,16 @@ internal fun PlaybackException.asPlaybackFailure(): PlaybackFailure {
         requiresSignIn = sessionRefused,
     )
 }
+
+/**
+ * A stream refused with `401` while the core found the session still
+ * honoured: the refusal came from something in front of the server, such as
+ * a proxy, so it is the generic refusal a retry may get past, not an expiry.
+ */
+internal fun streamRefusedWithSessionHonoured(): PlaybackFailure =
+    PlaybackFailure(message = SERVER_REFUSED_MESSAGE, isRetryable = true)
+
+private const val SERVER_REFUSED_MESSAGE = "The server refused to send this file."
 
 /**
  * The HTTP status behind this failure, if a server answered with one.

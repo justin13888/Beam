@@ -566,7 +566,7 @@ internal class ExoBeamPlayer(
         forceReport()
         val failure = error.asPlaybackFailure()
         mutableState.update { it.copy(error = failure, isBuffering = false) }
-        if (failure.requiresSignIn) confirmSessionWithCore()
+        if (failure.requiresSignIn) confirmSessionWithCore(failure)
     }
 
     /**
@@ -580,15 +580,29 @@ internal class ExoBeamPlayer(
      * API call. The core decides, not this class -- a stray `401` from a proxy
      * in front of the stream does not sign anyone out while the server still
      * honours the session. The cheapest secured call the repository offers is
-     * one row of "continue watching"; its answer, and its failure, are only
-     * the side effect.
+     * one row of "continue watching"; its answer is only the side effect.
+     *
+     * Where the core does not confirm the expiry, [failure] stops claiming
+     * one: nothing would send the viewer to sign in, so a sign-in prompt with
+     * no retry would leave them stuck. It becomes the retryable refusal it
+     * was before the status was read.
      */
-    private fun confirmSessionWithCore() {
+    private fun confirmSessionWithCore(failure: PlaybackFailure) {
         scope.launch {
-            try {
-                repository.continueWatching(SESSION_PROBE_LIMIT)
-            } catch (_: BeamException) {
-                // The expiry, if that is what this was, is already announced.
+            val confirmed =
+                try {
+                    repository.continueWatching(SESSION_PROBE_LIMIT)
+                    false
+                } catch (probeFailure: BeamException) {
+                    // The expiry, if that is what this was, is already announced.
+                    probeFailure.toFailure().requiresSignIn
+                }
+            if (!confirmed) {
+                mutableState.update { state ->
+                    // Only the failure this probe was for: a newer one, or a
+                    // new file, is not this probe's to rewrite.
+                    if (state.error === failure) state.copy(error = streamRefusedWithSessionHonoured()) else state
+                }
             }
         }
     }
