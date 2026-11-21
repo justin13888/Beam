@@ -38,7 +38,8 @@ class SettingsTest {
         preferences: FakePreferencesRepository = FakePreferencesRepository(),
         servers: FakeServerRepository = signedIn(),
         sessions: FakeSessionRepository = FakeSessionRepository(),
-    ) = SettingsViewModel(preferences, servers, sessions)
+        downloads: FakeDownloadRepository = FakeDownloadRepository(),
+    ) = SettingsViewModel(preferences, servers, sessions, downloads)
 
     /**
      * One signed-in server, already restored: settings is reached only past
@@ -282,6 +283,41 @@ class SettingsTest {
                 listOf("home", "office"),
                 model.state.value.servers
                     .map { it.id },
+            )
+        }
+
+    @Test
+    fun `forgetting a server deletes its downloads and only its downloads`() =
+        runTest {
+            val downloads =
+                FakeDownloadRepository(
+                    listOf(download("h1", serverId = "home"), download("c1", serverId = "cabin")),
+                )
+            val model = viewModel(servers = knownServers(), downloads = downloads)
+            testScheduler.advanceUntilIdle()
+
+            model.removeServer("cabin")
+            testScheduler.advanceUntilIdle()
+
+            assertEquals(listOf("h1"), downloads.current.map { it.fileId })
+        }
+
+    @Test
+    fun `a server the core failed to forget keeps its downloads`() =
+        runTest {
+            val servers = knownServers()
+            val downloads = FakeDownloadRepository(listOf(download("c1", serverId = "cabin")))
+            val model = viewModel(servers = servers, downloads = downloads)
+            testScheduler.advanceUntilIdle()
+
+            servers.failWith = BeamException.Network("the connection dropped", true)
+            model.removeServer("cabin")
+            testScheduler.advanceUntilIdle()
+
+            assertEquals(
+                "the server is still listed, so its downloads stay with it",
+                listOf("c1"),
+                downloads.current.map { it.fileId },
             )
         }
 

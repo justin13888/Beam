@@ -7,6 +7,7 @@ import dev.beam.android.core.ffi.preferences.PreferencesRepository
 import dev.beam.android.core.ffi.repository.ServerRepository
 import dev.beam.android.core.ffi.repository.SessionRepository
 import dev.beam.android.core.ffi.toFailure
+import dev.beam.android.core.media.download.DownloadRepository
 import dev.beam.android.core.model.PaletteSource
 import dev.beam.android.core.model.QualityPreference
 import dev.beam.android.core.model.ThemeMode
@@ -57,6 +58,7 @@ public class SettingsViewModel
         private val preferences: PreferencesRepository,
         private val servers: ServerRepository,
         private val sessions: SessionRepository,
+        private val downloads: DownloadRepository,
     ) : ViewModel() {
         private val mutableState = MutableStateFlow(SettingsUiState())
         public val state: StateFlow<SettingsUiState> = mutableState.asStateFlow()
@@ -96,14 +98,19 @@ public class SettingsViewModel
         }
 
         /**
-         * Forget a server this device is not using, with its session and its
-         * queued progress. The active one is signed out of instead, which is
-         * the account row's button.
+         * Forget a server this device is not using, with its session, its
+         * queued progress and the downloads fetched from it. The active one is
+         * signed out of instead, which is the account row's button.
+         *
+         * The downloads go only once the core has forgotten the server: a
+         * removal that failed leaves the server listed, and its downloads must
+         * still be there with it.
          */
         public fun removeServer(serverId: String) {
             if (mutableState.value.server?.id == serverId) return
             viewModelScope.launch {
-                runCatching { servers.removeServer(serverId) }
+                runCatching { servers.removeServer(serverId) }.onFailure { return@launch }
+                runCatching { downloads.removeServer(serverId) }
             }
         }
 

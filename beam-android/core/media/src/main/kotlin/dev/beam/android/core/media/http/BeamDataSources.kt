@@ -13,6 +13,7 @@ import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.HttpDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
+import okhttp3.Call
 import okhttp3.OkHttpClient
 import uniffi.beam_client_core.ServerHttpConfig
 import java.util.concurrent.TimeUnit
@@ -81,15 +82,27 @@ internal class BeamHttpClientFactory(
  * resolve too -- without it, a completed download would be unplayable, because
  * an HTTP-only factory cannot open a local file.
  *
- * Takes the server's config rather than one file's, because downloads and
- * playback share it: a download manager is constructed once, before any file
- * is chosen.
+ * Takes the server's config rather than one file's: playback resolves it once
+ * for the file it is about to play.
  */
 internal fun beamDataSourceFactory(
     context: Context,
     clients: BeamHttpClientFactory,
     server: ServerHttpConfig,
 ): DataSource.Factory = DefaultDataSource.Factory(context, beamHttpDataSourceFactory(clients, server))
+
+/**
+ * A Media3 [DataSource.Factory] whose requests go out through [calls].
+ *
+ * For a consumer that outlives any one credential -- the download manager is
+ * built once per process, and a download runs across sign-outs, re-sign-ins and
+ * restarts -- so [calls] must resolve the server config per request, as
+ * [ServerCallFactory] does, rather than capture it.
+ */
+internal fun beamDataSourceFactory(
+    context: Context,
+    calls: Call.Factory,
+): DataSource.Factory = DefaultDataSource.Factory(context, OkHttpDataSource.Factory(calls))
 
 /**
  * The HTTP half of [beamDataSourceFactory]: requests go out through a
