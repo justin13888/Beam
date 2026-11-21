@@ -238,6 +238,55 @@ async fn server_additions_selections_and_removals_are_each_announced() {
     );
 }
 
+/// The server is installed before the registry write the keystore refuses,
+/// so it is in the list all the same: the observer hears that list once.
+#[tokio::test]
+async fn an_addition_the_storage_refuses_is_still_announced() {
+    let storage = Arc::new(InMemoryKeyValueStore::new());
+    let client = BeamClient::new(Arc::clone(&storage) as Arc<dyn KeyValueStore>);
+    let recorded = observing(&client);
+    storage.set_failure(FailureMode::FailWrites);
+
+    assert!(matches!(
+        client
+            .add_server("https://beam.test".to_owned(), Some("Home".to_owned()))
+            .await,
+        Err(BeamError::Storage { .. })
+    ));
+
+    let server = the_only_announcement(&client, &recorded);
+    assert_eq!(server.display_name, "Home");
+    assert_eq!(server.state, SessionState::LoggedOut);
+}
+
+/// The server leaves the in-memory registry before the write the keystore
+/// refuses, so the list changed: the observer hears it once, without it.
+#[tokio::test]
+async fn a_removal_the_storage_refuses_is_still_announced() {
+    let storage = Arc::new(InMemoryKeyValueStore::new());
+    let client = BeamClient::new(Arc::clone(&storage) as Arc<dyn KeyValueStore>);
+    let home = client
+        .add_server("https://beam.test".to_owned(), Some("Home".to_owned()))
+        .await
+        .expect("added")
+        .id;
+    let cabin = client
+        .add_server("https://cabin.test".to_owned(), Some("Cabin".to_owned()))
+        .await
+        .expect("added")
+        .id;
+    let recorded = observing(&client);
+    storage.set_failure(FailureMode::FailWrites);
+
+    assert!(matches!(
+        client.remove_server(home).await,
+        Err(BeamError::Storage { .. })
+    ));
+
+    let server = the_only_announcement(&client, &recorded);
+    assert_eq!(server.id, cabin);
+}
+
 /// A cold start announces what it read, and registering announces nothing
 /// by itself: the app reads the list it starts from.
 #[tokio::test]
