@@ -1,10 +1,11 @@
 package dev.beam.android.feature.settings
 
 import dev.beam.android.core.media.download.DownloadRepository
-import dev.beam.android.core.model.DownloadRecord
-import dev.beam.android.core.model.DownloadState
+import dev.beam.android.core.testing.downloadRecord
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import uniffi.beam_client_core.DownloadRecord
+import uniffi.beam_client_core.DownloadState
 
 /**
  * Downloads held in memory, each tagged with the server it came from.
@@ -25,13 +26,13 @@ internal class FakeDownloadRepository(
 
     override suspend fun enqueue(
         fileId: String,
-        serverId: String,
         mediaId: String,
         title: String,
         subtitle: String?,
         posterUrl: String?,
+        episodeId: String?,
     ) {
-        state.value = state.value + download(fileId = fileId, serverId = serverId)
+        state.value = state.value + download(fileId = fileId, serverId = ACTIVE_SERVER)
     }
 
     override suspend fun pause(fileId: String) = Unit
@@ -59,12 +60,12 @@ internal class FakeDownloadRepository(
 internal fun download(
     fileId: String,
     serverId: String,
-) = DownloadRecord(
+) = downloadRecord(
     fileId = fileId,
-    mediaId = "media-$fileId",
     serverId = serverId,
     title = "Title $fileId",
-    state = DownloadState.Completed,
-    downloadedBytes = 0L,
-    totalBytes = 0L,
+    state = DownloadState.COMPLETED,
 )
+
+/** The server the core queues a download on: the active one, whichever that is. */
+private const val ACTIVE_SERVER = "active"

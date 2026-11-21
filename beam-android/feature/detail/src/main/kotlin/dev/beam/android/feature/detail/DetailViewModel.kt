@@ -242,10 +242,9 @@ public class DetailViewModel
         /**
          * Queue a file for offline playback.
          *
-         * The server is resolved here rather than demanded from the screen: a
-         * download belongs to the server it came from, so that a removed
-         * server can take its files with it, but which server is active is not
-         * something a detail screen knows or should have to pass down.
+         * The core queues it on the active server, which it records as the
+         * download's own, so a removed server can take its files with it.
+         * Checked here first only to say why nothing was queued.
          */
         public fun download(
             fileId: String,
@@ -262,7 +261,6 @@ public class DetailViewModel
                     runCatching {
                         downloads.enqueue(
                             fileId = fileId,
-                            serverId = serverId,
                             mediaId = mediaId,
                             title = title,
                             subtitle = subtitle,

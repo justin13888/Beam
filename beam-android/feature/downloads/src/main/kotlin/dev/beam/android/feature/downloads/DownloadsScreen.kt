@@ -29,10 +29,11 @@ import dev.beam.android.core.designsystem.BeamSpacing
 import dev.beam.android.core.designsystem.component.Artwork
 import dev.beam.android.core.designsystem.component.BeamEmptyState
 import dev.beam.android.core.designsystem.component.SectionHeader
-import dev.beam.android.core.model.DownloadRecord
-import dev.beam.android.core.model.DownloadState
 import dev.beam.android.core.model.PlaybackRequest
 import dev.beam.android.core.ui.Format
+import uniffi.beam_client_core.DownloadRecord
+import uniffi.beam_client_core.DownloadState
+import java.io.File
 
 /** Downloads, wired to its view model. */
 @Composable
@@ -113,16 +114,16 @@ private fun DownloadRow(
     onRemove: () -> Unit,
 ) {
     ListItem(
-        // Rendered from the copy pinned at enqueue time, so it still shows
-        // with no network -- see DownloadArtwork.
+        // Rendered from the copy kept on disk at enqueue time, so it still
+        // shows with no network -- see DownloadArtwork.
         leadingContent = {
-            Artwork(url = record.posterUrl, modifier = Modifier.width(BeamSizes.ListPosterWidth))
+            Artwork(url = record.artworkUri(), modifier = Modifier.width(BeamSizes.ListPosterWidth))
         },
         headlineContent = { Text(record.title) },
         supportingContent = {
             Text(record.statusLine())
             val progress = record.progress
-            if (record.state == DownloadState.Downloading) {
+            if (record.state == DownloadState.DOWNLOADING) {
                 if (progress != null) {
                     LinearProgressIndicator(
                         progress = { progress },
@@ -145,19 +146,19 @@ private fun DownloadRow(
         },
         trailingContent = {
             when (record.state) {
-                DownloadState.Downloading, DownloadState.Queued -> {
+                DownloadState.DOWNLOADING, DownloadState.QUEUED -> {
                     IconButton(onClick = onPause) {
                         Icon(Icons.Rounded.Pause, contentDescription = "Pause")
                     }
                 }
 
-                DownloadState.Paused, DownloadState.Failed, DownloadState.WaitingForNetwork -> {
+                DownloadState.PAUSED, DownloadState.FAILED, DownloadState.WAITING_FOR_NETWORK -> {
                     IconButton(onClick = onResume) {
                         Icon(Icons.Rounded.PlayArrow, contentDescription = "Resume")
                     }
                 }
 
-                DownloadState.Completed -> {
+                DownloadState.COMPLETED -> {
                     IconButton(onClick = onRemove) {
                         Icon(Icons.Rounded.Delete, contentDescription = "Delete")
                     }
@@ -168,7 +169,7 @@ private fun DownloadRow(
             Modifier
                 .fillMaxWidth()
                 .then(
-                    if (record.isPlayableOffline) Modifier.clickable(onClick = onPlay) else Modifier,
+                    if (record.state == DownloadState.COMPLETED) Modifier.clickable(onClick = onPlay) else Modifier,
                 ),
     )
 }
@@ -176,31 +177,38 @@ private fun DownloadRow(
 /** "1.2 GB of 4.0 GB", or why it stopped. */
 internal fun DownloadRecord.statusLine(): String =
     when (state) {
-        DownloadState.Completed -> {
-            Format.fileSize(totalBytes.toULong())
+        DownloadState.COMPLETED -> {
+            Format.fileSize(totalBytes ?: downloadedBytes)
         }
 
-        DownloadState.Failed -> {
+        DownloadState.FAILED -> {
             failureMessage ?: "Stopped"
         }
 
-        DownloadState.WaitingForNetwork -> {
+        DownloadState.WAITING_FOR_NETWORK -> {
             "Waiting for Wi-Fi"
         }
 
-        DownloadState.Paused -> {
-            "Paused · ${Format.fileSize(downloadedBytes.toULong())}"
+        DownloadState.PAUSED -> {
+            "Paused · ${Format.fileSize(downloadedBytes)}"
         }
 
-        DownloadState.Queued -> {
+        DownloadState.QUEUED -> {
             "Waiting to start"
         }
 
-        DownloadState.Downloading -> {
-            if (totalBytes > 0L) {
-                "${Format.fileSize(downloadedBytes.toULong())} of ${Format.fileSize(totalBytes.toULong())}"
+        DownloadState.DOWNLOADING -> {
+            val total = totalBytes
+            if (total != null) {
+                "${Format.fileSize(downloadedBytes)} of ${Format.fileSize(total)}"
             } else {
-                Format.fileSize(downloadedBytes.toULong())
+                Format.fileSize(downloadedBytes)
             }
         }
     }
+
+/**
+ * The poster kept on disk, as a `file:` URI the image loader reads with no
+ * network; `null` when the download has none, so the placeholder shows.
+ */
+internal fun DownloadRecord.artworkUri(): String? = artworkPath?.let { File(it).toURI().toString() }

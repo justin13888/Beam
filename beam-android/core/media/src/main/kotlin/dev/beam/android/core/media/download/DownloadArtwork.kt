@@ -1,7 +1,6 @@
 package dev.beam.android.core.media.download
 
 import android.content.Context
-import android.net.Uri
 import coil3.ImageLoader
 import coil3.request.CachePolicy
 import coil3.request.ImageRequest
@@ -18,8 +17,9 @@ import java.security.MessageDigest
  * The downloads screen is the one screen guaranteed to be used offline, and a
  * poster URL written down at enqueue time is useless there unless its bytes
  * were fetched while the network was still up. So enqueueing fetches them and
- * keeps a copy in [directory], the downloads screen renders that copy (see
- * [displayUrl]), and removing the download deletes it.
+ * keeps a copy in [directory], the core's download record names that copy
+ * (see [pathFor]) and the downloads screen renders it, and removing the
+ * download deletes it.
  *
  * The fetch goes through the app's own [ImageLoader] rather than a second
  * fetcher. That loader fetches through
@@ -31,7 +31,7 @@ import java.security.MessageDigest
  *
  * The copy is what makes the lifetime match. The loader's disk cache is a
  * shared LRU with a size cap, so enough browsing pushes any entry in it out;
- * a file of the app's own in [directory] is deleted only by [unpin], which the
+ * a file of the app's own in [directory] is deleted only by [release], which the
  * download manager calls when the last download showing the poster goes.
  *
  * @param directory where pinned posters are kept, one file per poster URL.
@@ -48,7 +48,7 @@ public class DownloadArtwork(
     private val loader: () -> ImageLoader,
 ) {
     /**
-     * Fetch [url] and keep a copy of it until [unpin].
+     * Fetch [url] and keep a copy of it at [pathFor] until [release].
      *
      * Never throws for a network or storage failure: a poster is decoration on
      * a download the viewer asked for, and failing the download because the
@@ -80,20 +80,23 @@ public class DownloadArtwork(
         withContext(Dispatchers.IO) { copyOut(images, url, target) }
     }
 
-    /** Stop keeping [url]; it is fetched again on the next online render. */
-    public fun unpin(url: String) {
-        fileFor(url).delete()
-        loader().diskCache?.remove(url)
-    }
+    /**
+     * Where [pin] keeps [url]'s copy: what a download record names, so the
+     * downloads screen renders the poster from disk with no network.
+     *
+     * Known before the fetch, so the record is written once, at enqueue. A
+     * poster that could not be kept leaves nothing at the path, and the
+     * screen shows its placeholder.
+     */
+    public fun pathFor(url: String): String = fileFor(url).absolutePath
 
     /**
-     * What the downloads screen should render for [url]: the kept copy where
-     * there is one, so it renders with no network, and [url] itself otherwise,
-     * so a poster that could not be kept still renders online.
+     * Stop keeping the copy at [path], a path [pathFor] named. A path outside
+     * [directory] is not this store's to delete, and is left alone.
      */
-    public fun displayUrl(url: String): String {
-        val kept = fileFor(url)
-        return if (kept.isFile) Uri.fromFile(kept).toString() else url
+    public fun release(path: String) {
+        val kept = File(path)
+        if (kept.parentFile?.canonicalFile == directory.canonicalFile) kept.delete()
     }
 
     private fun copyOut(

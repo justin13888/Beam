@@ -3,10 +3,7 @@
 
 package dev.beam.android.core.media.download
 
-import android.content.Context
 import android.database.SQLException
-import android.net.ConnectivityManager
-import android.net.NetworkCapabilities
 import android.net.Uri
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.database.DatabaseIOException
@@ -17,116 +14,37 @@ import androidx.media3.datasource.cache.CacheWriter
 import androidx.media3.exoplayer.offline.Download
 import androidx.media3.exoplayer.offline.DownloadCursor
 import androidx.media3.exoplayer.offline.DownloadIndex
-import androidx.media3.test.utils.robolectric.RobolectricUtil.runMainLooperUntil
-import androidx.test.core.app.ApplicationProvider
-import dev.beam.android.core.ffi.repository.PlaybackRepository
-import dev.beam.android.core.media.http.BeamHttpClientFactory
-import dev.beam.android.core.media.http.ServerCallFactory
-import dev.beam.android.core.media.player.DownloadCacheRule
-import dev.beam.android.core.model.DownloadRecord
-import dev.beam.android.core.model.DownloadState
-import dev.beam.android.core.model.UserPreferences
-import dev.beam.android.core.testing.FakePlaybackRepository
-import dev.beam.android.core.testing.FakePreferencesRepository
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.test.UnconfinedTestDispatcher
-import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
-import kotlinx.coroutines.test.setMain
-import mockwebserver3.Dispatcher
-import mockwebserver3.MockResponse
-import mockwebserver3.MockWebServer
-import mockwebserver3.RecordedRequest
-import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
-import org.junit.Before
-import org.junit.Rule
 import org.junit.Test
-import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
-import org.robolectric.Shadows.shadowOf
-import org.robolectric.shadows.ShadowNetworkCapabilities
-import uniffi.beam_client_core.PlaybackHttpConfig
-import java.util.concurrent.atomic.AtomicReference
+import org.robolectric.annotation.GraphicsMode
+import uniffi.beam_client_core.DownloadState
 
 /**
- * Which downloads count as complete, and that a finished one stays listed,
- * against a real Media3 download manager and a real server on loopback: the
- * server serves [DONE] in full and refuses
- * every request for [PARTIAL], whose first bytes are already in the cache.
+ * Which downloads count as complete, and that a finished or failed one stays
+ * listed, through the harness's real manager, core and server: [DONE] is
+ * served in full under a fresh session, and every request for [PARTIAL],
+ * whose first bytes are already in the cache, is refused.
  */
-@OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
-class CompletedDownloadsTest {
-    @get:Rule val temp = TemporaryFolder()
-
-    @get:Rule val downloads = DownloadCacheRule()
-
-    private val context: Context = ApplicationProvider.getApplicationContext()
-    private val server = MockWebServer()
-
-    /** Whether the server has recovered, and serves [RETRIED] in full. */
-    @Volatile private var recovered = false
-    private lateinit var repository: MediaDownloadRepository
-
-    @Before
-    fun setUp() {
-        // As in MediaDownloadRepositoryTest: a validated network, with
-        // cellular allowed, so the manager's requirements are met.
-        Dispatchers.setMain(UnconfinedTestDispatcher())
-        val connectivity = context.getSystemService(ConnectivityManager::class.java)
-        val capabilities = ShadowNetworkCapabilities.newInstance()
-        shadowOf(capabilities).addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-        shadowOf(capabilities).addCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
-        shadowOf(connectivity).setNetworkCapabilities(connectivity.activeNetwork, capabilities)
-        server.dispatcher =
-            object : Dispatcher() {
-                override fun dispatch(request: RecordedRequest): MockResponse =
-                    if (request.url.encodedPath == "/v1/files/$DONE/stream" ||
-                        (recovered && request.url.encodedPath == "/v1/files/$RETRIED/stream")
-                    ) {
-                        MockResponse.Builder().body(BODY).build()
-                    } else {
-                        MockResponse.Builder().code(503).build()
-                    }
-            }
-        server.start()
-        repository =
-            MediaDownloadRepository(
-                context = context,
-                playback = Playback(),
-                calls = ServerCallFactory(BeamHttpClientFactory(BeamHttpClientFactory.shared())) { null },
-                commands = InProcessDownloadCommands { repository.manager() },
-                cache = downloads.cache,
-                titles = FileDownloadTitleStore(context),
-                artwork = DownloadArtwork(context, temp.newFolder("artwork")) { error("no poster in this test") },
-                preferences = FakePreferencesRepository(UserPreferences(downloadOverCellular = true)),
-            )
-        repository.manager().resumeDownloads()
-    }
-
-    @After
-    fun tearDown() {
-        repository.manager().release()
-        server.close()
-        Dispatchers.resetMain()
-    }
-
+@GraphicsMode(GraphicsMode.Mode.NATIVE)
+class CompletedDownloadsTest : DownloadRepositoryHarness() {
     @Test
     fun `only a download that has completed counts as downloaded`() =
         runTest {
+            sessions[serverId(HOME)] = config(FRESH, HOME)
+            sessions[serverId(CABIN)] = config(STALE, CABIN)
             // The first bytes of PARTIAL, as an interrupted download leaves them.
             CacheWriter(
-                CacheDataSource(downloads.cache, ByteArrayDataSource(BODY.toByteArray())),
+                CacheDataSource(cache, ByteArrayDataSource(BODY.toByteArray())),
                 DataSpec
                     .Builder()
-                    .setUri(Uri.parse(mediaUrl(PARTIAL)))
+                    .setUri(Uri.parse(mediaUrl(PARTIAL, CABIN)))
                     .setLength(4)
                     .build(),
                 null,
@@ -135,16 +53,16 @@ class CompletedDownloadsTest {
 
             // DONE first: the manager runs one download at a time, and PARTIAL
             // never finishes.
-            enqueue(DONE)
-            runMainLooperUntil { stateOf(DONE) == Download.STATE_COMPLETED }
-            enqueue(PARTIAL)
-            runMainLooperUntil { stateOf(PARTIAL) != null }
+            enqueue(DONE, on = HOME)
+            awaitUntil { indexedState(DONE) == Download.STATE_COMPLETED }
+            enqueue(PARTIAL, on = CABIN)
+            awaitUntil { indexedState(PARTIAL) != null }
 
-            assertTrue(downloads.cache.getCachedSpans(mediaUrl(PARTIAL)).isNotEmpty())
+            assertTrue(cache.getCachedSpans(mediaUrl(PARTIAL, CABIN)).isNotEmpty())
             assertFalse("bytes on disk are not a finished download", repository.isDownloaded(PARTIAL))
             assertNull(repository.completed(PARTIAL))
             assertTrue(repository.isDownloaded(DONE))
-            assertEquals(CompletedDownload(DONE, mediaUrl(DONE)), repository.completed(DONE))
+            assertEquals(CompletedDownload(DONE, mediaUrl(DONE, HOME)), repository.completed(DONE))
             assertNull("never queued", repository.completed("unknown"))
         }
 
@@ -154,22 +72,17 @@ class CompletedDownloadsTest {
             // Media3 waits seconds between attempts; failing on the first
             // keeps this to the outcome rather than the backoff.
             repository.manager().minRetryCount = 0
-            // Atomic: the list is read from the download index on an IO thread.
-            val listed = AtomicReference<List<DownloadRecord>>(emptyList())
-            backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
-                repository.downloads.collect(listed::set)
-            }
+            sessions[serverId(HOME)] = config(FRESH, HOME)
+            sessions[serverId(CABIN)] = config(STALE, CABIN)
+            observe()
 
-            enqueue(DONE)
-            enqueue(PARTIAL)
-            runMainLooperUntil {
-                val finished = setOf(DownloadState.Completed, DownloadState.Failed)
-                listed.get().size == 2 && listed.get().all { it.state in finished }
-            }
+            enqueue(DONE, on = HOME)
+            enqueue(PARTIAL, on = CABIN)
+            awaitUntil { stateOf(DONE) == DownloadState.COMPLETED && stateOf(PARTIAL) == DownloadState.FAILED }
 
             assertEquals(
-                listOf(DONE to DownloadState.Completed, PARTIAL to DownloadState.Failed),
-                listed.get().map { it.fileId to it.state },
+                setOf(DONE to DownloadState.COMPLETED, PARTIAL to DownloadState.FAILED),
+                listed.map { it.fileId to it.state }.toSet(),
             )
         }
 
@@ -177,14 +90,17 @@ class CompletedDownloadsTest {
     fun `resuming a failed download retries it`() =
         runTest {
             repository.manager().minRetryCount = 0
-            enqueue(RETRIED)
-            runMainLooperUntil { stateOf(RETRIED) == Download.STATE_FAILED }
+            val cabin = serverId(CABIN)
+            sessions[cabin] = config(STALE, CABIN)
+            enqueue(RETRIED, on = CABIN)
+            awaitUntil { indexedState(RETRIED) == Download.STATE_FAILED }
 
-            recovered = true
+            // The viewer signs in again, then retries.
+            sessions[cabin] = config(FRESH, CABIN)
             repository.resume(RETRIED)
-            runMainLooperUntil { stateOf(RETRIED) == Download.STATE_COMPLETED }
+            awaitUntil { indexedState(RETRIED) == Download.STATE_COMPLETED }
 
-            assertEquals(CompletedDownload(RETRIED, mediaUrl(RETRIED)), repository.completed(RETRIED))
+            assertEquals(CompletedDownload(RETRIED, mediaUrl(RETRIED, CABIN)), repository.completed(RETRIED))
         }
 
     @Test
@@ -202,33 +118,11 @@ class CompletedDownloadsTest {
         assertNull(unreadable.completedDownload(DONE))
     }
 
-    private suspend fun enqueue(fileId: String) =
-        repository.enqueue(fileId = fileId, serverId = "home", mediaId = "m-$fileId", title = "Title $fileId")
-
-    private fun stateOf(fileId: String): Int? =
-        repository
-            .manager()
-            .downloadIndex
-            .getDownload(fileId)
-            ?.state
-
-    private fun mediaUrl(fileId: String): String = server.url("/v1/files/$fileId/stream").toString()
-
-    /** Media URLs on the loopback server; everything else is the shared fake's. */
-    private inner class Playback : PlaybackRepository by FakePlaybackRepository() {
-        override suspend fun playbackConfig(fileId: String): PlaybackHttpConfig =
-            PlaybackHttpConfig(
-                url = mediaUrl(fileId),
-                headers = emptyMap(),
-                trustedFingerprints = emptyList(),
-                pinnedHost = server.hostName,
-            )
-    }
+    private fun indexedState(fileId: String): Int? = indexed().firstOrNull { it.request.id == fileId }?.state
 
     private companion object {
-        const val DONE = "done"
-        const val PARTIAL = "partial"
-        const val RETRIED = "retried"
-        const val BODY = "media bytes"
+        const val DONE = "d1000000-0000-4000-8000-000000000001"
+        const val PARTIAL = "e1000000-0000-4000-8000-000000000001"
+        const val RETRIED = "f2000000-0000-4000-8000-000000000001"
     }
 }

@@ -15,9 +15,7 @@ import androidx.media3.exoplayer.offline.DownloadIndex
 import androidx.media3.exoplayer.offline.DownloadManager
 import dagger.hilt.android.qualifiers.ApplicationContext
 import dev.beam.android.core.ffi.preferences.PreferencesRepository
-import dev.beam.android.core.ffi.repository.PlaybackRepository
 import dev.beam.android.core.media.http.ServerCallFactory
-import dev.beam.android.core.model.DownloadRecord
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -28,6 +26,8 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import uniffi.beam_client_core.BeamClient
+import uniffi.beam_client_core.DownloadRecord
 import java.io.IOException
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -37,14 +37,17 @@ public interface DownloadRepository {
     /** Every download, re-emitted whenever any of them changes. */
     public val downloads: Flow<List<DownloadRecord>>
 
-    /** Queue a file for offline playback. */
+    /**
+     * Queue a file for offline playback, from the active server: the core
+     * plans every part and subtitle file of its source.
+     */
     public suspend fun enqueue(
         fileId: String,
-        serverId: String,
         mediaId: String,
         title: String,
         subtitle: String? = null,
         posterUrl: String? = null,
+        episodeId: String? = null,
     )
 
     /** Stop a download, keeping the bytes already fetched. */
@@ -120,11 +123,10 @@ internal class MediaDownloadRepository
     @Inject
     constructor(
         @ApplicationContext private val context: Context,
-        private val playback: PlaybackRepository,
+        private val core: BeamClient,
         private val calls: ServerCallFactory,
         private val commands: DownloadCommands,
         private val cache: Cache,
-        private val titles: DownloadTitleStore,
         private val artwork: DownloadArtwork,
         preferences: PreferencesRepository,
     ) : DownloadRepository,
@@ -153,13 +155,13 @@ internal class MediaDownloadRepository
 
         override suspend fun enqueue(
             fileId: String,
-            serverId: String,
             mediaId: String,
             title: String,
             subtitle: String?,
             posterUrl: String?,
+            episodeId: String?,
         ) {
-            beamManager().enqueue(fileId, serverId, mediaId, title, subtitle, posterUrl, playback)
+            beamManager().enqueue(fileId, mediaId, episodeId, title, subtitle, posterUrl)
         }
 
         override suspend fun pause(fileId: String) {
@@ -199,6 +201,12 @@ internal class MediaDownloadRepository
             }
         }
 
+        /**
+         * From the download index, as [completed] is, so the detail page says
+         * "Play offline" exactly when the player would read the file from disk.
+         * The core's record catches up only while something collects
+         * [downloads], so it can lag a download that finished meanwhile.
+         */
         override suspend fun isDownloaded(fileId: String): Boolean = completed(fileId) != null
 
         /**
@@ -231,7 +239,7 @@ internal class MediaDownloadRepository
                         calls = calls,
                         commands = commands,
                         cache = cache,
-                        titles = titles,
+                        core = core,
                         artwork = artwork,
                     ).also {
                         it.setRequiresUnmeteredNetwork(requiresUnmetered)

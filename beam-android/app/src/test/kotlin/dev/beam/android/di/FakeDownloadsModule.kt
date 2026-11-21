@@ -10,9 +10,9 @@ import dev.beam.android.core.media.di.MediaBindsModule
 import dev.beam.android.core.media.download.CompletedDownloads
 import dev.beam.android.core.media.download.DownloadManagerHolder
 import dev.beam.android.core.media.download.DownloadRepository
-import dev.beam.android.core.model.DownloadRecord
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import uniffi.beam_client_core.DownloadRecord
 import javax.inject.Singleton
 
 /**
@@ -57,11 +57,11 @@ private class NoDownloads : DownloadRepository {
 
     override suspend fun enqueue(
         fileId: String,
-        serverId: String,
         mediaId: String,
         title: String,
         subtitle: String?,
         posterUrl: String?,
+        episodeId: String?,
     ) = Unit
 
     override suspend fun pause(fileId: String) = Unit
