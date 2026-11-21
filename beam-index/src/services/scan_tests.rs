@@ -701,10 +701,24 @@ mod metrics {
         let library = Uuid::new_v4();
         let label = library.to_string();
         let series = |name: &str| capture.snapshot().gauge(name, &[("library", &label)]);
+        let titles = |kind: &str| {
+            capture.snapshot().gauge(
+                "beam_library_titles",
+                &[("library", &label), ("kind", kind)],
+            )
+        };
+        let kinds = ["movie", "show", "season", "episode"];
+        let counts = LibraryTitleCounts {
+            movies: 1,
+            shows: 2,
+            seasons: 3,
+            episodes: 4,
+        };
 
         let ticket = registered(&coordinator, library, ScanTrigger::Periodic, &clock);
         ticket.start();
         ticket.record_file_count(3);
+        ticket.record_title_counts(counts);
         ticket.succeed(ScanProgress::default());
         drop(ticket);
         assert_eq!(
@@ -712,6 +726,9 @@ mod metrics {
             Some(1_700_000_000.0)
         );
         assert_eq!(series("beam_library_files"), Some(3.0));
+        for (kind, count) in kinds.into_iter().zip([1.0, 2.0, 3.0, 4.0]) {
+            assert_eq!(titles(kind), Some(count), "{kind} is recorded");
+        }
 
         let late = registered(&coordinator, library, ScanTrigger::Manual, &clock);
         late.start();
@@ -725,9 +742,13 @@ mod metrics {
         ] {
             assert_eq!(series(name), Some(0.0), "{name} is zeroed on forget");
         }
+        for kind in kinds {
+            assert_eq!(titles(kind), Some(0.0), "{kind} is zeroed on forget");
+        }
 
         clock.advance(Duration::from_secs(60));
         late.record_file_count(5);
+        late.record_title_counts(counts);
         late.succeed(ScanProgress::default());
         drop(late);
         for name in [
@@ -736,6 +757,9 @@ mod metrics {
             "beam_library_files",
         ] {
             assert_eq!(series(name), Some(0.0), "{name} stays zeroed");
+        }
+        for kind in kinds {
+            assert_eq!(titles(kind), Some(0.0), "{kind} stays zeroed");
         }
         assert!(
             capture

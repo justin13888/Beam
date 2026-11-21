@@ -231,6 +231,12 @@ pub const DESCRIPTIONS: &[Description] = &[
         help: "Files present in the library as of its last completed scan, by library id; 0 once the library is deleted.",
     },
     Description {
+        name: "beam_library_titles",
+        kind: Kind::Gauge,
+        unit: Some(Unit::Count),
+        help: "Live titles in the library as of its last completed scan, by library id and kind (movie, show, season, episode); 0 once the library is deleted.",
+    },
+    Description {
         name: "beam_trickplay_pending",
         kind: Kind::Gauge,
         unit: Some(Unit::Count),

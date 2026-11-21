@@ -16,6 +16,25 @@ pub struct Library {
     pub last_scan_file_count: Option<i32>,
 }
 
+/// How many live titles one library holds, by kind (issue #494): what
+/// [`crate::repositories::LibraryRepository::count_titles`] answers.
+///
+/// A title counts as [`crate::models::LibraryShape`] counts it, scoped to the
+/// library's own files: while at least one of them is present -- a missing
+/// file (issue #179) keeps nothing live. A show spanning two libraries counts
+/// in each library that holds a present file of one of its episodes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LibraryTitleCounts {
+    /// Movies with a present file in the library.
+    pub movies: u64,
+    /// Shows with an episode that has a present file in the library.
+    pub shows: u64,
+    /// Seasons with an episode that has a present file in the library.
+    pub seasons: u64,
+    /// Episodes with a present file in the library.
+    pub episodes: u64,
+}
+
 /// Parameters for creating a new library
 #[derive(Debug, Clone)]
 pub struct CreateLibrary {

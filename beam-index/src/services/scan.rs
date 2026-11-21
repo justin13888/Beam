@@ -33,7 +33,38 @@ use tokio::sync::{
 };
 use uuid::Uuid;
 
+use beam_domain::models::LibraryTitleCounts;
 use beam_domain::services::Clock;
+
+/// `beam_library_titles{library,kind}`'s series for `counts`, one per `kind`
+/// label -- the one place the labels are named, so recording a scan's counts
+/// and zeroing a deleted library's cover the same series.
+fn title_series(counts: LibraryTitleCounts) -> [(&'static str, u64); 4] {
+    let LibraryTitleCounts {
+        movies,
+        shows,
+        seasons,
+        episodes,
+    } = counts;
+    [
+        ("movie", movies),
+        ("show", shows),
+        ("season", seasons),
+        ("episode", episodes),
+    ]
+}
+
+/// Set `beam_library_titles{library,kind}` to `counts`.
+fn set_title_gauges(library: &str, counts: LibraryTitleCounts) {
+    for (kind, count) in title_series(counts) {
+        metrics::gauge!(
+            "beam_library_titles",
+            "library" => library.to_string(),
+            "kind" => kind
+        )
+        .set(count as f64);
+    }
+}
 
 /// What started a scan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -421,8 +452,8 @@ impl ScanCoordinator {
     ///
     /// The library's scan series are zeroed, since the exporter keeps a
     /// series until the process ends: `beam_scan_in_progress`,
-    /// `beam_scan_last_success_timestamp_seconds` and `beam_library_files`
-    /// read 0 for a deleted library rather than its last values, so an alert
+    /// `beam_scan_last_success_timestamp_seconds`, `beam_library_files` and
+    /// every `beam_library_titles` kind read 0 for a deleted library rather than its last values, so an alert
     /// on a stale last success can exclude it. A ticket still running --
     /// one that did not stop in time -- emits nothing after this.
     pub fn forget(&self, library_id: Uuid) {
@@ -435,6 +466,7 @@ impl ScanCoordinator {
         metrics::gauge!("beam_scan_in_progress", "library" => library.clone()).set(0.0);
         metrics::gauge!("beam_scan_last_success_timestamp_seconds", "library" => library.clone())
             .set(0.0);
+        set_title_gauges(&library, LibraryTitleCounts::default());
         metrics::gauge!("beam_library_files", "library" => library).set(0.0);
     }
 
@@ -587,6 +619,12 @@ impl ScanTicket {
         self.emit_metrics(|library| {
             metrics::gauge!("beam_library_files", "library" => library).set(files as f64);
         });
+    }
+
+    /// Set `beam_library_titles{library,kind}` to the live titles a
+    /// completed scan left the library holding (issue #494).
+    pub fn record_title_counts(&self, counts: LibraryTitleCounts) {
+        self.emit_metrics(|library| set_title_gauges(&library, counts));
     }
 
     /// The job has its lock and is running.

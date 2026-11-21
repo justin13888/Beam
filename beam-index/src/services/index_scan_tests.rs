@@ -712,6 +712,173 @@ async fn a_scan_records_the_present_file_count_and_its_start_and_finish() {
     assert_eq!(files_gauge(), Some(1.0));
 }
 
+/// A completed scan sets `beam_library_titles{library,kind}` to the live
+/// titles it left the library holding, and the next scan refreshes it: a
+/// movie whose file is gone leaves the count (issue #494).
+#[tokio::test]
+async fn a_scan_records_the_live_title_count_of_each_kind() {
+    let capture = crate::test_metrics::MetricsCapture::new();
+    let _recorder = capture.install();
+    let h = Harness::settled().await;
+    let library_label = h.library.id.to_string();
+    let titles_gauge = |kind: &str| {
+        capture.snapshot().gauge(
+            "beam_library_titles",
+            &[("library", &library_label), ("kind", kind)],
+        )
+    };
+    let heat = h.write("Heat (1995).mkv");
+    h.write("The Office/Season 1/The Office S01E01.mkv");
+    h.write("The Office/Season 1/The Office S01E02.mkv");
+
+    h.scan().await;
+
+    for (kind, count) in [
+        ("movie", 1.0),
+        ("show", 1.0),
+        ("season", 1.0),
+        ("episode", 2.0),
+    ] {
+        assert_eq!(
+            titles_gauge(kind),
+            Some(count),
+            "{kind} after the first scan"
+        );
+    }
+
+    std::fs::remove_file(&heat).unwrap();
+    h.clock.advance(Duration::from_secs(60));
+
+    h.scan().await;
+
+    for (kind, count) in [
+        ("movie", 0.0),
+        ("show", 1.0),
+        ("season", 1.0),
+        ("episode", 2.0),
+    ] {
+        assert_eq!(
+            titles_gauge(kind),
+            Some(count),
+            "{kind} once the movie is gone"
+        );
+    }
+}
+
+/// The library store, whose title count fails (NFR-205); every other read
+/// and write goes to the wired in-memory store.
+#[derive(Debug)]
+struct TitleCountFails {
+    inner: Arc<InMemoryLibraryRepository>,
+}
+
+#[async_trait::async_trait]
+impl LibraryRepository for TitleCountFails {
+    async fn find_all(&self) -> Result<Vec<Library>, DbErr> {
+        self.inner.find_all().await
+    }
+    async fn find_by_id(&self, id: Uuid) -> Result<Option<Library>, DbErr> {
+        self.inner.find_by_id(id).await
+    }
+    async fn create(&self, create: CreateLibrary) -> Result<Library, DbErr> {
+        self.inner.create(create).await
+    }
+    async fn count_files(&self, library_id: Uuid) -> Result<u64, DbErr> {
+        self.inner.count_files(library_id).await
+    }
+    async fn count_titles(
+        &self,
+        _library_id: Uuid,
+    ) -> Result<beam_domain::models::LibraryTitleCounts, DbErr> {
+        Err(DbErr::Custom("the database is down".to_string()))
+    }
+    async fn update_scan_progress(
+        &self,
+        library_id: Uuid,
+        started_at: Option<DateTime<Utc>>,
+        finished_at: Option<DateTime<Utc>>,
+        file_count: Option<i32>,
+    ) -> Result<(), DbErr> {
+        self.inner
+            .update_scan_progress(library_id, started_at, finished_at, file_count)
+            .await
+    }
+    async fn delete(&self, id: Uuid) -> Result<(), DbErr> {
+        self.inner.delete(id).await
+    }
+    async fn count(&self) -> Result<u64, DbErr> {
+        self.inner.count().await
+    }
+}
+
+/// A scan whose title count fails fails as a whole, as any other store
+/// failure at its tail does: the job reads failed, the error reaches the
+/// caller, no title gauge is set, and the library is not stamped finished --
+/// a scan that could not read what it left is not recorded as complete
+/// (issue #494).
+#[tokio::test]
+async fn a_scan_whose_title_count_fails_fails_and_records_no_finish() {
+    let capture = crate::test_metrics::MetricsCapture::new();
+    let _recorder = capture.install();
+    let dir = TempDir::new().unwrap();
+    let stores = IndexStores::wired();
+    let library = stores
+        .library_repo
+        .create(CreateLibrary {
+            name: "Unreadable".to_string(),
+            root_path: dir.path().to_path_buf(),
+            description: None,
+        })
+        .await
+        .unwrap();
+    let clock = Arc::new(TestClock::starting_at(written_at()));
+    let service = IndexServiceBuilder::new()
+        .stores(&stores)
+        .library_repo(Arc::new(TitleCountFails {
+            inner: stores.library_repo.clone(),
+        }))
+        .build()
+        .with_clock(clock.clone());
+
+    let scanned = service.scan_now(library.id, ScanTrigger::Manual).await;
+
+    assert!(
+        matches!(scanned, Err(IndexError::Db(DbErr::Custom(_)))),
+        "the store's failure reaches the caller: {scanned:?}"
+    );
+    assert_eq!(
+        service.scan_job(library.id).map(|job| job.state),
+        Some(ScanState::Failed)
+    );
+    let stored = stores
+        .library_repo
+        .find_by_id(library.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        stored.last_scan_started_at,
+        Some(clock.now()),
+        "the scan did start"
+    );
+    assert_eq!(
+        stored.last_scan_finished_at, None,
+        "but is not stamped finished"
+    );
+    assert_eq!(stored.last_scan_file_count, None);
+    let library_label = library.id.to_string();
+    for kind in ["movie", "show", "season", "episode"] {
+        assert_eq!(
+            capture.snapshot().gauge(
+                "beam_library_titles",
+                &[("library", &library_label), ("kind", kind)],
+            ),
+            None,
+            "no {kind} count was read, so none is exported"
+        );
+    }
+}
+
 mod rescan_properties {
     use super::*;
     use proptest::prelude::*;
