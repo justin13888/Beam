@@ -65,6 +65,13 @@ first build to take a long time.** Later builds reuse the layer cache.
    it. It is a **build argument**, not a runtime setting: changing it later means rebuilding the
    web image, not just restarting the container. Leave it at `http://localhost:8000` and a browser
    on any other machine will try to reach the API on its own loopback and fail.
+
+   Do not point it at `http://<host>:8000` either. The server's port (`BEAM_SERVER_HOST_PORT`) is
+   published on `127.0.0.1` only, so no other machine can reach it: the web app would load and
+   then fail every API call. For browsers on other machines, set it to the reverse proxy's public
+   origin for the server, which forwards the API's `/v1` routes and nothing else. The bundled
+   Traefik serves that as `https://server.beam.localhost`, a name only this host resolves; give
+   its router your own domain to serve other machines.
    </Aside>
 
    The three `BEAM_OIDC_*` credentials are required together — see
@@ -118,8 +125,13 @@ first build to take a long time.** Later builds reuse the layer cache.
 | Service | Default | Variable |
 |---|---|---|
 | Web app | `http://localhost:8080` | `WEB_HOST_PORT` |
-| Server API | `http://localhost:8000` | `BEAM_SERVER_HOST_PORT` |
-| Interactive API docs | `http://localhost:8000/openapi` | — |
+| Server API | `http://localhost:8000`, on this host only | `BEAM_SERVER_HOST_PORT` |
+| Server API through the bundled Traefik | `https://server.beam.localhost/v1` | — |
+| Interactive API docs | `http://localhost:8000/openapi`, on this host only | — |
+
+The server's port is bound to `127.0.0.1`: it carries every route, including the unauthenticated
+`/metrics` and `/openapi`, so it is never published to the network. Other machines reach the API
+through the reverse proxy, which forwards only `/v1`.
 
 Open the web app and sign in. If sign-in fails, [Troubleshooting](/help/troubleshooting/) covers
 the usual causes.

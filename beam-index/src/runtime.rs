@@ -26,6 +26,7 @@ use crate::services::enrichment::MetadataEnrichmentService;
 use crate::services::filesystem_probe::StatfsFilesystemProbe;
 use crate::services::index::{IndexError, LocalIndexService, ReconcileOutcome};
 use crate::services::scan::ScanTrigger;
+use crate::services::scan_deferrals::{ScanDeferral, ScanDeferrals, ScanDeferralsConsumer};
 use crate::services::watch_status::{WatchMode, WatchStatus, read_max_user_watches};
 use crate::services::watcher::{FsEvent, FsEventKind, FsWatcher, NotifyFsWatcher, PathDebouncer};
 
@@ -57,6 +58,10 @@ pub trait BackgroundIndexer: Send + Sync + std::fmt::Debug {
 
     /// The repository the watch refresher lists libraries from.
     fn library_repo(&self) -> Arc<dyn LibraryRepository>;
+
+    /// Where scans leave the files they deferred as still being written, for
+    /// the watch consumer to retry (issue #453).
+    fn scan_deferrals(&self) -> Arc<ScanDeferrals>;
 }
 
 #[async_trait::async_trait]
@@ -81,6 +86,10 @@ impl BackgroundIndexer for LocalIndexService {
 
     fn library_repo(&self) -> Arc<dyn LibraryRepository> {
         LocalIndexService::library_repo(self).clone()
+    }
+
+    fn scan_deferrals(&self) -> Arc<ScanDeferrals> {
+        LocalIndexService::scan_deferrals(self).clone()
     }
 }
 
@@ -258,10 +267,13 @@ pub fn spawn_background_indexing_with(
     // poller waits for it. Dropped unused when the watcher is disabled.
     let (startup_scan_done, startup_scan_finished) = oneshot::channel();
 
+    // Attached before the startup scan can start, so no file it defers is
+    // dropped for want of a consumer.
     let watch_consumer = watcher.clone().map(|watcher| {
         tokio::spawn(run_watch_consumer(
             watcher,
             indexer.clone(),
+            indexer.scan_deferrals().attach(),
             clock.clone(),
             Duration::from_millis(config.watch_debounce_ms),
         ))
@@ -300,38 +312,43 @@ pub fn spawn_background_indexing_with(
 /// passed, measured on `clock`. A fresh event for the same path replaces the
 /// kept one, since it says more recently what happened there. Waiting on the
 /// library instead would stall every other library's events behind one scan.
+///
+/// A file a scan deferred as still being written (issue #453) joins the same
+/// set, as a [`FsEventKind::Modified`] event due once the scan's delay has
+/// passed: nothing else would come back to it before the next periodic
+/// rescan. An event already kept for the path stays as it was.
 async fn run_watch_consumer(
     watcher: Arc<dyn FsWatcher>,
     indexer: Arc<dyn BackgroundIndexer>,
+    scan_deferrals: ScanDeferralsConsumer,
     clock: Arc<dyn Clock>,
     debounce: Duration,
 ) {
     let mut deferred: HashMap<(Uuid, PathBuf), (FsEventKind, std::time::Instant)> = HashMap::new();
     loop {
-        // Block until the first event of a burst, or until a deferred event
-        // falls due.
+        // Block until the first event of a burst, until a deferred event
+        // falls due, or until a scan defers a file.
         let next_due = deferred.values().map(|(_, due)| *due).min();
-        let first = match next_due {
-            Some(due) => {
-                let wait = due.saturating_duration_since(clock.monotonic());
-                tokio::select! {
-                    event = watcher.next_event() => match event {
-                        Some(event) => Some(event),
-                        None => {
-                            info!("Filesystem watcher closed; stopping consumer");
-                            return;
-                        }
-                    },
-                    _ = clock.sleep(wait) => None,
+        let retry_due = async {
+            match next_due {
+                Some(due) => {
+                    clock
+                        .sleep(due.saturating_duration_since(clock.monotonic()))
+                        .await
                 }
+                None => std::future::pending().await,
             }
-            None => match watcher.next_event().await {
+        };
+        let first = tokio::select! {
+            event = watcher.next_event() => match event {
                 Some(event) => Some(event),
                 None => {
                     info!("Filesystem watcher closed; stopping consumer");
                     return;
                 }
             },
+            () = retry_due => None,
+            () = scan_deferrals.recorded() => None,
         };
 
         let mut batch: Vec<FsEvent> = Vec::new();
@@ -361,8 +378,21 @@ async fn run_watch_consumer(
             }
         }
 
-        // Every deferred event that has fallen due joins the batch.
+        // Every file a scan deferred since the last pass is kept until its
+        // delay has passed.
         let now = clock.monotonic();
+        for ScanDeferral {
+            library_id,
+            path,
+            retry_after,
+        } in scan_deferrals.take()
+        {
+            deferred
+                .entry((library_id, path))
+                .or_insert((FsEventKind::Modified, now + retry_after));
+        }
+
+        // Every deferred event that has fallen due joins the batch.
         let due: Vec<(Uuid, PathBuf)> = deferred
             .iter()
             .filter(|(_, (_, due))| *due <= now)

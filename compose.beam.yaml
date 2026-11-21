@@ -107,7 +107,13 @@ services:
       - BEAM_SESSION_IDLE_DAYS=${BEAM_SESSION_IDLE_DAYS:-14}
       - BEAM_SESSION_MAX_DAYS=${BEAM_SESSION_MAX_DAYS:-60}
     ports:
-      - "${BEAM_SERVER_HOST_PORT:-8000}:8000"
+      # Loopback only. The port carries the whole server -- the unauthenticated
+      # `/metrics` (with BEAM_ENABLE_METRICS) and `/openapi` included -- so
+      # anything off this host reaches Beam through Traefik's `/v1` router
+      # below, never directly. The browser and an Android emulator reach it on
+      # the host's loopback. `check:compose-invariants` fails if the address is
+      # dropped.
+      - "127.0.0.1:${BEAM_SERVER_HOST_PORT:-8000}:8000"
     volumes:
       # Use named volumes by default, or custom host paths if specified.
       # The library is mounted read-only (FR-202): Beam never writes under a
@@ -133,7 +139,11 @@ services:
       - beam_proxy
     labels:
       traefik.enable: "true"
-      traefik.http.routers.server.rule: "Host(`server.beam.localhost`)"
+      # Only the versioned API, as the Helm ingress routes it: `/metrics` is
+      # unauthenticated and `/openapi` is not part of the client contract, so
+      # neither is forwarded. `check:compose-invariants` fails if the path
+      # restriction is dropped or widened.
+      traefik.http.routers.server.rule: "Host(`server.beam.localhost`) && PathPrefix(`/v1`)"
       traefik.http.routers.server.entrypoints: websecure
       traefik.http.routers.server.tls: "true"
       traefik.http.services.server.loadbalancer.server.port: "8000"

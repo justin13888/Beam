@@ -231,7 +231,9 @@ strength. Each requirement is independently testable. See `product.md` for narra
   library's first -- and every watcher reconcile of it MUST be serialised: a request while a scan is queued or running MUST
   be refused with `library-scan-in-progress` (409), the periodic rescan MUST skip such a library,
   and a watcher event MUST be deferred and retried rather than wait. A file MUST NOT be hashed until
-  it has gone `BEAM_SCAN_SETTLE_SECS` without a write (measured with the injected `Clock`), and a
+  it has gone `BEAM_SCAN_SETTLE_SECS` without a write (measured with the injected `Clock`); a file a
+  scan defers for that reason MUST be retried once the window has passed, not left to the next scan,
+  whenever the watcher runs; and a
   file whose probe failed MUST be probed again on each visit and classified when a probe succeeds;
   when a file's content changes and its probe fails, the old content's probe results and streams
   MUST be cleared rather than kept; when its size, modification time or identity (FR-221: inode and
