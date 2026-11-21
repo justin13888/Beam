@@ -506,7 +506,9 @@ mod library_declarations {
 
     #[test]
     fn a_malformed_or_ambiguous_declaration_is_refused() {
-        let cases: [(&str, fn(&LibraryDeclarationError) -> bool); 7] = [
+        /// Whether a refusal is the one a case expects.
+        type Expected = fn(&LibraryDeclarationError) -> bool;
+        let cases: [(&str, Expected); 7] = [
             ("{", |e| matches!(e, LibraryDeclarationError::Json(_))),
             (r#"{"name":"a","path":"/a"}"#, |e| {
                 matches!(e, LibraryDeclarationError::Json(_))
