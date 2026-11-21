@@ -5,6 +5,7 @@ package dev.beam.android.core.media.download
 
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.offline.Download
+import androidx.media3.exoplayer.offline.DownloadManager
 import uniffi.beam_client_core.DownloadRecord
 import uniffi.beam_client_core.DownloadState
 import uniffi.beam_client_core.TransferReport
@@ -64,6 +65,16 @@ internal fun Download.toReport(notMetRequirements: Int): TransferReport {
             },
     )
 }
+
+/**
+ * Every download in the manager's index, in every state: unlike
+ * `currentDownloads`, which leaves out a completed or failed one. Reads the
+ * index's database, so it is called off the main thread.
+ */
+internal fun DownloadManager.indexedDownloads(): List<Download> =
+    downloadIndex.getDownloads().use { cursor ->
+        buildList { while (cursor.moveToNext()) add(cursor.download) }
+    }
 
 /** Whether [fileId] -- a download, or a part of one -- is complete among [this]. */
 internal fun List<DownloadRecord>.holdsCompleted(fileId: String): Boolean =

@@ -19,11 +19,13 @@ import androidx.media3.exoplayer.offline.DownloadManager
 import androidx.media3.exoplayer.offline.DownloadRequest
 import androidx.media3.exoplayer.scheduler.Requirements
 import dev.beam.android.core.media.http.beamDataSourceFactory
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import okhttp3.Call
 import uniffi.beam_client_core.BeamClient
 import uniffi.beam_client_core.DownloadRecord
@@ -95,8 +97,14 @@ public class BeamDownloadManager internal constructor(
                 }
 
             manager.addListener(listener)
-            changes.trySend(manager.currentDownloads to manager.notMetRequirements)
+            val unmetAtStart = manager.notMetRequirements
             launch {
+                // Nothing reports while nobody collects, so what finished or
+                // failed meanwhile is caught up from the index, which unlike
+                // `currentDownloads` holds both. Read after the listener is
+                // added, so a change racing the read is reported after it.
+                val indexed = withContext(Dispatchers.IO) { manager.indexedDownloads() }
+                send(core.reportDownloadTransfers(indexed.map { it.toReport(unmetAtStart) }))
                 // The requirements are read with the downloads, on Media3's
                 // thread, since the manager is not to be read from any other.
                 for ((batch, unmet) in changes) {
