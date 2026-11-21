@@ -22,6 +22,18 @@ export default defineConfig({
 		globals: true,
 		setupFiles: ["./src/test/setup.ts"],
 		passWithNoTests: true,
+		// `src/test/setup.ts` gives each Testing Library wait 15s, because a
+		// `renderRoute` test is not on screen until the auth check and the
+		// page's own query have both round-tripped through MSW, and under
+		// host load that takes seconds. Vitest's own 5s default per test
+		// (and per hook) sat *below* that, so a loaded run killed tests
+		// before their waits could finish -- the 15s never took effect, and
+		// `ts:test` failed with a different handful of tests each time
+		// (#480). The per-test budget must exceed one wait, and a test may
+		// chain several, so it is twice the wait. A genuine break still
+		// fails at the 15s wait, not here.
+		testTimeout: 30_000,
+		hookTimeout: 30_000,
 		env: {
 			C_STREAM_SERVER_URL: "http://localhost:8000",
 		},
