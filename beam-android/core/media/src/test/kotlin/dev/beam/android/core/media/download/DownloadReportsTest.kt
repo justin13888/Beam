@@ -6,6 +6,7 @@ package dev.beam.android.core.media.download
 import androidx.core.net.toUri
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.offline.Download
+import androidx.media3.exoplayer.offline.DownloadProgress
 import androidx.media3.exoplayer.offline.DownloadRequest
 import androidx.media3.exoplayer.scheduler.Requirements
 import dev.beam.android.core.testing.downloadRecord
@@ -81,7 +82,8 @@ class DownloadReportsTest {
         length,
         if (state == Download.STATE_STOPPED) BeamDownloadManager.STOP_REASON_USER else Download.STOP_REASON_NONE,
         if (state == Download.STATE_FAILED) Download.FAILURE_REASON_UNKNOWN else Download.FAILURE_REASON_NONE,
-    ).also { it.progress.bytesDownloaded = downloaded }
+        DownloadProgress().apply { bytesDownloaded = downloaded },
+    )
 
     private companion object {
         const val ITEM = "f1000000-0000-4000-8000-000000000001"
