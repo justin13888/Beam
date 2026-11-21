@@ -6,11 +6,10 @@
 //! doubles linked to the file double so orphan checks read the files the scan
 //! actually wrote.
 
+use super::test_harness::IndexServiceBuilder;
 use super::*;
-use crate::services::admin_log::LocalAdminLogService;
 use crate::services::hash::MockHashService;
 use crate::services::media_info::MockMediaInfoService;
-use crate::services::notification::InMemoryNotificationService;
 use beam_domain::models::{CreateLibrary, CreateMovieEntry, Episode, Show};
 use beam_domain::repositories::AdminLogRepository;
 use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
@@ -18,7 +17,7 @@ use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
 use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
 use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
 use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
-use beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository;
+use beam_domain::test_utils::create_media_file;
 use tempfile::TempDir;
 
 /// What the prober reports for every file: an hour.
@@ -87,22 +86,17 @@ impl Harness {
 
         // The real clock: `delete_orphaned` compares its cutoff with the
         // `created_at` the repositories stamp from the wall clock.
-        let service = LocalIndexService::new(
-            library_repo,
-            file_repo.clone(),
-            movie_repo.clone(),
-            show_repo.clone(),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-            Arc::new(hasher),
-            Arc::new(prober),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(LocalAdminLogService::new(
-                admin_log_repo.clone() as Arc<dyn AdminLogRepository>
-            )),
-            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-        )
-        .with_missing_file_grace(Duration::ZERO)
-        .with_path_policy(policy);
+        let service = IndexServiceBuilder::new()
+            .library_repo(library_repo)
+            .file_repo(file_repo.clone())
+            .movie_repo(movie_repo.clone())
+            .show_repo(show_repo.clone())
+            .hash_service(Arc::new(hasher))
+            .media_info(Arc::new(prober))
+            .admin_log_repo(admin_log_repo.clone())
+            .build()
+            .with_missing_file_grace(Duration::ZERO)
+            .with_path_policy(policy);
 
         Self {
             _dir: dir,
@@ -190,15 +184,18 @@ impl Harness {
     async fn legacy_file(&self, rel: &str, content: Option<MediaFileContent>, runtime: Duration) {
         let path = self.write(rel);
         let (size_bytes, mtime) = read_fs_meta(path.parent().unwrap(), &path).unwrap();
-        let hash = u64::MAX - self.file_repo.files.lock().unwrap().len() as u64;
+        let held = self
+            .file_repo
+            .find_all_by_library_including_missing(self.library.id)
+            .await
+            .unwrap()
+            .len();
+        let hash = u64::MAX - held as u64;
         self.file_repo
             .create(CreateMediaFile {
-                library_id: self.library.id,
-                path,
                 hash,
                 size_bytes,
                 mtime,
-                identity: None,
                 mime_type: None,
                 duration: Some(runtime),
                 container_format: None,
@@ -208,8 +205,7 @@ impl Harness {
                 } else {
                     FileStatus::Unknown
                 },
-                classifier_version: 0,
-                container_tags: None,
+                ..create_media_file(self.library.id, path)
             })
             .await
             .unwrap();
@@ -579,19 +575,12 @@ async fn a_legacy_sidecar_row_is_marked_missing() {
     let (size_bytes, mtime) = read_fs_meta(nfo.parent().unwrap(), &nfo).unwrap();
     h.file_repo
         .create(CreateMediaFile {
-            library_id: h.library.id,
-            path: nfo.clone(),
             hash: 7,
             size_bytes,
             mtime,
-            identity: None,
             mime_type: None,
-            duration: None,
             container_format: None,
-            content: None,
-            status: FileStatus::Unknown,
-            classifier_version: 0,
-            container_tags: None,
+            ..create_media_file(h.library.id, nfo.clone())
         })
         .await
         .unwrap();
@@ -637,7 +626,12 @@ async fn a_watcher_event_for_an_excluded_file_indexes_nothing() {
         .await
         .unwrap();
 
-    assert!(h.file_repo.files.lock().unwrap().is_empty());
+    let rows = h
+        .file_repo
+        .find_all_by_library_including_missing(h.library.id)
+        .await
+        .unwrap();
+    assert!(rows.is_empty(), "{rows:?}");
 }
 
 #[tokio::test]

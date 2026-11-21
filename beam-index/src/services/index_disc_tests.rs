@@ -7,14 +7,13 @@
 
 use std::sync::atomic::AtomicUsize;
 
+use super::test_harness::IndexServiceBuilder;
 use super::*;
 use crate::disc::fixtures::{TitleSet, mpls, ticks, write_blu_ray, write_dvd};
 use crate::library_file::test_support::snapshot;
 use crate::probe::metadata::MetadataError;
-use crate::services::admin_log::LocalAdminLogService;
 use crate::services::filesystem_probe::{FilesystemKind, FixedFilesystemProbe};
 use crate::services::hash::{HashConfig, LocalHashService};
-use crate::services::notification::InMemoryNotificationService;
 use beam_domain::models::CreateLibrary;
 use beam_domain::models::watch_state::{RecordProgress, WatchTarget};
 use beam_domain::repositories::AdminLogRepository;
@@ -24,7 +23,6 @@ use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
 use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
 use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
 use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
-use beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository;
 use beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository;
 use beam_domain::services::TestClock;
 use tempfile::TempDir;
@@ -102,22 +100,22 @@ impl Harness {
             })
             .await
             .unwrap();
-        let service = LocalIndexService::new(
-            library_repo,
-            file_repo.clone(),
-            movie_repo.clone(),
-            Arc::new(InMemoryShowRepository::with_files(file_repo.clone())),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-            Arc::new(LocalHashService::new(HashConfig { num_threads: 1 })),
-            prober.clone(),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(LocalAdminLogService::new(
-                admin_log_repo.clone() as Arc<dyn AdminLogRepository>
-            )),
-            progress.clone(),
-        )
-        .with_clock(clock)
-        .with_filesystem_probe(Arc::new(FixedFilesystemProbe(FilesystemKind::Local)));
+        let service = IndexServiceBuilder::new()
+            .library_repo(library_repo)
+            .file_repo(file_repo.clone())
+            .movie_repo(movie_repo.clone())
+            .show_repo(Arc::new(InMemoryShowRepository::with_files(
+                file_repo.clone(),
+            )))
+            .hash_service(Arc::new(LocalHashService::new(HashConfig {
+                num_threads: 1,
+            })))
+            .media_info(prober.clone())
+            .admin_log_repo(admin_log_repo.clone())
+            .progress_repo(progress.clone())
+            .build()
+            .with_clock(clock)
+            .with_filesystem_probe(Arc::new(FixedFilesystemProbe(FilesystemKind::Local)));
         Self {
             _dir: dir,
             root,
@@ -1049,26 +1047,13 @@ async fn a_disc_that_cannot_be_read_leaves_its_rows_as_they_were() {
 #[test]
 fn a_rekey_keeps_a_disc_files_part() {
     let row = |path: &str, part: Option<u32>| MediaFile {
-        id: Uuid::nil(),
-        library_id: Uuid::nil(),
-        path: PathBuf::from(path),
-        hash: 1,
-        size_bytes: 1,
-        mtime: None,
-        identity: None,
-        mime_type: None,
-        duration: None,
-        container_format: None,
         content: Some(MediaFileContent::Movie {
             movie_entry_id: Uuid::nil(),
             part_number: part,
         }),
         status: FileStatus::Known,
         classifier_version: CLASSIFIER_VERSION,
-        container_tags: None,
-        scanned_at: DateTime::UNIX_EPOCH,
-        updated_at: DateTime::UNIX_EPOCH,
-        missing_since: None,
+        ..beam_domain::test_utils::media_file(Uuid::nil(), path)
     };
     let cases = [
         ("/lib/Heat (1995)/VIDEO_TS/VTS_02_3.VOB", Some(3), Some(3)),
