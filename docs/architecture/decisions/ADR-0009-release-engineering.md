@@ -31,7 +31,20 @@ honor it and duplicating it in `mise.toml` would recreate the very drift this AD
 
 **`hk` runs the git hooks.** `pre-commit` is staged-file-scoped and auto-fixing; `commit-msg` runs
 `convco` so that non-Conventional Commits are rejected at authorship; `pre-push` approximates CI,
-omitting only coverage instrumentation and container builds.
+omitting only coverage instrumentation and container builds. (Amended — issue #478 — `pre-push`
+now compiles nothing, and `mise run ci` at the head being merged is the gate. Branches are pushed
+after every commit, so a whole-workspace `cargo clippy` and `cargo test` on every push repeated the
+full gates many times for one change, and a merge push re-ran them on a head `ci` had already
+passed. `pre-push` keeps only static checks that read files and finish in seconds: commit messages,
+the hook environment probe, `rustfmt` over the pushed `.rs` files, the lockfile, the FFmpeg pin,
+the compose and chart invariants, the mutants-skip guard and the file-size gate. Clippy, the Rust
+tests, `cargo-deny` (whose advisory database can fail a push for an advisory published since,
+whatever the push changed), and the TypeScript, docs, Android and Apple suites are `ci`'s alone.
+`rust:clippy:affected` and `rust:test:affected` -- which `scripts/affected-rust-packages.sh` scopes
+to the owning workspace members and their reverse dependencies, `--workspace` only when
+`Cargo.lock`, the root `Cargo.toml`, `rust-toolchain.toml`, `clippy.toml` or `.cargo/**` changed --
+and `ts:test:related` remain as quick local checks no hook runs. `mise run ci` together with CI's
+`ci-ok` remains the gate before a merge, and is unchanged.)
 
 **Conventional Commits are enforced, and drive versioning.** `convco` lints — at commit time, over
 the commit range on a pull request, and against the pull request title, since a squash merge lands

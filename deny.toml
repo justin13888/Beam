@@ -87,13 +87,13 @@ ignore = [
     # 0.7.6, which elliptic-curve 0.13 (openidconnect 4.0.1's pin) cannot take;
     # re-evaluate when openidconnect moves to elliptic-curve 0.14.
     { id = "RUSTSEC-2026-0387", reason = "constant-time leak only matters for secret integers; beam only verifies EC signatures against public JWKS keys as an OIDC relying party, and no patched 0.5.x exists" },
-    # chrono: an *unmaintained* notice, not a vulnerability -- every version is
-    # flagged and no safe upgrade exists. Beam's direct uses could move to jiff
-    # or time, but chrono also reaches the tree through sea-orm, sea-query,
-    # sqlx-core/sqlx-postgres and openidconnect/oauth2, so dropping our own
-    # uses would not remove it. Re-evaluate when those dependencies migrate
-    # (#476).
-    { id = "RUSTSEC-2026-0543", reason = "unmaintained notice with no safe upgrade; chrono arrives transitively via sea-orm, sqlx and openidconnect regardless of beam's direct uses (#476)" },
+    # chrono: marked unmaintained for every version, with no safe upgrade. It
+    # is an informational advisory, not a vulnerability. beam uses it directly
+    # (beam-auth, beam-domain, beam-index, beam-server, beam-test-support), and
+    # sea-orm, sea-query, sqlx, openidconnect, oauth2 and kynos depend on it
+    # regardless, so dropping the direct uses alone would not clear it.
+    # Migrating to `jiff` or `time` is tracked by #476; re-evaluate there.
+    { id = "RUSTSEC-2026-0543", reason = "unmaintained, not vulnerable; transitive through sea-orm, sqlx and openidconnect regardless of beam's own use, and the migration off chrono is tracked by #476" },
 ]
 # If this is true, then cargo deny will use the git executable to fetch advisory database.
 # If this is false, then it uses a built-in git library.
