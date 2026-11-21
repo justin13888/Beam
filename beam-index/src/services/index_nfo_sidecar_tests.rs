@@ -1516,7 +1516,9 @@ async fn a_rescan_writes_nothing_for_a_subtitle_with_a_sub_microsecond_mtime() {
     );
     h.scan().await;
 
-    // Mark the row, so a rewrite -- which stamps it afresh -- shows.
+    // Mark the row, so a rewrite -- which stamps it afresh -- shows. Through
+    // the double's map: `upsert_by_path` stamps `updated_at` with the time it
+    // writes, so no trait method can leave a row with a chosen stamp.
     let marker = DateTime::<Utc>::UNIX_EPOCH;
     h.sidecar_repo
         .rows
@@ -2131,14 +2133,29 @@ async fn an_nfo_whose_stat_stamp_is_unchanged_is_not_read_again() {
     let stamp = hints::change_stamp(&crate::library_file::FileMeta::from(
         &std::fs::symlink_metadata(&nfo).unwrap(),
     ));
-    let stale = |stamp: Option<String>| {
-        let mut rows = h.applied_nfo_repo.rows.lock().unwrap();
-        let row = rows.get_mut(&nfo).unwrap();
-        row.content_hash = "stale".to_string();
-        row.change_stamp = stamp;
-    };
+    async fn stale(h: &Harness, nfo: &std::path::Path, stamp: Option<String>) {
+        use beam_domain::models::applied_nfo::RecordAppliedNfo;
+        use beam_domain::repositories::AppliedNfoRepository;
 
-    stale(stamp);
+        let recorded = h
+            .applied_nfo_repo
+            .find_by_path(nfo)
+            .await
+            .unwrap()
+            .expect("the NFO is recorded");
+        h.applied_nfo_repo
+            .record_by_path(RecordAppliedNfo {
+                library_id: recorded.library_id,
+                path: recorded.path,
+                size_bytes: recorded.size_bytes,
+                content_hash: "stale".to_string(),
+                change_stamp: stamp,
+            })
+            .await
+            .unwrap();
+    }
+
+    stale(&h, &nfo, stamp).await;
     h.scan().await;
     assert_eq!(
         h.movie_of("Matrix/matrix.mkv").pinned_ref.as_deref(),
@@ -2146,7 +2163,7 @@ async fn an_nfo_whose_stat_stamp_is_unchanged_is_not_read_again() {
         "not read, so not re-applied"
     );
 
-    stale(None);
+    stale(&h, &nfo, None).await;
     h.scan().await;
     assert_eq!(
         h.movie_of("Matrix/matrix.mkv").pinned_ref.as_deref(),

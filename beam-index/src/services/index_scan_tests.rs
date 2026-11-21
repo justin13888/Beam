@@ -1775,22 +1775,14 @@ mod library_scans {
         // and this run owns it, and the child is guaranteed absent.
         let dir = TempDir::new().unwrap();
         let root_path = dir.path().join("beam-nonexistent-root");
-        let library = Library {
-            id: Uuid::new_v4(),
-            name: "Bad Library".to_string(),
-            root_path: root_path.clone(),
-            description: None,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-            last_scan_started_at: None,
-            last_scan_finished_at: None,
-            last_scan_file_count: None,
-        };
-        lib_repo
-            .libraries
-            .lock()
-            .unwrap()
-            .insert(library.id, library.clone());
+        let library = lib_repo
+            .create(CreateLibrary {
+                name: "Bad Library".to_string(),
+                root_path: root_path.clone(),
+                description: None,
+            })
+            .await
+            .unwrap();
 
         let admin_log_repo = Arc::new(InMemoryAdminLogRepository::default());
         let admin_log_svc = Arc::new(LocalAdminLogService::new(

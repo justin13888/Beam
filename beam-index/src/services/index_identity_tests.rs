@@ -285,6 +285,9 @@ impl Harness {
             updated_at: now,
         };
         let id = movie.id;
+        // No `MovieRepository` method stores a movie without an identity
+        // key -- every one is created keyed -- so a pre-key row is put in
+        // the double's map, as the shared contract's own fixture does.
         self.movie_repo.movies.lock().unwrap().insert(id, movie);
         for rel in rels {
             let entry = self
@@ -337,6 +340,9 @@ impl Harness {
             updated_at: now,
         };
         let id = show.id;
+        // No `ShowRepository` method stores a show without an identity key
+        // -- every one is created keyed -- so a pre-key row is put in the
+        // double's map, as the shared contract's own fixture does.
         self.show_repo.shows.lock().unwrap().insert(id, show);
         let season = self.show_repo.find_or_create_season(id, 1).await.unwrap();
         for (n, rel) in rels.iter().enumerate() {
@@ -1624,12 +1630,18 @@ async fn a_rekey_does_not_retitle_a_matched_title_older_rules_spelled() {
     );
     // Matched without renaming it: only the provider id says so.
     h.movie_repo
-        .movies
-        .lock()
-        .unwrap()
-        .get_mut(&id)
-        .unwrap()
-        .tmdb_id = Some(949);
+        .apply_enrichment(
+            id,
+            &MovieEnrichment {
+                title: "Heat - CD1".to_string(),
+                year: Some(1995),
+                tmdb_id: Some(949),
+                ..Default::default()
+            },
+            &beam_domain::models::enrichment::FieldLocks::none(),
+        )
+        .await
+        .unwrap();
 
     h.service
         .scan_all_libraries(ScanTrigger::Periodic)
