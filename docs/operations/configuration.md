@@ -91,9 +91,9 @@ Read by the compose files, not by application code:
 | Variable | Default | Meaning |
 |---|---|---|
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | `beam` / `password` / `beam` | Postgres bootstrap credentials; keep in sync with `BEAM_DATABASE_URL`. Change the password in production. |
-| `POSTGRES_HOST_PORT` | `5432` | Host port for Postgres. |
+| `POSTGRES_HOST_PORT` | `5432` | Host port for Postgres, published on `127.0.0.1` only: it is for local tooling, and the server reaches Postgres over the compose network as `postgres:5432`. |
 | `BEAM_SERVER_HOST_PORT` | `8000` | Host port for the API server, published on `127.0.0.1` only: the port carries every route, `/metrics` and `/openapi` included, so off-host clients go through Traefik, which forwards only `/v1`. |
-| `WEB_HOST_PORT` | `8080` | Host port for the web app. |
+| `WEB_HOST_PORT` | `8080` | Host port for the web app, published on `127.0.0.1` only: off-host browsers reach it through Traefik over TLS. |
 | `TRAEFIK_HTTP_PORT` / `TRAEFIK_HTTPS_PORT` / `TRAEFIK_DASHBOARD_PORT` | `80` / `443` / `8888` | Traefik entrypoints (dashboard is loopback-only). |
 | `HOST_VIDEO_DIR` | `server_videos` named volume | Host path mounted read-only at `BEAM_VIDEO_DIR`. |
 | `HOST_DATA_DIR` | `server_data` named volume | Host path mounted at `BEAM_DATA_DIR`. |
