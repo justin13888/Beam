@@ -61,6 +61,11 @@ class CompletedDownloadsTest : DownloadRepositoryHarness() {
             assertTrue(repository.isDownloaded(DONE))
             assertEquals(CompletedDownload(DONE, mediaUrl(DONE, HOME)), repository.completed(DONE))
             assertNull("never queued", repository.completed("unknown"))
+
+            // Media3 would otherwise go on retrying the refused download past
+            // this test, calling into the core it shares with the next one.
+            repository.remove(PARTIAL)
+            awaitUntil { indexedState(PARTIAL) == null }
         }
 
     @Test
