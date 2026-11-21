@@ -8,7 +8,13 @@ services:
     volumes:
       - postgres:/var/lib/postgresql
     ports:
-      - "${POSTGRES_HOST_PORT:-5432}:5432"
+      # Loopback only. The server reaches Postgres over the compose network as
+      # `postgres:5432`; the host mapping exists for local tooling (psql,
+      # migrations, `rust:test:pg`), which connects on the loopback. On every
+      # interface it would hand the database -- with the default
+      # `POSTGRES_PASSWORD` -- to anything that can reach the host.
+      # `check:compose-invariants` fails if the address is dropped.
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-beam}"]
       interval: 10s
