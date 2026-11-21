@@ -43,6 +43,8 @@ use crate::services::paging::page_size;
 use crate::services::playback_telemetry::ReportError;
 use crate::services::telemetry::LibraryReportPreview;
 use crate::state::AppState;
+use beam_domain::models::AdminLogCategory;
+use beam_index::services::admin_log::record_admin_action;
 use beam_index::services::enrichment::control::{ControlError, RefreshScope};
 
 // The service errors are one vocabulary per service; the route errors are one
@@ -192,6 +194,28 @@ impl From<LibraryError> for LibraryScanReadError {
             | LibraryError::Db(_) => Self::Internal(ServerFault::new(err)),
         }
     }
+}
+
+/// Record an administrator's change in the process log and the admin log
+/// (NFR-403), as `System`: who made it, and what it was.
+///
+/// Called only once a change has been made, so the log never claims one that
+/// a validation failure or a missing target stopped. Enrichment changes are
+/// recorded by the enrichment control service itself, as `Enrichment`.
+async fn record_change(
+    state: &AppState,
+    auth: &AdminAuth,
+    message: String,
+    details: serde_json::Value,
+) {
+    record_admin_action(
+        state.services.admin_log.as_ref(),
+        AdminLogCategory::System,
+        message,
+        &auth.0.user_id.to_string(),
+        details,
+    )
+    .await;
 }
 
 /// What `/v1/libraries/{id}`, `/v1/admin/libraries/{id}` and their
@@ -382,7 +406,7 @@ pub async fn get_library_files(
 /// Register a new library root.
 #[kynos::post("/admin/libraries", tag = Admin, operation_id = "createLibrary")]
 pub async fn create_library(
-    _auth: AdminAuth,
+    auth: AdminAuth,
     Inject(state): Inject<AppState>,
     Json(body): Json<CreateLibraryRequest>,
 ) -> Result<Json<Library>, LibraryCreateError> {
@@ -396,6 +420,15 @@ pub async fn create_library(
         .library
         .create_library(name, root_path)
         .await?;
+    // The root path is left out: the admin log is for who changed what, and
+    // a path belongs to the operator's filesystem, not to the log (NFR-108).
+    record_change(
+        &state,
+        &auth,
+        format!("Created library \"{}\"", library.name),
+        serde_json::json!({ "library_id": library.id, "name": library.name }),
+    )
+    .await;
     Ok(Json(library))
 }
 
@@ -438,11 +471,20 @@ fn create_library_errors(body: &CreateLibraryRequest) -> Vec<FieldError> {
     operation_id = "scanLibrary"
 )]
 pub async fn scan_library(
-    _auth: AdminAuth,
+    auth: AdminAuth,
     Path(path): Path<LibraryPath>,
     Inject(state): Inject<AppState>,
 ) -> Result<Accepted<Json<ScanJob>>, LibraryScanError> {
     let job = state.services.library.start_scan(path.id).await?;
+    // The scan's own progress and outcome are the indexer's to record; this
+    // is who asked for it.
+    record_change(
+        &state,
+        &auth,
+        format!("Started a scan of library {}", path.id),
+        serde_json::json!({ "library_id": path.id }),
+    )
+    .await;
     Ok(Accepted::new(Json(job)))
 }
 
@@ -503,11 +545,18 @@ pub async fn refresh_media_metadata(
     operation_id = "deleteLibrary"
 )]
 pub async fn delete_library(
-    _auth: AdminAuth,
+    auth: AdminAuth,
     Path(path): Path<LibraryPath>,
     Inject(state): Inject<AppState>,
 ) -> Result<NoContent, LibraryRefError> {
     if state.services.library.delete_library(path.id).await? {
+        record_change(
+            &state,
+            &auth,
+            format!("Deleted library {}", path.id),
+            serde_json::json!({ "library_id": path.id }),
+        )
+        .await;
         Ok(NoContent)
     } else {
         Err(LibraryRefError::LibraryNotFound(format!(
@@ -717,11 +766,28 @@ pub async fn update_admin_user(
     Json(body): Json<UpdateAdminUserRequest>,
 ) -> Result<NoContent, AdminUserError> {
     let UpdateAdminUserRequest { disabled } = body;
-    state
+    let revoked_sessions = state
         .services
         .admin_users()
         .set_disabled(auth.0.user_id, path.id, disabled)
         .await?;
+
+    record_change(
+        &state,
+        &auth,
+        format!(
+            "{} account {}",
+            if disabled { "Disabled" } else { "Enabled" },
+            path.id
+        ),
+        serde_json::json!({
+            "target_user_id": path.id,
+            "disabled": disabled,
+            "revoked_sessions": revoked_sessions,
+        }),
+    )
+    .await;
+
     Ok(NoContent)
 }
 
@@ -757,7 +823,7 @@ pub async fn get_admin_user_access(
     operation_id = "setAdminUserAccess"
 )]
 pub async fn set_admin_user_access(
-    _auth: AdminAuth,
+    auth: AdminAuth,
     Path(path): Path<UserPath>,
     Inject(state): Inject<AppState>,
     Json(body): Json<UserAccess>,
@@ -767,7 +833,18 @@ pub async fn set_admin_user_access(
         .admin_users()
         .set_access(path.id, body)
         .await?;
-    Ok(Json(UserAccess::from(policy)))
+    let stored = UserAccess::from(policy);
+    record_change(
+        &state,
+        &auth,
+        format!("Set the access of account {}", path.id),
+        serde_json::json!({
+            "target_user_id": path.id,
+            "access": &stored,
+        }),
+    )
+    .await;
+    Ok(Json(stored))
 }
 
 // ── Admin system status (admin only, issue #85) ─────────────────────────────
