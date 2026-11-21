@@ -3,22 +3,14 @@
 //! A scan or watcher reconcile that queues a title for enrichment wakes the
 //! worker once as it ends, however many titles it queued, and one that
 //! queues none does not wake it. These run the real scan and reconcile over a
-//! `TempDir` library, with the in-memory stores below the trait line and a
-//! wake that counts.
+//! `TempDir` library, built by the shared [`IndexServiceBuilder`] over wired
+//! in-memory stores, with a wake that counts.
 
+use super::test_harness::*;
 use super::*;
-use crate::services::admin_log::NoOpAdminLogService;
 use crate::services::hash::MockHashService;
 use crate::services::media_info::MockMediaInfoService;
-use crate::services::notification::InMemoryNotificationService;
-use beam_domain::models::CreateLibrary;
 use beam_domain::repositories::enrichment::in_memory::InMemoryEnrichmentStateRepository;
-use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
-use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
-use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
-use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
-use beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository;
-use beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository;
 use std::sync::atomic::AtomicUsize;
 use tempfile::TempDir;
 
@@ -50,22 +42,9 @@ struct Harness {
 impl Harness {
     async fn new() -> Self {
         let dir = TempDir::new().unwrap();
-        let root = dir.path().join("library");
-        std::fs::create_dir_all(&root).unwrap();
-
-        let library_repo = Arc::new(InMemoryLibraryRepository::default());
-        let file_repo = Arc::new(InMemoryFileRepository::default());
-        let movie_repo = Arc::new(InMemoryMovieRepository::with_files(file_repo.clone()));
-        let show_repo = Arc::new(InMemoryShowRepository::with_files(file_repo.clone()));
+        let stores = IndexStores::wired();
         let enrichment_repo = Arc::new(InMemoryEnrichmentStateRepository::default());
-        let library = library_repo
-            .create(CreateLibrary {
-                name: "Wake".to_string(),
-                root_path: root.clone(),
-                description: None,
-            })
-            .await
-            .unwrap();
+        let library = make_library_in_tempdir(&stores.library_repo, &dir).await;
 
         // Every file gets its own hash, so none reads as another's copy.
         let next_hash = Arc::new(std::sync::atomic::AtomicU64::new(1));
@@ -75,42 +54,23 @@ impl Harness {
             .returning(move |_| Ok(next_hash.fetch_add(1, Ordering::Relaxed)));
         let mut prober = MockMediaInfoService::new();
         prober.expect_get_video_metadata().returning(|file| {
-            Ok(VideoFileMetadata {
-                file_path: file.path().to_path_buf(),
-                metadata: HashMap::default(),
-                best_video_stream: None,
-                best_audio_stream: None,
-                best_subtitle_stream: None,
-                duration: 60 * 60 * 1_000_000,
-                streams: vec![],
-                format_name: "matroska".to_string(),
-                format_long_name: "Matroska".to_string(),
-                file_size: 1024,
-                bit_rate: 1000,
-                probe_score: 100,
-                chapters: Vec::new(),
-            })
+            let mut metadata = make_video_metadata();
+            metadata.file_path = file.path().to_path_buf();
+            Ok(metadata)
         });
 
         let wake = Arc::new(CountingWake::default());
-        let service = LocalIndexService::new(
-            library_repo,
-            file_repo,
-            movie_repo,
-            show_repo,
-            Arc::new(InMemoryMediaStreamRepository::default()),
-            Arc::new(hasher),
-            Arc::new(prober),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(NoOpAdminLogService),
-            Arc::new(InMemoryWatchStateRepository::default()),
-        )
-        .with_enrichment_repo(enrichment_repo.clone())
-        .with_enrichment_wake(wake.clone());
+        let service = IndexServiceBuilder::new()
+            .stores(&stores)
+            .hash_service(Arc::new(hasher))
+            .media_info(Arc::new(prober))
+            .build()
+            .with_enrichment_repo(enrichment_repo.clone())
+            .with_enrichment_wake(wake.clone());
 
         Self {
+            root: dir.path().to_path_buf(),
             _dir: dir,
-            root,
             library_id: library.id,
             enrichment_repo,
             wake,
