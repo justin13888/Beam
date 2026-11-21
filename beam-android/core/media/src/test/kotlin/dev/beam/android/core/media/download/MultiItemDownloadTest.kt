@@ -24,7 +24,10 @@ class MultiItemDownloadTest : DownloadRepositoryHarness() {
     @Test
     fun `every part and subtitle file of a download is queued, paused and resumed`() =
         runTest {
-            sources["/v1/media/$TWO_PART_MEDIA/sources"] = TWO_PART_SOURCES
+            // Signed in to the core, which lists a title's sources only then.
+            canned["/v1/me"] = ME
+            canned["/v1/media/$TWO_PART_MEDIA/sources"] = TWO_PART_SOURCES
+            core.completeLogin(serverId(HOME), "opaque-session")
             // Held paused, as with no network, so every item stays where the
             // commands put it rather than finishing first.
             repository.manager().pauseDownloads()
@@ -55,6 +58,9 @@ class MultiItemDownloadTest : DownloadRepositoryHarness() {
         const val CD1 = "c1c1c1c1-0000-4000-8000-000000000001"
         const val CD2 = "c2c2c2c2-0000-4000-8000-000000000002"
         const val SIDECAR = "5d5d5d5d-0000-4000-8000-000000000002"
+
+        /** What `GET /v1/me` answers, confirming the session. */
+        const val ME = """{"id":"00000000-0000-0000-0000-0000000000a1","display_name":"Ada","is_admin":false}"""
 
         /** The title's one source: two clips, the second with a sidecar subtitle file. */
         val TWO_PART_SOURCES =

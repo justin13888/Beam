@@ -48,9 +48,9 @@ import java.util.concurrent.TimeoutException
  * session, which is whatever [sessions] holds for it, in place of the
  * core's answer; and the service start, which [InProcessDownloadCommands]
  * stands in for. The servers themselves are the core's own list. No server
- * is signed in to the core; it lists a title's sources only where [sources]
- * answers for it, and otherwise plans each file alone, from the server's
- * download route.
+ * is signed in to the core unless a test signs one in, answering `/v1/me`
+ * through [canned]; without that, or without a sources listing there, the
+ * core plans each file alone, from the server's download route.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 abstract class DownloadRepositoryHarness {
@@ -68,8 +68,8 @@ abstract class DownloadRepositoryHarness {
     /** The `Cookie` of every request for bytes the server answered, in order. */
     protected val cookies = mutableListOf<String?>()
 
-    /** A title's sources listing, by request path; answered with no session. */
-    protected val sources = ConcurrentHashMap<String, String>()
+    /** JSON the server answers the core with, by request path, whatever the session. */
+    protected val canned = ConcurrentHashMap<String, String>()
 
     /** Run on the server's thread whenever it refuses a request. */
     @Volatile
@@ -82,7 +82,9 @@ abstract class DownloadRepositoryHarness {
     private lateinit var database: StandaloneDatabaseProvider
     protected lateinit var cache: SimpleCache
     protected lateinit var core: BeamClient
-    protected lateinit var repository: MediaDownloadRepository
+
+    // Internal rather than protected: the repository's type is internal.
+    internal lateinit var repository: MediaDownloadRepository
 
     @Before
     fun setUp() {
@@ -207,7 +209,7 @@ abstract class DownloadRepositoryHarness {
 
     private inner class BeamServer : Dispatcher() {
         override fun dispatch(request: RecordedRequest): MockResponse {
-            sources[request.url.encodedPath]?.let { listing ->
+            canned[request.url.encodedPath]?.let { listing ->
                 return MockResponse
                     .Builder()
                     .addHeader("Content-Type", "application/json")
