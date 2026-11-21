@@ -46,6 +46,9 @@ pub enum ScanTrigger {
     Periodic,
     /// A library that has just started being polled rather than watched.
     NewlyPolled,
+    /// A library that has just been created, so what its root already holds
+    /// is indexed at once (FR-213).
+    Created,
 }
 
 /// Where a scan job is in its life.
