@@ -44,7 +44,7 @@ class AuthViewModelTest {
                             Fixtures.server(id = "home", displayName = "Home", isActive = true),
                         ),
                 )
-            val viewModel = AuthViewModel(servers, PHONE)
+            val viewModel = AuthViewModel(servers, PHONE, FakeDownloadRepository())
 
             viewModel.state.test {
                 val beforeRestore = awaitItem().knownServers.map { it.id }
@@ -60,7 +60,7 @@ class AuthViewModelTest {
             // twice -- once with its scheme and a trailing slash -- is one
             // entry the second connect selects, not a second shortcut.
             val servers = FakeServerRepository()
-            val viewModel = AuthViewModel(servers, PHONE)
+            val viewModel = AuthViewModel(servers, PHONE, FakeDownloadRepository())
             testScheduler.advanceUntilIdle()
 
             viewModel.onAddressChange("beam.example.com")
@@ -79,7 +79,7 @@ class AuthViewModelTest {
     @Test
     fun `connecting is refused while the address is blank`() =
         runTest {
-            val viewModel = AuthViewModel(FakeServerRepository(), PHONE)
+            val viewModel = AuthViewModel(FakeServerRepository(), PHONE, FakeDownloadRepository())
             testScheduler.advanceUntilIdle()
 
             viewModel.connect()
@@ -91,7 +91,7 @@ class AuthViewModelTest {
     @Test
     fun `a reachable server yields a sign-in url`() =
         runTest {
-            val viewModel = AuthViewModel(FakeServerRepository(), PHONE)
+            val viewModel = AuthViewModel(FakeServerRepository(), PHONE, FakeDownloadRepository())
             testScheduler.advanceUntilIdle()
 
             viewModel.onAddressChange("beam.example.com")
@@ -113,7 +113,7 @@ class AuthViewModelTest {
             // that reaches the server: adding a server and building its
             // sign-in address are answered by the core without a handshake.
             val servers = FakeServerRepository().apply { failOnce = untrustedCertificate() }
-            val viewModel = AuthViewModel(servers, TV)
+            val viewModel = AuthViewModel(servers, TV, FakeDownloadRepository())
             testScheduler.advanceUntilIdle()
 
             viewModel.onAddressChange("beam.local")
@@ -130,7 +130,7 @@ class AuthViewModelTest {
     fun `accepting a certificate records it and retries the connection`() =
         runTest {
             val servers = FakeServerRepository().apply { failOnce = untrustedCertificate() }
-            val viewModel = AuthViewModel(servers, TV)
+            val viewModel = AuthViewModel(servers, TV, FakeDownloadRepository())
             testScheduler.advanceUntilIdle()
 
             viewModel.onAddressChange("beam.local")
@@ -157,7 +157,7 @@ class AuthViewModelTest {
     fun `declining a certificate explains why nothing happened`() =
         runTest {
             val servers = FakeServerRepository().apply { failOnce = untrustedCertificate() }
-            val viewModel = AuthViewModel(servers, TV)
+            val viewModel = AuthViewModel(servers, TV, FakeDownloadRepository())
             testScheduler.advanceUntilIdle()
 
             viewModel.onAddressChange("beam.local")
@@ -181,7 +181,7 @@ class AuthViewModelTest {
                 FakeServerRepository().apply {
                     failOnce = BeamException.Network("could not reach the server", retryable = true)
                 }
-            val viewModel = AuthViewModel(servers, TV)
+            val viewModel = AuthViewModel(servers, TV, FakeDownloadRepository())
             testScheduler.advanceUntilIdle()
 
             viewModel.onAddressChange("nowhere.invalid")
@@ -200,7 +200,7 @@ class AuthViewModelTest {
                 FakeServerRepository().apply {
                     failOnce = BeamException.Unauthenticated()
                 }
-            val viewModel = AuthViewModel(servers, PHONE)
+            val viewModel = AuthViewModel(servers, PHONE, FakeDownloadRepository())
             testScheduler.advanceUntilIdle()
 
             viewModel.onAddressChange("beam.example.com")
@@ -219,7 +219,7 @@ class AuthViewModelTest {
     fun `a session cookie completes sign-in`() =
         runTest {
             val servers = FakeServerRepository()
-            val viewModel = AuthViewModel(servers, PHONE)
+            val viewModel = AuthViewModel(servers, PHONE, FakeDownloadRepository())
             testScheduler.advanceUntilIdle()
 
             viewModel.onAddressChange("beam.example.com")
@@ -242,7 +242,7 @@ class AuthViewModelTest {
             // The WebView reports every completed navigation, and a stale one can
             // arrive after the flow has been abandoned.
             val servers = FakeServerRepository()
-            val viewModel = AuthViewModel(servers, PHONE)
+            val viewModel = AuthViewModel(servers, PHONE, FakeDownloadRepository())
             testScheduler.advanceUntilIdle()
 
             viewModel.onSessionCookie("stray")
@@ -254,7 +254,7 @@ class AuthViewModelTest {
     @Test
     fun `cancelling sign-in closes the browser without an error`() =
         runTest {
-            val viewModel = AuthViewModel(FakeServerRepository(), PHONE)
+            val viewModel = AuthViewModel(FakeServerRepository(), PHONE, FakeDownloadRepository())
             testScheduler.advanceUntilIdle()
 
             viewModel.onAddressChange("beam.example.com")
@@ -273,7 +273,7 @@ class AuthViewModelTest {
                 FakeServerRepository().apply {
                     failOnce = BeamException.Network("unreachable", retryable = true)
                 }
-            val viewModel = AuthViewModel(servers, TV)
+            val viewModel = AuthViewModel(servers, TV, FakeDownloadRepository())
             testScheduler.advanceUntilIdle()
 
             viewModel.onAddressChange("nowhere.invalid")
@@ -286,7 +286,7 @@ class AuthViewModelTest {
         }
 
     @Test
-    fun `forgetting a server removes it from the shortcuts`() =
+    fun `forgetting a server removes it from the shortcuts with its downloads`() =
         runTest {
             val servers =
                 FakeServerRepository(
@@ -295,7 +295,11 @@ class AuthViewModelTest {
                         Fixtures.server(id = "cabin", isActive = false),
                     ),
                 )
-            val viewModel = AuthViewModel(servers, PHONE)
+            val downloads =
+                FakeDownloadRepository(
+                    listOf(download("h1", serverId = "home"), download("c1", serverId = "cabin")),
+                )
+            val viewModel = AuthViewModel(servers, PHONE, downloads)
             testScheduler.advanceUntilIdle()
 
             viewModel.forget("cabin")
@@ -306,6 +310,33 @@ class AuthViewModelTest {
                 viewModel.state.value.knownServers
                     .map { it.id },
             )
+            assertEquals(listOf("h1"), downloads.current.map { it.fileId })
+        }
+
+    @Test
+    fun `a forget the core reports as failed still deletes the server's downloads`() =
+        runTest {
+            val servers =
+                FakeServerRepository(
+                    listOf(
+                        Fixtures.server(id = "home", isActive = true),
+                        Fixtures.server(id = "cabin", isActive = false),
+                    ),
+                )
+            val downloads =
+                FakeDownloadRepository(
+                    listOf(download("h1", serverId = "home"), download("c1", serverId = "cabin")),
+                )
+            val viewModel = AuthViewModel(servers, PHONE, downloads)
+            testScheduler.advanceUntilIdle()
+
+            // The core unlists the server before any write that can fail, so a
+            // failed removal has already forgotten it.
+            servers.failWith = BeamException.Network("the connection dropped", true)
+            viewModel.forget("cabin")
+            testScheduler.advanceUntilIdle()
+
+            assertEquals(listOf("h1"), downloads.current.map { it.fileId })
         }
 
     @Test
@@ -318,7 +349,7 @@ class AuthViewModelTest {
                         Fixtures.server(id = "cabin", isActive = false),
                     ),
                 )
-            val viewModel = AuthViewModel(servers, PHONE)
+            val viewModel = AuthViewModel(servers, PHONE, FakeDownloadRepository())
             testScheduler.advanceUntilIdle()
 
             viewModel.connect(existingServerId = "cabin")

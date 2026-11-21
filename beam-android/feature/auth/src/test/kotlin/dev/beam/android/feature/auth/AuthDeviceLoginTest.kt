@@ -46,7 +46,7 @@ class AuthDeviceLoginTest {
                 FakeServerRepository().apply {
                     deviceLogin = listOf(DeviceLoginStep.SignedIn(ADA))
                 }
-            val viewModel = AuthViewModel(servers, PHONE)
+            val viewModel = AuthViewModel(servers, PHONE, FakeDownloadRepository())
             testScheduler.advanceUntilIdle()
 
             viewModel.onAddressChange("beam.example.com")
@@ -66,7 +66,7 @@ class AuthDeviceLoginTest {
                 FakeServerRepository().apply {
                     deviceLogin = listOf(DeviceLoginStep.SignedIn(ADA))
                 }
-            val viewModel = AuthViewModel(servers, PHONE)
+            val viewModel = AuthViewModel(servers, PHONE, FakeDownloadRepository())
             testScheduler.advanceUntilIdle()
             viewModel.onAddressChange("beam.example.com")
             viewModel.connect()
@@ -87,7 +87,7 @@ class AuthDeviceLoginTest {
     @Test
     fun `asking for a code from a server without them leaves the browser open`() =
         runTest {
-            val viewModel = AuthViewModel(FakeServerRepository(), PHONE)
+            val viewModel = AuthViewModel(FakeServerRepository(), PHONE, FakeDownloadRepository())
             testScheduler.advanceUntilIdle()
             viewModel.onAddressChange("beam.example.com")
             viewModel.connect()
@@ -109,7 +109,7 @@ class AuthDeviceLoginTest {
                 FakeServerRepository().apply {
                     deviceLogin = listOf(DeviceLoginStep.Waiting(5u, false))
                 }
-            val viewModel = AuthViewModel(servers, TV)
+            val viewModel = AuthViewModel(servers, TV, FakeDownloadRepository())
             testScheduler.advanceUntilIdle()
 
             viewModel.onAddressChange("beam.example.com")
@@ -129,7 +129,7 @@ class AuthDeviceLoginTest {
                 FakeServerRepository().apply {
                     deviceLogin = listOf(DeviceLoginStep.Waiting(5u, false))
                 }
-            val viewModel = AuthViewModel(servers, TV)
+            val viewModel = AuthViewModel(servers, TV, FakeDownloadRepository())
             testScheduler.advanceUntilIdle()
             viewModel.onAddressChange("beam.example.com")
             viewModel.connect()
@@ -148,7 +148,7 @@ class AuthDeviceLoginTest {
     @Test
     fun `a device without a browser falls back to it when the server has no codes`() =
         runTest {
-            val viewModel = AuthViewModel(FakeServerRepository(), TV)
+            val viewModel = AuthViewModel(FakeServerRepository(), TV, FakeDownloadRepository())
             testScheduler.advanceUntilIdle()
 
             viewModel.onAddressChange("beam.example.com")
@@ -261,7 +261,7 @@ class AuthDeviceLoginTest {
 
     /** Connects on a device with no browser, leaving the first poll pending. */
     private fun TestScope.signingInWithoutABrowser(servers: FakeServerRepository): AuthViewModel {
-        val viewModel = AuthViewModel(servers, TV)
+        val viewModel = AuthViewModel(servers, TV, FakeDownloadRepository())
         testScheduler.advanceUntilIdle()
         viewModel.onAddressChange("beam.example.com")
         viewModel.connect()

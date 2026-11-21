@@ -19,14 +19,13 @@ import androidx.media3.exoplayer.offline.DownloadManager
 import androidx.media3.exoplayer.offline.DownloadRequest
 import androidx.media3.exoplayer.scheduler.Requirements
 import dev.beam.android.core.ffi.repository.PlaybackRepository
-import dev.beam.android.core.media.http.BeamHttpClientFactory
 import dev.beam.android.core.media.http.beamDataSourceFactory
 import dev.beam.android.core.model.DownloadRecord
 import dev.beam.android.core.model.DownloadState
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
-import uniffi.beam_client_core.ServerHttpConfig
+import okhttp3.Call
 import java.io.File
 import java.util.concurrent.Executors
 
@@ -46,6 +45,7 @@ import java.util.concurrent.Executors
  */
 public class BeamDownloadManager internal constructor(
     private val manager: DownloadManager,
+    private val commands: DownloadCommands,
     private val titles: DownloadTitleStore,
     private val artwork: DownloadArtwork,
 ) {
@@ -113,7 +113,7 @@ public class BeamDownloadManager internal constructor(
             ),
         )
         val request = DownloadRequest.Builder(fileId, config.url.toUri()).build()
-        manager.addDownload(request)
+        commands.add(request)
         if (posterUrl != null) {
             artwork.pin(posterUrl)
             // The fetch suspends on the network, so the download may have been
@@ -126,27 +126,43 @@ public class BeamDownloadManager internal constructor(
 
     /** Stop a download, keeping the bytes already fetched. */
     public fun pause(fileId: String) {
-        manager.setStopReason(fileId, STOP_REASON_USER)
+        commands.setStopReason(fileId, STOP_REASON_USER)
     }
 
     /** Resume a paused download from where it stopped. */
     public fun resume(fileId: String) {
-        manager.setStopReason(fileId, Download.STOP_REASON_NONE)
+        commands.setStopReason(fileId, Download.STOP_REASON_NONE)
     }
 
     /** Delete a download, its bytes, and the poster kept for it. */
     public suspend fun remove(fileId: String) {
         val posterUrl = titles.get(fileId)?.posterUrl
-        manager.removeDownload(fileId)
+        commands.remove(fileId)
         titles.remove(fileId)
         if (posterUrl != null) {
             releaseIfUnused(posterUrl)
         }
     }
 
+    /**
+     * Delete every download that came from [serverId], with its bytes, its
+     * title and the posters only it kept.
+     *
+     * A download belongs to the server it was fetched from; once that server
+     * is forgotten its downloads can no longer be resumed, re-authenticated or
+     * reported against, and the session that fetched them is gone with it.
+     * Downloads from any other server are left alone.
+     */
+    public suspend fun removeServer(serverId: String) {
+        titles
+            .all()
+            .filter { title -> title.serverId == serverId }
+            .forEach { title -> remove(title.fileId) }
+    }
+
     /** Delete every download, and every poster kept for one. */
     public fun removeAll() {
-        manager.removeAllDownloads()
+        commands.removeAll()
         // The titles go too. They are what decides whether a poster is still
         // needed, so one left behind here would keep a later download's
         // shared poster pinned after that download was removed as well.
@@ -199,25 +215,36 @@ public class BeamDownloadManager internal constructor(
          */
         const val PARALLEL_DOWNLOADS: Int = 1
 
+        /**
+         * Build the manager over [calls], which must resolve the server's
+         * credential per request.
+         *
+         * No credential is taken here. The manager lives as long as the
+         * process, and a download as long as the viewer keeps it, across
+         * sign-outs, re-sign-ins and server switches; a credential captured at
+         * construction would be stale after the first of those, and with none
+         * to capture -- signed out, offline -- the manager could not be built
+         * at all, leaving the downloads list empty exactly when it is needed.
+         */
         fun create(
             context: Context,
-            clients: BeamHttpClientFactory,
+            calls: Call.Factory,
+            commands: DownloadCommands,
             cache: Cache,
             titles: DownloadTitleStore,
             artwork: DownloadArtwork,
-            server: ServerHttpConfig,
         ): BeamDownloadManager {
             val manager =
                 DownloadManager(
                     context,
                     StandaloneDatabaseProvider(context),
                     cache,
-                    beamDataSourceFactory(context, clients, server),
+                    beamDataSourceFactory(context, calls),
                     Executors.newFixedThreadPool(PARALLEL_DOWNLOADS),
                 ).apply {
                     maxParallelDownloads = PARALLEL_DOWNLOADS
                 }
-            return BeamDownloadManager(manager, titles, artwork)
+            return BeamDownloadManager(manager, commands, titles, artwork)
         }
 
         /**

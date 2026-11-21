@@ -72,6 +72,11 @@ internal class FakeDownloadRepository(
         state.value = emptyList()
     }
 
+    override suspend fun removeServer(serverId: String) {
+        failWith?.let { throw it }
+        state.value = state.value.filterNot { it.serverId == serverId }
+    }
+
     override suspend fun setRequiresUnmeteredNetwork(required: Boolean) {
         failWith?.let { throw it }
     }

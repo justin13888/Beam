@@ -14,21 +14,17 @@ import androidx.media3.exoplayer.offline.DownloadManager
 import dagger.hilt.android.qualifiers.ApplicationContext
 import dev.beam.android.core.ffi.preferences.PreferencesRepository
 import dev.beam.android.core.ffi.repository.PlaybackRepository
-import dev.beam.android.core.media.http.BeamHttpClientFactory
+import dev.beam.android.core.media.http.ServerCallFactory
 import dev.beam.android.core.model.DownloadRecord
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.emptyFlow
-import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
-import uniffi.beam_client_core.BeamClient
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -59,6 +55,9 @@ public interface DownloadRepository {
     /** Delete every download. */
     public suspend fun removeAll()
 
+    /** Delete every download that came from [serverId], leaving other servers' alone. */
+    public suspend fun removeServer(serverId: String)
+
     /** Only download over an unmetered connection. */
     public suspend fun setRequiresUnmeteredNetwork(required: Boolean)
 
@@ -69,10 +68,16 @@ public interface DownloadRepository {
 /**
  * A [DownloadRepository] whose manager is built on first use.
  *
- * Construction is deferred because a [DownloadManager] needs the session
- * credential, which does not exist until the viewer has signed in. Building it
- * eagerly at app start would either fail or bake in an empty credential, and
- * every download would then 401 with no obvious cause.
+ * The manager holds no credential: its requests go out through [calls], which
+ * asks the core for the active server's session on each one. So it can be built
+ * signed out -- the downloads list renders offline and signed out alike -- and a
+ * download queued under one session carries on under the next, after a sign-in
+ * or a server switch, without the manager being rebuilt. Every change goes
+ * through [commands], which reach [BeamDownloadService], so the transfer runs in
+ * a foreground service rather than dying with the app's process.
+ *
+ * Construction is still deferred to first use, so an app start that never
+ * touches downloads does not open the download index.
  *
  * The network requirement follows the stored cellular preference from the
  * moment this is constructed, rather than waiting for a screen to send it:
@@ -84,9 +89,9 @@ internal class MediaDownloadRepository
     @Inject
     constructor(
         @ApplicationContext private val context: Context,
-        private val client: BeamClient,
         private val playback: PlaybackRepository,
-        private val clients: BeamHttpClientFactory,
+        private val calls: ServerCallFactory,
+        private val commands: DownloadCommands,
         private val cache: Cache,
         private val titles: DownloadTitleStore,
         private val artwork: DownloadArtwork,
@@ -111,10 +116,8 @@ internal class MediaDownloadRepository
             }
         }
 
-        @OptIn(ExperimentalCoroutinesApi::class)
         override val downloads: Flow<List<DownloadRecord>> =
-            flow { emit(runCatching { beamManager() }.getOrNull()) }
-                .flatMapLatest { built -> built?.downloads ?: flowOf(emptyList()) }
+            flow { emitAll(beamManager().downloads) }
 
         override suspend fun enqueue(
             fileId: String,
@@ -143,12 +146,19 @@ internal class MediaDownloadRepository
             beamManager().removeAll()
         }
 
+        override suspend fun removeServer(serverId: String) {
+            beamManager().removeServer(serverId)
+        }
+
         /**
          * Held here rather than handed straight to the manager, because the
-         * stored preference is read at construction -- possibly before
-         * sign-in, when building the manager would bake in an empty
-         * credential. The manager takes it when it is built, and every change
-         * after that.
+         * stored preference is read at construction, and building the manager
+         * then would open the download index on every app start. The manager
+         * takes it when it is built, and every change after that.
+         *
+         * Set on the manager directly rather than sent to the service: the
+         * preference is followed from app start, when the app may not be in
+         * front, and a service start from the background is refused.
          */
         override suspend fun setRequiresUnmeteredNetwork(required: Boolean) {
             synchronized(this) {
@@ -174,11 +184,11 @@ internal class MediaDownloadRepository
                 delegate ?: BeamDownloadManager
                     .create(
                         context = context,
-                        clients = clients,
+                        calls = calls,
+                        commands = commands,
                         cache = cache,
                         titles = titles,
                         artwork = artwork,
-                        server = client.serverHttpConfig(),
                     ).also {
                         it.setRequiresUnmeteredNetwork(requiresUnmetered)
                         delegate = it
