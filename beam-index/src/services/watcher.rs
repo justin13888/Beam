@@ -59,10 +59,12 @@ pub trait FsWatcher: Send + Sync + std::fmt::Debug {
     fn watch_library(&self, library_id: Uuid, root: &Path) -> Result<WatchMode, WatchError>;
     /// Stop watching a library. Watching an unknown library is a no-op.
     fn unwatch_library(&self, library_id: Uuid) -> Result<(), WatchError>;
-    /// Rescan every polled library, first moving any natively watched library
-    /// that has since hit the watch limit onto the poller. Called by the
-    /// runtime once per poll interval; changes it finds arrive through
-    /// [`Self::next_event`] like any other. May block on a tree walk.
+    /// Rescan every polled library. First, watch again every natively
+    /// watched library whose watch no longer covers it -- its root was
+    /// removed, renamed, unmounted or remounted, or the backend lost events
+    /// -- and move any that has since hit the watch limit onto the poller.
+    /// Called by the runtime once per poll interval; changes it finds arrive
+    /// through [`Self::next_event`] like any other. May block on a tree walk.
     ///
     /// Returns the libraries moved to the poller by this call. Their native
     /// watch was already missing changes -- that is what the watch limit
@@ -71,10 +73,11 @@ pub trait FsWatcher: Send + Sync + std::fmt::Debug {
     fn poll_once(&self) -> Vec<Uuid>;
     /// Every library currently registered, natively or with the poller.
     ///
-    /// The watcher drops a registration on its own -- when a library it
-    /// could not move to the poller, or a library superseded by another at
-    /// the same root -- so this, not the caller's memory of what it
-    /// registered, is what the caller brings in line with the libraries.
+    /// The watcher drops a registration on its own -- a library it could not
+    /// move to the poller, one whose root could not be watched again after
+    /// its watch was lost, or one superseded by another at the same root --
+    /// so this, not the caller's memory of what it registered, is what the
+    /// caller brings in line with the libraries.
     fn registered_libraries(&self) -> Vec<Uuid>;
     /// Await the next event. Returns `None` once the watcher is closed.
     async fn next_event(&self) -> Option<FsEvent>;
@@ -153,6 +156,40 @@ struct WatchedLibrary {
     id: Uuid,
     root: PathBuf,
     backend: Backend,
+    /// What the root was on disk when its native watch was added; `None` for
+    /// a polled library, or where it could not be read.
+    identity: Option<RootIdentity>,
+}
+
+/// Which directory a root path named when it was watched.
+///
+/// A native watch follows the directory, not the path: once a filesystem is
+/// unmounted from the root, or the root is replaced, the watch is gone or
+/// watches something that is no longer the library -- and `notify` 8 reports
+/// an unmount (inotify's `IN_UNMOUNT` and `IN_IGNORED`) with no event at all.
+/// Comparing this with the root's identity now is how the watcher finds out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RootIdentity {
+    device: u64,
+    inode: u64,
+}
+
+#[cfg(unix)]
+fn root_identity(root: &Path) -> Option<RootIdentity> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = std::fs::metadata(root).ok()?;
+    Some(RootIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
+}
+
+/// Without device and inode numbers a replaced root cannot be told apart;
+/// only the events that name the root are acted on.
+#[cfg(not(unix))]
+fn root_identity(_root: &Path) -> Option<RootIdentity> {
+    None
 }
 
 /// State the `notify` callbacks share with [`NotifyFsWatcher`].
@@ -170,6 +207,11 @@ struct Shared {
     /// poller. The callback cannot do it itself: unwatching from inside the
     /// callback waits on the thread that is running the callback.
     pending_demotions: Mutex<Vec<Uuid>>,
+    /// Natively watched libraries whose watch can no longer be trusted --
+    /// their root was removed or renamed, or the backend lost events --
+    /// waiting for [`FsWatcher::poll_once`] to watch them again, for the
+    /// same reason demotions wait.
+    pending_rewatches: Mutex<Vec<Uuid>>,
     status: Arc<WatchStatus>,
     sender: tokio::sync::mpsc::UnboundedSender<FsEvent>,
 }
@@ -191,6 +233,63 @@ fn library_owning(libraries: &[WatchedLibrary], path: &Path) -> Option<Uuid> {
         .map(|library| library.id)
 }
 
+/// Queue the natively watched libraries an event says the native watch no
+/// longer covers, to be watched again (issue #452):
+///
+/// - the root itself was removed or renamed (inotify's `IN_DELETE_SELF` and
+///   `IN_MOVE_SELF`): the watch is gone, or follows the directory away from
+///   the root's path;
+/// - a rescan notice (inotify's queue overflowed): events were lost, and with
+///   them the watches the backend adds for directories created meanwhile, so
+///   those subtrees would go unwatched for good.
+///
+/// A rescan notice naming no path covers every natively watched library.
+/// Only native watches are queued: the poller re-reads its whole tree on
+/// every poll, so a root it lost is found again when the root comes back.
+fn queue_invalidated_watches(event: &notify::Event, shared: &Shared) {
+    use notify::EventKind;
+    use notify::event::ModifyKind;
+
+    let rescan = event.need_rescan();
+    let removes_or_renames = matches!(
+        event.kind,
+        EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(_))
+    );
+    if !rescan && !removes_or_renames {
+        return;
+    }
+    let invalidated: Vec<Uuid> = lock(&shared.libraries)
+        .iter()
+        .filter(|library| library.backend == Backend::Native)
+        .filter(|library| {
+            let names_this_root = event.paths.contains(&library.root);
+            let rescans_this_root = rescan
+                && (event.paths.is_empty()
+                    || event
+                        .paths
+                        .iter()
+                        .any(|path| path.starts_with(&library.root)));
+            (removes_or_renames && names_this_root) || rescans_this_root
+        })
+        .map(|library| library.id)
+        .collect();
+    if invalidated.is_empty() {
+        return;
+    }
+    warn!(
+        libraries = ?invalidated,
+        paths = ?event.paths,
+        rescan,
+        "a native watch no longer covers its library; it will be watched again"
+    );
+    let mut pending = lock(&shared.pending_rewatches);
+    for id in invalidated {
+        if !pending.contains(&id) {
+            pending.push(id);
+        }
+    }
+}
+
 /// What both `notify` backends do with a result.
 ///
 /// An event is mapped to its library and forwarded. A watch-limit error --
@@ -202,6 +301,7 @@ fn library_owning(libraries: &[WatchedLibrary], path: &Path) -> Option<Uuid> {
 fn handle_notify_result(result: notify::Result<notify::Event>, shared: &Shared) {
     match result {
         Ok(event) => {
+            queue_invalidated_watches(&event, shared);
             let Some(kind) = translate_event_kind(&event.kind) else {
                 return;
             };
@@ -247,11 +347,12 @@ fn handle_notify_result(result: notify::Result<notify::Event>, shared: &Shared) 
 /// where they do not.
 ///
 /// A library is watched natively (inotify on Linux, FSEvents on macOS) unless
-/// its root is on a network filesystem -- where changes made by other hosts
-/// produce no native event -- or native watching is unavailable or has hit
-/// the OS watch limit. Those libraries go to a [`notify::PollWatcher`] in
-/// manual mode, which walks them only when [`FsWatcher::poll_once`] is called,
-/// so the poll cadence is driven by the runtime's injected clock.
+/// its root is on a network filesystem, or has one mounted beneath it --
+/// where changes made by other hosts produce no native event -- or native
+/// watching is unavailable or has hit the OS watch limit. Those libraries go
+/// to a [`notify::PollWatcher`] in manual mode, which walks them only when
+/// [`FsWatcher::poll_once`] is called, so the poll cadence is driven by the
+/// runtime's injected clock.
 ///
 /// Neither backend follows symbolic links: Beam's library policy is that a
 /// symlink under a root is not part of the library.
@@ -290,6 +391,7 @@ impl NotifyFsWatcher {
         let shared = Arc::new(Shared {
             libraries: Mutex::new(Vec::new()),
             pending_demotions: Mutex::new(Vec::new()),
+            pending_rewatches: Mutex::new(Vec::new()),
             status,
             sender,
         });
@@ -345,6 +447,13 @@ impl NotifyFsWatcher {
     /// `unwatch_library` for the old id finds nothing to do -- it must not
     /// unwatch the root the new library now owns.
     fn register(&self, library_id: Uuid, root: &Path, backend: Backend) {
+        // Read before the watch is added, so a root replaced while it is
+        // being added is found by the next poll rather than recorded as the
+        // library.
+        let identity = match backend {
+            Backend::Native => root_identity(root),
+            Backend::Poll => None,
+        };
         let superseded: Vec<Uuid> = {
             let mut libraries = lock(&self.shared.libraries);
             let superseded = libraries
@@ -357,11 +466,13 @@ impl NotifyFsWatcher {
                 id: library_id,
                 root: root.to_path_buf(),
                 backend,
+                identity,
             });
             superseded
         };
         if !superseded.is_empty() {
             lock(&self.shared.pending_demotions).retain(|id| !superseded.contains(id));
+            lock(&self.shared.pending_rewatches).retain(|id| !superseded.contains(id));
             for id in superseded {
                 self.shared.status.remove(id);
             }
@@ -370,6 +481,44 @@ impl NotifyFsWatcher {
 
     fn deregister(&self, library_id: Uuid) {
         lock(&self.shared.libraries).retain(|library| library.id != library_id);
+    }
+
+    /// Whether a network filesystem is mounted anywhere beneath a local
+    /// `root` (issue #452).
+    ///
+    /// Native events miss what other hosts change on such a share just as
+    /// they would at the root, so the whole library is polled. One poller per
+    /// library, rather than a native watch with a polled subtree inside it,
+    /// keeps a library on exactly one backend, which demotion, unwatching and
+    /// the status all rely on. A probe that fails is treated as finding
+    /// nothing, as the root's own probe is.
+    ///
+    /// Checked once, at registration: a share mounted later is found when the
+    /// library is next registered.
+    fn network_mount_beneath(&self, library_id: Uuid, root: &Path) -> bool {
+        let filesystems = match self.probe.filesystems_beneath(root) {
+            Ok(filesystems) => filesystems,
+            Err(e) => {
+                warn!(
+                    root = %root.display(),
+                    error = %e,
+                    "could not look for filesystems mounted beneath a library; watching it natively"
+                );
+                return false;
+            }
+        };
+        let network = filesystems
+            .into_iter()
+            .find(|mount| matches!(self.probe.kind(mount), Ok(FilesystemKind::Network)));
+        if let Some(mount) = &network {
+            info!(
+                library_id = %library_id,
+                root = %root.display(),
+                mount = %mount.display(),
+                "a network filesystem is mounted beneath this library; polling it"
+            );
+        }
+        network.is_some()
     }
 
     /// Hand a library to the poller.
@@ -432,6 +581,71 @@ impl NotifyFsWatcher {
             }
         }
     }
+
+    /// Natively watched libraries whose root no longer names the directory
+    /// that was watched: it is gone, or something else -- an unmount, a
+    /// remount, a replacement -- now stands at its path. One `stat` per
+    /// library, with no lock held across it.
+    fn replaced_roots(&self) -> Vec<Uuid> {
+        let watched: Vec<(Uuid, PathBuf, RootIdentity)> = lock(&self.shared.libraries)
+            .iter()
+            .filter(|library| library.backend == Backend::Native)
+            .filter_map(|library| Some((library.id, library.root.clone(), library.identity?)))
+            .collect();
+        watched
+            .into_iter()
+            .filter(|(_, root, identity)| root_identity(root) != Some(*identity))
+            .map(|(library_id, _, _)| library_id)
+            .collect()
+    }
+
+    /// Drop a natively watched library's watch and register it afresh
+    /// (issue #452). Whether it came back polled, so the caller scans it as
+    /// it does a demoted one.
+    ///
+    /// A root that cannot be watched again -- removed, or not mounted yet --
+    /// is left unregistered and absent from the status, which is how the
+    /// admin status reports a library nothing watches; the runtime's next
+    /// watch refresh registers it once its root is back.
+    fn rewatch(&self, library_id: Uuid) -> bool {
+        let root = {
+            let mut libraries = lock(&self.shared.libraries);
+            let Some(at) = libraries
+                .iter()
+                .position(|library| library.id == library_id && library.backend == Backend::Native)
+            else {
+                // Unwatched, or demoted, since it was queued.
+                return false;
+            };
+            libraries.remove(at).root
+        };
+        lock(&self.shared.pending_demotions).retain(|id| *id != library_id);
+        self.shared.status.remove(library_id);
+        if let Some(native) = &self.native {
+            // Whatever is left of the old watch. Usually already gone.
+            let _ = lock(native).unwatch(&root);
+        }
+        match self.watch_library(library_id, &root) {
+            Ok(mode) => {
+                info!(
+                    library_id = %library_id,
+                    root = %root.display(),
+                    ?mode,
+                    "watching a library again after its watch was lost"
+                );
+                matches!(mode, WatchMode::Polling(_))
+            }
+            Err(e) => {
+                warn!(
+                    library_id = %library_id,
+                    error = %e,
+                    "a library's watch was lost and its root cannot be watched again; \
+                     it is not watched until a watch refresh finds its root"
+                );
+                false
+            }
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -451,6 +665,9 @@ impl FsWatcher for NotifyFsWatcher {
         let reason = match (kind, &self.native) {
             (FilesystemKind::Network, _) => PollReason::NetworkFilesystem,
             (FilesystemKind::Local, None) => PollReason::NativeUnavailable,
+            (FilesystemKind::Local, Some(_)) if self.network_mount_beneath(library_id, root) => {
+                PollReason::NetworkFilesystem
+            }
             (FilesystemKind::Local, Some(native)) => {
                 // Registered first so events raised while the recursive
                 // watch is still being added are attributed.
@@ -495,6 +712,7 @@ impl FsWatcher for NotifyFsWatcher {
             }
         };
         lock(&self.shared.pending_demotions).retain(|id| *id != library_id);
+        lock(&self.shared.pending_rewatches).retain(|id| *id != library_id);
         self.shared.status.remove(library_id);
 
         let result = match (removed.backend, &self.native, &self.poll) {
@@ -506,11 +724,23 @@ impl FsWatcher for NotifyFsWatcher {
     }
 
     fn poll_once(&self) -> Vec<Uuid> {
-        let demotions = std::mem::take(&mut *lock(&self.shared.pending_demotions));
-        let demoted: Vec<Uuid> = demotions
+        let mut rewatches = std::mem::take(&mut *lock(&self.shared.pending_rewatches));
+        for library_id in self.replaced_roots() {
+            if !rewatches.contains(&library_id) {
+                rewatches.push(library_id);
+            }
+        }
+        let mut moved_to_poller: Vec<Uuid> = rewatches
             .into_iter()
-            .filter(|library_id| self.demote(*library_id))
+            .filter(|library_id| self.rewatch(*library_id))
             .collect();
+
+        let demotions = std::mem::take(&mut *lock(&self.shared.pending_demotions));
+        for library_id in demotions {
+            if self.demote(library_id) && !moved_to_poller.contains(&library_id) {
+                moved_to_poller.push(library_id);
+            }
+        }
 
         let any_polled = lock(&self.shared.libraries)
             .iter()
@@ -521,7 +751,7 @@ impl FsWatcher for NotifyFsWatcher {
         {
             warn!("could not start a filesystem poll: {e}");
         }
-        demoted
+        moved_to_poller
     }
 
     fn registered_libraries(&self) -> Vec<Uuid> {
@@ -751,6 +981,45 @@ pub mod in_memory {
             }))
         }
     }
+
+    /// A native backend whose watches succeed and never report anything --
+    /// what `notify` 8 does when the filesystem under a watched root is
+    /// unmounted. A root that does not exist fails, as it does for inotify.
+    /// Records every root it watched.
+    #[derive(Debug, Default, Clone)]
+    pub struct SilentNativeWatcherFactory {
+        pub watched: Arc<Mutex<Vec<PathBuf>>>,
+    }
+
+    struct SilentBackend {
+        watched: Arc<Mutex<Vec<PathBuf>>>,
+    }
+
+    impl NativeBackend for SilentBackend {
+        fn watch(&mut self, root: &Path) -> notify::Result<()> {
+            if !root.is_dir() {
+                return Err(notify::Error::path_not_found().add_path(root.to_path_buf()));
+            }
+            self.watched.lock().unwrap().push(root.to_path_buf());
+            Ok(())
+        }
+
+        fn unwatch(&mut self, _root: &Path) -> notify::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl NativeWatcherFactory for SilentNativeWatcherFactory {
+        fn create(
+            &self,
+            _handler: NotifyHandler,
+            _config: notify::Config,
+        ) -> notify::Result<Box<dyn NativeBackend>> {
+            Ok(Box::new(SilentBackend {
+                watched: self.watched.clone(),
+            }))
+        }
+    }
 }
 
 // Re-exported at the module root so the doubles keep the paths they had before
@@ -963,6 +1232,67 @@ mod tests {
         let event = next_event_for(&watcher, &file).await;
         assert_eq!(event.library_id, lib);
         assert_eq!(event.kind, FsEventKind::Created);
+    }
+
+    fn mounted_watcher(
+        mounts: Vec<(PathBuf, FilesystemKind)>,
+    ) -> (NotifyFsWatcher, Arc<WatchStatus>) {
+        use crate::services::filesystem_probe::MountedFilesystemProbe;
+
+        let status = Arc::new(WatchStatus::new());
+        let watcher =
+            NotifyFsWatcher::new(Arc::new(MountedFilesystemProbe { mounts }), status.clone());
+        (watcher, status)
+    }
+
+    /// A share mounted inside a local root is changed by other hosts without
+    /// a native event, so the library is polled, and a poll finds a file
+    /// written into the share.
+    #[tokio::test]
+    async fn a_local_library_with_a_network_share_beneath_it_is_polled() {
+        let (_dir, root) = canonical_tempdir();
+        let share = root.join("tv").join("nas");
+        std::fs::create_dir_all(&share).unwrap();
+        let (watcher, status) = mounted_watcher(vec![(share.clone(), FilesystemKind::Network)]);
+        let lib = Uuid::new_v4();
+
+        let mode = watcher.watch_library(lib, &root).unwrap();
+        assert_eq!(mode, WatchMode::Polling(PollReason::NetworkFilesystem));
+        assert_eq!(status.snapshot().libraries.get(&lib), Some(&mode));
+
+        let file = share.join("episode.mkv");
+        std::fs::write(&file, b"x").unwrap();
+        watcher.poll_once();
+        let event = next_event_for(&watcher, &file).await;
+        assert_eq!(event.library_id, lib);
+        assert_eq!(event.kind, FsEventKind::Created);
+    }
+
+    /// Another local filesystem beneath the root, a network share beside
+    /// the root rather than beneath it, and a network share beneath only a
+    /// sibling library: none of them makes the library polled.
+    #[tokio::test]
+    async fn only_a_network_share_beneath_the_root_makes_a_library_polled() {
+        let (_dir, parent) = canonical_tempdir();
+        let root = parent.join("movies");
+        let sibling = parent.join("movies-nas");
+        let usb = root.join("usb");
+        std::fs::create_dir_all(&usb).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+        let (watcher, status) = mounted_watcher(vec![
+            (usb, FilesystemKind::Local),
+            (sibling, FilesystemKind::Network),
+        ]);
+        let lib = Uuid::new_v4();
+
+        assert_eq!(
+            watcher.watch_library(lib, &root).unwrap(),
+            WatchMode::Native
+        );
+        assert_eq!(
+            status.snapshot().libraries.get(&lib),
+            Some(&WatchMode::Native)
+        );
     }
 
     #[cfg(unix)]
@@ -1187,11 +1517,13 @@ mod tests {
                 id: outer,
                 root: PathBuf::from("/m"),
                 backend: Backend::Native,
+                identity: None,
             },
             WatchedLibrary {
                 id: inner,
                 root: PathBuf::from("/m/movies"),
                 backend: Backend::Native,
+                identity: None,
             },
         ];
         let cases = [
@@ -1275,6 +1607,7 @@ mod tests {
                         id: Uuid::from_u128(n as u128),
                         root: root.clone(),
                         backend: Backend::Native,
+                        identity: None,
                     })
                     .collect();
                 let holding: Vec<&WatchedLibrary> = libraries
@@ -1374,6 +1707,227 @@ mod tests {
             "registered as polled, so no demotion to report"
         );
         assert_eq!(next_event_for(&watcher, &file).await.library_id, lib);
+    }
+
+    // ── A native watch that stops covering its library (issue #452) ─────────
+
+    /// The real backend: removing the root ends its watch, and the poll
+    /// that follows cannot watch it again, so the library is no longer
+    /// registered and the status no longer lists it -- the runtime's watch
+    /// refresh re-registers whatever this omits. Once the root is back, that
+    /// registration watches it natively again.
+    #[tokio::test]
+    async fn a_removed_root_is_deregistered_and_watched_again_once_it_is_back() {
+        let (_dir, parent) = canonical_tempdir();
+        let root = parent.join("library");
+        std::fs::create_dir(&root).unwrap();
+        let (watcher, status) = notify_watcher(FilesystemKind::Local);
+        let lib = Uuid::new_v4();
+        watcher.watch_library(lib, &root).unwrap();
+
+        std::fs::remove_dir(&root).unwrap();
+        // The callback queues the library before it forwards the event.
+        next_event_for(&watcher, &root).await;
+        assert!(
+            watcher.poll_once().is_empty(),
+            "nothing was moved to the poller"
+        );
+        assert!(watcher.registered_libraries().is_empty());
+        assert!(!status.snapshot().libraries.contains_key(&lib));
+
+        std::fs::create_dir(&root).unwrap();
+        assert_eq!(
+            watcher.watch_library(lib, &root).unwrap(),
+            WatchMode::Native
+        );
+        let file = root.join("movie.mkv");
+        std::fs::write(&file, b"x").unwrap();
+        assert_eq!(next_event_for(&watcher, &file).await.library_id, lib);
+    }
+
+    /// Removed and re-created before the next poll: the poll watches the
+    /// new directory at once, rather than leaving the library unwatched
+    /// until the next refresh.
+    #[tokio::test]
+    async fn a_root_recreated_before_the_poll_is_watched_again_by_the_poll() {
+        let (_dir, parent) = canonical_tempdir();
+        let root = parent.join("library");
+        std::fs::create_dir(&root).unwrap();
+        let (watcher, status) = notify_watcher(FilesystemKind::Local);
+        let lib = Uuid::new_v4();
+        watcher.watch_library(lib, &root).unwrap();
+
+        std::fs::remove_dir(&root).unwrap();
+        next_event_for(&watcher, &root).await;
+        std::fs::create_dir(&root).unwrap();
+        watcher.poll_once();
+
+        assert_eq!(watcher.registered_libraries(), vec![lib]);
+        assert_eq!(
+            status.snapshot().libraries.get(&lib),
+            Some(&WatchMode::Native)
+        );
+        let file = root.join("movie.mkv");
+        std::fs::write(&file, b"x").unwrap();
+        assert_eq!(next_event_for(&watcher, &file).await.library_id, lib);
+    }
+
+    fn silent_watcher() -> (NotifyFsWatcher, Arc<WatchStatus>, Arc<Mutex<Vec<PathBuf>>>) {
+        use in_memory::SilentNativeWatcherFactory;
+
+        let status = Arc::new(WatchStatus::new());
+        let factory = SilentNativeWatcherFactory::default();
+        let watcher = NotifyFsWatcher::with_native_factory(
+            Arc::new(FixedFilesystemProbe(FilesystemKind::Local)),
+            status.clone(),
+            &factory,
+        );
+        (watcher, status, factory.watched)
+    }
+
+    /// An unmount reaches `notify` 8 as nothing at all, so the poll compares
+    /// what stands at each root with what was watched. A different directory
+    /// now at the root is watched in its place; a root that is gone leaves
+    /// the library unregistered and out of the status.
+    #[tokio::test]
+    async fn a_root_replaced_without_any_event_is_found_by_the_poll() {
+        let (_dir, parent) = canonical_tempdir();
+        let replaced = parent.join("replaced");
+        let removed = parent.join("removed");
+        let untouched = parent.join("untouched");
+        for root in [&replaced, &removed, &untouched] {
+            std::fs::create_dir(root).unwrap();
+        }
+        let (watcher, status, watched) = silent_watcher();
+        let (replaced_lib, removed_lib, untouched_lib) =
+            (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        watcher.watch_library(replaced_lib, &replaced).unwrap();
+        watcher.watch_library(removed_lib, &removed).unwrap();
+        watcher.watch_library(untouched_lib, &untouched).unwrap();
+
+        // The replacement exists while the original does, so it cannot have
+        // been given the original's inode.
+        let replacement = parent.join("replacement");
+        std::fs::create_dir(&replacement).unwrap();
+        std::fs::remove_dir(&replaced).unwrap();
+        std::fs::rename(&replacement, &replaced).unwrap();
+        std::fs::remove_dir(&removed).unwrap();
+
+        assert!(watcher.poll_once().is_empty());
+        assert_eq!(
+            *watched.lock().unwrap(),
+            vec![
+                replaced.clone(),
+                removed.clone(),
+                untouched.clone(),
+                replaced.clone()
+            ],
+            "only the replaced root was watched again"
+        );
+        let mut registered = watcher.registered_libraries();
+        registered.sort();
+        let mut expected = vec![replaced_lib, untouched_lib];
+        expected.sort();
+        assert_eq!(registered, expected);
+        let libraries = status.snapshot().libraries;
+        assert_eq!(libraries.get(&replaced_lib), Some(&WatchMode::Native));
+        assert!(!libraries.contains_key(&removed_lib));
+
+        // Watched again, the replaced root is not found replaced again.
+        watcher.poll_once();
+        assert_eq!(watched.lock().unwrap().len(), 4);
+    }
+
+    /// Which events invalidate a native watch: the root itself removed or
+    /// renamed, and a rescan notice for every native library it covers.
+    /// A change beneath a root, an event for another root, and a polled
+    /// library's root leave the watch alone.
+    #[tokio::test]
+    async fn only_events_that_end_a_native_watch_watch_it_again() {
+        use notify::event::{Flag, ModifyKind, RemoveKind, RenameMode};
+        use notify::{Event, EventKind};
+
+        let (_dir, parent) = canonical_tempdir();
+        let (_polled_dir, polled_root) = canonical_tempdir();
+        let a = parent.join("a");
+        let b = parent.join("b");
+        std::fs::create_dir(&a).unwrap();
+        std::fs::create_dir(&b).unwrap();
+
+        let remove_root = Event::new(EventKind::Remove(RemoveKind::Folder)).add_path(a.clone());
+        let rename_root =
+            Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::From))).add_path(a.clone());
+        let remove_beneath =
+            Event::new(EventKind::Remove(RemoveKind::Folder)).add_path(a.join("season-1"));
+        let rename_beneath = Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::From)))
+            .add_path(a.join("season-1"));
+        let create_root =
+            Event::new(EventKind::Create(notify::event::CreateKind::Folder)).add_path(a.clone());
+        let rescan_all = Event::new(EventKind::Other).set_flag(Flag::Rescan);
+        let rescan_a = Event::new(EventKind::Other)
+            .set_flag(Flag::Rescan)
+            .add_path(a.join("season-1"));
+        let remove_polled_root =
+            Event::new(EventKind::Remove(RemoveKind::Folder)).add_path(polled_root.clone());
+
+        let cases: [(&str, Event, &[&Path]); 8] = [
+            ("root removed", remove_root, &[a.as_path()]),
+            ("root renamed", rename_root, &[a.as_path()]),
+            ("directory beneath removed", remove_beneath, &[]),
+            ("directory beneath renamed", rename_beneath, &[]),
+            ("root created", create_root, &[]),
+            (
+                "rescan naming no path",
+                rescan_all,
+                &[a.as_path(), b.as_path()],
+            ),
+            ("rescan beneath one root", rescan_a, &[a.as_path()]),
+            ("polled root removed", remove_polled_root, &[]),
+        ];
+        for (case, event, expected) in cases {
+            let (watcher, _status, watched) = silent_watcher();
+            let (lib_a, lib_b, polled) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+            watcher.watch_library(lib_a, &a).unwrap();
+            watcher.watch_library(lib_b, &b).unwrap();
+            watcher
+                .watch_polled(polled, &polled_root, PollReason::NetworkFilesystem)
+                .unwrap();
+            watched.lock().unwrap().clear();
+
+            handle_notify_result(Ok(event), &watcher.shared);
+            watcher.poll_once();
+
+            let mut rewatched = watched.lock().unwrap().clone();
+            rewatched.sort();
+            assert_eq!(rewatched, expected, "{case}");
+            assert_eq!(watcher.registered_libraries().len(), 3, "{case}");
+        }
+    }
+
+    /// A library unwatched, or superseded at its root, after its watch was
+    /// queued to be renewed is not watched again by the poll.
+    #[tokio::test]
+    async fn a_renewal_queued_for_a_library_since_unwatched_is_dropped() {
+        use notify::event::{Event, EventKind, Flag};
+
+        let (_dir, root) = canonical_tempdir();
+        let (_other_dir, other_root) = canonical_tempdir();
+        let (watcher, _status, watched) = silent_watcher();
+        let (unwatched, superseded, successor) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        watcher.watch_library(unwatched, &root).unwrap();
+        watcher.watch_library(superseded, &other_root).unwrap();
+        handle_notify_result(
+            Ok(Event::new(EventKind::Other).set_flag(Flag::Rescan)),
+            &watcher.shared,
+        );
+
+        watcher.unwatch_library(unwatched).unwrap();
+        watcher.watch_library(successor, &other_root).unwrap();
+        watched.lock().unwrap().clear();
+        watcher.poll_once();
+
+        assert!(watched.lock().unwrap().is_empty());
+        assert_eq!(watcher.registered_libraries(), vec![successor]);
     }
 
     #[test]

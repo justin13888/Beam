@@ -517,7 +517,9 @@ enum NewlyPolled {
 ///
 /// What is already watched is asked of the watcher, not remembered here: the
 /// watcher drops a registration on its own when it cannot move a library to
-/// the poller, and a copy kept here would never register that library again.
+/// the poller, or cannot watch a library again after its root was removed or
+/// unmounted (issue #452), and a copy kept here would never register that
+/// library again.
 ///
 /// The watcher calls run on the blocking pool: registering a library walks
 /// its tree, natively or to take the poller's snapshot.
