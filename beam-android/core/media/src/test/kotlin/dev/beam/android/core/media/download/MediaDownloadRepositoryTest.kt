@@ -94,6 +94,12 @@ class MediaDownloadRepositoryTest : DownloadRepositoryHarness() {
             enqueue(F1, on = HOME)
             awaitUntil { indexed().any { it.request.id == F1 && it.state == Download.STATE_COMPLETED } }
             assertEquals(DownloadState.QUEUED, core.downloads().single().state)
+            // The detail screen reads this with the downloads screen still
+            // closed, so it must not wait on the core's record to catch up.
+            assertTrue(
+                "the completed download plays offline before anything collects",
+                repository.isDownloaded(F1),
+            )
 
             observe()
             awaitUntil { stateOf(F1) == DownloadState.COMPLETED }
