@@ -17,6 +17,7 @@ use crate::library_file::{
 };
 use crate::probe::metadata::{StreamMetadata, VideoFileMetadata};
 use crate::services::admin_log::AdminLogService;
+use crate::services::enrichment::EnrichmentWake;
 use crate::services::filesystem_probe::{FilesystemKind, FilesystemProbe, StatfsFilesystemProbe};
 use crate::services::hash::HashService;
 use crate::services::media_info::MediaInfoService;
@@ -415,6 +416,14 @@ pub struct LocalIndexService {
     progress_repo: Arc<dyn WatchStateRepository>,
     path_policy: PathPolicy,
     enrichment_repo: Option<Arc<dyn EnrichmentStateRepository>>,
+    /// Pokes the enrichment worker once a scan or reconcile has queued a
+    /// title (issue #449). Unset, queued titles wait for the next sweep.
+    enrichment_wake: Option<Arc<dyn EnrichmentWake>>,
+    /// Whether a title has been queued for enrichment since the worker was
+    /// last woken: set as classification queues one, taken when a scan or
+    /// reconcile ends, so a batch wakes the worker once however many titles
+    /// it queued, and not at all when it queued none.
+    enrichment_queued: AtomicBool,
     sidecar_repo: Option<Arc<dyn SidecarSubtitleRepository>>,
     /// Where each probed file's chapters go (issue #265). Unset, none are
     /// recorded.
@@ -470,6 +479,8 @@ impl LocalIndexService {
             admin_log,
             path_policy: PathPolicy::default(),
             enrichment_repo: None,
+            enrichment_wake: None,
+            enrichment_queued: AtomicBool::new(false),
             sidecar_repo: None,
             chapter_repo: None,
             applied_nfo_repo: None,
@@ -543,6 +554,28 @@ impl LocalIndexService {
     pub fn with_enrichment_repo(mut self, repo: Arc<dyn EnrichmentStateRepository>) -> Self {
         self.enrichment_repo = Some(repo);
         self
+    }
+
+    /// Wake the enrichment worker -- in `beam-server`, the handle
+    /// [`MetadataEnrichmentService::notify_handle`](crate::services::enrichment::MetadataEnrichmentService::notify_handle)
+    /// gives -- at the end of each scan or reconcile that queued at least one
+    /// title for enrichment, so a new title is enriched within seconds rather
+    /// than at the next periodic sweep (issue #449). Defaults to `None`,
+    /// which leaves queued titles to that sweep.
+    pub fn with_enrichment_wake(mut self, wake: Arc<dyn EnrichmentWake>) -> Self {
+        self.enrichment_wake = Some(wake);
+        self
+    }
+
+    /// Wake the enrichment worker if a title was queued since it was last
+    /// woken. Called once as each scan or reconcile ends, whether or not it
+    /// succeeded: what it queued before failing is still queued.
+    fn wake_enrichment_if_queued(&self) {
+        if self.enrichment_queued.swap(false, Ordering::AcqRel)
+            && let Some(wake) = &self.enrichment_wake
+        {
+            wake.wake();
+        }
     }
 
     /// Wire up sidecar subtitles (issue #184): when set, every text subtitle
@@ -1964,7 +1997,22 @@ impl LocalIndexService {
     /// A path at or inside a DVD or Blu-ray disc structure stands for its
     /// whole disc (issue #234): the disc is walked again as a directory is,
     /// or, when it is gone, its rows are marked missing.
+    ///
+    /// An event that queued a title for enrichment wakes the enrichment
+    /// worker once (see [`Self::with_enrichment_wake`]).
     pub async fn reconcile_path(
+        &self,
+        library_id: Uuid,
+        path: PathBuf,
+        kind: FsEventKind,
+    ) -> Result<ReconcileOutcome, IndexError> {
+        let outcome = self.reconcile_path_unwoken(library_id, path, kind).await;
+        self.wake_enrichment_if_queued();
+        outcome
+    }
+
+    /// [`Self::reconcile_path`], short of waking the enrichment worker.
+    async fn reconcile_path_unwoken(
         &self,
         library_id: Uuid,
         path: PathBuf,
@@ -2563,6 +2611,8 @@ impl LocalIndexService {
             Ok(None) => (None, Err(IndexError::LibraryNotFound)),
             Err(e) => (None, Err(IndexError::from(e))),
         };
+        // Once per scan, however many titles it queued (issue #449).
+        self.wake_enrichment_if_queued();
 
         match result {
             Ok(progress) => {
@@ -3297,3 +3347,7 @@ mod process_tests;
 #[cfg(test)]
 #[path = "index_divergence_tests.rs"]
 mod divergence_tests;
+
+#[cfg(test)]
+#[path = "index_enrichment_wake_tests.rs"]
+mod enrichment_wake_tests;

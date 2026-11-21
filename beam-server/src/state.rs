@@ -445,6 +445,29 @@ impl AppServices {
             beam_index::repositories::SqlTrickplayRepository::new(db.clone()),
         );
 
+        let enrichment_provider = build_enrichment_provider(config, clock.clone())?;
+
+        // Built before the indexer, which wakes it when it queues a title.
+        let enrichment_service = Arc::new(
+            MetadataEnrichmentService::new(
+                enrichment_repo.clone(),
+                movie_repo.clone(),
+                show_repo.clone(),
+                genre_repo.clone(),
+                person_repo.clone(),
+                collection_repo.clone(),
+                enrichment_provider.clone(),
+                admin_log_service.clone(),
+                notification_service.clone(),
+                clock.clone(),
+            )
+            .with_policy(EnrichmentPolicy {
+                batch_size: config.enrich_batch_size,
+                min_confidence: config.enrich_min_confidence,
+                ..EnrichmentPolicy::default()
+            }),
+        );
+
         let index_service = Arc::new(
             LocalIndexService::new(
                 library_repo.clone(),
@@ -468,29 +491,8 @@ impl AppServices {
             .with_applied_nfo_repo(Arc::new(
                 beam_index::repositories::SqlAppliedNfoRepository::new(db.clone()),
             ))
-            .with_user_list_repo(user_list_repo.clone()),
-        );
-
-        let enrichment_provider = build_enrichment_provider(config, clock.clone())?;
-
-        let enrichment_service = Arc::new(
-            MetadataEnrichmentService::new(
-                enrichment_repo.clone(),
-                movie_repo.clone(),
-                show_repo.clone(),
-                genre_repo.clone(),
-                person_repo.clone(),
-                collection_repo.clone(),
-                enrichment_provider.clone(),
-                admin_log_service.clone(),
-                notification_service.clone(),
-                clock.clone(),
-            )
-            .with_policy(EnrichmentPolicy {
-                batch_size: config.enrich_batch_size,
-                min_confidence: config.enrich_min_confidence,
-                ..EnrichmentPolicy::default()
-            }),
+            .with_user_list_repo(user_list_repo.clone())
+            .with_enrichment_wake(enrichment_service.notify_handle()),
         );
         let enrichment_control = Arc::new(EnrichmentControl::new(EnrichmentControlDeps {
             movies: movie_repo.clone(),
