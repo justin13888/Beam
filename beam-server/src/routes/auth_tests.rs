@@ -1567,4 +1567,67 @@ pub(super) mod tests {
             Some("https://idp.test/new.png")
         );
     }
+
+    // ─── sign-in metrics (#458) ────────────────────────────────────────────
+
+    /// `beam_auth_logins_total{flow="browser"}`: a refused exchange is a
+    /// failure, an account store that cannot answer is an error, and a minted
+    /// session a success -- each counted once, under its own result.
+    #[tokio::test]
+    async fn each_callback_is_counted_as_a_browser_sign_in_by_result() {
+        use crate::routes::test_support::Recorded;
+
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        // Sign-ins by result since the previous call, which drains them.
+        let logins = || {
+            let recorded = Recorded::of(&snapshotter);
+            ["success", "failure", "error"].map(|result| {
+                recorded
+                    .counter(
+                        "beam_auth_logins_total",
+                        &[("flow", "browser"), ("result", result)],
+                    )
+                    .unwrap_or(0)
+            })
+        };
+
+        let refused = make_harness(FakeOidcClient::with_exchange_error("bad code"));
+        let (state_cookie, _) = do_login(&refused, None).await;
+        let begin = refused.oidc_client.last_begin().unwrap();
+        do_callback(&refused, &state_cookie, &begin.state)
+            .await
+            .assert_status(StatusCode::BAD_REQUEST);
+        assert_eq!(
+            logins(),
+            [0, 1, 0],
+            "a refusal is a failure: the IdP's verdict, not a fault"
+        );
+
+        let broken = make_harness_over_users(
+            FakeOidcClient::with_identity(identity("user@example.com", true)),
+            Arc::new(FailingUserRepository::new(
+                InMemoryUserRepository::default(),
+                UserRepositoryOperation::FindByOidcIdentity,
+            )),
+        );
+        let (state_cookie, _) = do_login(&broken, None).await;
+        let begin = broken.oidc_client.last_begin().unwrap();
+        do_callback(&broken, &state_cookie, &begin.state)
+            .await
+            .assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            logins(),
+            [0, 0, 1],
+            "a store that cannot answer is an error"
+        );
+
+        let working = make_harness(FakeOidcClient::with_identity(identity(
+            "user@example.com",
+            true,
+        )));
+        login_and_get_session_cookie(&working, "user@example.com").await;
+        assert_eq!(logins(), [1, 0, 0]);
+    }
 }

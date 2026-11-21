@@ -15,6 +15,7 @@ use kynos::security::{
 };
 use uuid::Uuid;
 
+use crate::metrics::session_store_failed;
 use crate::state::AppState;
 
 /// The cookie the OIDC login flow sets. The only credential Beam issues.
@@ -136,6 +137,7 @@ impl Authenticator<SessionCookie, AppState> for SessionAuthenticator {
         )
         .await
         .map_err(|e| {
+            session_store_failed();
             tracing::error!(error = %e, "session store failed while authenticating");
             AuthRejection::unavailable::<SessionCookie>()
         })?

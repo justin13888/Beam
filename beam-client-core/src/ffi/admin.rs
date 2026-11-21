@@ -1,9 +1,12 @@
 //! Administration: the dashboard, accounts, the operational log, server
-//! events, and library management.
+//! events, library management, metadata matching, and the library telemetry
+//! preview.
 
 use super::{BeamClient, parse_uuid};
 use crate::catalog::{
-    AdminEvent, AdminLogPage, AdminStatus, AdminUserPage, LibrarySummary, ScanJob,
+    AdminEvent, AdminLogPage, AdminStatus, AdminUserPage, EnrichmentStatus, LibrarySummary,
+    LibraryTelemetryPreview, MatchCandidate, MediaEnrichment, MediaEnrichmentPage, MetadataField,
+    ScanJob,
 };
 use crate::error::BeamError;
 
@@ -229,5 +232,192 @@ impl BeamClient {
         )
         .await?;
         Ok(())
+    }
+
+    /// One page of titles by enrichment status, newest change first: `first`
+    /// of them, after the page whose `end_cursor` is `after`, or from the
+    /// start. `status` filters to one status -- `Unmatched` is the list of
+    /// titles waiting for a fix-match -- and `None` lists every title.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::NoActiveServer`] when no server is selected,
+    /// [`BeamError::Forbidden`] for a non-administrator, and the
+    /// [request failures](BeamClient#request-failures).
+    pub async fn admin_enrichment(
+        &self,
+        status: Option<EnrichmentStatus>,
+        first: Option<u32>,
+        after: Option<String>,
+    ) -> Result<MediaEnrichmentPage, BeamError> {
+        let (server_id, client, _) = self.active_context()?;
+        let params = crate::api::ListEnrichmentParams {
+            status: status.map(EnrichmentStatus::to_wire),
+            kind: None,
+            first: first.map(i64::from),
+            after,
+        };
+        let response = self
+            .send(&server_id, client.list_enrichment(params))
+            .await?;
+        Ok(MediaEnrichmentPage::from_generated(response.into_inner()))
+    }
+
+    /// Where one title's enrichment stands, its locked fields included.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::NoActiveServer`] when no server is selected,
+    /// [`BeamError::BadRequest`] when `media_id` is not a UUID,
+    /// [`BeamError::Forbidden`] for a non-administrator,
+    /// [`BeamError::NotFound`] for a title the server does not know, and the
+    /// [request failures](BeamClient#request-failures).
+    pub async fn media_enrichment(&self, media_id: String) -> Result<MediaEnrichment, BeamError> {
+        let wire_media_id = parse_uuid("media_id", &media_id)?;
+        let (server_id, client, _) = self.active_context()?;
+        let response = self
+            .send(&server_id, client.get_media_enrichment(wire_media_id))
+            .await?;
+        Ok(MediaEnrichment::from_generated(response.into_inner()))
+    }
+
+    /// The configured providers' candidates to fix a title's match to, best
+    /// first, at most ten. Searches by the title's own title and year unless
+    /// `query` or `year` says otherwise.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::NoActiveServer`] when no server is selected,
+    /// [`BeamError::BadRequest`] when `media_id` is not a UUID,
+    /// [`BeamError::Forbidden`] for a non-administrator,
+    /// [`BeamError::NotFound`] for a title the server does not know,
+    /// [`BeamError::Server`] with status 409 when no provider is configured
+    /// and 502 when the provider failed, and the
+    /// [request failures](BeamClient#request-failures).
+    pub async fn match_candidates(
+        &self,
+        media_id: String,
+        query: Option<String>,
+        year: Option<u32>,
+    ) -> Result<Vec<MatchCandidate>, BeamError> {
+        let wire_media_id = parse_uuid("media_id", &media_id)?;
+        let (server_id, client, _) = self.active_context()?;
+        let params = crate::api::SearchMatchCandidatesParams {
+            // A blank search is no search: the server falls back to the
+            // title's own name only when `query` is absent, so an emptied
+            // field must not send `query=` and match nothing.
+            query: query.filter(|text| !text.trim().is_empty()),
+            year: year.map(i64::from),
+        };
+        let response = self
+            .send(
+                &server_id,
+                client.search_match_candidates(wire_media_id, params),
+            )
+            .await?;
+        Ok(response
+            .into_inner()
+            .items
+            .into_iter()
+            .map(MatchCandidate::from_generated)
+            .collect())
+    }
+
+    /// Fix a title's match to `external_ref`, a `provider:id` such as
+    /// `tmdb:603`. Returns the title as queued: the worker fetches it by that
+    /// id afterwards, and the outcome arrives on the admin event feed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::NoActiveServer`] when no server is selected,
+    /// [`BeamError::BadRequest`] when `media_id` is not a UUID,
+    /// [`BeamError::Forbidden`] for a non-administrator,
+    /// [`BeamError::NotFound`] for a title the server does not know,
+    /// [`BeamError::Server`] with status 409 or 422 for a reference no
+    /// configured provider serves, and the
+    /// [request failures](BeamClient#request-failures).
+    pub async fn fix_media_match(
+        &self,
+        media_id: String,
+        external_ref: String,
+    ) -> Result<MediaEnrichment, BeamError> {
+        let wire_media_id = parse_uuid("media_id", &media_id)?;
+        let (server_id, client, _) = self.active_context()?;
+        let body = crate::api::types::FixMatchRequest { external_ref };
+        let response = self
+            .send(&server_id, client.fix_media_match(wire_media_id, &body))
+            .await?;
+        Ok(MediaEnrichment::from_generated(response.into_inner()))
+    }
+
+    /// Clear an administrator's fixed match: the title goes back to its
+    /// NFO's pin, or to being searched for by name. A title no administrator
+    /// pinned is left as it is.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::NoActiveServer`] when no server is selected,
+    /// [`BeamError::BadRequest`] when `media_id` is not a UUID,
+    /// [`BeamError::Forbidden`] for a non-administrator,
+    /// [`BeamError::NotFound`] for a title the server does not know, and the
+    /// [request failures](BeamClient#request-failures).
+    pub async fn clear_media_match(&self, media_id: String) -> Result<(), BeamError> {
+        let wire_media_id = parse_uuid("media_id", &media_id)?;
+        let (server_id, client, _) = self.active_context()?;
+        self.send(&server_id, client.clear_media_match(wire_media_id))
+            .await?;
+        Ok(())
+    }
+
+    /// Lock exactly `locked_fields` of a title, so enrichment leaves them as
+    /// they are; every field not listed is unlocked. Takes effect from the
+    /// title's next pass.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::NoActiveServer`] when no server is selected,
+    /// [`BeamError::BadRequest`] when `media_id` is not a UUID,
+    /// [`BeamError::Forbidden`] for a non-administrator,
+    /// [`BeamError::NotFound`] for a title the server does not know,
+    /// [`BeamError::Server`] with status 422 for a field the title's kind has
+    /// none of, and the [request failures](BeamClient#request-failures).
+    pub async fn set_media_field_locks(
+        &self,
+        media_id: String,
+        locked_fields: Vec<MetadataField>,
+    ) -> Result<MediaEnrichment, BeamError> {
+        let wire_media_id = parse_uuid("media_id", &media_id)?;
+        let (server_id, client, _) = self.active_context()?;
+        let body = crate::api::types::SetFieldLocksRequest {
+            locked_fields: locked_fields
+                .into_iter()
+                .map(MetadataField::to_wire)
+                .collect(),
+        };
+        let response = self
+            .send(
+                &server_id,
+                client.set_media_field_locks(wire_media_id, &body),
+            )
+            .await?;
+        Ok(MediaEnrichment::from_generated(response.into_inner()))
+    }
+
+    /// The anonymous library report this server would send now, byte for
+    /// byte, and whether and where it would go. Sends nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::NoActiveServer`] when no server is selected,
+    /// [`BeamError::Forbidden`] for a non-administrator, and the
+    /// [request failures](BeamClient#request-failures).
+    pub async fn library_telemetry_preview(&self) -> Result<LibraryTelemetryPreview, BeamError> {
+        let (server_id, client, _) = self.active_context()?;
+        let response = self
+            .send(&server_id, client.preview_library_telemetry())
+            .await?;
+        Ok(LibraryTelemetryPreview::from_generated(
+            response.into_inner(),
+        ))
     }
 }

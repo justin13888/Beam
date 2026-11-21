@@ -12,6 +12,8 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.HttpDataSource
+import androidx.media3.datasource.cache.Cache
+import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import okhttp3.Call
 import okhttp3.OkHttpClient
@@ -76,11 +78,23 @@ internal class BeamHttpClientFactory(
 }
 
 /**
- * A Media3 [DataSource.Factory] that authenticates as the signed-in user.
+ * The player's [DataSource.Factory]: the download [cache] first, then the
+ * network as the signed-in user.
  *
- * Wrapped in [DefaultDataSource.Factory] so `file://` and `content://` URIs
- * resolve too -- without it, a completed download would be unplayable, because
- * an HTTP-only factory cannot open a local file.
+ * Downloads land in [cache] (see `BeamDownloadManager`), keyed by the URL
+ * they were fetched from. Reading through a [CacheDataSource] is what lets a
+ * downloaded file play with no network at all: every span on disk is read from
+ * disk, and only a span that is not goes upstream.
+ *
+ * Read-only. No cache sink is set, so streaming never writes to [cache]: it
+ * holds what the viewer chose to download and nothing else, under a
+ * no-eviction policy that would otherwise keep every streamed byte forever. A
+ * span a download is writing at that moment is locked, and is read from the
+ * network rather than waited for; a cache that fails to read is skipped the
+ * same way, since the network can still serve the file.
+ *
+ * Upstream is wrapped in [DefaultDataSource.Factory] so `file://` and
+ * `content://` URIs resolve too.
  *
  * Takes the server's config rather than one file's: playback resolves it once
  * for the file it is about to play.
@@ -89,7 +103,14 @@ internal fun beamDataSourceFactory(
     context: Context,
     clients: BeamHttpClientFactory,
     server: ServerHttpConfig,
-): DataSource.Factory = DefaultDataSource.Factory(context, beamHttpDataSourceFactory(clients, server))
+    cache: Cache,
+): DataSource.Factory =
+    CacheDataSource
+        .Factory()
+        .setCache(cache)
+        .setUpstreamDataSourceFactory(DefaultDataSource.Factory(context, beamHttpDataSourceFactory(clients, server)))
+        .setCacheWriteDataSinkFactory(null)
+        .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
 
 /**
  * A Media3 [DataSource.Factory] whose requests go out through [calls].

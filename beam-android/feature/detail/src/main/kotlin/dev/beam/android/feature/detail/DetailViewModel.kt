@@ -38,7 +38,7 @@ public data class DetailUiState(
     val selection: SourceSelection? = null,
     /** Whether the source picker is open. */
     val isPickingSource: Boolean = false,
-    /** Files already downloaded, so the action reads "Play offline". */
+    /** Files downloaded in full, so the action reads "Play offline"; read at each load. */
     val downloadedFileIds: Set<String> = emptySet(),
     /** What the last action reported, for a snackbar. */
     val message: String? = null,
@@ -196,10 +196,7 @@ public class DetailViewModel
                         .first()
                         .quality
                         .asPolicy()
-                val selection =
-                    runCatching {
-                        playback.selectSource(mediaId, policy)
-                    }.getOrNull()
+                val selection = runCatching { playback.selectSource(mediaId, policy) }.getOrNull()
 
                 val previous = mutableState.value.previous()
                 val seasons = (detail as? MediaDetail.Show)?.seasons.orEmpty()
@@ -214,6 +211,7 @@ public class DetailViewModel
                                     ?: seasons.firstOrNull()?.seasonNumber,
                             sources = sources,
                             selection = selection,
+                            downloadedFileIds = downloads.downloadedOf(selection),
                         ),
                     )
             } catch (failure: BeamException) {

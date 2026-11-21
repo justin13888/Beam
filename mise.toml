@@ -1954,11 +1954,11 @@ git clone -q "$tmp/src" "$tmp/clone"
 '''
 
 [tasks."check:compose-invariants"]
-description = "Assert the compose topology keeps the dev IdP opt-in, declares its networks, lets dev admin work, forwards what dev:up sets and .env.example names, and mounts libraries read-only"
-# Seven properties the dev stack depends on, none of which any other gate sees.
+description = "Assert the compose topology keeps the dev IdP opt-in, declares its networks, lets dev admin work, forwards what dev:up sets and .env.example names, mounts libraries read-only, proxies only the server's /v1, and publishes the server, web and Postgres ports on loopback only"
+# Nine properties the stack depends on, none of which any other gate sees.
 # `dev:verify-oidc` asserts the first two, but it needs a container runtime and
 # so sits outside `ci` (NFR-201) -- which means nothing runs them automatically.
-# These seven are pure configuration, hermetic, and belong here:
+# These nine are pure configuration, hermetic, and belong here:
 #
 #   1. `dex` stays behind the `dev-idp` profile, so a bare `compose up` is the
 #      production shape and starts no IdP (FR-110, NFR-406).
@@ -1995,6 +1995,27 @@ description = "Assert the compose topology keeps the dev IdP opt-in, declares it
 #      an operator to, and a name set in `.env` that no service lists is
 #      dropped as silently as the one property 6 guards (#221). A name counts
 #      whether it is set or commented out, since an operator uncomments it.
+#   8. Every Traefik router rule on a `server` service is restricted to the
+#      versioned API: it conjoins ``PathPrefix(`/v1`)`` and has no `||` or `!`
+#      that could widen it again, and at least one such router exists. The
+#      server's other routes -- the unauthenticated `/metrics` and `/openapi`
+#      -- stay off the public entrypoint, as the Helm ingress keeps them
+#      (check:chart-invariants property 6) and the operations docs promise.
+#   9. Every port a `server`, `web` or `postgres` service publishes binds
+#      127.0.0.1, and each of the three is declared somewhere. A published
+#      port with no address listens on every interface: for `server` that
+#      hands the whole server -- `/metrics` included -- to the network and
+#      bypasses property 8; for `web` it is a plain-HTTP path around Traefik's
+#      TLS router; for `postgres` it hands the database, with the default
+#      POSTGRES_PASSWORD, to anything that can reach the host (#495). Traefik's
+#      own 80/443 are the stack's one intended public entrypoint, and `dex`'s
+#      5556 is part of its issuer string, so neither is under this property.
+#
+# Properties 8 and 9 are predicates, and each is run first over fixed
+# fixtures: the shapes it must refuse (the unrestricted rule and the
+# all-interfaces ports these properties were written against) and ones it must
+# accept. A predicate weakened until it accepts everything fails there, even
+# while the tracked files still satisfy it.
 #
 # The files are the ones compose.yaml `include`s, read from there rather than
 # restated, so a compose file is under these checks from the moment it is
@@ -2116,6 +2137,60 @@ for (const [f, doc] of docs)
       }
     }
 check(libraryMounts > 0, "some compose service mounts the media library (HOST_VIDEO_DIR/BEAM_VIDEO_DIR)");
+
+// Properties 8 and 9. Labels are a map or a list of NAME=value; a port is a
+// short-form string (`[ip:]host:container`) or a long-form map with host_ip.
+const apiOnlyRule = (rule) =>
+  !/\|\||!/.test(rule) &&
+  rule.split("&&").some((term) => /^\s*PathPrefix\(`\/v1\/?`\)\s*$/.test(term));
+const loopbackPort = (port) =>
+  typeof port === "string" ? port.startsWith("127.0.0.1:") : port?.host_ip === "127.0.0.1";
+for (const [rule, want] of [
+  ["Host(`server.beam.localhost`)", false],
+  ["Host(`server.beam.localhost`) || PathPrefix(`/v1`)", false],
+  ["Host(`server.beam.localhost`) && !PathPrefix(`/v1`)", false],
+  ["Host(`server.beam.localhost`) && PathPrefix(`/`)", false],
+  ["Host(`server.beam.localhost`) && PathPrefix(`/v1`)", true],
+])
+  check(apiOnlyRule(rule) === want, `fixture: the /v1 router predicate ${want ? "accepts" : "refuses"} ${rule}`);
+for (const [port, want] of [
+  ["${BEAM_SERVER_HOST_PORT:-8000}:8000", false],
+  ["${WEB_HOST_PORT:-8080}:80", false],
+  ["${POSTGRES_HOST_PORT:-5432}:5432", false],
+  ["0.0.0.0:8000:8000", false],
+  ["8000", false],
+  [{ target: 8000, published: 8000 }, false],
+  [{ target: 5432, published: 5432, host_ip: "0.0.0.0" }, false],
+  ["127.0.0.1:${BEAM_SERVER_HOST_PORT:-8000}:8000", true],
+  ["127.0.0.1:${WEB_HOST_PORT:-8080}:80", true],
+  ["127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432", true],
+  [{ target: 8000, published: 8000, host_ip: "127.0.0.1" }, true],
+])
+  check(loopbackPort(port) === want, `fixture: the loopback predicate ${want ? "accepts" : "refuses"} ${JSON.stringify(port)}`);
+
+let serverRouters = 0;
+for (const [f, doc] of docs) {
+  const svc = doc.services?.server;
+  if (svc === undefined) continue;
+  const labels = Array.isArray(svc?.labels)
+    ? Object.fromEntries(svc.labels.map((l) => { const i = String(l).indexOf("="); return [String(l).slice(0, i), String(l).slice(i + 1)]; }))
+    : svc?.labels ?? {};
+  for (const [key, rule] of Object.entries(labels)) {
+    if (!/^traefik\.http\.routers\.[^.]+\.rule$/.test(key)) continue;
+    serverRouters += 1;
+    check(apiOnlyRule(String(rule)), `${f}: server router ${key} is restricted to PathPrefix(\`/v1\`) (${rule})`);
+  }
+}
+check(serverRouters > 0, "some compose file routes the server through Traefik");
+
+// Property 9.
+for (const name of ["server", "web", "postgres"]) {
+  const declaring = [...docs].filter(([, doc]) => doc.services?.[name] !== undefined);
+  check(declaring.length > 0, `some compose file declares a ${name} service`);
+  for (const [f, doc] of declaring)
+    for (const port of doc.services[name]?.ports ?? [])
+      check(loopbackPort(port), `${f}: ${name} publishes ${JSON.stringify(port)} on 127.0.0.1 only`);
+}
 
 process.exit(status);
 '

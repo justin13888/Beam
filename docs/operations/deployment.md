@@ -43,16 +43,16 @@ supported way to get a working login locally, and is for development only.
 
 | Service | Role |
 |---|---|
-| `postgres` | Postgres 18, the sole datastore: catalog, sessions, enrichment state, admin logs. Healthchecked via `pg_isready`; data in the `postgres` named volume. |
+| `postgres` | Postgres 18, the sole datastore: catalog, sessions, enrichment state, admin logs. Healthchecked via `pg_isready`; data in the `postgres` named volume. Publishes its port (`POSTGRES_HOST_PORT`) on `127.0.0.1` only, for local tooling: the server reaches it over the compose network as `postgres:5432`. `check:compose-invariants` fails if the address is dropped. |
 | `dex` | Dev-only OIDC IdP with static test users (`admin@beam.localhost` / `user@beam.localhost`, password `password`; see `dex/config.yaml`). Only `admin@` is in the `beam-admin` group, which `mise run dev:up` maps to admin via `BEAM_OIDC_ADMIN_CLAIM=groups`, so `user@` is a non-admin. **Opt-in**: it is gated behind the `dev-idp` compose profile and does not start with a bare `compose up`. Use `mise run dev:up`, which enables the profile and sets the matching `BEAM_OIDC_*`. Production deployments point `BEAM_OIDC_ISSUER` at a real IdP (Keycloak, Authentik, Authelia, or a hosted provider) instead. Listens on `5556` on both the host and the container; that port is part of the issuer string, which the browser reaches via the host mapping and the server via the compose alias, so it has no `*_HOST_PORT` override. |
-| `traefik` | TLS termination and `Host()`-rule routing (`server.beam.localhost` → server, `beam.localhost` → web), HTTP→HTTPS redirect, HTTP/3, dashboard bound to loopback. The server router disables response buffering (`flushInterval: "-1"`) for low-latency media delivery. The bundled setup uses self-signed certs for `*.beam.localhost`; bring your own domain/certificate configuration for production. |
+| `traefik` | TLS termination and `Host()`-rule routing (`server.beam.localhost` under `/v1` → server, `beam.localhost` → web; the server's `/metrics` and `/openapi` are never routed, and `check:compose-invariants` fails if the path restriction is dropped), HTTP→HTTPS redirect, HTTP/3, dashboard bound to loopback. The server router disables response buffering (`flushInterval: "-1"`) for low-latency media delivery. The bundled setup uses self-signed certs for `*.beam.localhost`; bring your own domain/certificate configuration for production. |
 
 ### Application services (`compose.beam.yaml`)
 
 | Service | Role |
 |---|---|
-| `server` | The `beam-server` binary (built from `beam-server/Containerfile`): HTTP API, OIDC auth, in-process indexing/enrichment, direct-play streaming. Mounts the media library read-only (`:ro`, FR-202; `check:compose-invariants` fails if it is dropped) at `BEAM_VIDEO_DIR` and server-writable state at `BEAM_DATA_DIR` (host paths via `HOST_VIDEO_DIR`/`HOST_DATA_DIR`, or the `server_videos`/`server_data` named volumes by default). Healthchecked via `GET /v1/health`. Depends only on `postgres` — deliberately not on `dex`, because a `depends_on` naming a profile-gated service makes the profile-less project invalid outright; `mise run dev:up` sequences Dex first instead. |
-| `web` | The `beam-web` SPA (built from `beam-web/Containerfile`, which generates the typed client from the `beam-web/openapi.json` supplied in the build context), served as static files by Caddy. Depends on a healthy `server`. |
+| `server` | The `beam-server` binary (built from `beam-server/Containerfile`): HTTP API, OIDC auth, in-process indexing/enrichment, direct-play streaming. Mounts the media library read-only (`:ro`, FR-202; `check:compose-invariants` fails if it is dropped) at `BEAM_VIDEO_DIR` and server-writable state at `BEAM_DATA_DIR` (host paths via `HOST_VIDEO_DIR`/`HOST_DATA_DIR`, or the `server_videos`/`server_data` named volumes by default). Publishes its port (`BEAM_SERVER_HOST_PORT`) on `127.0.0.1` only, so off-host clients reach it through Traefik's `/v1` router; `check:compose-invariants` fails if the address is dropped. Healthchecked via `GET /v1/health`. Depends only on `postgres` — deliberately not on `dex`, because a `depends_on` naming a profile-gated service makes the profile-less project invalid outright; `mise run dev:up` sequences Dex first instead. |
+| `web` | The `beam-web` SPA (built from `beam-web/Containerfile`, which generates the typed client from the `beam-web/openapi.json` supplied in the build context), served as static files by Caddy. Publishes its port (`WEB_HOST_PORT`) on `127.0.0.1` only, so off-host browsers reach it through Traefik's TLS router; `check:compose-invariants` fails if the address is dropped. Depends on a healthy `server`. |
 
 ## Database migrations
 
@@ -95,6 +95,8 @@ rolling back to the previous image is safe after a failed upgrade. Only `up` is 
      `C_STREAM_SERVER_URL` is what the *browser* uses to reach the API and should match
      `BEAM_SERVER_URL` from that perspective.
    - Terminate TLS in Traefik (or your own reverse proxy); never expose `beam-server` directly.
+     The bundled compose files already keep to this: the server's, the web app's and Postgres's
+     host ports are bound to `127.0.0.1`, and Traefik forwards only `/v1` to the server. A proxy of your own should route only `/v1` too.
      If TLS terminates in front of a plain-HTTP `BEAM_SERVER_URL`, the server refuses to start
      until you either use the public HTTPS URL or set `BEAM_COOKIE_SECURE` explicitly (see
      [`configuration.md`](configuration.md)).
@@ -121,8 +123,9 @@ rolling back to the previous image is safe after a failed upgrade. Only `up` is 
    `BEAM_TVDB_API_KEY` (and `BEAM_TVDB_PIN` for a user-supported key) for TheTVDB-sourced
    enrichment, asked after TMDB and AniList; without it TheTVDB is not asked.
 5. **Operations** — set `BEAM_ENABLE_METRICS=true` for monitoring (Prometheus text exposition at
-   `GET /metrics`, top-level and unauthenticated — scrape it over the internal network and do not
-   forward it through the reverse proxy) and keep `RUST_LOG` at `info` or `warn`; structured logs
+   `GET /metrics`, top-level and unauthenticated — scrape it over the internal network, e.g. as
+   `server:8000` from a container on the compose network, and do not forward it through the
+   reverse proxy; the bundled Traefik router forwards only `/v1`) and keep `RUST_LOG` at `info` or `warn`; structured logs
    back the admin log viewer.
 
    With `BEAM_ENABLE_METRICS=false` the route does **not** disappear: no recorder is installed, and

@@ -3,10 +3,6 @@ package dev.beam.android.core.ffi.repository
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
-import uniffi.beam_client_core.AdminEvent
-import uniffi.beam_client_core.AdminLogPage
-import uniffi.beam_client_core.AdminStatus
-import uniffi.beam_client_core.AdminUserPage
 import uniffi.beam_client_core.BeamClient
 import uniffi.beam_client_core.BrowseQuery
 import uniffi.beam_client_core.DeviceLoginPrompt
@@ -16,9 +12,6 @@ import uniffi.beam_client_core.LibraryFileSummary
 import uniffi.beam_client_core.LibrarySummary
 import uniffi.beam_client_core.MediaDetail
 import uniffi.beam_client_core.MediaPage
-import uniffi.beam_client_core.PlaybackTelemetrySummary
-import uniffi.beam_client_core.ScanJob
-import uniffi.beam_client_core.ServerHealth
 import uniffi.beam_client_core.ServerSummary
 import uniffi.beam_client_core.SessionObserver
 import uniffi.beam_client_core.StartFailureCause
@@ -195,50 +188,4 @@ internal class BeamSessionRepository
         override suspend fun revoke(sessionId: String) = client.revokeSession(sessionId)
 
         override suspend fun logoutEverywhere() = client.logoutEverywhere()
-    }
-
-@Singleton
-internal class BeamAdminRepository
-    @Inject
-    constructor(
-        private val client: BeamClient,
-    ) : AdminRepository {
-        override suspend fun status(): AdminStatus = client.adminStatus()
-
-        override suspend fun health(): ServerHealth = client.health()
-
-        override suspend fun users(
-            first: UInt?,
-            after: String?,
-        ): AdminUserPage = client.adminUsers(first, after)
-
-        override suspend fun setUserDisabled(
-            userId: String,
-            disabled: Boolean,
-        ) = client.setUserDisabled(userId, disabled)
-
-        override suspend fun logs(
-            first: UInt?,
-            after: String?,
-        ): AdminLogPage = client.adminLogs(first, after)
-
-        override suspend fun events(limit: UInt?): List<AdminEvent> = client.adminEvents(limit)
-
-        override suspend fun createLibrary(
-            name: String,
-            rootPath: String,
-        ): LibrarySummary = client.createLibrary(name, rootPath)
-
-        override suspend fun deleteLibrary(libraryId: String) = client.deleteLibrary(libraryId)
-
-        override suspend fun scanLibrary(libraryId: String) = client.scanLibrary(libraryId)
-
-        override suspend fun scanJob(libraryId: String): ScanJob? = client.libraryScan(libraryId)
-
-        override suspend fun refreshMetadata(mediaId: String) = client.refreshMediaMetadata(mediaId)
-
-        override suspend fun playbackTelemetry(
-            from: String?,
-            to: String?,
-        ): PlaybackTelemetrySummary = client.adminPlaybackTelemetry(from, to)
     }
