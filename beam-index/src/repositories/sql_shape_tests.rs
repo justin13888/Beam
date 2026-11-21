@@ -1366,6 +1366,7 @@ mod show {
                 title: "Seven".to_string(),
                 runtime: None,
                 air_date: None,
+                numbering: beam_domain::utils::media_path::EpisodeNumbering::Standard,
             })
             .await;
         drop(repo);

@@ -195,9 +195,9 @@ impl LibraryWatches {
 #[async_trait::async_trait]
 impl LibraryWatchHook for LibraryWatches {
     /// Registered on the blocking pool: registering walks the tree. A library
-    /// that comes back polled needs no scan here: it has never been scanned,
-    /// so its first scan -- an administrator's, or the next periodic one --
-    /// indexes everything already in it, as for a natively watched one.
+    /// that comes back polled needs no scan here: the library service runs
+    /// its first scan ([`ScanTrigger::Created`]) once this returns, and that
+    /// scan indexes everything already in it, as for a natively watched one.
     async fn library_created(&self, library: &Library) {
         let Some(watcher) = self.watcher.clone() else {
             return;

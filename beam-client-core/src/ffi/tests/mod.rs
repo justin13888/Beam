@@ -10,6 +10,7 @@ mod catalog;
 mod drain;
 mod playback;
 mod progress;
+mod session_observer;
 mod telemetry;
 
 /// The library the library and scan tests name.

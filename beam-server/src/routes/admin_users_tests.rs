@@ -580,7 +580,15 @@ async fn the_status_endpoint_reports_counts_queue_state_and_recent_scans() {
         .iter()
         .map(|scan| scan.message.as_str())
         .collect();
-    assert_eq!(body.recent_scans.len(), 2);
+    // The fixture's library root does not exist, so the first scan its
+    // creation started was refused -- and logged as a scan entry too.
+    assert_eq!(body.recent_scans.len(), 3, "{messages:?}");
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("root path does not exist")),
+        "{messages:?}"
+    );
     assert!(messages.contains(&"scan one"));
     assert!(messages.contains(&"scan two"));
     assert!(

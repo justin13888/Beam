@@ -743,7 +743,7 @@ impl LocalIndexService {
                 last_episode,
                 air_date,
                 episode_title,
-                numbering: _,
+                numbering,
                 contradicted_season_folder,
             }) => {
                 if let Some(folder) = contradicted_season_folder {
@@ -793,6 +793,7 @@ impl LocalIndexService {
                     title: episode_title.unwrap_or_else(|| format!("Episode {first_episode}")),
                     runtime: if spans_episodes { None } else { runtime },
                     air_date,
+                    numbering,
                 };
                 let episode = self
                     .show_repo
@@ -1305,10 +1306,44 @@ impl LocalIndexService {
             })
             .await?;
 
-        self.insert_media_streams(file.id, &metadata).await?;
+        if let Err(err) = self.insert_media_streams(file.id, &metadata).await {
+            self.forget_hash_to_reprobe(&file).await;
+            return Err(err);
+        }
         self.check_and_report_duplicate(&file).await;
         self.check_and_report_runtime_divergence(&file).await;
         Ok(FileOutcome::Added)
+    }
+
+    /// Leave `file`, a row just recorded from a probe whose streams or
+    /// chapters could not be stored, to be probed again by the next scan
+    /// (issue #438). Its probe results, status and classification stand; only
+    /// its hash is forgotten -- the unhashed sentinel `0` -- since an
+    /// unchanged file with a hash is never probed again, and one without is
+    /// hashed and probed again on its next visit (see
+    /// `reconcile_existing_file`). A failure to forget it is logged and
+    /// otherwise left: the scan already reports the file as failed.
+    async fn forget_hash_to_reprobe(&self, file: &MediaFile) {
+        let forgotten = self
+            .file_repo
+            .update(UpdateMediaFile {
+                id: file.id,
+                hash: Some(0),
+                size_bytes: None,
+                mtime: None,
+                identity: None,
+                probe: ProbeUpdate::Keep,
+                content: None,
+                status: None,
+            })
+            .await;
+        if let Err(e) = forgotten {
+            warn!(
+                path = %file.path.display(),
+                error = %e,
+                "could not leave a file whose streams were not stored to be probed again"
+            );
+        }
     }
 
     /// Hash `opened`, a file beneath the library `root` whose handle a stat
@@ -1440,9 +1475,11 @@ impl LocalIndexService {
         let unprobed = existing.duration.is_none();
 
         // Cheap gate: only a size, mtime or identity change warrants a
-        // rehash, and only an unprobed file a re-probe. Neither opens the
-        // file.
-        if listed.is_recorded_by(existing) && !unprobed {
+        // rehash, and only an unprobed or unhashed file a re-probe. Neither
+        // opens the file. An unhashed row is one an older build stored so, or
+        // one whose probe's streams or chapters could not be stored (issue
+        // #438): rehashed, it reads as changed and is probed again.
+        if listed.is_recorded_by(existing) && !unprobed && existing.hash != 0 {
             let FileStat {
                 size: _,
                 mtime: _,
@@ -1597,7 +1634,10 @@ impl LocalIndexService {
     /// content, and a row with no duration is probed again on every visit. A
     /// failed probe of a file whose content did not change writes only the
     /// size, modification time and identity it was found with, so the next
-    /// visit -- which tries the probe again -- does not rehash it.
+    /// visit -- which tries the probe again -- does not rehash it. A row with
+    /// no hash (`0`) counts as one whose content did not change: it keeps its
+    /// probe results, streams, chapters and status, and stays unhashed, so
+    /// the next visit hashes and probes it again.
     ///
     /// The probe reads `opened`, the handle the file was stat'ed and hashed
     /// from (issue #238).
@@ -1617,7 +1657,11 @@ impl LocalIndexService {
             identity,
             inodes: _,
         } = stat;
-        let content_changed = new_hash != existing.hash;
+        // An unhashed row (the sentinel `0`: stored by an older build, or
+        // left so because its streams or chapters were not stored, issue
+        // #438) has no hash to compare against: its content is unknown, not
+        // changed, so a failed probe must not clear what it holds.
+        let content_changed = existing.hash != 0 && new_hash != existing.hash;
         if content_changed {
             info!("File content changed, reconciling: {}", path.display());
         }

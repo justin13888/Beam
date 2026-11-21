@@ -305,6 +305,7 @@ async fn a_new_file_for_an_existing_episode_attaches_without_rewriting_it() {
             title: "Good News About Hell".to_string(),
             runtime: Some(Duration::from_secs(57 * 60)),
             air_date: None,
+            numbering: beam_domain::utils::media_path::EpisodeNumbering::Standard,
         })
         .await
         .unwrap();

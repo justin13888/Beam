@@ -52,8 +52,14 @@ futures = "0.3.34"
 metrics-util = { workspace = true }
 mockall = "0.15.0"
 proptest = "1.11.0"
+# The local TLS stand-in `ReqwestArtworkFetcher` is tested against: a real
+# self-signed certificate and a real rustls listener on 127.0.0.1, so the body
+# ceiling and redirect policy are exercised over an actual connection with no
+# network access (NFR-201). Both already in the tree.
+rcgen = "0.14.10"
 sea-orm = { workspace = true, features = ["mock"] }
 tempfile = "3.27.0"
+tokio-rustls = "0.26.4"
 
 # Independent sources for the filesystem magic numbers the probe classifies:
 # libc's constants, and the kernel's `linux/magic.h` for the ones libc lacks.

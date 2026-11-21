@@ -80,6 +80,7 @@ macro_rules! library_shape_repository_contract {
                         title: format!("Episode {number}"),
                         runtime: None,
                         air_date: None,
+                        numbering: $crate::utils::media_path::EpisodeNumbering::Standard,
                     })
                     .await
                     .expect("create an episode");
