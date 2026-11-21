@@ -188,9 +188,16 @@ pub enum LibraryDeclarationError {
 /// Parse `BEAM_LIBRARIES`: a JSON array of `{"name", "path"}` objects, or
 /// nothing at all when the value is blank.
 ///
-/// Names are trimmed. Two declarations may not share a name or a path: the
-/// second could only ever be skipped, which is a mistake in the declaration
-/// rather than something to apply.
+/// Names are trimmed. Two declarations may not share a name or a path string:
+/// the second could only ever be skipped, which is a mistake in the
+/// declaration rather than something to apply.
+///
+/// Paths are compared as written, not as resolved: `BEAM_VIDEO_DIR` is not
+/// known here, and only the filesystem can say whether two spellings
+/// (`movies` and `/videos/movies`, or a symlink) name one root. Two spellings
+/// of one root are therefore caught at boot instead, where
+/// [`LibraryService::declare_library`] resolves each root: the second is
+/// reported already stored under the first's name and changes nothing.
 pub fn parse_library_declarations(
     raw: &str,
 ) -> Result<Vec<LibraryDeclaration>, LibraryDeclarationError> {

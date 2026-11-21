@@ -706,6 +706,36 @@ mod library_declarations {
     }
 
     #[tokio::test]
+    async fn two_spellings_of_one_root_store_one_library_under_the_first_name() {
+        let host = host();
+        let libraries = no_libraries();
+        let absolute = host.videos.join("movies").display().to_string();
+        let raw = format!(
+            r#"[{{"name":"Movies","path":"movies"}},{{"name":"Films","path":"{absolute}"}}]"#
+        );
+        // The parser compares paths as written, so both spellings pass it.
+        let declarations = parse_library_declarations(&raw).unwrap();
+
+        let reports = declare_libraries(&boot(&host, libraries.clone()), &declarations).await;
+
+        assert!(
+            matches!(reports[0].outcome, Ok(LibraryDeclared::Created(_))),
+            "{reports:?}"
+        );
+        assert!(
+            matches!(
+                &reports[1].outcome,
+                Ok(LibraryDeclared::AlreadyStored { stored_name }) if stored_name == "Movies"
+            ),
+            "{reports:?}"
+        );
+        assert_eq!(
+            stored(&libraries).await,
+            vec![("Movies".to_string(), host.videos.join("movies"))]
+        );
+    }
+
+    #[tokio::test]
     async fn a_name_held_at_another_root_is_neither_moved_nor_duplicated() {
         let host = host();
         let libraries = no_libraries();
