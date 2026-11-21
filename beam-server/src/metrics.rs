@@ -156,7 +156,7 @@ pub const DESCRIPTIONS: &[Description] = &[
         name: "beam_scan_last_success_timestamp_seconds",
         kind: Kind::Gauge,
         unit: Some(Unit::Seconds),
-        help: "Unix time the library's last successful scan finished, by library id.",
+        help: "Unix time the library's last successful scan finished, by library id; 0 once the library is deleted.",
     },
     Description {
         name: "beam_scan_failures_total",
@@ -228,7 +228,7 @@ pub const DESCRIPTIONS: &[Description] = &[
         name: "beam_library_files",
         kind: Kind::Gauge,
         unit: Some(Unit::Count),
-        help: "Files present in the library as of its last completed scan, by library id.",
+        help: "Files present in the library as of its last completed scan, by library id; 0 once the library is deleted.",
     },
     Description {
         name: "beam_trickplay_pending",

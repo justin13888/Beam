@@ -688,6 +688,67 @@ mod metrics {
         assert!(!finished.has("beam_scan_last_success_timestamp_seconds"));
     }
 
+    /// Forgetting a deleted library zeroes its scan series, which the
+    /// exporter would otherwise keep at their last values until restart; a
+    /// scan still running against it -- one that outlived its stop timeout
+    /// -- writes none of them back.
+    #[test]
+    fn forgetting_a_library_zeroes_its_series_and_a_late_scan_writes_none_back() {
+        let capture = MetricsCapture::new();
+        let _recorder = capture.install();
+        let clock = Arc::new(TestClock::starting_at(instant(0)));
+        let coordinator = ScanCoordinator::new();
+        let library = Uuid::new_v4();
+        let label = library.to_string();
+        let series = |name: &str| capture.snapshot().gauge(name, &[("library", &label)]);
+
+        let ticket = registered(&coordinator, library, ScanTrigger::Periodic, &clock);
+        ticket.start();
+        ticket.record_file_count(3);
+        ticket.succeed(ScanProgress::default());
+        drop(ticket);
+        assert_eq!(
+            series("beam_scan_last_success_timestamp_seconds"),
+            Some(1_700_000_000.0)
+        );
+        assert_eq!(series("beam_library_files"), Some(3.0));
+
+        let late = registered(&coordinator, library, ScanTrigger::Manual, &clock);
+        late.start();
+        assert_eq!(series("beam_scan_in_progress"), Some(1.0));
+
+        coordinator.forget(library);
+        for name in [
+            "beam_scan_in_progress",
+            "beam_scan_last_success_timestamp_seconds",
+            "beam_library_files",
+        ] {
+            assert_eq!(series(name), Some(0.0), "{name} is zeroed on forget");
+        }
+
+        clock.advance(Duration::from_secs(60));
+        late.record_file_count(5);
+        late.succeed(ScanProgress::default());
+        drop(late);
+        for name in [
+            "beam_scan_in_progress",
+            "beam_scan_last_success_timestamp_seconds",
+            "beam_library_files",
+        ] {
+            assert_eq!(series(name), Some(0.0), "{name} stays zeroed");
+        }
+        assert!(
+            capture
+                .snapshot()
+                .histogram(
+                    "beam_scan_duration_seconds",
+                    &[("library", &label), ("trigger", "manual")]
+                )
+                .is_none(),
+            "the late scan is not timed"
+        );
+    }
+
     /// Each trigger has its own label, so a dashboard can tell the startup
     /// scan from the periodic one.
     #[test]
