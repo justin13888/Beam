@@ -12,21 +12,32 @@ use crate::error::StorageError;
 use crate::ports::kv::KeyValueStore;
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 
 /// The prefix every server's download key carries: `downloads/{server_id}`.
 pub const DOWNLOADS_KEY_PREFIX: &str = "downloads/";
 
 /// Every download record, across every server.
+///
+/// Every write reads a server's whole list, changes it and writes it back, so
+/// the writes take turns: two at once would each write back the list they
+/// read, and the second would undo the first -- losing a just-queued download
+/// while its items transfer, or bringing back a removed one with a report.
+/// The lock is held across the storage calls, which is why it is an async one.
 #[derive(Debug, Clone)]
 pub struct DownloadStore {
     storage: Arc<dyn KeyValueStore>,
+    writes: Arc<Mutex<()>>,
 }
 
 impl DownloadStore {
     /// A store over the platform's storage.
     #[must_use]
     pub fn new(storage: Arc<dyn KeyValueStore>) -> Self {
-        Self { storage }
+        Self {
+            storage,
+            writes: Arc::new(Mutex::new(())),
+        }
     }
 
     fn key(server_id: &str) -> String {
@@ -75,6 +86,7 @@ impl DownloadStore {
     ///
     /// Propagates storage failures.
     pub async fn insert(&self, download: StoredDownload) -> Result<StoredDownload, StorageError> {
+        let _writing = self.writes.lock().await;
         let server_id = download.plan.server_id.clone();
         let mut entries = self.for_server(&server_id).await?;
         let shares_a_part = |existing: &StoredDownload| {
@@ -105,6 +117,7 @@ impl DownloadStore {
         &self,
         reports: Vec<TransferReport>,
     ) -> Result<Vec<StoredDownload>, StorageError> {
+        let _writing = self.writes.lock().await;
         let mut by_server: BTreeMap<String, (Vec<StoredDownload>, bool)> = BTreeMap::new();
         for server_id in self.server_ids().await? {
             let entries = self.for_server(&server_id).await?;
@@ -143,6 +156,7 @@ impl DownloadStore {
     ///
     /// Propagates storage failures.
     pub async fn remove(&self, file_id: &str) -> Result<Option<StoredDownload>, StorageError> {
+        let _writing = self.writes.lock().await;
         for server_id in self.server_ids().await? {
             let mut entries = self.for_server(&server_id).await?;
             if let Some(index) = entries
@@ -167,6 +181,7 @@ impl DownloadStore {
         &self,
         server_id: &str,
     ) -> Result<Vec<StoredDownload>, StorageError> {
+        let _writing = self.writes.lock().await;
         let removed = self.for_server(server_id).await?;
         self.storage.remove(Self::key(server_id)).await?;
         Ok(removed)
@@ -178,6 +193,7 @@ impl DownloadStore {
     ///
     /// Propagates storage failures.
     pub async fn remove_all(&self) -> Result<Vec<StoredDownload>, StorageError> {
+        let _writing = self.writes.lock().await;
         let removed = self.all().await?;
         for server_id in self.server_ids().await? {
             self.storage.remove(Self::key(&server_id)).await?;

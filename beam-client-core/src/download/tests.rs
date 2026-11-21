@@ -1,7 +1,7 @@
 use super::*;
 use crate::capability::builders::MediaSourceBuilder;
 use crate::capability::select::{SubtitleOrigin, SubtitleTrackView};
-use crate::ports::kv::{FailureMode, InMemoryKeyValueStore};
+use crate::ports::kv::{FailureMode, InMemoryKeyValueStore, KeyValueStore};
 use proptest::prelude::*;
 use std::sync::Arc;
 
@@ -521,6 +521,78 @@ async fn removal_answers_what_was_removed_and_leaves_the_rest() {
     let rest = store.remove_all().await.expect("remove_all");
     assert_eq!(rest.len(), 1);
     assert!(storage.is_empty());
+}
+
+/// Storage that yields before every call, as a platform store crossing the
+/// FFI boundary does, so concurrent writers interleave between a read and
+/// the write that follows it.
+#[derive(Debug)]
+struct YieldingStore(Arc<InMemoryKeyValueStore>);
+
+#[async_trait::async_trait]
+impl KeyValueStore for YieldingStore {
+    async fn get(&self, key: String) -> Result<Option<String>, crate::error::StorageError> {
+        tokio::task::yield_now().await;
+        self.0.get(key).await
+    }
+    async fn put(&self, key: String, value: String) -> Result<(), crate::error::StorageError> {
+        tokio::task::yield_now().await;
+        self.0.put(key, value).await
+    }
+    async fn remove(&self, key: String) -> Result<(), crate::error::StorageError> {
+        tokio::task::yield_now().await;
+        self.0.remove(key).await
+    }
+    async fn list_keys(&self, prefix: String) -> Result<Vec<String>, crate::error::StorageError> {
+        tokio::task::yield_now().await;
+        self.0.list_keys(prefix).await
+    }
+    async fn get_secret(&self, key: String) -> Result<Option<String>, crate::error::StorageError> {
+        self.0.get_secret(key).await
+    }
+    async fn put_secret(
+        &self,
+        key: String,
+        value: String,
+    ) -> Result<(), crate::error::StorageError> {
+        self.0.put_secret(key, value).await
+    }
+    async fn remove_secret(&self, key: String) -> Result<(), crate::error::StorageError> {
+        self.0.remove_secret(key).await
+    }
+}
+
+/// Writes that overlap each land: two downloads queued at once on one
+/// server are both kept, and a report racing a removal does not bring the
+/// removed download back.
+#[tokio::test]
+async fn overlapping_writes_do_not_undo_each_other() {
+    let storage = Arc::new(InMemoryKeyValueStore::new());
+    let store = DownloadStore::new(Arc::new(YieldingStore(Arc::clone(&storage))));
+    store
+        .insert(stored(plan_of(SERVER, &[("gone", Some(4))], &[]), 1))
+        .await
+        .expect("insert");
+
+    let (first, second, removed, reported) = tokio::join!(
+        store.insert(stored(plan_of(SERVER, &[("a1", Some(1))], &[]), 2)),
+        store.insert(stored(plan_of(SERVER, &[("a2", Some(1))], &[]), 3)),
+        store.remove("gone"),
+        store.report(vec![report("gone", Downloading, 2, Some(4))]),
+    );
+    first.expect("first insert");
+    second.expect("second insert");
+    removed.expect("remove").expect("held");
+    reported.expect("report");
+
+    let held: Vec<String> = store_over(&storage)
+        .all()
+        .await
+        .expect("all")
+        .into_iter()
+        .map(|download| download.plan.file_id)
+        .collect();
+    assert_eq!(held, vec!["a1".to_owned(), "a2".to_owned()]);
 }
 
 /// An unreadable list reads as empty rather than failing every render.
