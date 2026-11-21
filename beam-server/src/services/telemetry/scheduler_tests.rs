@@ -95,6 +95,30 @@ async fn parked(harness: &Harness) {
     .await;
 }
 
+/// Wait until the recorded delivery reads back as `expected`, or fail after
+/// the same deadline as [`until`], naming what it last read.
+///
+/// The record is written and read back through `tokio::fs` on the blocking
+/// pool, and both sides swallow an I/O error: the schedule logs a failed
+/// write, and `last_sent_at` reads any failure as never sent. So the
+/// assertion waits on the record itself, not on the schedule having parked
+/// again, and a timeout says what the record last read as rather than only
+/// that it differed once.
+async fn recorded(harness: &Harness, expected: DateTime<Utc>) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let seen = harness.service.last_sent_at().await;
+        if seen == Some(expected) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for a delivery recorded at {expected}; last read {seen:?}"
+        );
+        tokio::task::yield_now().await;
+    }
+}
+
 fn write_state(path: &std::path::Path, last_sent_at: DateTime<Utc>) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(
@@ -152,11 +176,8 @@ async fn nothing_is_sent_before_an_hour_then_one_report_a_week() {
     let sent = &h.sink.sent()[0];
     assert_eq!(sent.url, URL);
     assert_eq!(sent.content_type, "application/json");
-    assert_eq!(
-        h.service.last_sent_at().await,
-        Some(start() + chrono::Duration::hours(1)),
-        "a delivery is recorded"
-    );
+    // A delivery is recorded.
+    recorded(&h, start() + chrono::Duration::hours(1)).await;
     assert_eq!(
         h.service.preview().await.unwrap().next_send_at,
         Some(start() + chrono::Duration::hours(1) + chrono::Duration::days(7))
@@ -212,10 +233,7 @@ async fn a_failed_delivery_is_retried_after_an_hour_and_not_recorded() {
     h.clock.advance(INITIAL_RETRY_DELAY);
     until("the retry", || h.sink.sent_count() == 2).await;
     parked(&h).await;
-    assert_eq!(
-        h.service.last_sent_at().await,
-        Some(start() + chrono::Duration::hours(2))
-    );
+    recorded(&h, start() + chrono::Duration::hours(2)).await;
 }
 
 /// NFR-205: a report that cannot be built is a failed delivery like any
@@ -253,10 +271,7 @@ async fn a_store_failure_is_a_failed_delivery_and_is_retried() {
     h.clock.advance(Duration::from_secs(1));
     until("the retry", || h.sink.sent_count() == 1).await;
     parked(&h).await;
-    assert_eq!(
-        h.service.last_sent_at().await,
-        Some(start() + chrono::Duration::hours(2))
-    );
+    recorded(&h, start() + chrono::Duration::hours(2)).await;
 }
 
 #[tokio::test]
