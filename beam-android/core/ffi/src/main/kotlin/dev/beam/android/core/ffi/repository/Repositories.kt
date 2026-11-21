@@ -1,10 +1,6 @@
 package dev.beam.android.core.ffi.repository
 
 import kotlinx.coroutines.flow.Flow
-import uniffi.beam_client_core.AdminEvent
-import uniffi.beam_client_core.AdminLogPage
-import uniffi.beam_client_core.AdminStatus
-import uniffi.beam_client_core.AdminUserPage
 import uniffi.beam_client_core.BrowseQuery
 import uniffi.beam_client_core.ContinueWatchingEntry
 import uniffi.beam_client_core.DeviceLoginPrompt
@@ -19,12 +15,9 @@ import uniffi.beam_client_core.MediaPage
 import uniffi.beam_client_core.MediaSourceView
 import uniffi.beam_client_core.PlaybackHttpConfig
 import uniffi.beam_client_core.PlaybackPlan
-import uniffi.beam_client_core.PlaybackTelemetrySummary
 import uniffi.beam_client_core.ProgressDrain
 import uniffi.beam_client_core.ProgressOutcome
 import uniffi.beam_client_core.QualityPolicy
-import uniffi.beam_client_core.ScanJob
-import uniffi.beam_client_core.ServerHealth
 import uniffi.beam_client_core.ServerSummary
 import uniffi.beam_client_core.SourceSelection
 import uniffi.beam_client_core.StartFailureCause
@@ -275,70 +268,4 @@ public interface SessionRepository {
 
     /** End every session everywhere, including this one. */
     public suspend fun logoutEverywhere()
-}
-
-/** The administrative surface, available only to administrators. */
-public interface AdminRepository {
-    /** The dashboard snapshot. */
-    public suspend fun status(): AdminStatus
-
-    /** The server's own health report. */
-    public suspend fun health(): ServerHealth
-
-    /** One page of user accounts: [first] of them, after the page whose `endCursor` is [after]. */
-    public suspend fun users(
-        first: UInt?,
-        after: String?,
-    ): AdminUserPage
-
-    /** Block or unblock an account. */
-    public suspend fun setUserDisabled(
-        userId: String,
-        disabled: Boolean,
-    )
-
-    /**
-     * One page of the operational log, newest first: [first] lines, after the page whose
-     * `endCursor` is [after]. Its `total` is how many lines the server holds.
-     */
-    public suspend fun logs(
-        first: UInt?,
-        after: String?,
-    ): AdminLogPage
-
-    /** Recent server events, newest first. */
-    public suspend fun events(limit: UInt?): List<AdminEvent>
-
-    /** Create a library from a path on the server. */
-    public suspend fun createLibrary(
-        name: String,
-        rootPath: String,
-    ): LibrarySummary
-
-    /** Delete a library and everything indexed into it. */
-    public suspend fun deleteLibrary(libraryId: String)
-
-    /**
-     * Start a rescan of a library. Returns once the server has accepted it; the
-     * scan itself runs on the server afterwards.
-     */
-    public suspend fun scanLibrary(libraryId: String)
-
-    /**
-     * The latest scan of a library since the server started, running or
-     * finished; null when it has not been scanned since.
-     */
-    public suspend fun scanJob(libraryId: String): ScanJob?
-
-    /** Re-fetch metadata for one title. */
-    public suspend fun refreshMetadata(mediaId: String)
-
-    /**
-     * Playback telemetry from [from] to [to], inclusive UTC days as
-     * `YYYY-MM-DD`; null for the server's default of the last thirty days.
-     */
-    public suspend fun playbackTelemetry(
-        from: String?,
-        to: String?,
-    ): PlaybackTelemetrySummary
 }

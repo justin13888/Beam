@@ -28,8 +28,6 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.hilt.navigation.compose.hiltViewModel
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.beam.android.core.designsystem.BeamSpacing
 import dev.beam.android.core.designsystem.component.BeamErrorState
 import dev.beam.android.core.designsystem.component.BeamLoading
@@ -39,27 +37,7 @@ import dev.beam.android.core.model.valueOrNull
 import uniffi.beam_client_core.LibrarySummary
 import kotlin.time.Duration.Companion.seconds
 
-/** The admin area, wired to its view model. */
-@Composable
-public fun AdminRoute(
-    modifier: Modifier = Modifier,
-    viewModel: AdminViewModel = hiltViewModel(),
-) {
-    val state by viewModel.state.collectAsStateWithLifecycle()
-    AdminScreen(
-        state = state,
-        onScan = viewModel::scan,
-        onDeleteLibrary = viewModel::deleteLibrary,
-        onSetUserDisabled = viewModel::setUserDisabled,
-        onTelemetryRange = viewModel::setTelemetryRange,
-        onRetry = viewModel::refresh,
-        modifier = modifier,
-        onCreateLibrary = viewModel::createLibrary,
-        onMessageShown = viewModel::clearMessage,
-    )
-}
-
-/** The admin area, as a function of its state. */
+/** The admin dashboard, as a function of its state. */
 @Composable
 internal fun AdminScreen(
     state: LoadState<AdminUiState>,
@@ -71,6 +49,7 @@ internal fun AdminScreen(
     onTelemetryRange: (TelemetryRange) -> Unit = {},
     onCreateLibrary: (name: String, rootPath: String) -> Unit = { _, _ -> },
     onMessageShown: () -> Unit = {},
+    onOpen: (AdminPage) -> Unit = {},
 ) {
     val content = state.valueOrNull
     val snackbarHost = remember { SnackbarHostState() }
@@ -101,6 +80,7 @@ internal fun AdminScreen(
                 onTelemetryRange = onTelemetryRange,
                 onCreateLibrary = onCreateLibrary,
                 onRefresh = onRetry,
+                onOpen = onOpen,
                 modifier = modifier,
             )
         }
@@ -128,6 +108,7 @@ private fun AdminContent(
     onTelemetryRange: (TelemetryRange) -> Unit,
     onCreateLibrary: (name: String, rootPath: String) -> Unit,
     onRefresh: () -> Unit,
+    onOpen: (AdminPage) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val status = state.status
@@ -218,6 +199,23 @@ private fun AdminContent(
                     status.enrichment.unmatched.toString(),
                     Modifier.weight(1f),
                 )
+            }
+        }
+        item(key = "open-metadata") {
+            OpenPageRow(
+                "Fix matches and lock fields",
+                "${status.enrichment.unmatched} unmatched, ${status.enrichment.failed} failed",
+            ) { onOpen(AdminPage.Metadata) }
+        }
+
+        item(key = "operations-header") { SectionHeader(title = "Operations") }
+        item(key = "open-logs") { OpenPageRow("Logs", "The server's operational log") { onOpen(AdminPage.Logs) } }
+        item(
+            key = "open-events",
+        ) { OpenPageRow("Events", "Scans, enrichment and system events") { onOpen(AdminPage.Events) } }
+        item(key = "open-library-telemetry") {
+            OpenPageRow("Library telemetry", "The anonymous report this server would send") {
+                onOpen(AdminPage.LibraryTelemetry)
             }
         }
 

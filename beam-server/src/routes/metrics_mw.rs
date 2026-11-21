@@ -34,7 +34,9 @@
 //! defect to work around: [`Observer::on_disconnect`] is the honest companion,
 //! and `beam_http_response_disconnects_total` counts the bodies that were
 //! announced and never delivered — a player abandoning a large range mid-
-//! download was previously counted as served.
+//! download was previously counted as served. For the two media endpoints it
+//! also counts `beam_stream_aborted_total{endpoint}`, beside the bytes and
+//! active bodies `stream.rs` meters as the body is read.
 
 use std::time::Duration;
 
@@ -44,6 +46,7 @@ use kynos::middleware::{Continued, Interceptor, Next, Observer};
 use kynos::prelude::*;
 use kynos::router::operation::Route;
 
+use crate::routes::stream::DeliveryEndpoint;
 use crate::routes::tags::Internal;
 use crate::state::AppState;
 
@@ -84,6 +87,14 @@ impl Observer<AppState> for HttpMetrics {
     }
 
     fn on_disconnect(&self, route: Option<Route<'_>>, elapsed: Duration) {
+        // A media body abandoned part-way: the player seeked, or gave up.
+        if let Some(endpoint) =
+            route.and_then(|route| DeliveryEndpoint::of_operation(route.operation_id()))
+        {
+            metrics::counter!("beam_stream_aborted_total", "endpoint" => endpoint.label())
+                .increment(1);
+        }
+
         let (method, path) = labels(route);
 
         // Called from the body's `Drop`, so this does the little work a

@@ -242,6 +242,66 @@ pub const DESCRIPTIONS: &[Description] = &[
         unit: Some(Unit::Count),
         help: "Files whose trickplay sheets could not be made: left for a later pass, or undecodable.",
     },
+    Description {
+        name: "beam_db_pool_connections",
+        kind: Kind::Gauge,
+        unit: Some(Unit::Count),
+        help: "Open database pool connections, by state (idle or in_use), as of the last pool sample.",
+    },
+    Description {
+        name: "beam_db_pool_max",
+        kind: Kind::Gauge,
+        unit: Some(Unit::Count),
+        help: "The most connections the database pool may open.",
+    },
+    Description {
+        name: "beam_db_acquire_duration_seconds",
+        kind: Kind::Histogram,
+        unit: Some(Unit::Seconds),
+        help: "Time a periodic probe waited to acquire a database pool connection; it queues behind every request, so it tracks pool saturation.",
+    },
+    Description {
+        name: "beam_db_errors_total",
+        kind: Kind::Counter,
+        unit: Some(Unit::Count),
+        help: "Database failures, by kind: a failed query, or a pool probe that timed out, found the pool closed or could not connect.",
+    },
+    Description {
+        name: "beam_stream_bytes_total",
+        kind: Kind::Counter,
+        unit: Some(Unit::Bytes),
+        help: "Media bytes read into stream and download response bodies, by endpoint.",
+    },
+    Description {
+        name: "beam_streams_active",
+        kind: Kind::Gauge,
+        unit: Some(Unit::Count),
+        help: "Stream and download bodies currently being delivered, by endpoint.",
+    },
+    Description {
+        name: "beam_stream_aborted_total",
+        kind: Kind::Counter,
+        unit: Some(Unit::Count),
+        help: "Stream and download bodies dropped before their last byte, by endpoint.",
+    },
+    Description {
+        name: "beam_auth_logins_total",
+        kind: Kind::Counter,
+        unit: Some(Unit::Count),
+        help: "Sign-ins that ended, by flow (browser or device) and result: success, failure (refused, a 4xx), or error (Beam or the identity provider failed, a 5xx).",
+    },
+    Description {
+        name: "beam_session_store_errors_total",
+        kind: Kind::Counter,
+        unit: Some(Unit::Count),
+        help: "Session-store calls that failed while authenticating a request, signing out, listing or revoking sessions, or revoking a disabled account's sessions.",
+    },
+    Description {
+        name: "beam_rate_limited_total",
+        kind: Kind::Counter,
+        unit: Some(Unit::Count),
+        help: "Requests refused with 429 by a rate limiter, by route class.",
+    },
 ];
 
 /// The recorder's configuration: real buckets for every `*_seconds` histogram.
@@ -325,6 +385,17 @@ pub fn record_build_info() {
         "commit" => BUILD_COMMIT,
     )
     .set(1.0);
+}
+
+/// Count one failed session-store call in `beam_session_store_errors_total`
+/// ([#458](https://github.com/justin13888/beam/issues/458)).
+///
+/// Called wherever Beam meets a session-store failure: authenticating a
+/// cookie, signing out, listing and revoking sessions, and revoking a
+/// disabled account's sessions. A store outage answers every signed-in
+/// request with a 503, so this is the counter that pages.
+pub(crate) fn session_store_failed() {
+    ::metrics::counter!("beam_session_store_errors_total").increment(1);
 }
 
 /// A recorder whose histogram samples must be drained periodically.

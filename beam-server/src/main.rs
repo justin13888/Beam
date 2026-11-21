@@ -82,6 +82,9 @@ async fn main() -> Result<()> {
     // the hermetic SQL-shape tests need that feature -- so the sharing is
     // explicit rather than a `.clone()` per consumer.
     let db = std::sync::Arc::new(db);
+    // The pool behind it, for the metrics sampler below. A handle, not a
+    // second pool: SQLx's pool is reference-counted.
+    let pool = db.get_postgres_connection_pool().clone();
 
     // Deep-health probe over the same pool.
     let probe: std::sync::Arc<dyn beam_server::services::health::DependencyProbe> =
@@ -171,6 +174,8 @@ async fn main() -> Result<()> {
         // The recorder drains histogram samples only on render or upkeep, so
         // without this task an unscraped histogram grows without bound.
         beam_server::metrics::spawn_upkeep(handle.clone());
+        // The pool's connections and acquire wait, which no request reports.
+        beam_server::db::spawn_pool_sampler(pool, clock.clone());
         info!("Metrics enabled -- Prometheus exposition at /metrics");
         Some(handle)
     } else {

@@ -283,7 +283,13 @@ impl RateLimitPolicy<AppState> for BeamRateLimit {
         let limit = self.limit(quota, &outcome);
 
         match outcome.retry_after {
-            Some(retry_after) => Decision::deny(retry_after, limit),
+            Some(retry_after) => {
+                // The HTTP observer counts this 429 by route; this counts it by
+                // the budget that ran out, which is what an operator raises.
+                metrics::counter!("beam_rate_limited_total", "route_class" => self.class.name())
+                    .increment(1);
+                Decision::deny(retry_after, limit)
+            }
             None => Decision::allow(limit),
         }
     }

@@ -167,7 +167,11 @@ services:
       C_APP_TITLE: ${C_APP_TITLE:-Beam}
       C_STREAM_SERVER_URL: ${C_STREAM_SERVER_URL:-http://localhost:8000}
     ports:
-      - "${WEB_HOST_PORT:-8080}:80"
+      # Loopback only, like the server's port. Off-host browsers reach the web
+      # app through Traefik's TLS router (`beam.localhost`) below; on every
+      # interface this port would be a plain-HTTP path around the proxy.
+      # `check:compose-invariants` fails if the address is dropped.
+      - "127.0.0.1:${WEB_HOST_PORT:-8080}:80"
     depends_on:
       server:
         condition: service_healthy
