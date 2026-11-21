@@ -26,6 +26,8 @@ import mockwebserver3.RecordedRequest
 import okio.Buffer
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -106,7 +108,8 @@ class OfflinePlaybackTest {
             scope.runCurrent()
             TestPlayerRunHelper.run(exoPlayer).untilState(Player.STATE_READY)
 
-            assertTrue("the core was never asked for a plan", playback.planRequests.isEmpty())
+            assertNull(player.state.value.error)
+            assertEquals(1, exoPlayer.mediaItemCount)
             assertEquals(
                 uri,
                 exoPlayer
@@ -119,6 +122,56 @@ class OfflinePlaybackTest {
             assertTrue("bytes were read", exoPlayer.bufferedPosition > 0L)
             assertEquals("every byte came from the cache", 0, server.requestCount)
             player.stop()
+        }
+
+    @Test
+    fun `a downloaded part keeps the core's other parts and subtitles, and plays from its download`() =
+        runTest {
+            val scope = TestScope(testScheduler)
+            val uri = mediaUrl()
+            downloads.store(uri, WAV)
+            // The core names the active server, which is not the one the
+            // download came from; its later part and the subtitle stay.
+            val first = Fixtures.part(FILE_ID, sidecars = listOf(Fixtures.sidecar()))
+            val second = Fixtures.part("part-2")
+            playback.plans[FILE_ID] = Fixtures.plan(listOf(first, second))
+            val player = player(scope) { fileId -> CompletedDownload(fileId, uri).takeIf { fileId == FILE_ID } }
+
+            player.play(REQUEST)
+            scope.runCurrent()
+
+            assertEquals("the core's plan was used", listOf(FILE_ID), playback.planRequests.map { it.second })
+            val items = (0 until exoPlayer.mediaItemCount).map(exoPlayer::getMediaItemAt)
+            assertEquals(listOf(FILE_ID, "part-2"), items.map { it.mediaId })
+            assertEquals(
+                listOf(uri, second.url),
+                items.map {
+                    it.localConfiguration
+                        ?.uri
+                        .toString()
+                },
+            )
+            assertEquals(
+                listOf(first.sidecarSubtitles.single().url),
+                items[0].localConfiguration?.subtitleConfigurations?.map { it.uri.toString() },
+            )
+            assertEquals(2, player.state.value.partCount)
+            player.stop()
+        }
+
+    @Test
+    fun `a file the core cannot plan and that is not downloaded is a playback error`() =
+        runTest {
+            val scope = TestScope(testScheduler)
+            playback.failWith = BeamException.Unauthenticated()
+            // Another file is downloaded; this one is not.
+            val player = player(scope) { fileId -> CompletedDownload(fileId, mediaUrl()).takeIf { fileId == "other" } }
+
+            player.play(REQUEST)
+            scope.runCurrent()
+
+            assertNotNull(player.state.value.error)
+            assertEquals(0, exoPlayer.mediaItemCount)
         }
 
     @Test

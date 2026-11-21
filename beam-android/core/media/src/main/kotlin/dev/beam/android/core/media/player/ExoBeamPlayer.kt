@@ -263,17 +263,19 @@ internal class ExoBeamPlayer(
         // Sources belong to a movie or an episode; a show has none of its own,
         // so an episode's are asked for by the episode.
         val titleId = request.episodeId ?: request.mediaId.takeIf { it.isNotEmpty() }
-        // A file downloaded in full plays from disk, without the core's plan.
         val plan =
-            completedDownloads.completed(request.fileId)?.let(::downloadedPlan)
-                ?: try {
-                    repository.playbackPlan(titleId, request.fileId)
-                } catch (failure: BeamException) {
+            try {
+                withDownloads(repository.playbackPlan(titleId, request.fileId))
+            } catch (failure: BeamException) {
+                // Signed out, the session expired, or no server: a file
+                // downloaded in full still plays, from disk and alone.
+                completedDownloads.completed(request.fileId)?.let(::downloadedPlan) ?: run {
                     mutableState.update {
                         it.copy(request = request, error = failure.toFailure().asPlaybackFailure())
                     }
                     return false
                 }
+            }
         if (plan.parts.isEmpty()) return false
 
         val factory =
@@ -335,15 +337,37 @@ internal class ExoBeamPlayer(
     }
 
     /**
-     * The plan for a file downloaded in full, built from its download alone.
+     * The core's [plan], with each part downloaded in full played from its
+     * download.
      *
-     * The core is not asked: its plan needs a session and a server, and a
-     * download is played exactly when there may be neither -- in airplane
-     * mode, or after the session has expired. A download holds one file, so
-     * the plan is that file alone, with no sidecar subtitles, which are not
-     * downloaded; it plays from the URL the download was fetched from, which
-     * is the key its bytes are cached under. No session goes with it: every
-     * byte is on disk, and the server is never asked for one.
+     * Every part, sidecar subtitle and the start part stay the core's, so a
+     * multi-part source whose first part alone is downloaded still plays its
+     * later parts. A downloaded part plays from the URL its download was
+     * fetched from, which is the key its bytes are cached under: the core's
+     * URL for it names the active server, which after a server switch is not
+     * the one the download came from. Offline, the core's lookup of the
+     * source's other parts fails and the plan is the one file, which then
+     * plays from disk.
+     */
+    private suspend fun withDownloads(plan: PlaybackPlan): PlaybackPlan =
+        plan.copy(
+            parts =
+                plan.parts.map { part ->
+                    completedDownloads.completed(part.fileId)?.let { download -> part.copy(url = download.uri) } ?: part
+                },
+        )
+
+    /**
+     * The plan for a file downloaded in full, built from its download alone,
+     * for when the core cannot plan it.
+     *
+     * The core's plan needs a session and a server, and a download is played
+     * exactly when there may be neither -- after the session has expired, or
+     * signed out. A download holds one file, so the plan is that file alone,
+     * with no sidecar subtitles, which are not downloaded; it plays from the
+     * URL the download was fetched from, which is the key its bytes are
+     * cached under. No session goes with it: every byte is on disk, and the
+     * server is never asked for one.
      */
     private fun downloadedPlan(download: CompletedDownload): PlaybackPlan =
         PlaybackPlan(
