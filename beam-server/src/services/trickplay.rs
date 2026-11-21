@@ -197,9 +197,14 @@ impl TrickplayService {
 
     /// One pass: make the sheets of every file that needs them, then sweep
     /// away what no record names.
+    ///
+    /// Every file needing sheets is found before any is made, so
+    /// `beam_trickplay_pending` (issue #457) counts the pass's whole backlog
+    /// and falls as each file is done.
     pub async fn run_pass(&self) -> Result<PassReport, DbErr> {
-        let mut report = PassReport::default();
-        for library in self.libraries.find_all().await? {
+        let libraries = self.libraries.find_all().await?;
+        let mut work: Vec<(&Library, MediaFile)> = Vec::new();
+        for library in &libraries {
             let files: Vec<MediaFile> = self
                 .files
                 .find_all_by_library(library.id)
@@ -216,13 +221,27 @@ impl TrickplayService {
                 .map(|record| (record.file_id, record))
                 .collect();
             for file in files {
-                if self.is_current(&file, records.get(&file.id)).await {
-                    continue;
+                if !self.is_current(&file, records.get(&file.id)).await {
+                    work.push((library, file));
                 }
-                match self.make(&library, &file).await? {
-                    Made::Sheets => report.made += 1,
-                    Made::None => report.without_sheets += 1,
-                    Made::Deferred => report.deferred += 1,
+            }
+        }
+
+        let mut report = PassReport::default();
+        let mut remaining = work.len();
+        record_pending(remaining);
+        for (library, file) in work {
+            let made = self.make(library, &file).await;
+            remaining -= 1;
+            record_pending(remaining);
+            match made? {
+                Made::Sheets => report.made += 1,
+                Made::None => report.without_sheets += 1,
+                Made::Deferred => {
+                    // Every deferral is a failure: the file could not be
+                    // opened or read, or its sheets could not be written.
+                    record_failure();
+                    report.deferred += 1;
                 }
             }
         }
@@ -285,6 +304,7 @@ impl TrickplayService {
             // again until it changes.
             Err(error) if error.is_content_fault() => {
                 warn!(path = %file.path.display(), %error, "no trickplay sheets for this file");
+                record_failure();
                 None
             }
             // Anything else -- the file could not be rewound or read just
@@ -353,6 +373,20 @@ impl TrickplayService {
         }
         Ok(())
     }
+}
+
+/// Set `beam_trickplay_pending` (issue #457): the files the running pass
+/// has still to make sheets for.
+fn record_pending(files: usize) {
+    metrics::gauge!("beam_trickplay_pending").set(files as f64);
+}
+
+/// Count one file whose sheets could not be made
+/// (`beam_trickplay_failures_total`, issue #457): one left for a later pass,
+/// or one whose content gives none because it does not decode. A file with
+/// no video to make sheets of is not a failure.
+fn record_failure() {
+    metrics::counter!("beam_trickplay_failures_total").increment(1);
 }
 
 /// What making one file's sheets came to.

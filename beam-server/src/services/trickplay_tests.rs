@@ -490,3 +490,180 @@ async fn a_file_with_no_sheets_locates_none() {
         Err(SheetLookupError::NotFound)
     ));
 }
+
+// ─── metrics (issue #457) ───────────────────────────────────────────────────
+
+/// A local recorder logging every value a gauge is set to and every counter
+/// increment, so a test reads a gauge's whole history rather than its last
+/// value.
+#[derive(Debug, Default)]
+struct MetricLog {
+    gauges: Mutex<Vec<(String, f64)>>,
+    counters: Mutex<Vec<(String, u64)>>,
+}
+
+impl MetricLog {
+    fn gauge_history(&self, name: &str) -> Vec<f64> {
+        let gauges = self.gauges.lock().unwrap();
+        gauges
+            .iter()
+            .filter(|(gauge, _)| gauge == name)
+            .map(|(_, value)| *value)
+            .collect()
+    }
+
+    fn counter_total(&self, name: &str) -> u64 {
+        let counters = self.counters.lock().unwrap();
+        counters
+            .iter()
+            .filter(|(counter, _)| counter == name)
+            .map(|(_, value)| *value)
+            .sum()
+    }
+}
+
+struct Logged {
+    name: String,
+    log: Arc<MetricLog>,
+}
+
+impl metrics::GaugeFn for Logged {
+    fn increment(&self, _: f64) {
+        unimplemented!("the trickplay worker only sets its gauge")
+    }
+    fn decrement(&self, _: f64) {
+        unimplemented!("the trickplay worker only sets its gauge")
+    }
+    fn set(&self, value: f64) {
+        self.log
+            .gauges
+            .lock()
+            .unwrap()
+            .push((self.name.clone(), value));
+    }
+}
+
+impl metrics::CounterFn for Logged {
+    fn increment(&self, value: u64) {
+        self.log
+            .counters
+            .lock()
+            .unwrap()
+            .push((self.name.clone(), value));
+    }
+    fn absolute(&self, _: u64) {
+        unimplemented!("the trickplay worker only increments its counter")
+    }
+}
+
+struct LoggingRecorder(Arc<MetricLog>);
+
+impl LoggingRecorder {
+    fn logged(&self, key: &metrics::Key) -> Arc<Logged> {
+        Arc::new(Logged {
+            name: key.name().to_string(),
+            log: self.0.clone(),
+        })
+    }
+}
+
+impl metrics::Recorder for LoggingRecorder {
+    fn describe_counter(
+        &self,
+        _: metrics::KeyName,
+        _: Option<metrics::Unit>,
+        _: metrics::SharedString,
+    ) {
+    }
+    fn describe_gauge(
+        &self,
+        _: metrics::KeyName,
+        _: Option<metrics::Unit>,
+        _: metrics::SharedString,
+    ) {
+    }
+    fn describe_histogram(
+        &self,
+        _: metrics::KeyName,
+        _: Option<metrics::Unit>,
+        _: metrics::SharedString,
+    ) {
+    }
+    fn register_counter(&self, key: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Counter {
+        metrics::Counter::from_arc(self.logged(key))
+    }
+    fn register_gauge(&self, key: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {
+        metrics::Gauge::from_arc(self.logged(key))
+    }
+    fn register_histogram(
+        &self,
+        _: &metrics::Key,
+        _: &metrics::Metadata<'_>,
+    ) -> metrics::Histogram {
+        metrics::Histogram::noop()
+    }
+}
+
+/// The pending gauge counts a pass's whole backlog before any file is made,
+/// and falls by one as each is done.
+#[tokio::test]
+async fn the_pending_gauge_counts_down_the_pass() {
+    let log = Arc::new(MetricLog::default());
+    let recorder = LoggingRecorder(log.clone());
+    let _recorder = metrics::set_default_local_recorder(&recorder);
+    let h = Harness::new(Outcome::Sheets(1)).await;
+    h.file("One (2001).mkv", 1).await;
+    h.file("Two (2002).mkv", 2).await;
+
+    assert_eq!(h.service.run_pass().await.unwrap().made, 2);
+    assert_eq!(log.gauge_history("beam_trickplay_pending"), [2.0, 1.0, 0.0]);
+    assert_eq!(log.counter_total("beam_trickplay_failures_total"), 0);
+
+    // Nothing left to make: the backlog reads empty at once.
+    h.service.run_pass().await.unwrap();
+    assert_eq!(
+        log.gauge_history("beam_trickplay_pending"),
+        [2.0, 1.0, 0.0, 0.0]
+    );
+}
+
+/// A file whose sheets could not be made counts as a failure, whether it is
+/// left for a later pass or its content does not decode; one with no video
+/// to make sheets of does not.
+#[tokio::test]
+async fn a_file_that_could_not_be_given_sheets_is_a_failure() {
+    for (outcome, failures) in [
+        (Outcome::NoVideo, 0),
+        (Outcome::Undecodable, 1),
+        (Outcome::WriteFails, 1),
+        (Outcome::ReadFails, 1),
+    ] {
+        let log = Arc::new(MetricLog::default());
+        let recorder = LoggingRecorder(log.clone());
+        let _recorder = metrics::set_default_local_recorder(&recorder);
+        let h = Harness::new(outcome).await;
+        h.file("Film (2001).mkv", 9).await;
+
+        h.service.run_pass().await.unwrap();
+
+        assert_eq!(
+            log.counter_total("beam_trickplay_failures_total"),
+            failures,
+            "{outcome:?}"
+        );
+    }
+}
+
+/// A file gone from disk cannot be opened: a failure, left for later.
+#[tokio::test]
+async fn a_file_that_cannot_be_opened_is_a_failure() {
+    let log = Arc::new(MetricLog::default());
+    let recorder = LoggingRecorder(log.clone());
+    let _recorder = metrics::set_default_local_recorder(&recorder);
+    let h = Harness::new(Outcome::Sheets(1)).await;
+    let file = h.file("Film (2001).mkv", 9).await;
+    std::fs::remove_file(&file.path).unwrap();
+
+    assert_eq!(h.service.run_pass().await.unwrap().deferred, 1);
+    assert_eq!(log.counter_total("beam_trickplay_failures_total"), 1);
+}
