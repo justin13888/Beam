@@ -31,19 +31,20 @@ import dev.beam.android.core.designsystem.component.BeamEmptyState
 import dev.beam.android.core.designsystem.component.SectionHeader
 import dev.beam.android.core.model.DownloadRecord
 import dev.beam.android.core.model.DownloadState
+import dev.beam.android.core.model.PlaybackRequest
 import dev.beam.android.core.ui.Format
 
 /** Downloads, wired to its view model. */
 @Composable
 public fun DownloadsRoute(
-    onPlay: (DownloadRecord) -> Unit,
+    onPlay: (PlaybackRequest) -> Unit,
     modifier: Modifier = Modifier,
     viewModel: DownloadsViewModel = hiltViewModel(),
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     DownloadsScreen(
         state = state,
-        onPlay = onPlay,
+        onPlay = { record -> viewModel.play(record, onPlay) },
         onPause = viewModel::pause,
         onResume = viewModel::resume,
         onRemove = viewModel::remove,
