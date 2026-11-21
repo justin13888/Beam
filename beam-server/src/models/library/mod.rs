@@ -1,3 +1,4 @@
+mod changes;
 mod file;
 
 use chrono::{DateTime, Utc};
@@ -5,6 +6,7 @@ use kynos::Schema;
 use serde::Serialize;
 use uuid::Uuid;
 
+pub use changes::*;
 pub use file::*;
 
 #[derive(Clone, Debug, Serialize, serde::Deserialize, Schema)]
