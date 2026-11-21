@@ -91,6 +91,11 @@ spec:
               value: /videos
             - name: BEAM_DATA_DIR
               value: /data
+            {{- if .Values.libraries }}
+            # Each mounted library, created at boot when it is not stored yet.
+            - name: BEAM_LIBRARIES
+              value: {{ include "beam.libraryDeclarations" . | quote }}
+            {{- end }}
             - name: BEAM_SERVER_URL
               value: {{ .Values.server.publicUrl | quote }}
             {{- with include "beam.webUrl" . }}

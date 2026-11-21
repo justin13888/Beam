@@ -32,10 +32,13 @@ ingress-level controls.
 {{- end }}
 {{- if .Values.libraries }}
 
-Libraries are mounted read-only. Create each in Beam's admin UI with its path:
+Libraries are mounted read-only, and Beam creates each one not stored yet when it starts
+(a library already stored at the path is kept under its own name):
 {{- range .Values.libraries }}
-  /videos/{{ .name }}
+  {{ .name }}  /videos/{{ .name }}
 {{- end }}
+A library Beam cannot create -- its path overlaps another library, say -- is reported in the
+server log and skipped.
 {{- else }}
 
 No libraries are mounted. Add entries under `libraries` to mount media read-only at
