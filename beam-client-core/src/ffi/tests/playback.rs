@@ -18,6 +18,65 @@ async fn playback_needs_a_session_before_it_will_hand_over_a_url() {
     ));
 }
 
+/// A download queued from one server keeps fetching from it after the
+/// viewer switches to another, so that server's config must be reachable
+/// by id and carry its own cookie and pins -- never the active server's.
+#[tokio::test]
+async fn a_server_config_by_id_carries_that_servers_session_not_the_active_ones() {
+    let client = client();
+    let home = sign_in_to(&client, "https://home.beam.test", "home-cookie").await;
+    client
+        .trust_certificate(home.clone(), "AA:BB".to_owned())
+        .await
+        .expect("home is registered");
+    let cabin = sign_in_to(&client, "https://cabin.beam.test", "cabin-cookie").await;
+    assert!(
+        client
+            .list_servers()
+            .expect("listed")
+            .iter()
+            .any(|server| server.id == cabin && server.is_active),
+        "cabin, added last, is the active server"
+    );
+
+    let config = client
+        .server_http_config_for(home)
+        .expect("home is signed in");
+
+    assert_eq!(config.base_url, "https://home.beam.test");
+    assert_eq!(config.host, "home.beam.test");
+    assert_eq!(
+        config.headers.get("Cookie").map(String::as_str),
+        Some("beam_session=home-cookie")
+    );
+    assert_eq!(config.trusted_fingerprints, vec!["AA:BB".to_owned()]);
+    assert_eq!(
+        client
+            .server_http_config()
+            .expect("cabin is signed in")
+            .headers
+            .get("Cookie")
+            .map(String::as_str),
+        Some("beam_session=cabin-cookie"),
+        "the active server's config is still the active server's"
+    );
+}
+
+#[tokio::test]
+async fn a_server_config_by_id_refuses_an_unknown_or_signed_out_server() {
+    let (client, signed_out) = client_with_server().await;
+    sign_in_to(&client, "https://cabin.beam.test", "cabin-cookie").await;
+
+    assert!(matches!(
+        client.server_http_config_for(signed_out),
+        Err(BeamError::Unauthenticated)
+    ));
+    assert!(matches!(
+        client.server_http_config_for("no-such-server".to_owned()),
+        Err(BeamError::UnknownServer { server_id }) if server_id == "no-such-server"
+    ));
+}
+
 #[tokio::test]
 async fn a_playback_config_carries_the_cookie_and_the_stream_url() {
     let (_, client, _) = restarted_after_sign_in(ME, "opaque-value").await;

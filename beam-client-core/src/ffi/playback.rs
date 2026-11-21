@@ -352,6 +352,22 @@ impl BeamClient {
     /// [`BeamError::Unauthenticated`] when there is no session.
     pub fn server_http_config(&self) -> Result<ServerHttpConfig, BeamError> {
         let server_id = self.require_active()?;
+        self.server_http_config_for(server_id)
+    }
+
+    /// The credential and trust decision for one known server, active or not.
+    ///
+    /// A download outlives the moment it was queued: the viewer can switch
+    /// to another server while it is still transferring, and its remaining
+    /// requests still go to the server it came from, so they need that
+    /// server's own session and pins rather than the active server's.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::UnknownServer`] when `server_id` is not
+    /// registered, and [`BeamError::Unauthenticated`] when that server has no
+    /// session.
+    pub fn server_http_config_for(&self, server_id: String) -> Result<ServerHttpConfig, BeamError> {
         let servers = self.servers.read().expect("servers lock");
         let context = servers.get(&server_id).ok_or(BeamError::UnknownServer {
             server_id: server_id.clone(),
