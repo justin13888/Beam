@@ -935,7 +935,8 @@ impl MetadataEnrichmentService {
             };
             let from = (season_number, episode.episode_number);
             let to = (in_season, provider_episode.episode_number);
-            let as_indexed = episode.episode_number == absolute;
+            let as_indexed = episode.episode_number == absolute
+                && episode.absolute_season_number == Some(season_number);
             if from == to || (as_indexed && season_number != 1 && in_season != season_number) {
                 continue;
             }

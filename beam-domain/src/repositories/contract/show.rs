@@ -406,16 +406,142 @@ macro_rules! show_repository_contract {
             ] {
                 let created = repo.find_or_create_episode(create).await.unwrap();
                 let read = repo.find_episode_by_id(created.id).await.unwrap().unwrap();
-                stored.push((read.numbering, read.absolute_number));
+                stored.push((
+                    read.numbering,
+                    read.absolute_number,
+                    read.absolute_season_number,
+                ));
             }
             assert_eq!(
                 stored,
                 vec![
-                    (EpisodeNumbering::Standard, None),
-                    (EpisodeNumbering::Daily, None),
-                    (EpisodeNumbering::Absolute, Some(30)),
+                    (EpisodeNumbering::Standard, None, None),
+                    (EpisodeNumbering::Daily, None, None),
+                    (EpisodeNumbering::Absolute, Some(30), Some(1)),
                 ]
             );
+        }
+
+        /// A bare number in two season folders -- `Season 1/Show - 03` and
+        /// `Season 2/Show - 03`, both read as absolute -- is two episodes,
+        /// whichever is indexed first, and a rescan of each finds its own.
+        #[tokio::test]
+        async fn one_running_number_in_two_season_folders_is_two_episodes() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let (one, two) = new_seasons(repo).await;
+
+            let second = repo.find_or_create_episode(absolute(two, 3)).await.unwrap();
+            let first = repo.find_or_create_episode(absolute(one, 3)).await.unwrap();
+
+            assert_ne!(first.id, second.id);
+            assert_eq!(
+                (
+                    first.season_id,
+                    first.episode_number,
+                    first.absolute_season_number
+                ),
+                (one, 3, Some(1))
+            );
+            assert_eq!(
+                (
+                    second.season_id,
+                    second.episode_number,
+                    second.absolute_season_number
+                ),
+                (two, 3, Some(2))
+            );
+            let again = repo.find_or_create_episode(absolute(two, 3)).await.unwrap();
+            assert_eq!(again.id, second.id);
+            let again = repo.find_or_create_episode(absolute(one, 3)).await.unwrap();
+            assert_eq!(again.id, first.id);
+        }
+
+        /// A running number read in season 1 and re-homed into season 2
+        /// is not what the same bare number in the season 2 folder names:
+        /// that file's episode is made at its own place.
+        #[tokio::test]
+        async fn a_rehomed_episode_is_not_found_from_another_season_folder() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let (show_id, one) = new_show_season(repo, "rehome other folder").await;
+            // `one` keeps an episode, so it survives the move.
+            repo.find_or_create_episode(absolute(one, 1)).await.unwrap();
+            let indexed = repo
+                .find_or_create_episode(absolute(one, 30))
+                .await
+                .unwrap();
+            repo.rehome_episode(indexed.id, 2, 5).await.unwrap();
+            let two = repo.find_or_create_season(show_id, 2).await.unwrap();
+
+            let folder = repo
+                .find_or_create_episode(absolute(two.id, 30))
+                .await
+                .unwrap();
+
+            assert_ne!(folder.id, indexed.id);
+            assert_eq!((folder.season_id, folder.episode_number), (two.id, 30));
+            let moved = repo.find_episode_by_id(indexed.id).await.unwrap().unwrap();
+            assert_eq!((moved.season_id, moved.episode_number), (two.id, 5));
+        }
+
+        /// A standard episode with no running number -- one indexed before
+        /// numbering was recorded -- takes the numbering of an absolutely
+        /// numbered file that lands on it, so enrichment can re-home it. An
+        /// episode numbered any other way is left as it is.
+        #[tokio::test]
+        async fn an_absolute_file_upgrades_a_standard_episode_with_no_running_number() {
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let (one, two) = new_seasons(repo).await;
+            let before = repo
+                .find_or_create_episode(episode(one, 30, "Indexed before", 24))
+                .await
+                .unwrap();
+            let daily = repo
+                .find_or_create_episode(CreateEpisode {
+                    numbering: EpisodeNumbering::Daily,
+                    ..episode(two, 301, "Daily", 24)
+                })
+                .await
+                .unwrap();
+
+            let upgraded = repo
+                .find_or_create_episode(absolute(one, 30))
+                .await
+                .unwrap();
+            let left = repo
+                .find_or_create_episode(absolute(two, 301))
+                .await
+                .unwrap();
+
+            assert_eq!(upgraded.id, before.id);
+            let read = repo.find_episode_by_id(before.id).await.unwrap().unwrap();
+            assert_eq!(
+                (
+                    read.numbering,
+                    read.absolute_number,
+                    read.absolute_season_number
+                ),
+                (EpisodeNumbering::Absolute, Some(30), Some(1))
+            );
+            assert_eq!(read.title, "Indexed before", "nothing else is rewritten");
+            assert_eq!(left.id, daily.id);
+            let read = repo.find_episode_by_id(daily.id).await.unwrap().unwrap();
+            assert_eq!(
+                (
+                    read.numbering,
+                    read.absolute_number,
+                    read.absolute_season_number
+                ),
+                (EpisodeNumbering::Daily, None, None)
+            );
+            // A standard file never downgrades it back.
+            repo.find_or_create_episode(episode(one, 30, "Standard", 24))
+                .await
+                .unwrap();
+            let read = repo.find_episode_by_id(before.id).await.unwrap().unwrap();
+            assert_eq!(read.numbering, EpisodeNumbering::Absolute);
         }
 
         /// An episode re-homed to a free place moves with its files and
@@ -538,7 +664,11 @@ macro_rules! show_repository_contract {
                 .expect("the episode exists");
 
             assert_eq!(home.id, occupant.id);
-            assert_eq!(home.absolute_number, Some(30), "a rescan finds it by 30");
+            assert_eq!(
+                (home.absolute_number, home.absolute_season_number),
+                (Some(30), Some(1)),
+                "a rescan finds it by 30 read in season 1"
+            );
             assert!(repo.find_episode_by_id(indexed.id).await.unwrap().is_none());
             let mut files: Vec<Uuid> = fixture
                 .files()

@@ -345,14 +345,19 @@ set at index time for a date-based episode), `runtime_mins` (INTEGER,
 nullable), `thumbnail_url` (TEXT, nullable), `numbering` (TEXT, not null, default `standard` — how
 the number of the file that created the row was written: `standard`, `daily` or `absolute`, a
 `CHECK` holding it to those), `absolute_number` (INTEGER, nullable, positive — the running number an
-absolutely numbered file gave the episode), `created_at` (TIMESTAMPTZ, not null). Unique index on
-`(season_id, episode_number)`; index on `season_id`; partial index on `absolute_number` where set.
+absolutely numbered file gave the episode), `absolute_season_number` (INTEGER, nullable — the season
+that file was indexed into, set exactly when `absolute_number` is, a `CHECK` holding the two
+together), `created_at` (TIMESTAMPTZ, not null). Unique index on `(season_id, episode_number)`;
+index on `season_id`; partial index on `absolute_number` where set.
 
 An absolutely numbered file (`Show - 030`) is indexed as episode 30 of season 1 (or of its season
 folder). Once the show is matched, enrichment re-homes the row to the season and episode the
 provider's absolute order puts 30 at, merging it into a row already there (its files and watch
-state with it), and the row keeps `absolute_number`, so a rescan of the file finds it there rather
-than making a new row at 30 (issue #334).
+state with it), and the row keeps `absolute_number` and `absolute_season_number`, so a rescan of the
+file finds it there rather than making a new row at 30 (issue #334). The lookup is by the pair: a
+bare `03` in `Season 1/` and in `Season 2/` is two episodes. Rows indexed before these columns
+existed are all `standard`; an absolutely numbered file that a rescan finds on a `standard` row with
+no running number upgrades it to `absolute`, so enrichment re-homes it.
 
 ## Media-file tables
 

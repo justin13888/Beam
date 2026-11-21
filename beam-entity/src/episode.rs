@@ -21,6 +21,9 @@ pub struct Model {
     /// The running number an absolutely numbered file gave the episode,
     /// wherever enrichment has since re-homed it.
     pub absolute_number: Option<i32>,
+    /// The season the absolutely numbered file was indexed into, set exactly
+    /// when `absolute_number` is: a running number is looked up within it.
+    pub absolute_season_number: Option<i32>,
 
     pub created_at: DateTimeWithTimeZone,
 }

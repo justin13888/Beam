@@ -68,6 +68,11 @@ pub struct Episode {
     /// (issue #334), kept wherever enrichment has since re-homed it -- see
     /// [`crate::repositories::ShowRepository::rehome_episode`].
     pub absolute_number: Option<u32>,
+    /// The season that file was indexed into -- season 1, or its season
+    /// folder's -- set exactly when `absolute_number` is. A running number
+    /// names one episode only within it: `Season 1/Show - 03` and
+    /// `Season 2/Show - 03` are two episodes.
+    pub absolute_season_number: Option<u32>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -173,6 +178,7 @@ impl From<beam_entity::episode::Model> for Episode {
             numbering: EpisodeNumbering::parse(&model.numbering)
                 .unwrap_or(EpisodeNumbering::Standard),
             absolute_number: model.absolute_number.map(|n| n as u32),
+            absolute_season_number: model.absolute_season_number.map(|n| n as u32),
             created_at: model.created_at.with_timezone(&Utc),
         }
     }
@@ -195,6 +201,7 @@ mod entity_conversion_tests {
             thumbnail_url: None,
             numbering: "standard".to_string(),
             absolute_number: None,
+            absolute_season_number: None,
             created_at: now,
         }
     }

@@ -275,6 +275,7 @@ async fn test_process_file_episode_success() {
                 thumbnail_url: None,
                 numbering: beam_domain::utils::media_path::EpisodeNumbering::Standard,
                 absolute_number: None,
+                absolute_season_number: None,
                 created_at: chrono::Utc::now(),
             })
         });

@@ -516,7 +516,7 @@ impl ShowRepository for SqlShowRepository {
     }
 
     async fn find_or_create_episode(&self, create: CreateEpisode) -> Result<Episode, DbErr> {
-        use beam_entity::episode;
+        use beam_entity::{episode, season};
         use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 
         let CreateEpisode {
@@ -529,15 +529,19 @@ impl ShowRepository for SqlShowRepository {
         } = create;
 
         // An absolutely numbered file finds its episode by its running number
-        // first, wherever enrichment has re-homed it (issue #334).
+        // and the season it was read in first, wherever enrichment has
+        // re-homed it (issue #334). The season matters: `Season 1/Show - 03`
+        // and `Season 2/Show - 03` are two episodes.
         let absolute_number = (numbering == EpisodeNumbering::Absolute).then_some(episode_number);
         if let Some(absolute) = absolute_number {
             let rehomed = episode::Entity::find()
                 .from_raw_sql(Statement::from_sql_and_values(
                     DbBackend::Postgres,
                     "SELECT e.* FROM episodes AS e JOIN seasons AS s ON s.id = e.season_id \
+                     JOIN seasons AS indexed ON indexed.id = $2 \
                      WHERE e.absolute_number = $1 \
-                       AND s.show_id = (SELECT show_id FROM seasons WHERE id = $2) \
+                       AND e.absolute_season_number = indexed.season_number \
+                       AND s.show_id = indexed.show_id \
                      ORDER BY e.created_at, e.id LIMIT 1",
                     [(absolute as i32).into(), season_id.into()],
                 ))
@@ -547,13 +551,27 @@ impl ShowRepository for SqlShowRepository {
                 return Ok(Episode::from(rehomed));
             }
         }
+        let absolute_season_number = match absolute_number {
+            Some(_) => Some(
+                season::Entity::find_by_id(season_id)
+                    .one(self.db.as_ref())
+                    .await?
+                    .ok_or_else(|| {
+                        DbErr::RecordNotFound(format!(
+                            "season {season_id} of an absolutely numbered episode does not exist"
+                        ))
+                    })?
+                    .season_number,
+            ),
+            None => None,
+        };
 
         // One `INSERT ... ON CONFLICT DO NOTHING`, not SELECT-then-INSERT:
         // `(season_id, episode_number)` carries `idx_episodes_unique`, so two
         // files for one episode indexed concurrently would both read "absent"
         // and the second insert would fail. On conflict the existing row is
-        // left exactly as it is -- a later file's parse never rewrites the
-        // title or runtime -- and read back below.
+        // left as it is -- a later file's parse never rewrites the title or
+        // runtime; only its numbering may be upgraded, below -- and read back.
         let active = episode::ActiveModel {
             id: Set(Uuid::new_v4()),
             season_id: Set(season_id),
@@ -563,6 +581,7 @@ impl ShowRepository for SqlShowRepository {
             air_date: Set(air_date),
             numbering: Set(numbering.as_str().to_string()),
             absolute_number: Set(absolute_number.map(|n| n as i32)),
+            absolute_season_number: Set(absolute_season_number),
             created_at: Set(Utc::now().into()),
             ..Default::default()
         };
@@ -575,6 +594,34 @@ impl ShowRepository for SqlShowRepository {
             .on_conflict_do_nothing_on([episode::Column::SeasonId, episode::Column::EpisodeNumber])
             .exec_without_returning(self.db.as_ref())
             .await?;
+
+        // A standard row with no running number that an absolutely numbered
+        // file lands on was indexed before numbering was recorded: it takes
+        // the file's numbering, so enrichment re-homes it. Conditional in the
+        // statement itself, so it never touches any other row and a
+        // concurrent upgrade of the same row is a no-op.
+        if let (Some(absolute), Some(indexed_season)) = (absolute_number, absolute_season_number) {
+            use sea_orm::sea_query::Expr;
+            episode::Entity::update_many()
+                .col_expr(
+                    episode::Column::Numbering,
+                    Expr::value(EpisodeNumbering::Absolute.as_str()),
+                )
+                .col_expr(
+                    episode::Column::AbsoluteNumber,
+                    Expr::value(absolute as i32),
+                )
+                .col_expr(
+                    episode::Column::AbsoluteSeasonNumber,
+                    Expr::value(indexed_season),
+                )
+                .filter(episode::Column::SeasonId.eq(season_id))
+                .filter(episode::Column::EpisodeNumber.eq(episode_number as i32))
+                .filter(episode::Column::Numbering.eq(EpisodeNumbering::Standard.as_str()))
+                .filter(episode::Column::AbsoluteNumber.is_null())
+                .exec(self.db.as_ref())
+                .await?;
+        }
 
         // `ON CONFLICT` returns only once the conflicting row is committed, so
         // under READ COMMITTED this fresh statement sees it.

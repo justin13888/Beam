@@ -843,15 +843,18 @@ impl LocalIndexService {
                         thumbnail_url: _,
                         numbering,
                         absolute_number,
+                        absolute_season_number,
                         created_at: _,
                     } = episode;
                     // An absolutely numbered episode joins the survivor's by
-                    // its running number while it is still at it; one
-                    // enrichment has re-homed is carried to the place it now
-                    // has, where the survivor's enrichment re-homes it again
-                    // (issue #334).
+                    // its running number while it is still where it was
+                    // indexed; one enrichment has re-homed is carried to the
+                    // place it now has, where the survivor's enrichment
+                    // re-homes it again (issue #334).
+                    let as_indexed = absolute_number == Some(episode_number)
+                        && absolute_season_number == Some(season.season_number);
                     let numbering = match absolute_number {
-                        Some(absolute) if absolute != episode_number => {
+                        Some(_) if !as_indexed => {
                             beam_domain::utils::media_path::EpisodeNumbering::Standard
                         }
                         _ => numbering,

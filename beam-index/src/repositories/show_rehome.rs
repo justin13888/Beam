@@ -84,17 +84,26 @@ pub(super) async fn rehome_episode(
             };
             carry_rows(&txn, target(source.id), target(occupant.id)).await?;
             episode::Entity::delete_by_id(source.id).exec(&txn).await?;
-            let absolute_number = occupant.absolute_number.or(source.absolute_number);
+            // The running number and the season it was read in go together.
+            let (absolute_number, absolute_season_number) = match occupant.absolute_number {
+                Some(_) => (occupant.absolute_number, occupant.absolute_season_number),
+                None => (source.absolute_number, source.absolute_season_number),
+            };
             episode::Entity::update_many()
                 .col_expr(
                     episode::Column::AbsoluteNumber,
                     Expr::value(absolute_number),
+                )
+                .col_expr(
+                    episode::Column::AbsoluteSeasonNumber,
+                    Expr::value(absolute_season_number),
                 )
                 .filter(episode::Column::Id.eq(occupant.id))
                 .exec(&txn)
                 .await?;
             beam_entity::episode::Model {
                 absolute_number,
+                absolute_season_number,
                 ..occupant
             }
         }
