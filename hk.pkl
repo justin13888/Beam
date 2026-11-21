@@ -135,10 +135,19 @@ hooks {
         }
     }
 
-    // A local approximation of .github/workflows/ci.yml. Deliberately excludes
-    // the two slow gates CI still enforces -- llvm-cov coverage thresholds and
-    // container image builds. Globs gate each step so a docs-only push does not
-    // wait on a Rust compile.
+    // Affected-only: each step checks what the pushed range changed, not the
+    // whole repository (#478). Branches are pushed after every commit, so a
+    // whole-workspace clippy and test per push repeated the full gates many
+    // times over for one change. Globs gate each step, so a docs-only push runs
+    // no Rust, Android, Apple or TypeScript step, and the Rust steps hand the
+    // changed files to `rust:*:affected`, which selects the members they belong
+    // to plus their reverse dependencies.
+    //
+    // The full gate is `mise run ci` (with CI's `ci-ok`), run before a merge:
+    // the whole-workspace clippy and tests, the full TypeScript suite and
+    // biome over the project, and the Android screenshot and minify gates.
+    // This hook also never runs the two slow gates CI alone enforces --
+    // llvm-cov coverage thresholds and container image builds. See ADR-0009.
     ["pre-push"] {
         steps {
             default {
@@ -157,17 +166,24 @@ hooks {
             ["hook-git-env"] {
                 check = "mise run check:hook-git-env:probe"
             }
+            // The pushed .rs files only: pre-commit already ran rustfmt on each
+            // staged one, and `rust:fmt` over the whole tree is `ci`'s.
             ["rust-fmt"] {
                 glob = List("*.rs")
-                check = "mise run rust:fmt"
+                check = "mise run rust:fmt:files {{files}}"
             }
+            // Both hand the changed paths to scripts/affected-rust-packages.sh
+            // (through the tasks), which selects `--workspace` only for a
+            // workspace-wide input -- the root Cargo.toml, Cargo.lock,
+            // rust-toolchain.toml, clippy.toml, .cargo/** -- and otherwise the
+            // owning members and their reverse dependencies.
             ["rust-clippy"] {
-                glob = List("*.rs", "Cargo.toml", "*/Cargo.toml", "Cargo.lock", "rust-toolchain.toml")
-                check = "mise run rust:clippy"
+                glob = List("*.rs", "Cargo.toml", "*/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "clippy.toml", ".cargo/**")
+                check = "mise run rust:clippy:affected {{files}}"
             }
             ["rust-test"] {
-                glob = List("*.rs", "Cargo.toml", "*/Cargo.toml", "Cargo.lock")
-                check = "mise run rust:test"
+                glob = List("*.rs", "Cargo.toml", "*/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".cargo/**")
+                check = "mise run rust:test:affected {{files}}"
             }
             ["rust-deny"] {
                 glob = List("Cargo.toml", "*/Cargo.toml", "Cargo.lock", "deny.toml")
@@ -230,28 +246,32 @@ hooks {
             // mise.toml). The glob is the union of theirs, so it fires exactly
             // when one of them will.
             ["js-deps"] {
-                glob = List("*.ts", "*.tsx", "*.js", "*.mjs", "*.cjs", "*.astro", "*.json", "beam-docs/**")
+                glob = List("beam-web/**", "beam-docs/**")
+                exclude = List("beam-web/**/*.md")
                 check = "mise run deps:js"
             }
-            ["ts-check"] {
-                glob = List("*.ts", "*.tsx", "*.js", "*.mjs", "*.cjs", "*.astro", "*.json")
-                depends = List("js-deps")
-                check = "mise run ts:check"
-            }
-            // `*.json` includes beam-web/openapi.json: a contract change re-checks the
-            // client generated from it. ts:typecheck regenerates the gitignored
-            // api.gen.ts from that file first, so this runs on a fresh checkout.
+            // No project-wide biome here: pre-commit already ran it on every
+            // staged JS/TS file, and `ts:check` over the project is `ci`'s.
+            //
+            // Per workspace: beam-docs is type-checked by docs-build below, so
+            // only a beam-web change runs this. beam-web/openapi.json is in the
+            // glob: a contract change re-checks the client generated from it.
+            // ts:typecheck regenerates the gitignored api.gen.ts from that file
+            // first, so this runs on a fresh checkout.
             ["ts-typecheck"] {
-                glob = List("*.ts", "*.tsx", "*.json")
+                glob = List("beam-web/**/*.ts", "beam-web/**/*.tsx", "beam-web/**/*.json")
                 depends = List("js-deps")
                 check = "mise run ts:typecheck"
             }
-            // vitest resolves through Vite and never needs the generated types to
-            // exist, so the suite runs on a fresh checkout.
+            // vitest's related mode: only the tests that import a pushed file,
+            // or the whole suite when the push changed something every test
+            // depends on (see the task). vitest resolves through Vite and never
+            // needs the generated types to exist, so it runs on a fresh checkout.
             ["ts-test"] {
-                glob = List("*.ts", "*.tsx")
+                glob = List("beam-web/**")
+                exclude = List("beam-web/**/*.md")
                 depends = List("js-deps")
-                check = "mise run ts:test"
+                check = "mise run ts:test:related {{files}}"
             }
             // Without this a docs-only change is pushed unverified, because none of the ts-*
             // steps above build beam-docs. Narrower than ci.yml's `docs` filter, which also
@@ -262,38 +282,37 @@ hooks {
                 depends = List("js-deps")
                 check = "mise run docs:build"
             }
-            // The Android steps also watch beam-client-core: the Kotlin
-            // bindings and the .so are generated from it, so a change there can
-            // break the Android build without touching a Kotlin file.
+            // The Android steps also watch the parts of beam-client-core the
+            // Kotlin bindings and the .so are generated from -- its Rust
+            // sources, its manifest, and the API document its build script
+            // reads -- so a change there can break the Android build without
+            // touching a Kotlin file. Its README or test fixtures cannot.
             //
             // Nothing needs installing by hand first: every `android:*` task
             // depends on `android:sdk`, which installs the pinned SDK and NDK
             // into the mise-owned ANDROID_SDK_ROOT on the first run and is a
-            // no-op after that. It is not a race across these three: they are
-            // chained, so `android-lint` provisions before the others start.
+            // no-op after that. It is not a race across these two: they are
+            // chained, so `android-lint` provisions before the other starts.
             ["android-lint"] {
-                glob = List("*.kt", "*.kts", "beam-android/**", "beam-client-core/**")
+                glob = List("*.kt", "*.kts", "beam-android/**", "beam-client-core/**/*.rs", "beam-client-core/Cargo.toml", "beam-client-core/api/**")
+                exclude = List("*.md")
                 check = "mise run android:lint"
             }
-            // Chained rather than parallel: all three drive `./gradlew` against the
+            // Chained rather than parallel: both drive `./gradlew` against the
             // same beam-android project, and Gradle serialises concurrent builds on
             // its own project lock anyway. Running them in parallel buys nothing and
-            // spends three daemons contending for one lock.
+            // spends two daemons contending for one lock.
             ["android-test"] {
-                glob = List("*.kt", "*.kts", "beam-android/**", "beam-client-core/**")
+                glob = List("*.kt", "*.kts", "beam-android/**", "beam-client-core/**/*.rs", "beam-client-core/Cargo.toml", "beam-client-core/api/**")
+                exclude = List("*.md")
                 depends = List("android-lint")
                 check = "mise run android:test"
             }
-            ["android-screenshot"] {
-                glob = List("*.kt", "*.kts", "beam-android/**", "beam-client-core/**")
-                depends = List("android-test")
-                check = "mise run android:screenshot"
-            }
-            // `android:minify` is deliberately absent, for the same reason
-            // `android:build` is: a full release compile plus an R8 pass over
-            // the whole app is minutes on every push, which is more than a
-            // hook should spend on a path no Kotlin edit usually touches.
-            // CI's android-minify job runs it instead.
+            // `android:screenshot` and `android:minify` are deliberately absent:
+            // they are merge gates, which `mise run ci` and CI's
+            // android-screenshot and android-minify jobs run (#478). Rendering
+            // every screen, or a full release compile plus an R8 pass, is
+            // minutes on every push -- more than a hook should spend per commit.
 
             // The Apple steps watch beam-client-core for the same reason the
             // Android ones do: the Swift bindings and the XCFramework are
@@ -306,11 +325,13 @@ hooks {
             // cannot stop `core:bindgen:swift` from running. That is why the
             // bindgen task guards itself rather than relying on its dependent.
             ["apple-lint"] {
-                glob = List("*.swift", "beam-apple/**", "beam-client-core/**")
+                glob = List("*.swift", "beam-apple/**", "beam-client-core/**/*.rs", "beam-client-core/Cargo.toml", "beam-client-core/api/**")
+                exclude = List("*.md")
                 check = "mise run apple:lint"
             }
             ["apple-test"] {
-                glob = List("*.swift", "beam-apple/**", "beam-client-core/**")
+                glob = List("*.swift", "beam-apple/**", "beam-client-core/**/*.rs", "beam-client-core/Cargo.toml", "beam-client-core/api/**")
+                exclude = List("*.md")
                 check = "mise run apple:test"
             }
             // `apple-test` and `apple-snapshot` both drive `xcodebuild` against the
@@ -324,7 +345,8 @@ hooks {
             // steps, which share nothing with them. `apple-lint` stays parallel
             // because it runs swift-format over the sources and never opens Xcode.
             ["apple-snapshot"] {
-                glob = List("*.swift", "beam-apple/**", "beam-client-core/**")
+                glob = List("*.swift", "beam-apple/**", "beam-client-core/**/*.rs", "beam-client-core/Cargo.toml", "beam-client-core/api/**")
+                exclude = List("*.md")
                 depends = List("apple-test")
                 check = "mise run apple:snapshot"
             }
