@@ -45,6 +45,7 @@ use kynos::response::headers::WithHeaders;
 use kynos::response::status::{InvalidLocation, Location, NoContent, Redirect};
 use serde::{Deserialize, Serialize};
 
+use crate::metrics::session_store_failed;
 use crate::models::auth::{
     CurrentUser, DeviceLoginComplete, DeviceLoginPending, DeviceLoginPoll, DeviceLoginStart,
     DeviceLoginWait, SessionConnection, SessionSummary,
@@ -52,7 +53,7 @@ use crate::models::auth::{
 use crate::routes::api_error::{
     ERROR_BASE, INTERNAL_DETAIL, InternalError, OIDC_UNAVAILABLE_DETAIL, ServerFault,
 };
-use crate::routes::session_auth::{SESSION_COOKIE, SessionAuth, session_store_failed};
+use crate::routes::session_auth::{SESSION_COOKIE, SessionAuth};
 use crate::routes::tags::Auth;
 
 const STATE_COOKIE: &str = "beam_oidc_state";

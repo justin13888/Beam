@@ -195,7 +195,7 @@ pub const DESCRIPTIONS: &[Description] = &[
         name: "beam_session_store_errors_total",
         kind: Kind::Counter,
         unit: Some(Unit::Count),
-        help: "Session-store calls that failed while authenticating a request, signing out, or listing or revoking sessions.",
+        help: "Session-store calls that failed while authenticating a request, signing out, listing or revoking sessions, or revoking a disabled account's sessions.",
     },
     Description {
         name: "beam_rate_limited_total",
@@ -286,6 +286,17 @@ pub fn record_build_info() {
         "commit" => BUILD_COMMIT,
     )
     .set(1.0);
+}
+
+/// Count one failed session-store call in `beam_session_store_errors_total`
+/// ([#458](https://github.com/justin13888/beam/issues/458)).
+///
+/// Called wherever Beam meets a session-store failure: authenticating a
+/// cookie, signing out, listing and revoking sessions, and revoking a
+/// disabled account's sessions. A store outage answers every signed-in
+/// request with a 503, so this is the counter that pages.
+pub(crate) fn session_store_failed() {
+    ::metrics::counter!("beam_session_store_errors_total").increment(1);
 }
 
 /// A recorder whose histogram samples must be drained periodically.
