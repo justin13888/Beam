@@ -1045,6 +1045,12 @@ else
     cache_next=
     set -- build
 fi
+# The commit beam_build_info reports. Outside a git checkout the Containerfile's
+# `unknown` default stands. The build layer this busts reruns on every commit
+# regardless, since `COPY . .` precedes it.
+if commit=$(git rev-parse HEAD 2>/dev/null); then
+    set -- "$@" --build-arg "BEAM_GIT_COMMIT=$commit"
+fi
 echo "ts:e2e: $engine $* --file beam-server/Containerfile --tag $image ."
 "$engine" "$@" --file beam-server/Containerfile --tag "$image" .
 if [ -n "$cache_next" ]; then
