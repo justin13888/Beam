@@ -26,6 +26,11 @@ public data class AuthUiState(
     val devicePrompt: DeviceLoginPrompt? = null,
     /** The URL to open in the sign-in browser, once a server is reachable. */
     val loginUrl: String? = null,
+    /**
+     * The certificates the viewer accepted for the server being signed in to,
+     * so the sign-in browser can reach it when its certificate is one of them.
+     */
+    val trustedFingerprints: List<String> = emptyList(),
     /** The server being signed in to. */
     val serverId: String? = null,
     /** Set once the viewer is signed in. */
