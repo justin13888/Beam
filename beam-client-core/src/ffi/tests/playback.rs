@@ -9,7 +9,7 @@ async fn playback_needs_a_session_before_it_will_hand_over_a_url() {
     let (client, _) = client_with_server().await;
 
     assert!(matches!(
-        client.playback_config("file-1".to_owned()),
+        client.playback_config("f1000000-0000-4000-8000-000000000001".to_owned()),
         Err(BeamError::Unauthenticated)
     ));
     assert!(matches!(
@@ -23,16 +23,41 @@ async fn a_playback_config_carries_the_cookie_and_the_stream_url() {
     let (_, client, _) = restarted_after_sign_in(ME, "opaque-value").await;
 
     let config = client
-        .playback_config("file-1".to_owned())
+        .playback_config("f1000000-0000-4000-8000-000000000001".to_owned())
         .expect("configured");
 
-    assert_eq!(config.url, "https://beam.test/v1/files/file-1/stream");
+    assert_eq!(
+        config.url,
+        "https://beam.test/v1/files/f1000000-0000-4000-8000-000000000001/stream"
+    );
     assert_eq!(
         config.headers.get("Cookie").map(String::as_str),
         Some("beam_session=opaque-value"),
         "Media3 fetches the bytes itself, so the credential has to travel with it"
     );
     assert_eq!(config.pinned_host, "beam.test");
+}
+
+/// A file id is a UUID or nothing: one that is not would be interpolated
+/// into the stream URL, and an id holding a path or a query names some other
+/// resource on the origin the session cookie travels to.
+#[tokio::test]
+async fn a_playback_config_for_a_malformed_file_id_is_refused() {
+    let (_, client, _) = restarted_after_sign_in(ME, "opaque-value").await;
+
+    for malformed in ["file-1", "../../v1/admin/users", "a?b=1"] {
+        assert!(
+            matches!(
+                client.playback_config(malformed.to_owned()),
+                Err(BeamError::BadRequest { .. })
+            ),
+            "{malformed} became a URL"
+        );
+        assert!(matches!(
+            client.playback_plan(None, malformed.to_owned()).await,
+            Err(BeamError::BadRequest { .. })
+        ));
+    }
 }
 
 /// The server's one track model (issue #189) reaches the platform as the
@@ -310,13 +335,22 @@ async fn a_plan_whose_source_cannot_be_listed_is_the_file_alone() {
     .await;
 
     let plan = client
-        .playback_plan(Some(MEDIA_ID.to_owned()), "f-1".to_owned())
+        .playback_plan(
+            Some(MEDIA_ID.to_owned()),
+            "f1000000-0000-4000-8000-000000000001".to_owned(),
+        )
         .await
         .expect("a failed lookup is not a failed plan");
 
     assert_eq!(plan.parts.len(), 1);
-    assert_eq!(plan.parts[0].file_id, "f-1");
-    assert_eq!(plan.parts[0].url, "https://beam.test/v1/files/f-1/stream");
+    assert_eq!(
+        plan.parts[0].file_id,
+        "f1000000-0000-4000-8000-000000000001"
+    );
+    assert_eq!(
+        plan.parts[0].url,
+        "https://beam.test/v1/files/f1000000-0000-4000-8000-000000000001/stream"
+    );
     assert_eq!(plan.start_part_index, 0);
 }
 
@@ -327,12 +361,15 @@ async fn a_plan_without_a_title_is_the_file_alone_and_asks_nothing() {
     let (client, backend) = one_answer(500, r#"{"type":"about:blank","status":500}"#).await;
 
     let plan = client
-        .playback_plan(None, "f-1".to_owned())
+        .playback_plan(None, "f1000000-0000-4000-8000-000000000001".to_owned())
         .await
         .expect("a plan of one file");
 
     assert_eq!(plan.parts.len(), 1);
-    assert_eq!(plan.parts[0].url, "https://beam.test/v1/files/f-1/stream");
+    assert_eq!(
+        plan.parts[0].url,
+        "https://beam.test/v1/files/f1000000-0000-4000-8000-000000000001/stream"
+    );
     assert_eq!(plan.start_part_index, 0);
     assert!(backend.recorded().is_empty(), "no title, so no lookup");
 }
@@ -355,14 +392,23 @@ async fn a_plan_whose_source_lookup_never_answers_is_the_file_alone_once_bounded
     let started = tokio::time::Instant::now();
 
     let plan = client
-        .playback_plan(Some(MEDIA_ID.to_owned()), "f-1".to_owned())
+        .playback_plan(
+            Some(MEDIA_ID.to_owned()),
+            "f1000000-0000-4000-8000-000000000001".to_owned(),
+        )
         .await
         .expect("a lookup that never answers is not a failed plan");
 
     assert_eq!(started.elapsed(), PLAYBACK_PLAN_LOOKUP_TIMEOUT);
     assert_eq!(plan.parts.len(), 1);
-    assert_eq!(plan.parts[0].file_id, "f-1");
-    assert_eq!(plan.parts[0].url, "https://beam.test/v1/files/f-1/stream");
+    assert_eq!(
+        plan.parts[0].file_id,
+        "f1000000-0000-4000-8000-000000000001"
+    );
+    assert_eq!(
+        plan.parts[0].url,
+        "https://beam.test/v1/files/f1000000-0000-4000-8000-000000000001/stream"
+    );
     assert_eq!(plan.start_part_index, 0);
 }
 
