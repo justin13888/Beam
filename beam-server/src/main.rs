@@ -102,6 +102,11 @@ async fn main() -> Result<()> {
         .await
         .map_err(|e| eyre!("Failed to initialize services: {e}"))?;
 
+    // Libraries the deployment declares (BEAM_LIBRARIES) are created before
+    // the indexer starts, so its startup pass watches and scans them with
+    // every other library.
+    beam_server::bootstrap::declare_libraries(services.library.as_ref(), &config.libraries).await;
+
     // Start in-process indexing (startup scan, filesystem watcher, periodic
     // rescan backstop). There is no separate indexer process.
     beam_index::runtime::spawn_background_indexing(
