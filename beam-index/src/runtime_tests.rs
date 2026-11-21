@@ -51,6 +51,8 @@ struct RecordingIndexer {
     failing_listings: Arc<AtomicU32>,
     /// Where a test records the files a scan deferred.
     scan_deferrals: Arc<ScanDeferrals>,
+    /// Every `library_changed` published, in order.
+    changed_libraries: std::sync::Mutex<Vec<Uuid>>,
 }
 
 /// The library store, whose next `failing` listings fail (NFR-205).
@@ -122,6 +124,10 @@ impl RecordingIndexer {
 
     fn library_scans(&self) -> Vec<Uuid> {
         self.library_scans.lock().unwrap().clone()
+    }
+
+    fn changed_libraries(&self) -> Vec<Uuid> {
+        self.changed_libraries.lock().unwrap().clone()
     }
 
     fn overlapping_library_scans(&self) -> Vec<Uuid> {
@@ -231,6 +237,10 @@ impl BackgroundIndexer for RecordingIndexer {
 
     fn scan_deferrals(&self) -> Arc<ScanDeferrals> {
         self.scan_deferrals.clone()
+    }
+
+    fn library_changed(&self, library_id: Uuid) {
+        self.changed_libraries.lock().unwrap().push(library_id);
     }
 }
 
@@ -737,6 +747,79 @@ async fn a_deferred_event_is_retried_once_its_delay_has_passed() {
         ),
         "the retry is the event that was deferred"
     );
+
+    tasks.abort();
+}
+
+/// A burst of reconciles in one library is one `library_changed` per
+/// debounce window (issue #454); a library whose only reconcile was deferred
+/// or failed changed nothing, so it is not announced until a retry finishes.
+#[tokio::test]
+async fn a_burst_of_reconciles_announces_each_changed_library_once_per_window() {
+    let indexer = Arc::new(RecordingIndexer::default());
+    let clock = Arc::new(TestClock::new());
+    let watcher = Arc::new(InMemoryFsWatcher::new());
+    let (films, shows, music) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    indexer.defer_next("/shows/a.mkv", Duration::from_secs(30));
+    indexer.fail_next("/music/a.mkv");
+
+    let tasks = spawn_background_indexing_with(
+        indexer.clone(),
+        Some(watcher.clone()),
+        clock.clone(),
+        config(3600, 2000),
+    );
+    let emit = |library_id: Uuid, path: &str| {
+        watcher.emit(FsEvent {
+            library_id,
+            path: PathBuf::from(path),
+            kind: FsEventKind::Created,
+        });
+    };
+    for path in ["/films/a.mkv", "/films/b.mkv", "/films/c.mkv"] {
+        emit(films, path);
+    }
+    emit(shows, "/shows/a.mkv");
+    emit(music, "/music/a.mkv");
+    until("the debounce window to open", || clock.waiter_count() >= 3).await;
+    assert!(indexer.changed_libraries().is_empty());
+
+    clock.advance(Duration::from_millis(2000));
+    until("the window's reconciles", || {
+        indexer.reconciled().len() == 5
+    })
+    .await;
+    until("the window's announcement", || {
+        !indexer.changed_libraries().is_empty()
+    })
+    .await;
+    assert_eq!(
+        indexer.changed_libraries(),
+        vec![films],
+        "three reconciles in one library are one announcement, and the \
+         deferred and failed libraries changed nothing"
+    );
+
+    // A second window is a second announcement for the same library.
+    emit(films, "/films/d.mkv");
+    until("the next debounce window to open", || {
+        clock.waiter_count() >= 4
+    })
+    .await;
+    clock.advance(Duration::from_millis(2000));
+    until("the second announcement", || {
+        indexer.changed_libraries().len() == 2
+    })
+    .await;
+    assert_eq!(indexer.changed_libraries(), vec![films, films]);
+
+    // The deferred reconcile finishing is what announces its library.
+    clock.advance(Duration::from_secs(30));
+    until("the retry's announcement", || {
+        indexer.changed_libraries().len() == 3
+    })
+    .await;
+    assert_eq!(indexer.changed_libraries()[2], shows);
 
     tasks.abort();
 }
