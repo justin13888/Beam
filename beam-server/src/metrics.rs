@@ -170,6 +170,36 @@ pub const DESCRIPTIONS: &[Description] = &[
         unit: None,
         help: "1 while a scan of the library is running, 0 otherwise, by library id.",
     },
+    Description {
+        name: "beam_watcher_events_total",
+        kind: Kind::Counter,
+        unit: Some(Unit::Count),
+        help: "Filesystem change events the watcher attributed to a library, by library id and kind.",
+    },
+    Description {
+        name: "beam_watcher_errors_total",
+        kind: Kind::Counter,
+        unit: Some(Unit::Count),
+        help: "Filesystem watcher errors, and watches that could not be added, by library id.",
+    },
+    Description {
+        name: "beam_watcher_mode",
+        kind: Kind::Gauge,
+        unit: None,
+        help: "1 for how the library's changes are observed (native events or polling), 0 for the other, both 0 when it is not watched; by library id and mode.",
+    },
+    Description {
+        name: "beam_watcher_pending_paths",
+        kind: Kind::Gauge,
+        unit: Some(Unit::Count),
+        help: "Changed paths the watcher holds and has not reconciled yet: being debounced, or waiting in the batch being reconciled.",
+    },
+    Description {
+        name: "beam_watcher_deferred_paths",
+        kind: Kind::Gauge,
+        unit: Some(Unit::Count),
+        help: "Changed paths whose reconcile was deferred -- the library was being scanned, or the file was still being written -- held for a retry.",
+    },
 ];
 
 /// The recorder's configuration: real buckets for every `*_seconds` histogram.

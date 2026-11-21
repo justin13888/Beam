@@ -30,6 +30,17 @@ pub enum FsEventKind {
     Removed,
 }
 
+impl FsEventKind {
+    /// The `kind` label of `beam_watcher_events_total`.
+    pub fn label(self) -> &'static str {
+        match self {
+            FsEventKind::Created => "created",
+            FsEventKind::Modified => "modified",
+            FsEventKind::Removed => "removed",
+        }
+    }
+}
+
 /// A filesystem change within a watched library.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FsEvent {
@@ -308,6 +319,12 @@ fn handle_notify_result(result: notify::Result<notify::Event>, shared: &Shared) 
             for path in event.paths {
                 let library_id = library_owning(&lock(&shared.libraries), &path);
                 if let Some(library_id) = library_id {
+                    metrics::counter!(
+                        "beam_watcher_events_total",
+                        "library" => library_id.to_string(),
+                        "kind" => kind.label(),
+                    )
+                    .increment(1);
                     let _ = shared.sender.send(FsEvent {
                         library_id,
                         path,
@@ -332,6 +349,7 @@ fn handle_notify_result(result: notify::Result<notify::Event>, shared: &Shared) 
                 libraries = ?affected,
                 "filesystem watch limit reached; moving the affected libraries to polling"
             );
+            record_watcher_errors(&affected);
             let mut pending = lock(&shared.pending_demotions);
             for id in affected {
                 if !pending.contains(&id) {
@@ -339,7 +357,36 @@ fn handle_notify_result(result: notify::Result<notify::Event>, shared: &Shared) 
                 }
             }
         }
-        Err(err) => warn!("filesystem watcher error: {err}"),
+        Err(err) => {
+            warn!("filesystem watcher error: {err}");
+            // Charged to the libraries whose roots hold the paths it names;
+            // one naming no path may be any library's, so it is every one's.
+            let affected: Vec<Uuid> = {
+                let libraries = lock(&shared.libraries);
+                if err.paths.is_empty() {
+                    libraries.iter().map(|library| library.id).collect()
+                } else {
+                    let mut owners: Vec<Uuid> = err
+                        .paths
+                        .iter()
+                        .filter_map(|path| library_owning(&libraries, path))
+                        .collect();
+                    owners.sort_unstable();
+                    owners.dedup();
+                    owners
+                }
+            };
+            record_watcher_errors(&affected);
+        }
+    }
+}
+
+/// Count one watcher error against each of `libraries`
+/// (`beam_watcher_errors_total{library}`, issue #457).
+fn record_watcher_errors(libraries: &[Uuid]) {
+    for library_id in libraries {
+        metrics::counter!("beam_watcher_errors_total", "library" => library_id.to_string())
+            .increment(1);
     }
 }
 
@@ -532,6 +579,7 @@ impl NotifyFsWatcher {
 
         let Some(poll) = &self.poll else {
             self.deregister(library_id);
+            record_watcher_errors(&[library_id]);
             return Err(WatchError::Backend(
                 "no polling watcher is available".to_string(),
             ));
@@ -539,6 +587,7 @@ impl NotifyFsWatcher {
         self.register(library_id, root, Backend::Poll);
         if let Err(e) = lock(poll).watch(root, notify::RecursiveMode::Recursive) {
             self.deregister(library_id);
+            record_watcher_errors(&[library_id]);
             return Err(WatchError::Watch(root.to_path_buf(), e.to_string()));
         }
         let mode = WatchMode::Polling(reason);
@@ -690,6 +739,7 @@ impl FsWatcher for NotifyFsWatcher {
                     }
                     Err(e) => {
                         self.deregister(library_id);
+                        record_watcher_errors(&[library_id]);
                         return Err(WatchError::Watch(root.to_path_buf(), e.to_string()));
                     }
                 }
@@ -1058,6 +1108,11 @@ impl PathDebouncer {
             .collect()
     }
 
+    /// How many paths have an event pending.
+    pub fn len(&self) -> usize {
+        self.pending.len()
+    }
+
     /// Whether any events are pending.
     pub fn is_empty(&self) -> bool {
         self.pending.is_empty()
@@ -1415,6 +1470,99 @@ mod tests {
                 Some(&WatchMode::Polling(PollReason::WatchLimitReached))
             );
         }
+    }
+
+    // ── Metrics (issue #457) ────────────────────────────────────────────────
+    //
+    // The callback is driven directly, on the test's thread, so the local
+    // recorder sees what it emits; a real backend calls it from its own.
+
+    /// An event is counted against the library that owns its path, by
+    /// kind; an event under no library, or of a kind that is dropped, is not.
+    #[tokio::test]
+    async fn events_are_counted_by_library_and_kind() {
+        use crate::test_metrics::MetricsCapture;
+        use notify::EventKind;
+        use notify::event::{AccessKind, CreateKind, ModifyKind, RemoveKind};
+
+        let capture = MetricsCapture::new();
+        let _recorder = capture.install();
+        let (_dir, root) = canonical_tempdir();
+        let (watcher, _status) = notify_watcher(FilesystemKind::Local);
+        let lib = Uuid::new_v4();
+        watcher.watch_library(lib, &root).unwrap();
+
+        let event = |kind: EventKind, path: PathBuf| {
+            handle_notify_result(Ok(notify::Event::new(kind).add_path(path)), &watcher.shared);
+        };
+        event(EventKind::Create(CreateKind::File), root.join("a.mkv"));
+        event(EventKind::Create(CreateKind::File), root.join("b.mkv"));
+        event(EventKind::Modify(ModifyKind::Any), root.join("a.mkv"));
+        event(EventKind::Remove(RemoveKind::File), root.join("b.mkv"));
+        event(EventKind::Access(AccessKind::Any), root.join("a.mkv"));
+        event(
+            EventKind::Create(CreateKind::File),
+            PathBuf::from("/elsewhere/c.mkv"),
+        );
+
+        let recorded = capture.snapshot();
+        let library = lib.to_string();
+        let count = |kind| {
+            recorded.counter(
+                "beam_watcher_events_total",
+                &[("library", &library), ("kind", kind)],
+            )
+        };
+        assert_eq!(count("created"), Some(2));
+        assert_eq!(count("modified"), Some(1));
+        assert_eq!(count("removed"), Some(1));
+    }
+
+    /// A backend error is charged to the library whose root holds its path,
+    /// one naming no path to every library, and a watch that cannot be added
+    /// to the library being watched.
+    #[tokio::test]
+    async fn watcher_errors_are_counted_against_the_libraries_they_touch() {
+        use crate::test_metrics::MetricsCapture;
+
+        let capture = MetricsCapture::new();
+        let _recorder = capture.install();
+        let (_dir, root) = canonical_tempdir();
+        let (_other_dir, other_root) = canonical_tempdir();
+        let (watcher, _status) = notify_watcher(FilesystemKind::Local);
+        let lib = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        watcher.watch_library(lib, &root).unwrap();
+        watcher.watch_library(other, &other_root).unwrap();
+        let errors = |id: Uuid| {
+            capture
+                .snapshot()
+                .counter("beam_watcher_errors_total", &[("library", &id.to_string())])
+                .unwrap_or(0)
+        };
+
+        handle_notify_result(
+            Err(notify::Error::generic("read failed").add_path(root.join("a.mkv"))),
+            &watcher.shared,
+        );
+        assert_eq!((errors(lib), errors(other)), (1, 0));
+
+        handle_notify_result(Err(notify::Error::generic("lost")), &watcher.shared);
+        assert_eq!((errors(lib), errors(other)), (2, 1));
+
+        handle_notify_result(
+            Err(notify::Error::new(notify::ErrorKind::MaxFilesWatch).add_path(other_root.join("d"))),
+            &watcher.shared,
+        );
+        assert_eq!((errors(lib), errors(other)), (2, 2));
+
+        let missing = Uuid::new_v4();
+        assert!(
+            watcher
+                .watch_library(missing, &root.join("not-there"))
+                .is_err()
+        );
+        assert_eq!(errors(missing), 1);
     }
 
     #[tokio::test]

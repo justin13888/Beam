@@ -728,6 +728,62 @@ async fn a_deferred_event_is_retried_once_its_delay_has_passed() {
     tasks.abort();
 }
 
+/// The consumer's queue is visible as gauges (issue #457): a path is
+/// pending while it is debounced, and deferred once the indexer defers it
+/// until its retry reconciles it. The spawned tasks run on this
+/// current-thread runtime, so the local recorder sees what they emit.
+#[tokio::test]
+async fn the_pending_and_deferred_paths_are_gauged() {
+    use crate::test_metrics::MetricsCapture;
+
+    let capture = MetricsCapture::new();
+    let _recorder = capture.install();
+    let gauge = |name| capture.snapshot().gauge(name, &[]);
+    let indexer = Arc::new(RecordingIndexer::default());
+    let clock = Arc::new(TestClock::new());
+    let watcher = Arc::new(InMemoryFsWatcher::new());
+    let library_id = Uuid::new_v4();
+    indexer.defer_next("/videos/a.mkv", Duration::from_secs(30));
+
+    let tasks = spawn_background_indexing_with(
+        indexer.clone(),
+        Some(watcher.clone()),
+        clock.clone(),
+        config(3600, 2000),
+    );
+    for path in ["/videos/a.mkv", "/videos/b.mkv"] {
+        watcher.emit(FsEvent {
+            library_id,
+            path: PathBuf::from(path),
+            kind: FsEventKind::Created,
+        });
+    }
+    until("both paths to be debounced", || {
+        gauge("beam_watcher_pending_paths") == Some(2.0)
+    })
+    .await;
+
+    clock.advance(Duration::from_millis(2000));
+    until("the batch to be reconciled, one path deferred", || {
+        indexer.reconciled().len() == 2
+            && gauge("beam_watcher_pending_paths") == Some(0.0)
+            && gauge("beam_watcher_deferred_paths") == Some(1.0)
+    })
+    .await;
+
+    until("the consumer to wait for the retry", || {
+        clock.waiter_count() >= 3
+    })
+    .await;
+    clock.advance(Duration::from_secs(30));
+    until("the retry to empty the deferred paths", || {
+        indexer.reconciled().len() == 3 && gauge("beam_watcher_deferred_paths") == Some(0.0)
+    })
+    .await;
+
+    tasks.abort();
+}
+
 /// A fresh event for a path whose last event was deferred replaces it: the
 /// path is reconciled as the fresh event says, and the old one is dropped.
 #[tokio::test]

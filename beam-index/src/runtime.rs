@@ -338,6 +338,7 @@ async fn run_watch_consumer(
         if let Some(first) = first {
             let mut debouncer = PathDebouncer::new();
             debouncer.submit(first);
+            record_pending(debouncer.len());
 
             // Collect further events for the debounce window.
             let window = clock.sleep(debounce);
@@ -346,7 +347,10 @@ async fn run_watch_consumer(
                 tokio::select! {
                     _ = &mut window => break,
                     event = watcher.next_event() => match event {
-                        Some(e) => debouncer.submit(e),
+                        Some(e) => {
+                            debouncer.submit(e);
+                            record_pending(debouncer.len());
+                        }
                         None => break,
                     },
                 }
@@ -375,7 +379,11 @@ async fn run_watch_consumer(
             }
         }
 
+        record_pending(batch.len());
+        record_deferred(deferred.len());
+
         // Reconcile the coalesced events.
+        let mut remaining = batch.len();
         for event in batch {
             let FsEvent {
                 library_id,
@@ -387,11 +395,27 @@ async fn run_watch_consumer(
                 Ok(ReconcileOutcome::Deferred { retry_after }) => {
                     let due = clock.monotonic() + retry_after;
                     deferred.insert((library_id, path), (kind, due));
+                    record_deferred(deferred.len());
                 }
                 Err(e) => warn!("Failed to reconcile {}: {e}", path.display()),
             }
+            remaining -= 1;
+            record_pending(remaining);
         }
     }
+}
+
+/// `beam_watcher_pending_paths` (issue #457): paths the consumer holds and
+/// has not reconciled yet -- collected in the debounce window, or waiting
+/// their turn in the batch being reconciled.
+fn record_pending(paths: usize) {
+    metrics::gauge!("beam_watcher_pending_paths").set(paths as f64);
+}
+
+/// `beam_watcher_deferred_paths` (issue #457): paths whose reconcile the
+/// indexer deferred, held for a retry.
+fn record_deferred(paths: usize) {
+    metrics::gauge!("beam_watcher_deferred_paths").set(paths as f64);
 }
 
 /// Poll the watcher's polled libraries once per `interval`, and reconcile
