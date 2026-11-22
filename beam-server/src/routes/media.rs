@@ -3,6 +3,9 @@
 //! via `SessionAuth`, cursor pagination over an `{items, page_info}`
 //! connection) are meant to be followed by every subsequent `/v1` route.
 
+use std::collections::BTreeSet;
+
+use beam_domain::models::access::{AccessPolicy, LibraryAccess};
 use kynos::prelude::*;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -21,8 +24,8 @@ use crate::state::AppState;
 
 /// Everything `GET /v1/media` accepts.
 ///
-/// A struct rather than thirteen `parameters(...)` entries beside thirteen
-/// `req.query::<T>(name)` calls. The pair used to be maintained by hand, so a
+/// A struct rather than a `parameters(...)` entry beside a
+/// `req.query::<T>(name)` call for each parameter. The pair used to be maintained by hand, so a
 /// renamed parameter changed one and not the other; here the field *is* the
 /// parameter and the type *is* the schema.
 #[derive(Debug, Default, Serialize, Deserialize, Schema, QueryParams)]
@@ -68,6 +71,10 @@ pub struct BrowseQuery {
     /// is a 400.
     #[schema(minimum = 0, maximum = 10)]
     pub min_rating: Option<f64>,
+    /// Filter to the titles indexed in this library. A library the caller
+    /// may not see, or one that does not exist, lists nothing: the answer is
+    /// the same either way, so it does not say which libraries exist.
+    pub library_id: Option<Uuid>,
 }
 
 /// What `/v1/media/{id}` and `/v1/media/{id}/sources` capture.
@@ -113,6 +120,7 @@ pub async fn browse_media(
         year_to,
         query,
         min_rating,
+        library_id,
     } = params;
 
     let filters = MediaSearchFilters {
@@ -136,7 +144,7 @@ pub async fn browse_media(
             sort_by: sort_by.unwrap_or_default(),
             sort_order: sort_order.unwrap_or_default(),
             filters,
-            access,
+            access: narrowed_to_library(access, library_id),
         })
         .await;
 
@@ -163,6 +171,29 @@ pub async fn browse_media(
             | MetadataError::MediaNotFound
             | MetadataError::Unsupported(_)),
         ) => Err(MediaBrowseError::Internal(ServerFault::new(err))),
+    }
+}
+
+/// `access` narrowed to the one library a browse asked for, or `access` as
+/// it is when it asked for none.
+///
+/// The library filter is a narrower grant, not a second filter beside the
+/// grant: the store already lists only the titles in a policy's libraries,
+/// and a title indexed in two libraries is in each one's listing. A library
+/// the policy does not admit narrows it to none, so asking for one never
+/// widens what the caller sees. The rating ceiling is kept as it is.
+fn narrowed_to_library(access: AccessPolicy, library_id: Option<Uuid>) -> AccessPolicy {
+    let Some(library_id) = library_id else {
+        return access;
+    };
+    let libraries = if access.admits_library(library_id) {
+        BTreeSet::from([library_id])
+    } else {
+        BTreeSet::new()
+    };
+    AccessPolicy {
+        libraries: LibraryAccess::Only(libraries),
+        ..access
     }
 }
 

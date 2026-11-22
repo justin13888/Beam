@@ -232,6 +232,15 @@ pub struct BrowseQuery {
     pub query: Option<String>,
     /// Minimum rating percentage.
     pub min_rating: Option<u32>,
+    /// Restrict to the titles indexed in one library, by its id. A library
+    /// the viewer may not see lists nothing.
+    ///
+    /// Part of the query, so it is sent with every page a pager fetches: a
+    /// cursor only means something within the query that issued it. Defaults
+    /// to no library in the bindings, so a caller browsing the whole
+    /// catalogue need not name it.
+    #[uniffi(default)]
+    pub library_id: Option<String>,
 }
 
 impl MediaSummary {
@@ -425,6 +434,18 @@ pub fn browse_params(query: &BrowseQuery) -> Result<crate::api::BrowseMediaParam
         Some(value) => Some(i64::from(value)),
         None => None,
     };
+    // The record carries the id as the string the foreign bindings hold; the
+    // wire declares it `format: uuid`, so a malformed one is refused here
+    // rather than answered with the server's 400.
+    let library_id = query
+        .library_id
+        .as_deref()
+        .map(uuid::Uuid::parse_str)
+        .transpose()
+        .map_err(|_| BeamError::BadRequest {
+            detail: "library_id is not a valid identifier".to_owned(),
+            code: crate::transport::ABOUT_BLANK.to_owned(),
+        })?;
 
     Ok(crate::api::BrowseMediaParams {
         first,
@@ -457,6 +478,7 @@ pub fn browse_params(query: &BrowseQuery) -> Result<crate::api::BrowseMediaParam
         // The record keeps its percentage (issue #190 left the UniFFI surface
         // alone); the wire takes the rating on its own 0-10 scale.
         min_rating: query.min_rating.map(|percent| f64::from(percent) / 10.0),
+        library_id,
     })
 }
 
@@ -822,8 +844,14 @@ mod tests {
             year_to: Some(2000),
             query: Some("bureau".to_owned()),
             min_rating: Some(70),
+            library_id: Some("00000000-0000-0000-0000-00000000001d".to_owned()),
         };
         let params = browse_params(&query).expect("a valid query");
+        assert_eq!(
+            params.library_id,
+            Some(uuid::Uuid::from_u128(0x1d)),
+            "the library the record names"
+        );
         assert_eq!(params.first, Some(24));
         assert_eq!(params.after.as_deref(), Some("cursor"));
         assert!(matches!(
@@ -851,6 +879,7 @@ mod tests {
         assert_eq!(params.first, None);
         assert!(params.sort_by.is_none());
         assert!(params.genre.is_none());
+        assert!(params.library_id.is_none());
     }
 
     #[test]

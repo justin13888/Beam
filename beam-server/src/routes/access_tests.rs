@@ -171,6 +171,8 @@ impl LibraryService for FileLocator {
 /// The titles every test starts from: a `PG` movie in the kids' library,
 /// and an `R` movie and a `TV-MA` show in the grown-ups'.
 struct Catalogue {
+    /// The grown-ups' library; the kids' is returned beside the catalogue.
+    grown: Uuid,
     kids_movie: Uuid,
     kids_file: Uuid,
     grown_movie: Uuid,
@@ -529,6 +531,7 @@ impl Fixture {
         (
             kids,
             Catalogue {
+                grown,
                 kids_movie,
                 kids_file,
                 grown_movie,
@@ -709,6 +712,76 @@ async fn browse_lists_only_what_the_viewer_may_see() {
         listed(restricted).await,
         BTreeSet::from([titles.kids_movie])
     );
+}
+
+/// `library_id` lists one library's titles (issue #465), within what the
+/// viewer may see: a library they are not granted lists nothing, even a
+/// title they can see through another library, and so does one that does
+/// not exist.
+#[tokio::test]
+async fn browse_by_library_lists_only_that_librarys_titles_the_viewer_may_see() {
+    let fixture = fixture();
+    let (kids, titles) = fixture.catalogue().await;
+    // Paddington is in both libraries, so it is in each one's listing.
+    fixture
+        .movies
+        .ensure_library_association(titles.grown, titles.kids_movie)
+        .await
+        .unwrap();
+    let client = client(&fixture);
+    let (open, _) = fixture.viewer().await;
+    let (restricted, _) = fixture.kids_viewer(kids).await;
+
+    let listed = |token: String, library: Uuid| {
+        let client = &client;
+        async move {
+            let page: MediaConnection = client
+                .get(&format!("/v1/media?library_id={library}"))
+                .cookie("beam_session", &token)
+                .send()
+                .await
+                .assert_status(StatusCode::OK)
+                .json();
+            page.items
+                .iter()
+                .map(|item| match item {
+                    MediaMetadata::Movie(movie) => movie.id,
+                    MediaMetadata::Show(show) => show.id,
+                })
+                .collect::<BTreeSet<Uuid>>()
+        }
+    };
+
+    assert_eq!(
+        listed(open.clone(), kids).await,
+        BTreeSet::from([titles.kids_movie])
+    );
+    assert_eq!(
+        listed(open.clone(), titles.grown).await,
+        BTreeSet::from([titles.kids_movie, titles.grown_movie, titles.show])
+    );
+    assert_eq!(
+        listed(restricted.clone(), kids).await,
+        BTreeSet::from([titles.kids_movie])
+    );
+    assert_eq!(
+        listed(restricted.clone(), titles.grown).await,
+        BTreeSet::new(),
+        "a library the viewer is not granted lists nothing"
+    );
+    assert_eq!(
+        listed(open.clone(), Uuid::new_v4()).await,
+        BTreeSet::new(),
+        "an unknown library lists nothing"
+    );
+
+    // A malformed id is the query extractor's 400, never an unfiltered page.
+    client
+        .get("/v1/media?library_id=not-a-uuid")
+        .cookie("beam_session", &open)
+        .send()
+        .await
+        .assert_status(StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

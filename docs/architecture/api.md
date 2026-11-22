@@ -214,7 +214,10 @@ that does not apply to that kind of title (a season has no backdrop, an episode 
     range -- a year above 2147483647 (the `year` columns are signed) -- is `400 #invalid-filter`,
     never narrowed into a bound that matches everything; a `min_rating` outside 0-10, `NaN`
     included, is refused before the handler as `400 about:blank`. Only titles with a present
-    file are listed.
+    file are listed. `library_id` lists the titles indexed in one library by narrowing the
+    caller's access policy to it ([#465](https://github.com/justin13888/beam/issues/465)): a
+    library the caller is not granted, or one that does not exist, lists nothing, so the answer
+    never says which libraries exist.
   - One page is one catalogue statement plus a fixed number of reads by id to hydrate the page
     (titles, genres, season and episode counts), whatever the library's size (NFR-301). The
     statement is a `UNION ALL` over `movies` and `shows` in which each branch filters, seeks,
