@@ -1,9 +1,9 @@
 package dev.beam.android.feature.detail
 
 import dev.beam.android.core.media.download.DownloadRepository
-import dev.beam.android.core.model.DownloadRecord
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
+import uniffi.beam_client_core.DownloadRecord
 
 /**
  * A download repository that records what it was asked to fetch.
@@ -20,11 +20,11 @@ internal class FakeDownloadRepository : DownloadRepository {
 
     override suspend fun enqueue(
         fileId: String,
-        serverId: String,
         mediaId: String,
         title: String,
         subtitle: String?,
         posterUrl: String?,
+        episodeId: String?,
     ) {
         enqueued += fileId to title
     }

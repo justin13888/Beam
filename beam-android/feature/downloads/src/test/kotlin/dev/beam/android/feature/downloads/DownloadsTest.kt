@@ -1,9 +1,8 @@
 package dev.beam.android.feature.downloads
 
-import dev.beam.android.core.model.DownloadRecord
-import dev.beam.android.core.model.DownloadState
 import dev.beam.android.core.testing.FakeCatalogRepository
 import dev.beam.android.core.testing.FakePlaybackRepository
+import dev.beam.android.core.testing.downloadRecord
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -17,6 +16,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import uniffi.beam_client_core.DownloadState
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class DownloadsTest {
@@ -46,12 +46,12 @@ class DownloadsTest {
             val repository =
                 FakeDownloadRepository(
                     listOf(
-                        downloadRecord(fileId = "a", state = DownloadState.Completed),
-                        downloadRecord(fileId = "b", state = DownloadState.Downloading),
-                        downloadRecord(fileId = "c", state = DownloadState.Paused),
-                        downloadRecord(fileId = "d", state = DownloadState.WaitingForNetwork),
-                        downloadRecord(fileId = "e", state = DownloadState.Queued),
-                        downloadRecord(fileId = "f", state = DownloadState.Failed),
+                        downloadRecord(fileId = "a", state = DownloadState.COMPLETED),
+                        downloadRecord(fileId = "b", state = DownloadState.DOWNLOADING),
+                        downloadRecord(fileId = "c", state = DownloadState.PAUSED),
+                        downloadRecord(fileId = "d", state = DownloadState.WAITING_FOR_NETWORK),
+                        downloadRecord(fileId = "e", state = DownloadState.QUEUED),
+                        downloadRecord(fileId = "f", state = DownloadState.FAILED),
                     ),
                 )
             val viewModel = DownloadsViewModel(repository, FakeCatalogRepository(), FakePlaybackRepository())
@@ -84,7 +84,7 @@ class DownloadsTest {
         runTest {
             val repository =
                 FakeDownloadRepository(
-                    listOf(downloadRecord(fileId = "a", state = DownloadState.Downloading)),
+                    listOf(downloadRecord(fileId = "a", state = DownloadState.DOWNLOADING)),
                 )
             val viewModel = DownloadsViewModel(repository, FakeCatalogRepository(), FakePlaybackRepository())
             backgroundScope.observe(viewModel)
@@ -93,7 +93,7 @@ class DownloadsTest {
             viewModel.pause("a")
             testScheduler.advanceUntilIdle()
             assertEquals(
-                DownloadState.Paused,
+                DownloadState.PAUSED,
                 viewModel.state.value.inProgress
                     .single()
                     .state,
@@ -102,7 +102,7 @@ class DownloadsTest {
             viewModel.resume("a")
             testScheduler.advanceUntilIdle()
             assertEquals(
-                DownloadState.Downloading,
+                DownloadState.DOWNLOADING,
                 viewModel.state.value.inProgress
                     .single()
                     .state,
@@ -114,7 +114,7 @@ class DownloadsTest {
         runTest {
             val repository =
                 FakeDownloadRepository(
-                    listOf(downloadRecord(fileId = "a", state = DownloadState.Completed)),
+                    listOf(downloadRecord(fileId = "a", state = DownloadState.COMPLETED)),
                 )
             val viewModel = DownloadsViewModel(repository, FakeCatalogRepository(), FakePlaybackRepository())
             backgroundScope.observe(viewModel)
@@ -146,9 +146,9 @@ class DownloadsTest {
     fun `the status line shows progress against the total once it is known`() {
         val record =
             downloadRecord(
-                state = DownloadState.Downloading,
-                downloadedBytes = 500L * 1024 * 1024,
-                totalBytes = 4L * 1024 * 1024 * 1024,
+                state = DownloadState.DOWNLOADING,
+                downloadedBytes = 500uL * 1024uL * 1024uL,
+                totalBytes = 4uL * 1024uL * 1024uL * 1024uL,
             )
 
         assertTrue(record.statusLine().contains(" of "))
@@ -158,9 +158,9 @@ class DownloadsTest {
     fun `the status line does not invent a total it does not have`() {
         val record =
             downloadRecord(
-                state = DownloadState.Downloading,
-                downloadedBytes = 1024L,
-                totalBytes = 0L,
+                state = DownloadState.DOWNLOADING,
+                downloadedBytes = 1024uL,
+                totalBytes = null,
             )
 
         assertTrue(!record.statusLine().contains(" of "))
@@ -169,7 +169,8 @@ class DownloadsTest {
     @Test
     fun `a failed download explains that retrying resumes rather than restarts`() {
         val record =
-            downloadRecord(state = DownloadState.Failed).copy(
+            downloadRecord(
+                state = DownloadState.FAILED,
                 failureMessage = "The download stopped. It will resume when you retry it.",
             )
 

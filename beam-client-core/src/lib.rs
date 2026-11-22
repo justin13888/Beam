@@ -50,6 +50,7 @@ pub mod capability;
 pub mod catalog;
 pub mod clock;
 pub mod demux;
+pub mod download;
 pub mod error;
 pub mod ffi;
 pub mod paging;
@@ -77,6 +78,10 @@ pub use catalog::{
     ServerHealth, SortOrder,
 };
 pub use clock::{Clock, SystemClock};
+pub use download::{
+    DownloadPart, DownloadPlan, DownloadRecord, DownloadRequest, DownloadState, DownloadSubtitle,
+    TransferReport,
+};
 pub use error::{BeamError, StorageError};
 pub use ffi::{PlaybackHttpConfig, RebufferMonitor, ServerHttpConfig};
 pub use paging::{CursorPager, PageAdvance};

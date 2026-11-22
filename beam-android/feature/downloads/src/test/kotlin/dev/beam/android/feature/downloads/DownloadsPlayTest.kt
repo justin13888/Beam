@@ -1,12 +1,11 @@
 package dev.beam.android.feature.downloads
 
 import dev.beam.android.core.ffi.repository.CatalogRepository
-import dev.beam.android.core.model.DownloadRecord
-import dev.beam.android.core.model.DownloadState
 import dev.beam.android.core.model.PlaybackRequest
 import dev.beam.android.core.testing.FakeCatalogRepository
 import dev.beam.android.core.testing.FakePlaybackRepository
 import dev.beam.android.core.testing.Fixtures
+import dev.beam.android.core.testing.downloadRecord
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.awaitCancellation
@@ -20,6 +19,8 @@ import org.junit.Assert.assertEquals
 import org.junit.Before
 import org.junit.Test
 import uniffi.beam_client_core.BeamException
+import uniffi.beam_client_core.DownloadRecord
+import uniffi.beam_client_core.DownloadState
 import uniffi.beam_client_core.MediaDetail
 
 /** Where Play on a download starts: the server's resume point, else the device's own. */
@@ -61,7 +62,7 @@ class DownloadsPlayTest {
     @Test
     fun `a second tap while the lookup is pending opens one player, not two`() =
         runTest {
-            val record = downloadRecord(state = DownloadState.Completed)
+            val record = downloadRecord(state = DownloadState.COMPLETED)
             val viewModel =
                 DownloadsViewModel(
                     FakeDownloadRepository(listOf(record)),
@@ -95,7 +96,7 @@ class DownloadsPlayTest {
                                 ).copy(resumePositionSecs = 6_250.0, startPositionSecs = 1_200.0),
                         )
                 }
-            val record = downloadRecord(fileId = "a", state = DownloadState.Completed)
+            val record = downloadRecord(fileId = "a", state = DownloadState.COMPLETED)
 
             // The server's answer wins over the device's own record of the file.
             val request = playing(record, catalog, recorded("a", 420.0))!!
@@ -123,11 +124,25 @@ class DownloadsPlayTest {
                                 ),
                         )
                 }
-            val record = downloadRecord(state = DownloadState.Completed).copy(episodeId = "e2")
+            val record = downloadRecord(state = DownloadState.COMPLETED, episodeId = "e2")
 
             val request = playing(record, catalog)!!
             assertEquals(900.0, request.startPositionSecs, 0.0)
             assertEquals("e2", request.episodeId)
+        }
+
+    @Test
+    fun `a download plays under the poster kept on disk, not a URL`() =
+        runTest {
+            val record =
+                downloadRecord(state = DownloadState.COMPLETED, artworkPath = "/data/files/download-artwork/ab12")
+
+            val request = playing(record, FakeCatalogRepository())!!
+            assertEquals("file:/data/files/download-artwork/ab12", request.artworkUrl)
+            assertEquals(
+                null,
+                playing(downloadRecord(state = DownloadState.COMPLETED), FakeCatalogRepository())!!.artworkUrl,
+            )
         }
 
     @Test
@@ -136,7 +151,7 @@ class DownloadsPlayTest {
             // Issue #487: the server cannot be asked, so the device's own
             // record of the file -- through the core's start rule -- is where
             // Play starts.
-            val record = downloadRecord(fileId = "a", state = DownloadState.Completed)
+            val record = downloadRecord(fileId = "a", state = DownloadState.COMPLETED)
 
             val request = playing(record, offline(), recorded("a", 420.0))
             assertEquals(420.0, request!!.startPositionSecs, 0.0)
@@ -145,7 +160,7 @@ class DownloadsPlayTest {
     @Test
     fun `a download played offline with nothing recorded starts at the beginning`() =
         runTest {
-            val record = downloadRecord(fileId = "a", state = DownloadState.Completed)
+            val record = downloadRecord(fileId = "a", state = DownloadState.COMPLETED)
 
             val request = playing(record, offline(), recorded("another-file", 420.0))
             assertEquals(0.0, request!!.startPositionSecs, 0.0)
@@ -159,7 +174,7 @@ class DownloadsPlayTest {
                     localStartPositions["a"] = 420.0
                     localStartFailure = BeamException.Storage("locked")
                 }
-            val record = downloadRecord(fileId = "a", state = DownloadState.Completed)
+            val record = downloadRecord(fileId = "a", state = DownloadState.COMPLETED)
 
             val request = playing(record, offline(), playback)
             assertEquals(0.0, request!!.startPositionSecs, 0.0)
@@ -175,7 +190,7 @@ class DownloadsPlayTest {
                 object : CatalogRepository by FakeCatalogRepository() {
                     override suspend fun detail(mediaId: String): MediaDetail = awaitCancellation()
                 }
-            val record = downloadRecord(fileId = "a", state = DownloadState.Completed)
+            val record = downloadRecord(fileId = "a", state = DownloadState.COMPLETED)
 
             val request = playing(record, hanging, recorded("a", 420.0))
             assertEquals(420.0, request!!.startPositionSecs, 0.0)

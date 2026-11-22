@@ -1,13 +1,14 @@
 package dev.beam.android.feature.downloads
 
 import dev.beam.android.core.media.download.DownloadRepository
-import dev.beam.android.core.model.DownloadRecord
-import dev.beam.android.core.model.DownloadState
+import dev.beam.android.core.testing.downloadRecord
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import uniffi.beam_client_core.DownloadRecord
+import uniffi.beam_client_core.DownloadState
 
 /**
- * Downloads held in memory.
+ * Downloads held in memory, as the core would hand them over.
  *
  * Local to this module rather than in `:core:testing`: the real repository
  * lives in `:core:media`, and putting its fake in the shared testing module
@@ -30,35 +31,25 @@ internal class FakeDownloadRepository(
 
     override suspend fun enqueue(
         fileId: String,
-        serverId: String,
         mediaId: String,
         title: String,
         subtitle: String?,
         posterUrl: String?,
+        episodeId: String?,
     ) {
         failWith?.let { throw it }
         state.value = state.value +
-            DownloadRecord(
-                fileId = fileId,
-                mediaId = mediaId,
-                serverId = serverId,
-                title = title,
-                subtitle = subtitle,
-                posterUrl = posterUrl,
-                state = DownloadState.Queued,
-                downloadedBytes = 0L,
-                totalBytes = 0L,
-            )
+            downloadRecord(fileId = fileId, title = title, state = DownloadState.QUEUED, episodeId = episodeId)
     }
 
     override suspend fun pause(fileId: String) {
         failWith?.let { throw it }
-        transition(fileId, DownloadState.Paused)
+        transition(fileId, DownloadState.PAUSED)
     }
 
     override suspend fun resume(fileId: String) {
         failWith?.let { throw it }
-        transition(fileId, DownloadState.Downloading)
+        transition(fileId, DownloadState.DOWNLOADING)
     }
 
     override suspend fun remove(fileId: String) {
@@ -82,7 +73,7 @@ internal class FakeDownloadRepository(
     }
 
     override suspend fun isDownloaded(fileId: String): Boolean =
-        state.value.any { it.fileId == fileId && it.state == DownloadState.Completed }
+        state.value.any { it.fileId == fileId && it.state == DownloadState.COMPLETED }
 
     private fun transition(
         fileId: String,
@@ -94,20 +85,3 @@ internal class FakeDownloadRepository(
             }
     }
 }
-
-/** A download record, for tests that need one in a particular state. */
-internal fun downloadRecord(
-    fileId: String = "file-1",
-    title: String = "Arrival",
-    state: DownloadState = DownloadState.Downloading,
-    downloadedBytes: Long = 0L,
-    totalBytes: Long = 0L,
-) = DownloadRecord(
-    fileId = fileId,
-    mediaId = "media-1",
-    serverId = "server-1",
-    title = title,
-    state = state,
-    downloadedBytes = downloadedBytes,
-    totalBytes = totalBytes,
-)
