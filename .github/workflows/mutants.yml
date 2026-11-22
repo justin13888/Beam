@@ -46,7 +46,7 @@ jobs:
           # base branch ref must both be present.
           fetch-depth: 0
       - uses: jdx/mise-action@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           # setup-rust-toolchain defaults RUSTFLAGS to "-D warnings". Under
           # mutation that turns every mutant which merely provokes a warning
@@ -110,7 +110,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           rustflags: ""
       - uses: ./.github/actions/install-rust-build-deps
@@ -135,7 +135,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           rustflags: ""
       - uses: ./.github/actions/install-rust-build-deps
