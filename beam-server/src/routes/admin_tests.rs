@@ -1514,7 +1514,7 @@ async fn an_admin_mutation_writes_an_admin_log_entry_for_each_library_change() {
         .assert_status(StatusCode::FORBIDDEN);
     assert!(change_records(&fixture).await.is_empty());
 
-    let (_, library_id) = create_movies_library(&client, &admin_token).await;
+    let (_, library_id) = create_movies_library(&fixture, &client, &admin_token).await;
     client
         .post(&format!("/v1/admin/libraries/{library_id}/scan"))
         .cookie("beam_session", &admin_token)
