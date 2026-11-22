@@ -1287,7 +1287,7 @@ pub struct SessionRevoked {
 
 #[cfg(test)]
 #[path = "auth_tests.rs"]
-mod auth_tests;
+pub(crate) mod auth_tests;
 
 #[cfg(test)]
 #[path = "session_tests.rs"]

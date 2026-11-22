@@ -217,7 +217,7 @@ async fn the_admin_log_refuses_a_cursor_it_did_not_issue() {
 
 /// An admin log store that fails every call.
 #[derive(Debug)]
-struct UnavailableAdminLog;
+pub(super) struct UnavailableAdminLog;
 
 #[async_trait::async_trait]
 impl AdminLogRepository for UnavailableAdminLog {

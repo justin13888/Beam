@@ -13,7 +13,7 @@
 //! building an `AppServices` rather than by stacking `affix_state` hoops.
 
 #[cfg(test)]
-pub(super) mod tests {
+pub(crate) mod tests {
     use std::collections::BTreeSet;
     use std::sync::Arc;
 
@@ -924,6 +924,27 @@ pub(super) mod tests {
         let retried = do_callback(&harness, &state_cookie, &begin.state).await;
         retried.assert_status(StatusCode::BAD_REQUEST);
         assert_signed_nobody_in(&harness, &retried).await;
+
+        // The attempt this server began is recorded once, as an invalid
+        // attempt naming what was missing. The replay matched no pending
+        // login, so any request could make it: it leaves no row.
+        let records = sign_in_records(&harness).await;
+        let refusals: Vec<(AdminLogLevel, Value)> = records
+            .iter()
+            .map(|(level, details)| {
+                (
+                    level.clone(),
+                    json!([details["method"], details["outcome"], details["error"]]),
+                )
+            })
+            .collect();
+        assert_eq!(
+            refusals,
+            vec![(
+                AdminLogLevel::Warning,
+                json!(["browser", "attempt_invalid", "Missing code parameter"]),
+            )]
+        );
     }
 
     /// An ID token minted for a different login attempt -- its nonce is not

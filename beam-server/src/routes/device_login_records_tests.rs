@@ -89,3 +89,50 @@ async fn a_denied_and_an_approved_device_login_are_recorded_without_secrets() {
         assert!(!stored.contains(&secret), "{secret} reached the admin log");
     }
 }
+
+/// NFR-403: an open device login that expires -- because the identity
+/// provider says so, or because it outlived its lifetime here -- is recorded
+/// once, as an expired device sign-in, and its handle never reaches the row.
+#[tokio::test]
+async fn an_expired_device_login_is_recorded_as_expired() {
+    let reported =
+        harness(FakeOidcClient::default().with_device_script(vec![Ok(DevicePoll::Expired)]));
+    let reported_handle = started(&reported).await;
+    poll(&reported, &reported_handle)
+        .await
+        .assert_status(StatusCode::GONE);
+
+    let outlived = harness(FakeOidcClient::default());
+    let outlived_handle = started(&outlived).await;
+    outlived
+        .clock
+        .advance(Duration::from_secs(FAKE_DEVICE_EXPIRES_IN_SECS));
+    poll(&outlived, &outlived_handle)
+        .await
+        .assert_status(StatusCode::GONE);
+
+    for (harness, handle) in [(&reported, reported_handle), (&outlived, outlived_handle)] {
+        let records = sign_in_records(harness).await;
+        let summary: Vec<(beam_domain::models::AdminLogLevel, Value)> = records
+            .iter()
+            .map(|entry| {
+                let details = entry.details.clone().unwrap_or_default();
+                (
+                    entry.level.clone(),
+                    json!([details["method"], details["outcome"]]),
+                )
+            })
+            .collect();
+        assert_eq!(
+            summary,
+            vec![(
+                beam_domain::models::AdminLogLevel::Warning,
+                json!(["device", "expired"])
+            )]
+        );
+        assert!(
+            !format!("{records:?}").contains(&handle),
+            "the device handle reached the admin log"
+        );
+    }
+}

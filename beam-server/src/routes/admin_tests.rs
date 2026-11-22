@@ -1556,3 +1556,52 @@ async fn an_admin_mutation_writes_an_admin_log_entry_for_each_library_change() {
         );
     }
 }
+
+/// NFR-205: an admin log store that cannot take the row costs the change
+/// nothing. The library is created and listed, and the change still reaches
+/// the process log naming the administrator and the library, beside a warning
+/// that its admin log row was not written.
+#[tokio::test]
+async fn an_admin_change_is_made_and_logged_when_the_admin_log_store_fails() {
+    let logs = crate::routes::auth::auth_tests::tests::CapturedLogs::default();
+    let _guard = logs.install();
+    let mut fixture = make_scan_test_state(Gate::Open);
+    let mut services = fixture.state.services.clone();
+    services.admin_log = Arc::new(super::admin_logs_tests::UnavailableAdminLog);
+    fixture.state = AppState::new(
+        fixture.state.config.clone(),
+        services,
+        fixture.state.probe.clone(),
+        None,
+    );
+    let client = build_client(&fixture);
+    let token = seed_user_session(&fixture, true).await;
+    let admin = admin_id(&fixture).await;
+
+    let (_, library_id) = create_movies_library(&fixture, &client, &token).await;
+
+    let listed = client
+        .get("/v1/libraries")
+        .cookie("beam_session", &token)
+        .send()
+        .await
+        .json::<LibraryConnection>()
+        .items;
+    assert!(
+        listed.iter().any(|library| library.id == library_id),
+        "the library was created although its record could not be stored"
+    );
+    let logged = logs.text();
+    let created = logged
+        .lines()
+        .find(|line| line.contains("Created library \"Movies\""))
+        .unwrap_or_else(|| panic!("the change is in the process log:\n{logged}"));
+    assert!(
+        created.contains(&admin) && created.contains(&library_id.to_string()),
+        "the process log names who made the change, and to what: {created}"
+    );
+    assert!(
+        logged.contains("could not write an admin log entry"),
+        "the lost row is itself logged:\n{logged}"
+    );
+}
