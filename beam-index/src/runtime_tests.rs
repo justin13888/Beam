@@ -51,6 +51,8 @@ struct RecordingIndexer {
     failing_listings: Arc<AtomicU32>,
     /// Where a test records the files a scan deferred.
     scan_deferrals: Arc<ScanDeferrals>,
+    /// Every `library_changed` published, in order.
+    changed_libraries: std::sync::Mutex<Vec<Uuid>>,
 }
 
 /// The library store, whose next `failing` listings fail (NFR-205).
@@ -122,6 +124,10 @@ impl RecordingIndexer {
 
     fn library_scans(&self) -> Vec<Uuid> {
         self.library_scans.lock().unwrap().clone()
+    }
+
+    fn changed_libraries(&self) -> Vec<Uuid> {
+        self.changed_libraries.lock().unwrap().clone()
     }
 
     fn overlapping_library_scans(&self) -> Vec<Uuid> {
@@ -231,6 +237,10 @@ impl BackgroundIndexer for RecordingIndexer {
 
     fn scan_deferrals(&self) -> Arc<ScanDeferrals> {
         self.scan_deferrals.clone()
+    }
+
+    fn library_changed(&self, library_id: Uuid) {
+        self.changed_libraries.lock().unwrap().push(library_id);
     }
 }
 
@@ -736,6 +746,176 @@ async fn a_deferred_event_is_retried_once_its_delay_has_passed() {
             FsEventKind::Created
         ),
         "the retry is the event that was deferred"
+    );
+
+    tasks.abort();
+}
+
+/// A burst of reconciles in one library is one `library_changed` per
+/// debounce window (issue #454); a library whose only reconcile was deferred
+/// or failed changed nothing, so it is not announced until a retry finishes.
+#[tokio::test]
+async fn a_burst_of_reconciles_announces_each_changed_library_once_per_window() {
+    let indexer = Arc::new(RecordingIndexer::default());
+    let clock = Arc::new(TestClock::new());
+    let watcher = Arc::new(InMemoryFsWatcher::new());
+    let (films, shows, music) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    indexer.defer_next("/shows/a.mkv", Duration::from_secs(30));
+    indexer.fail_next("/music/a.mkv");
+
+    let tasks = spawn_background_indexing_with(
+        indexer.clone(),
+        Some(watcher.clone()),
+        clock.clone(),
+        config(3600, 2000),
+    );
+    let emit = |library_id: Uuid, path: &str| {
+        watcher.emit(FsEvent {
+            library_id,
+            path: PathBuf::from(path),
+            kind: FsEventKind::Created,
+        });
+    };
+    for path in ["/films/a.mkv", "/films/b.mkv", "/films/c.mkv"] {
+        emit(films, path);
+    }
+    emit(shows, "/shows/a.mkv");
+    emit(music, "/music/a.mkv");
+    until("the debounce window to open", || clock.waiter_count() >= 3).await;
+    assert!(indexer.changed_libraries().is_empty());
+
+    clock.advance(Duration::from_millis(2000));
+    until("the window's reconciles", || {
+        indexer.reconciled().len() == 5
+    })
+    .await;
+    until("the window's announcement", || {
+        !indexer.changed_libraries().is_empty()
+    })
+    .await;
+    assert_eq!(
+        indexer.changed_libraries(),
+        vec![films],
+        "three reconciles in one library are one announcement, and the \
+         deferred and failed libraries changed nothing"
+    );
+
+    // A second window is a second announcement for the same library.
+    emit(films, "/films/d.mkv");
+    until("the next debounce window to open", || {
+        clock.waiter_count() >= 4
+    })
+    .await;
+    clock.advance(Duration::from_millis(2000));
+    until("the second announcement", || {
+        indexer.changed_libraries().len() == 2
+    })
+    .await;
+    assert_eq!(indexer.changed_libraries(), vec![films, films]);
+
+    // The deferred reconcile finishing is what announces its library.
+    clock.advance(Duration::from_secs(30));
+    until("the retry's announcement", || {
+        indexer.changed_libraries().len() == 3
+    })
+    .await;
+    assert_eq!(indexer.changed_libraries()[2], shows);
+
+    tasks.abort();
+}
+
+/// End to end over the real indexer (issue #454): a file copied into a
+/// `TempDir` library is reconciled by the watch consumer through a real
+/// `LocalIndexService`, and the library is then read as changed through the
+/// notification service that service publishes to -- the one the server's
+/// change feed reads.
+#[tokio::test]
+async fn a_reconcile_on_the_real_indexer_is_read_through_its_notification_service() {
+    use crate::services::hash::{HashConfig, LocalHashService};
+    use crate::services::index::test_harness::{IndexServiceBuilder, IndexStores};
+    use crate::services::media_info::LocalMediaInfoService;
+    use crate::services::notification::{
+        ChangedLibraries, InMemoryNotificationService, NotificationService,
+    };
+    use beam_domain::repositories::FileRepository;
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let stores = IndexStores::wired();
+    let library = stores
+        .library_repo
+        .create(CreateLibrary {
+            name: "Films".to_string(),
+            root_path: dir.path().to_path_buf(),
+            description: None,
+        })
+        .await
+        .unwrap();
+    let notifications = Arc::new(InMemoryNotificationService::new());
+    let indexer = Arc::new(
+        IndexServiceBuilder::new()
+            .stores(&stores)
+            .hash_service(Arc::new(LocalHashService::new(HashConfig::default())))
+            .media_info(Arc::new(LocalMediaInfoService::default()))
+            .notifications(notifications.clone())
+            .build(),
+    );
+    let before = notifications.library_changes(None).cursor;
+
+    let clock = Arc::new(TestClock::new());
+    let watcher = Arc::new(InMemoryFsWatcher::new());
+    let tasks = spawn_background_indexing_with(
+        indexer.clone(),
+        Some(watcher.clone()),
+        clock.clone(),
+        config(3600, 2000),
+    );
+    // The startup scan holds the library; an event reconciled under it would
+    // be deferred, so the file is copied in only once the scan has finished
+    // and the maintenance loop and the poller both sleep on the clock.
+    until("the startup scan to finish", || clock.waiter_count() >= 2).await;
+    assert!(
+        stores
+            .library_repo
+            .find_by_id(library.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .last_scan_finished_at
+            .is_some(),
+        "the startup scan of the empty library finished"
+    );
+
+    let path = dir.path().join("Heat.1995.mkv");
+    std::fs::write(&path, b"not really a movie").unwrap();
+    watcher.emit(FsEvent {
+        library_id: library.id,
+        path: path.clone(),
+        kind: FsEventKind::Created,
+    });
+    until("the debounce window to open", || clock.waiter_count() >= 3).await;
+    assert_eq!(
+        notifications.library_changes(Some(before)).changed,
+        ChangedLibraries::Only(vec![]),
+        "nothing is announced before the window's reconcile"
+    );
+
+    clock.advance(Duration::from_millis(2000));
+    until("the reconcile's announcement", || {
+        notifications.library_changes(Some(before)).changed != ChangedLibraries::Only(vec![])
+    })
+    .await;
+    assert_eq!(
+        notifications.library_changes(Some(before)).changed,
+        ChangedLibraries::Only(vec![library.id])
+    );
+    assert!(
+        stores
+            .file_repo
+            .find_by_path(&path.to_string_lossy())
+            .await
+            .unwrap()
+            .is_some(),
+        "the announced reconcile indexed the copied file"
     );
 
     tasks.abort();

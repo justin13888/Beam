@@ -53,6 +53,7 @@ queries, so a page still holds `first` items and every `total` counts only what 
 | `/v1/genres` | GET | Every genre a title the caller may see carries, for filter chips: a `GenreConnection`, never paged |
 | `/v1/artwork/{kind}/{id}/{variant}` | GET, HEAD | Poster, backdrop or thumbnail art, people's portraits and collections' art, fetched from the provider once and served from Beam's cache. `kind` is `movie`/`show`/`season`/`episode`/`person`/`collection`; `variant` is `poster`/`backdrop`/`thumbnail`/`profile` (a person has only `profile`, a collection `poster` and `backdrop`) |
 | `/v1/libraries`, `/v1/libraries/{id}`, `/v1/libraries/{id}/files` | GET | Library listing (a `LibraryConnection`, never paged) and contents: a `LibraryFileConnection` paged by `first` (1-500, default 100) and `after`, by stored path then id. File paths are relative to the library root, in the listing and inside its cursor (NFR-108); another library's cursor is `400 #invalid-cursor` |
+| `/v1/libraries/changes` | GET | The library change feed (issue #454; see [Library change feed](#library-change-feed)): `LibraryChanges` -- the `library_ids` the caller may see whose contents the filesystem watcher changed since the `since` cursor, the `cursor` to pass next, and `reset: true` (no ids) when `since` is absent, malformed or from before a restart |
 | `/v1/files/{fileId}/stream` | GET, HEAD | Direct-play byte-range streaming (see `streaming.md`) |
 | `/v1/files/{fileId}/download` | GET, HEAD | Full-file download (attachment) |
 | `/v1/files/{fileId}/grant` | POST | A media grant for a client without the session cookie: `stream_url` and `download_url` carrying a signed `grant` query parameter that the four operations above accept, and only they, until `expires_at` (four hours). `404` `file-not-found` for a file the caller may not see ([ADR-0022](decisions/ADR-0022-signed-media-grants.md)) |
@@ -449,3 +450,36 @@ library would flush the snapshot, and where every title stands is `GET /v1/admin
 title the sweep never reached -- it stopped for a provider's rate limit -- sends nothing. SSE was
 chosen over WebSockets because the channel is strictly server-to-client — see
 [ADR-0010](decisions/ADR-0010-openapi-3-2-kynos.md).
+
+## Library change feed
+
+When the filesystem watcher adds, relinks or removes files, every client showing the library is to
+refetch it (issue #454). The watch consumer coalesces its reconciles into one `library_changed {
+library_id }` per library per debounce window -- a burst of files copied in is one event, and a
+reconcile deferred or failed is none until its retry finishes -- and records it in the process's
+change log. The event names the library and nothing else: no file path, so it tells a user nothing
+about content their access policy hides.
+
+Clients read it by **polling a cursor**, `GET /v1/libraries/changes?since=CURSOR`, not from a
+user-level event stream. Decided for these reasons:
+
+- **The clients poll anyway.** `beam-client-core` is the one client for Android, Apple and web, and
+  UniFFI has no async-iterator type: even the admin SSE stream is polled through
+  `GET /v1/admin/events` there. A stream would need a callback-interface subscription built first,
+  in every platform's binding, for an event that only says "refetch".
+- **A cursor loses nothing.** A mobile client is backgrounded, suspended and reconnected as a matter
+  of course, and SSE does not replay what it missed; a cursor answers with every library changed
+  since it, however long the client was away.
+- **It costs nothing to serve.** A poll is a read of an in-memory map bounded by the number of
+  libraries, filtered by the caller's access policy -- no held connection per open screen, and no
+  new access control: it is a library read, for any signed-in user, filtered as `GET /v1/libraries`
+  is.
+
+The cursor is opaque: a per-process epoch and a sequence number. Changes live in memory, so a
+restart forgets them; a cursor from before one -- or none, or a malformed one -- answers
+`reset: true` with no ids, meaning "refetch everything you show", and a cursor to continue from.
+Latency is the client's poll interval, which it picks for the screen on show; the watcher's own
+debounce window is the floor.
+
+The feed covers the watcher's reconciles. A scan's results reach clients as before -- through the
+admin `scan_progress` events for administrators, and on the next fetch for everyone else.

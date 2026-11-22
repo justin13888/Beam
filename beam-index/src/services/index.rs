@@ -651,6 +651,12 @@ impl LocalIndexService {
         &self.scan_deferrals
     }
 
+    /// Where this service publishes its events, for the watch consumer to
+    /// announce the libraries its reconciles changed (issue #454).
+    pub fn notification_service(&self) -> &Arc<dyn NotificationService> {
+        &self.notification_service
+    }
+
     /// Helper to extract and insert media streams for a file, and to replace
     /// its chapters with the ones the same probe read
     pub(crate) async fn insert_media_streams(

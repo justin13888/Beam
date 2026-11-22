@@ -13208,6 +13208,179 @@
         ]
       }
     },
+    "/v1/libraries/changes": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "The libraries whose contents changed since `since`, among those the caller can see.",
+        "description": "Poll it while a library is on screen, passing back the `cursor` each\nanswer returns; refetch each library in `library_ids`, or every library\nwhen `reset` is `true`. Library-level only: it never names a file.",
+        "operationId": "getLibraryChanges",
+        "parameters": [
+          {
+            "name": "since",
+            "in": "query",
+            "description": "The `cursor` the previous poll returned. Absent on a client's first\npoll; absent, malformed or issued before the server restarted, the\nanswer is a reset.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Unauthorized",
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "The challenge the client must answer, per RFC 9110 section 11.6.1.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "example": "ApiKey"
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden; Cross-origin request rejected; Malformed Origin/Referer header",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "headers": {
+              "Retry-After": {
+                "description": "How long to wait before retrying, in seconds or as an HTTP-date",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        },
+                        "errors": {
+                          "items": {
+                            "properties": {
+                              "pointer": {
+                                "type": "string",
+                                "format": "json-pointer"
+                              },
+                              "detail": {
+                                "type": "string"
+                              }
+                            },
+                            "type": "object",
+                            "required": [
+                              "pointer",
+                              "detail"
+                            ]
+                          },
+                          "type": "array"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LibraryChanges"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#internal"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BeamSession": []
+          }
+        ]
+      }
+    },
     "/v1/admin/logs": {
       "get": {
         "tags": [
@@ -24087,6 +24260,33 @@
           "progress"
         ],
         "description": "One scan of one library. A library has at most one queued or running\nscan; the latest is kept until the server restarts."
+      },
+      "LibraryChanges": {
+        "properties": {
+          "cursor": {
+            "type": "string",
+            "description": "Opaque. Pass it as `since` on the next poll."
+          },
+          "reset": {
+            "type": "boolean",
+            "description": "Whether every library is to be refetched, the cursor passed being\nunknown to this server."
+          },
+          "library_ids": {
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": "array",
+            "description": "The libraries the caller can see whose contents changed since the\ncursor passed, each once, in no particular order."
+          }
+        },
+        "type": "object",
+        "required": [
+          "cursor",
+          "reset",
+          "library_ids"
+        ],
+        "description": "The libraries changed since the cursor a client passed: what\n`GET /v1/libraries/changes` returns.\n\nA client keeps `cursor` and passes it back as `since` on its next poll.\nWhen `reset` is `true` the server cannot say what changed -- there was no\ncursor, or it was issued before the server restarted -- and the client is\nto refetch every library it shows; `library_ids` is then empty."
       },
       "LogLevel": {
         "type": "string",

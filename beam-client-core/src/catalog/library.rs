@@ -111,6 +111,36 @@ pub struct ScanJob {
     pub failure: Option<String>,
 }
 
+/// The libraries whose contents changed since a client's last poll of the
+/// library change feed (issue #454): what a browse or home screen refetches.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct LibraryChanges {
+    /// Opaque. Pass it as `since` on the next poll.
+    pub cursor: String,
+    /// Refetch every library shown: the server could not say what changed
+    /// (first poll, or the server restarted). `library_ids` is then empty.
+    pub reset: bool,
+    /// The libraries to refetch, each once.
+    pub library_ids: Vec<String>,
+}
+
+impl LibraryChanges {
+    /// Normalise generated library changes.
+    #[must_use]
+    pub fn from_generated(changes: wire::LibraryChanges) -> Self {
+        let wire::LibraryChanges {
+            cursor,
+            library_ids,
+            reset,
+        } = changes;
+        Self {
+            cursor,
+            reset,
+            library_ids: library_ids.iter().map(ToString::to_string).collect(),
+        }
+    }
+}
+
 impl LibrarySummary {
     /// Normalise a generated library.
     #[must_use]

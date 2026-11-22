@@ -9,7 +9,9 @@ use std::sync::Arc;
 
 use beam_domain::models::enrichment::EnrichmentTargetId;
 use beam_domain::repositories::EnrichmentStateRepository;
-use beam_index::services::notification::{AdminEvent, EventCategory, NotificationService};
+use beam_index::services::notification::{
+    AdminEvent, EventCategory, LibraryChangeCursor, LibraryChanges, NotificationService,
+};
 use kynos::http::StatusCode;
 use serde_json::Value;
 use tokio::sync::broadcast;
@@ -51,6 +53,12 @@ impl NotificationService for FiniteEventFeed {
 
     fn recent_events(&self, limit: usize) -> Vec<AdminEvent> {
         self.events.iter().take(limit).cloned().collect()
+    }
+
+    fn library_changed(&self, _library_id: uuid::Uuid) {}
+
+    fn library_changes(&self, _since: Option<LibraryChangeCursor>) -> LibraryChanges {
+        unreachable!("the admin event routes never read the library change feed")
     }
 }
 
@@ -420,6 +428,12 @@ impl NotificationService for LaggingEventFeed {
 
     fn recent_events(&self, _limit: usize) -> Vec<AdminEvent> {
         Vec::new()
+    }
+
+    fn library_changed(&self, _library_id: uuid::Uuid) {}
+
+    fn library_changes(&self, _since: Option<LibraryChangeCursor>) -> LibraryChanges {
+        unreachable!("the admin event routes never read the library change feed")
     }
 }
 
