@@ -305,9 +305,34 @@ impl MarkerService {
             others
                 .sort_by_key(|(other, _, other_number)| (other_number.abs_diff(number), other.id));
 
-            // The partners first: with none to compare with, the file is
-            // not decoded at all, so a season whose other files never decode
-            // costs a failed open each pass rather than a decode.
+            // The file is opened before any partner is decoded, so a file
+            // that does not open costs one failed open each pass rather than
+            // its partners' decodes; one already heard this pass as a
+            // partner is not opened again.
+            let opened = match prints.get(&file.id) {
+                Some(Heard::Later) => {
+                    report.deferred += 1;
+                    continue;
+                }
+                Some(Heard::Nothing) => {
+                    self.record(file, Vec::new()).await?;
+                    report.without_markers += 1;
+                    continue;
+                }
+                Some(Heard::Print(_)) => None,
+                None => match Self::open(library, file) {
+                    Some(opened) => Some(opened),
+                    None => {
+                        prints.insert(file.id, Heard::Later);
+                        report.deferred += 1;
+                        continue;
+                    }
+                },
+            };
+
+            // Then the partners: with none to compare with, the file is not
+            // decoded at all, so a season whose other files never decode
+            // costs no decode of this one.
             let mut partners: Vec<Arc<AudioFingerprint>> = Vec::new();
             for (other, ..) in others {
                 if partners.len() == PARTNERS {
@@ -321,7 +346,15 @@ impl MarkerService {
                 report.deferred += 1;
                 continue;
             }
-            let own = match self.listen(library, file, &mut prints).await {
+            let heard = match opened {
+                Some(opened) => {
+                    let heard = self.hear(file, opened).await;
+                    prints.insert(file.id, heard.clone());
+                    heard
+                }
+                None => self.listen(library, file, &mut prints).await,
+            };
+            let own = match heard {
                 Heard::Print(print) => print,
                 Heard::Nothing => {
                     self.record(file, Vec::new()).await?;
@@ -369,26 +402,40 @@ impl MarkerService {
         if let Some(heard) = prints.get(&file.id) {
             return heard.clone();
         }
-        let heard = match LibraryFile::open(&library.root_path, &file.path) {
-            Err(error) => {
-                debug!(path = %file.path.display(), %error, "file not opened for marker detection");
-                Heard::Later
-            }
-            Ok(opened) => match self.fingerprinter.fingerprint(opened, self.spec).await {
-                Ok(Some(print)) => Heard::Print(Arc::new(print)),
-                Ok(None) => Heard::Nothing,
-                Err(error) if error.is_content_fault() => {
-                    warn!(path = %file.path.display(), %error, "no audio to detect markers in");
-                    Heard::Nothing
-                }
-                Err(error) => {
-                    warn!(path = %file.path.display(), %error, "marker detection left for a later pass");
-                    Heard::Later
-                }
-            },
+        let heard = match Self::open(library, file) {
+            None => Heard::Later,
+            Some(opened) => self.hear(file, opened).await,
         };
         prints.insert(file.id, heard.clone());
         heard
+    }
+
+    /// `file` opened beneath its library's root, or `None` -- logged --
+    /// where it cannot be just now.
+    fn open(library: &Library, file: &MediaFile) -> Option<LibraryFile> {
+        match LibraryFile::open(&library.root_path, &file.path) {
+            Ok(opened) => Some(opened),
+            Err(error) => {
+                debug!(path = %file.path.display(), %error, "file not opened for marker detection");
+                None
+            }
+        }
+    }
+
+    /// The fingerprint of `file`, already `opened`.
+    async fn hear(&self, file: &MediaFile, opened: LibraryFile) -> Heard {
+        match self.fingerprinter.fingerprint(opened, self.spec).await {
+            Ok(Some(print)) => Heard::Print(Arc::new(print)),
+            Ok(None) => Heard::Nothing,
+            Err(error) if error.is_content_fault() => {
+                warn!(path = %file.path.display(), %error, "no audio to detect markers in");
+                Heard::Nothing
+            }
+            Err(error) => {
+                warn!(path = %file.path.display(), %error, "marker detection left for a later pass");
+                Heard::Later
+            }
+        }
     }
 
     async fn record(&self, file: &MediaFile, markers: Vec<PlaybackMarker>) -> Result<(), DbErr> {

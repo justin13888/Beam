@@ -179,6 +179,20 @@ impl Harness {
         self.markers.find_by_file_id(file.id).await.unwrap()
     }
 
+    /// Record `file` as already listened to in its current version, so a
+    /// pass reaches it only as another file's partner.
+    async fn heard_before(&self, file: &MediaFile) {
+        self.markers
+            .record_detection(MarkerDetection {
+                file_id: file.id,
+                file_hash: file.hash,
+                markers: Vec::new(),
+                detected_at: TestClock::new().now(),
+            })
+            .await
+            .unwrap();
+    }
+
     fn times_asked(&self, file: &MediaFile) -> usize {
         self.listener
             .asked()
@@ -404,6 +418,80 @@ async fn a_lone_episode_waits_for_another_and_two_cuts_of_one_are_not_season_mat
     let report = h.service.run_pass().await.unwrap();
     assert_eq!(report.with_markers, 3, "{report:?}");
     assert_eq!(h.times_asked(&movie), 0);
+}
+
+#[tokio::test]
+async fn a_file_whose_season_mates_give_no_fingerprint_is_not_decoded() {
+    let h = Harness::new().await;
+    let season = Season::new();
+    let pending = h
+        .episode_file(1, FakeListen::Heard(season.episode(11, 0, 0)))
+        .await;
+    let silent = h.episode_file(2, FakeListen::NoAudio).await;
+    let undecodable = h.episode_file(3, FakeListen::Undecodable).await;
+    h.heard_before(&silent).await;
+    h.heard_before(&undecodable).await;
+
+    let report = h.service.run_pass().await.unwrap();
+
+    assert_eq!(
+        report,
+        PassReport {
+            with_markers: 0,
+            without_markers: 0,
+            deferred: 1,
+        }
+    );
+    // The season-mates are listened to as partners and give nothing, so
+    // the pending file -- reachable only as itself -- is never decoded.
+    assert_eq!(h.times_asked(&silent), 1);
+    assert_eq!(h.times_asked(&undecodable), 1);
+    assert_eq!(h.times_asked(&pending), 0);
+    assert!(
+        h.markers
+            .detected_hashes(&[pending.id])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn a_file_that_does_not_open_waits_without_its_partners_being_decoded() {
+    let h = Harness::new().await;
+    let season = Season::new();
+    let missing = h
+        .episode_file(1, FakeListen::Heard(season.episode(11, 10_000, 50_000)))
+        .await;
+    let two = h
+        .episode_file(2, FakeListen::Heard(season.episode(12, 60_000, 30_000)))
+        .await;
+    let three = h
+        .episode_file(3, FakeListen::Heard(season.episode(13, 0, 70_000)))
+        .await;
+    h.heard_before(&two).await;
+    h.heard_before(&three).await;
+    std::fs::remove_file(&missing.path).unwrap();
+
+    let report = h.service.run_pass().await.unwrap();
+
+    assert_eq!(
+        report,
+        PassReport {
+            with_markers: 0,
+            without_markers: 0,
+            deferred: 1,
+        }
+    );
+    assert!(h.listener.asked().is_empty(), "{:?}", h.listener.asked());
+
+    // Once the file is back it is heard against the partners it waited for.
+    std::fs::write(&missing.path, b"not really an episode").unwrap();
+    let report = h.service.run_pass().await.unwrap();
+    assert_eq!(report.with_markers, 1, "{report:?}");
+    assert_eq!(h.times_asked(&missing), 1);
+    assert_eq!(h.times_asked(&two), 1);
+    assert!(!h.kept(&missing).await.is_empty());
 }
 
 #[tokio::test]
