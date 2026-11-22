@@ -152,6 +152,12 @@ async fn main() -> Result<()> {
         let trickplay = services.trickplay.clone();
         tokio::spawn(async move { trickplay.run().await });
     }
+    // Skip markers are detected in the background for every episode file
+    // not yet heard in its current version, one file at a time (issue #332).
+    {
+        let markers = services.markers.clone();
+        tokio::spawn(async move { markers.run().await });
+    }
     if config.playback_telemetry_enabled {
         info!(
             "Playback telemetry enabled -- counts kept {} days, read at /v1/admin/telemetry/playback",

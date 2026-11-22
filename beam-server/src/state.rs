@@ -47,6 +47,7 @@ use crate::{
             audit_existing_roots,
         },
         lists::{ListDependencies, ListService},
+        markers::{MarkerDependencies, MarkerService},
         media_grant::MediaGrantSigner,
         metadata::{DbMetadataService, MetadataRepositories, MetadataService},
         people::PeopleService,
@@ -270,6 +271,10 @@ pub struct AppServices {
     /// pass loop `main` always runs, located by
     /// `GET /v1/files/{file_id}/trickplay/{sheet}`.
     pub trickplay: Arc<TrickplayService>,
+    /// Skip markers Beam keeps for each file (issue #332): set and cleared
+    /// by `/v1/admin/files/{file_id}/markers`, and detected in the
+    /// background by the pass loop `main` always runs.
+    pub markers: Arc<MarkerService>,
 }
 
 /// What [`AppServices::build`] builds: the services, and what the process
@@ -455,6 +460,11 @@ impl AppServices {
         let trickplay_repo: Arc<dyn beam_domain::repositories::TrickplayRepository> = Arc::new(
             beam_index::repositories::SqlTrickplayRepository::new(db.clone()),
         );
+        // Written by an administrator and the marker worker, read by the
+        // sources route.
+        let marker_repo: Arc<dyn beam_domain::repositories::MarkerRepository> = Arc::new(
+            beam_index::repositories::SqlMarkerRepository::new(db.clone()),
+        );
 
         let enrichment_provider = build_enrichment_provider(config, clock.clone())?;
 
@@ -523,8 +533,9 @@ impl AppServices {
             files: file_repo.clone(),
             streams: stream_repo.clone(),
             sidecars: sidecar_repo.clone(),
-            chapters: chapter_repo,
+            chapters: chapter_repo.clone(),
             trickplay: trickplay_repo.clone(),
+            markers: marker_repo.clone(),
         }));
         let playback_service = Arc::new(DbPlaybackService::new(PlaybackRepositories {
             watch_state: watch_state_repo,
@@ -594,6 +605,17 @@ impl AppServices {
                 clock: clock.clone(),
             },
         ));
+        // Writes only to the database: a file's audio is read through its
+        // open handle, and nothing is kept on disk (FR-202).
+        let markers = Arc::new(MarkerService::new(MarkerDependencies {
+            libraries: library_repo.clone(),
+            files: file_repo.clone(),
+            shows: show_repo.clone(),
+            chapters: chapter_repo,
+            markers: marker_repo,
+            fingerprinter: Arc::new(beam_index::services::LocalAudioFingerprinter),
+            clock: clock.clone(),
+        }));
 
         let telemetry = Arc::new(LibraryReportService::new(
             config.library_report_config(),
@@ -686,6 +708,7 @@ impl AppServices {
             telemetry,
             playback_telemetry,
             trickplay,
+            markers,
         };
 
         Ok(BuiltServices {

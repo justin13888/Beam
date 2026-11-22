@@ -41,6 +41,8 @@ mod language_preferences;
 mod library;
 #[path = "pg_integration/library_shape.rs"]
 mod library_shape;
+#[path = "pg_integration/markers.rs"]
+mod markers;
 #[path = "pg_integration/movie_repository.rs"]
 mod movie_repository;
 #[path = "pg_integration/person_repository.rs"]

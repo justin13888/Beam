@@ -11,7 +11,7 @@ fn empty_sources() -> std::sync::Arc<crate::services::sources::SourceCatalog> {
     use beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository;
     use std::sync::Arc;
 
-    Arc::new(crate::services::sources::SourceCatalog::new(crate::services::sources::SourceRepositories {movies: Arc::new(InMemoryMovieRepository::default()), files: Arc::new(InMemoryFileRepository::default()), streams: Arc::new(InMemoryMediaStreamRepository::default()), sidecars: Arc::new(InMemorySidecarSubtitleRepository::default()), chapters: Arc::new(beam_domain::repositories::chapter::in_memory::InMemoryChapterRepository::default()), trickplay: Arc::new(beam_domain::repositories::trickplay::in_memory::InMemoryTrickplayRepository::default()),}))
+    Arc::new(crate::services::sources::SourceCatalog::new(crate::services::sources::SourceRepositories {movies: Arc::new(InMemoryMovieRepository::default()), files: Arc::new(InMemoryFileRepository::default()), streams: Arc::new(InMemoryMediaStreamRepository::default()), sidecars: Arc::new(InMemorySidecarSubtitleRepository::default()), chapters: Arc::new(beam_domain::repositories::chapter::in_memory::InMemoryChapterRepository::default()), trickplay: Arc::new(beam_domain::repositories::trickplay::in_memory::InMemoryTrickplayRepository::default()), markers: Arc::new(beam_domain::repositories::markers::in_memory::InMemoryMarkerRepository::default()),}))
 }
 
 /// Browse and search through the service (issue #187): the page request rules,

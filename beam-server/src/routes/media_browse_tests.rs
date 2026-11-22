@@ -113,6 +113,7 @@ async fn browse_omits_a_title_whose_only_file_is_missing_but_its_detail_still_re
         streams: Arc::default(),
         sidecars: Arc::default(),
         chapters: Arc::default(),
+        markers: Arc::default(),
         trickplay: Arc::default(),
         files: files.clone(),
     }));
