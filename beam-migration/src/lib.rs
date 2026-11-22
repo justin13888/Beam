@@ -38,6 +38,7 @@ mod m20261028_000001_user_library_access;
 mod m20261029_000001_user_language_preferences;
 mod m20261030_000001_chapters_trickplay;
 mod m20261031_000001_episode_numbering;
+mod m20261101_000001_file_markers;
 
 pub use m20261008_000001_tracks_subtitles::RENAMED_FFMPEG_CODECS;
 
@@ -82,6 +83,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20261029_000001_user_language_preferences::Migration),
             Box::new(m20261030_000001_chapters_trickplay::Migration),
             Box::new(m20261031_000001_episode_numbering::Migration),
+            Box::new(m20261101_000001_file_markers::Migration),
         ]
     }
 }

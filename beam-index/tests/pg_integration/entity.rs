@@ -34,6 +34,8 @@ pub(crate) fn entity_table_names() -> Vec<&'static str> {
         DeviceAuth.table_name(),
         Episode.table_name(),
         FileChapter.table_name(),
+        FileMarker.table_name(),
+        FileMarkerDetection.table_name(),
         FileTrickplay.table_name(),
         Files.table_name(),
         Genre.table_name(),
@@ -132,6 +134,8 @@ async fn every_entity_reads_and_writes_against_the_migrated_schema() {
     selects(db, DeviceAuth).await;
     selects(db, Episode).await;
     selects(db, FileChapter).await;
+    selects(db, FileMarker).await;
+    selects(db, FileMarkerDetection).await;
     selects(db, FileTrickplay).await;
     selects(db, Files).await;
     selects(db, Genre).await;
