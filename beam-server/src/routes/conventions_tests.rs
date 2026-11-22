@@ -38,6 +38,11 @@
 //!   document served and in both committed copies, which the release workflow
 //!   regenerates on the release pull request. `/v1` is the contract's
 //!   version; this number only names the build (ADR-0021);
+//! * **R9** no `oneOf` or `anyOf` branch is a single-key wrapper -- an object
+//!   with exactly one property, that property required, as in
+//!   `{"Movie": {...}}`. A variant carries its tag beside its fields
+//!   (`{"media_type": "movie", ...}`); a lone `const` property is such a tag,
+//!   not a wrapper;
 //! * **R10** a `409` or `422` names its problem `type` from Beam's
 //!   taxonomy, never leaving it open or `about:blank`: a conflict and an
 //!   unprocessable request are the caller's to act on. The one exception is
@@ -545,6 +550,67 @@ mod tests {
         violations
     }
 
+    /// Whether `branch` is a single-key wrapper: an object with exactly one
+    /// property, and that property required -- `{"Movie": {...}}`, where the
+    /// key is the tag and the payload sits one level down.
+    fn is_single_key_wrapper(document: &Value, branch: &Value) -> bool {
+        let branch = resolved(document, branch);
+        let Some(properties) = branch.get("properties").and_then(Value::as_object) else {
+            return false;
+        };
+        let mut keys = properties.keys();
+        let (Some(only), None) = (keys.next(), keys.next()) else {
+            return false;
+        };
+        // A lone `const` is the tag itself -- a unit variant under an internal
+        // tag (`{"media_type": "movie"}`) -- not a key wrapping a payload.
+        let is_tag = properties[only].get("const").is_some();
+        !is_tag
+            && branch
+                .get("required")
+                .and_then(Value::as_array)
+                .is_some_and(|required| required.iter().any(|name| name == only))
+    }
+
+    /// R9: every `oneOf` or `anyOf` branch, anywhere in the document, that is a
+    /// single-key wrapper. A variant is told apart by a tag beside its fields
+    /// (`{"media_type": "movie", ...}`), so every client reads one shape
+    /// rather than unwrapping a key it has to know in advance.
+    fn r9_violations(document: &Value) -> Vec<String> {
+        fn walk(document: &Value, node: &Value, pointer: &str, found: &mut Vec<String>) {
+            match node {
+                Value::Object(object) => {
+                    for keyword in ["oneOf", "anyOf"] {
+                        for (index, branch) in object
+                            .get(keyword)
+                            .and_then(Value::as_array)
+                            .into_iter()
+                            .flatten()
+                            .enumerate()
+                        {
+                            if is_single_key_wrapper(document, branch) {
+                                found.push(format!("{pointer}/{keyword}/{index}"));
+                            }
+                        }
+                    }
+                    for (key, child) in object {
+                        walk(document, child, &format!("{pointer}/{}", token(key)), found);
+                    }
+                }
+                Value::Array(items) => {
+                    for (index, child) in items.iter().enumerate() {
+                        walk(document, child, &format!("{pointer}/{index}"), found);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let mut found = Vec::new();
+        walk(document, document, "", &mut found);
+        found
+    }
+
     /// The committed copies of the document every client is generated from,
     /// by path. The release workflow regenerates both on the release pull
     /// request, after release-please bumps `Cargo.toml`.
@@ -732,6 +798,24 @@ mod tests {
             violations.is_empty(),
             "info.version is the release, in the document served and in both committed copies \
              (the release workflow regenerates them on the release pull request):\n{}",
+            violations.join("\n")
+        );
+    }
+
+    #[test]
+    fn r9_no_variant_is_a_single_key_wrapper() {
+        let document = exported_document();
+        assert!(
+            document
+                .pointer("/components/schemas/MediaMetadata/oneOf")
+                .and_then(Value::as_array)
+                .is_some_and(|branches| branches.len() == 2),
+            "MediaMetadata is no longer a two-branch oneOf, so the rule may not be reading it"
+        );
+        let violations = r9_violations(&document);
+        assert!(
+            violations.is_empty(),
+            "a variant carries its tag beside its fields, never as a single-key wrapper:\n{}",
             violations.join("\n")
         );
     }
@@ -1103,5 +1187,77 @@ mod tests {
             }},
         });
         assert!(r6_violations(&conforming).is_empty());
+    }
+
+    #[test]
+    fn r9_catches_a_single_key_wrapper() {
+        let violating = json!({
+            "components": { "schemas": {
+                "MovieMetadata": { "type": "object", "properties": {
+                    "id": { "type": "string" },
+                    "title": { "type": "string" },
+                }},
+                "ShowWrapper": { "type": "object", "required": ["Show"], "properties": {
+                    "Show": { "type": "object" },
+                }},
+                // The externally tagged shape MediaMetadata had before R9.
+                "MediaMetadata": { "oneOf": [
+                    { "$ref": "#/components/schemas/ShowWrapper" },
+                    { "type": "object", "required": ["Movie"], "additionalProperties": false,
+                      "properties": { "Movie": { "$ref": "#/components/schemas/MovieMetadata" } } },
+                ]},
+            }},
+            "paths": { "/v1/things": { "get": { "responses": { "200": { "content": {
+                "application/json": { "schema": { "anyOf": [
+                    { "type": "object", "required": ["Episode"],
+                      "properties": { "Episode": { "type": "object" } } },
+                    { "type": "null" },
+                ]}}
+            }}}}}}
+        });
+        let mut r9 = r9_violations(&violating);
+        r9.sort();
+        assert_eq!(
+            r9,
+            vec![
+                "/components/schemas/MediaMetadata/oneOf/0".to_owned(),
+                "/components/schemas/MediaMetadata/oneOf/1".to_owned(),
+                "/paths/~1v1~1things/get/responses/200/content/application~1json/schema/anyOf/0"
+                    .to_owned(),
+            ],
+            "an inline wrapper, a $ref to one, and an anyOf wrapper in a response are caught"
+        );
+
+        let conforming = json!({
+            "components": { "schemas": {
+                "MovieMetadata": { "type": "object", "properties": {
+                    "id": { "type": "string" },
+                    "title": { "type": "string" },
+                }},
+                // The internally tagged shape Kynos describes today.
+                "MediaMetadata": {
+                    "oneOf": [
+                        { "allOf": [
+                            { "$ref": "#/components/schemas/MovieMetadata" },
+                            { "type": "object", "required": ["media_type"],
+                              "properties": { "media_type": { "const": "movie" } } },
+                        ]},
+                        // A unit variant is its tag alone, not a wrapper.
+                        { "type": "object", "required": ["media_type"],
+                          "properties": { "media_type": { "const": "unknown" } } },
+                        // One optional property wraps nothing.
+                        { "type": "object", "properties": { "note": { "type": "string" } } },
+                    ],
+                    "discriminator": { "propertyName": "media_type" },
+                },
+                "Holder": { "type": "object", "properties": {
+                    "movie": { "anyOf": [
+                        { "$ref": "#/components/schemas/MovieMetadata" },
+                        { "type": "null" },
+                    ]},
+                }},
+            }},
+        });
+        assert!(r9_violations(&conforming).is_empty());
     }
 }

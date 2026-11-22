@@ -4,7 +4,8 @@
 /// does not exist -- deleted while its scan ran -- it is a no-op, as the user
 /// store's `set_admin` is for an unknown id;
 /// a library's file count is of its own present files, read from the file
-/// store; and a deleted library is gone, deleting an unknown one changing
+/// store; its title count is of the movies, shows, seasons and episodes its
+/// own present files reach (issue #494); and a deleted library is gone, deleting an unknown one changing
 /// nothing.
 ///
 /// `$setup` names an `async fn() -> impl LibraryRepositoryFixture` whose
@@ -201,6 +202,168 @@ macro_rules! library_repository_contract {
             assert_eq!(repo.count_files(series.id).await.unwrap(), 1);
             assert_eq!(repo.count_files(empty.id).await.unwrap(), 0);
             assert_eq!(repo.count_files(Uuid::new_v4()).await.unwrap(), 0);
+        }
+
+        /// A present file in `library_id` holding `content`, returning its id.
+        async fn title_file_in(
+            fixture: &impl LibraryRepositoryFixture,
+            library_id: Uuid,
+            content: $crate::models::file::MediaFileContent,
+        ) -> Uuid {
+            fixture
+                .files()
+                .create($crate::models::file::CreateMediaFile {
+                    content: Some(content),
+                    status: $crate::models::file::FileStatus::Known,
+                    ..create_media_file(
+                        library_id,
+                        format!("/media/{library_id}/{}.mkv", Uuid::new_v4()),
+                    )
+                })
+                .await
+                .unwrap()
+                .id
+        }
+
+        /// A movie entry, in `library_id`, of the movie `title` names.
+        async fn movie_entry(
+            fixture: &impl LibraryRepositoryFixture,
+            library_id: Uuid,
+            title: &str,
+            edition: Option<&str>,
+        ) -> Uuid {
+            let movie = fixture
+                .movies()
+                .find_or_create_by_identity($crate::models::movie::CreateMovie::new(
+                    title.to_string(),
+                    None,
+                    None,
+                ))
+                .await
+                .unwrap();
+            fixture
+                .movies()
+                .find_or_create_entry($crate::models::movie::CreateMovieEntry {
+                    library_id,
+                    movie_id: movie.id,
+                    edition: edition.map(str::to_string),
+                })
+                .await
+                .unwrap()
+                .id
+        }
+
+        /// The episode numbered `episode` of season `season` of the show
+        /// `title` names.
+        async fn episode_of(
+            fixture: &impl LibraryRepositoryFixture,
+            title: &str,
+            season: u32,
+            episode: u32,
+        ) -> Uuid {
+            let show = fixture
+                .shows()
+                .find_or_create_by_identity($crate::models::show::CreateShow::new(
+                    title.to_string(),
+                    None,
+                ))
+                .await
+                .unwrap();
+            let season = fixture
+                .shows()
+                .find_or_create_season(show.id, season)
+                .await
+                .unwrap();
+            fixture
+                .shows()
+                .find_or_create_episode($crate::models::show::CreateEpisode {
+                    season_id: season.id,
+                    episode_number: episode,
+                    title: format!("Episode {episode}"),
+                    runtime: None,
+                    air_date: None,
+                    numbering: $crate::utils::media_path::EpisodeNumbering::Standard,
+                })
+                .await
+                .unwrap()
+                .id
+        }
+
+        #[tokio::test]
+        async fn a_library_counts_only_its_own_live_titles_by_kind() {
+            use $crate::models::file::MediaFileContent;
+            use $crate::models::library::LibraryTitleCounts;
+
+            let fixture = $setup().await;
+            let repo = fixture.repo();
+            let films = library(&fixture, "films").await;
+            let series = library(&fixture, "series").await;
+            let empty = library(&fixture, "empty").await;
+
+            // Two editions of one movie are one title; a movie whose only
+            // file is missing is not live; an unclassified file is no title.
+            let theatrical = movie_entry(&fixture, films.id, "Heat", None).await;
+            let directors = movie_entry(&fixture, films.id, "Heat", Some("Director's Cut")).await;
+            title_file_in(&fixture, films.id, MediaFileContent::movie(theatrical)).await;
+            title_file_in(&fixture, films.id, MediaFileContent::movie(directors)).await;
+            let gone_entry = movie_entry(&fixture, films.id, "Ronin", None).await;
+            let gone = title_file_in(&fixture, films.id, MediaFileContent::movie(gone_entry)).await;
+            file_in(&fixture, films.id).await;
+
+            // Two seasons of one show, an episode with two present files, and
+            // an episode whose only file is missing.
+            let pilot = episode_of(&fixture, "Lost", 1, 1).await;
+            for _ in 0..2 {
+                title_file_in(&fixture, series.id, MediaFileContent::episode(pilot)).await;
+            }
+            let second = episode_of(&fixture, "Lost", 1, 2).await;
+            title_file_in(&fixture, series.id, MediaFileContent::episode(second)).await;
+            let premiere = episode_of(&fixture, "Lost", 2, 1).await;
+            title_file_in(&fixture, series.id, MediaFileContent::episode(premiere)).await;
+            let missing_episode = episode_of(&fixture, "Lost", 3, 1).await;
+            let gone_episode = title_file_in(
+                &fixture,
+                series.id,
+                MediaFileContent::episode(missing_episode),
+            )
+            .await;
+            fixture
+                .files()
+                .mark_missing(vec![gone, gone_episode], at(0))
+                .await
+                .unwrap();
+
+            // The same show's episode filed in the films library counts there
+            // too, and adds nothing to the series library.
+            title_file_in(&fixture, films.id, MediaFileContent::episode(pilot)).await;
+
+            assert_eq!(
+                repo.count_titles(films.id).await.unwrap(),
+                LibraryTitleCounts {
+                    movies: 1,
+                    shows: 1,
+                    seasons: 1,
+                    episodes: 1,
+                },
+                "a missing file keeps no title live"
+            );
+            assert_eq!(
+                repo.count_titles(series.id).await.unwrap(),
+                LibraryTitleCounts {
+                    movies: 0,
+                    shows: 1,
+                    seasons: 2,
+                    episodes: 3,
+                }
+            );
+            assert_eq!(
+                repo.count_titles(empty.id).await.unwrap(),
+                LibraryTitleCounts::default()
+            );
+            assert_eq!(
+                repo.count_titles(Uuid::new_v4()).await.unwrap(),
+                LibraryTitleCounts::default()
+            );
         }
 
         #[tokio::test]

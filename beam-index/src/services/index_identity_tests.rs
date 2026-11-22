@@ -8,11 +8,10 @@
 //! to the file double, so liveness and orphan checks read the files the scan
 //! actually wrote.
 
+use super::test_harness::IndexServiceBuilder;
 use super::*;
-use crate::services::admin_log::LocalAdminLogService;
 use crate::services::hash::MockHashService;
 use crate::services::media_info::MockMediaInfoService;
-use crate::services::notification::InMemoryNotificationService;
 use beam_domain::models::access::AccessPolicy;
 use beam_domain::models::{CreateLibrary, CreateMovie, CreateMovieEntry, Library, Movie, Show};
 use beam_domain::providers::enrichment::{MovieEnrichment, ShowEnrichment};
@@ -23,8 +22,8 @@ use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
 use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
 use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
 use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
-use beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository;
 use beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository;
+use beam_domain::test_utils::create_media_file;
 use tempfile::TempDir;
 
 /// What the service writes files through, built over the harness's in-memory
@@ -142,23 +141,21 @@ impl Harness {
             Some(wrap) => wrap(file_repo.clone()),
             None => file_repo.clone() as Arc<dyn FileRepository>,
         };
-        let service = LocalIndexService::new(
-            library_repo.clone(),
-            service_files,
-            service_movies.unwrap_or_else(|| movie_repo.clone() as Arc<dyn MovieRepository>),
-            show_repo.clone(),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-            Arc::new(hasher),
-            Arc::new(prober),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(LocalAdminLogService::new(
-                admin_log_repo.clone() as Arc<dyn AdminLogRepository>
-            )),
-            watch_state.clone(),
-        )
-        .with_missing_file_grace(grace)
-        .with_enrichment_repo(enrichment_repo.clone())
-        .with_user_list_repo(lists.clone());
+        let service = IndexServiceBuilder::new()
+            .library_repo(library_repo.clone())
+            .file_repo(service_files)
+            .movie_repo(
+                service_movies.unwrap_or_else(|| movie_repo.clone() as Arc<dyn MovieRepository>),
+            )
+            .show_repo(show_repo.clone())
+            .hash_service(Arc::new(hasher))
+            .media_info(Arc::new(prober))
+            .admin_log_repo(admin_log_repo.clone())
+            .progress_repo(watch_state.clone())
+            .build()
+            .with_missing_file_grace(grace)
+            .with_enrichment_repo(enrichment_repo.clone())
+            .with_user_list_repo(lists.clone());
 
         Self {
             _dir: dir,
@@ -288,6 +285,11 @@ impl Harness {
             updated_at: now,
         };
         let id = movie.id;
+        // `rekey(id, None, v)` could leave a created movie keyless, but no
+        // `MovieRepository` method sets the chosen `created_at` -- creation
+        // stamps the wall clock -- or leaves the row with no rules version,
+        // as a pre-key build did. So the row is put in the double's map,
+        // as the shared contract's own fixture does.
         self.movie_repo.movies.lock().unwrap().insert(id, movie);
         for rel in rels {
             let entry = self
@@ -340,6 +342,11 @@ impl Harness {
             updated_at: now,
         };
         let id = show.id;
+        // `rekey(id, None, v)` could leave a created show keyless, but no
+        // `ShowRepository` method sets the chosen `created_at` -- creation
+        // stamps the wall clock -- or leaves the row with no rules version,
+        // as a pre-key build did. So the row is put in the double's map,
+        // as the shared contract's own fixture does.
         self.show_repo.shows.lock().unwrap().insert(id, show);
         let season = self.show_repo.find_or_create_season(id, 1).await.unwrap();
         for (n, rel) in rels.iter().enumerate() {
@@ -351,6 +358,7 @@ impl Harness {
                     title: format!("Episode {}", n + 1),
                     runtime: None,
                     air_date: None,
+                    numbering: beam_domain::utils::media_path::EpisodeNumbering::Standard,
                 })
                 .await
                 .unwrap();
@@ -366,22 +374,22 @@ impl Harness {
         let path = self.write(rel);
         let (size_bytes, mtime) = read_fs_meta(path.parent().unwrap(), &path).unwrap();
         // Distinct from the scan's hashes, which count up from 1.
-        let hash = u64::MAX - self.file_repo.files.lock().unwrap().len() as u64;
+        let held = self
+            .file_repo
+            .find_all_by_library_including_missing(self.library.id)
+            .await
+            .unwrap()
+            .len();
+        let hash = u64::MAX - held as u64;
         self.file_repo
             .create(CreateMediaFile {
-                library_id: self.library.id,
-                path,
                 hash,
                 size_bytes,
                 mtime,
-                identity: None,
-                mime_type: Some("video/x-matroska".to_string()),
-                duration: None,
                 container_format: None,
                 content: Some(content),
                 status: FileStatus::Known,
-                classifier_version: 0,
-                container_tags: None,
+                ..create_media_file(self.library.id, path)
             })
             .await
             .unwrap();
@@ -429,10 +437,14 @@ impl Harness {
 
     /// The show's episodes by number in season 1, each with its files'
     /// paths relative to the root.
-    fn season_one(&self, show: Uuid) -> Vec<(u32, Vec<String>)> {
+    async fn season_one(&self, show: Uuid) -> Vec<(u32, Vec<String>)> {
         let seasons = self.show_repo.seasons.lock().unwrap().clone();
         let episodes = self.show_repo.episodes.lock().unwrap().clone();
-        let files = self.file_repo.files.lock().unwrap().clone();
+        let files = self
+            .file_repo
+            .find_all_by_library_including_missing(self.library.id)
+            .await
+            .unwrap();
         let mut out: Vec<(u32, Vec<String>)> = episodes
             .values()
             .filter(|e| {
@@ -442,7 +454,7 @@ impl Harness {
             })
             .map(|e| {
                 let mut paths: Vec<String> = files
-                    .values()
+                    .iter()
                     .filter(|f| {
                         matches!(f.content, Some(MediaFileContent::Episode { episode_id, .. }) if episode_id == e.id)
                     })
@@ -533,11 +545,11 @@ impl Harness {
     async fn mark_every_file_missing(&self) {
         let ids: Vec<Uuid> = self
             .file_repo
-            .files
-            .lock()
+            .find_all_by_library(self.library.id)
+            .await
             .unwrap()
-            .keys()
-            .copied()
+            .into_iter()
+            .map(|file| file.id)
             .collect();
         self.file_repo
             .mark_missing(ids, chrono::Utc::now())
@@ -955,20 +967,11 @@ async fn a_failed_backfill_does_not_hold_up_the_scan_and_is_retried() {
         .times(1)
         .returning(|_| Ok(Vec::new()));
     movie_repo.expect_delete_orphaned().returning(|_| Ok(0));
-    let service = LocalIndexService::new(
-        library_repo.clone(),
-        Arc::new(InMemoryFileRepository::default()),
-        Arc::new(movie_repo),
-        Arc::new(InMemoryShowRepository::default()),
-        Arc::new(InMemoryMediaStreamRepository::default()),
-        Arc::new(MockHashService::new()),
-        Arc::new(MockMediaInfoService::new()),
-        Arc::new(InMemoryNotificationService::new()),
-        Arc::new(LocalAdminLogService::new(
-            Arc::new(InMemoryAdminLogRepository::default()) as Arc<dyn AdminLogRepository>,
-        )),
-        Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-    );
+    let service = IndexServiceBuilder::new()
+        .library_repo(library_repo.clone())
+        .movie_repo(Arc::new(movie_repo))
+        .admin_log_repo(Arc::new(InMemoryAdminLogRepository::default()))
+        .build();
 
     service
         .scan_all_libraries(ScanTrigger::Periodic)
@@ -1124,9 +1127,13 @@ async fn an_unkeyed_husk_is_retired(enriched: bool) {
     assert_eq!(show.title, "Show X");
     assert_eq!(show.identity_key.as_deref(), Some("show x|"));
     assert_eq!(show.tmdb_id, None, "the husk's match does not carry over");
-    let files = h.file_repo.files.lock().unwrap().clone();
+    let files = h
+        .file_repo
+        .find_all_by_library_including_missing(h.library.id)
+        .await
+        .unwrap();
     assert_eq!(files.len(), 3);
-    for file in files.values() {
+    for file in &files {
         let Some(MediaFileContent::Episode { episode_id, .. }) = file.content else {
             panic!("{} is not an episode file", file.path.display());
         };
@@ -1211,10 +1218,10 @@ async fn a_key_from_before_the_apostrophe_fold_is_rederived_in_place() {
     h.remove("Grey's Anatomy/Season 1/Greys.Anatomy.S01E02.mkv");
     let missing: Vec<Uuid> = h
         .file_repo
-        .files
-        .lock()
+        .find_all_by_library(h.library.id)
+        .await
         .unwrap()
-        .values()
+        .into_iter()
         .filter(|f| f.path.ends_with("Greys.Anatomy.S01E02.mkv"))
         .map(|f| f.id)
         .collect();
@@ -1233,7 +1240,7 @@ async fn a_key_from_before_the_apostrophe_fold_is_rederived_in_place() {
     assert_eq!(after.tmdb_id, Some(1416), "with its enrichment");
     assert_eq!(after.identity_key.as_deref(), Some("greys anatomy|"));
     assert_eq!(
-        h.season_one(show),
+        h.season_one(show).await,
         vec![
             (
                 1,
@@ -1331,7 +1338,7 @@ async fn titles_the_current_fold_reads_as_one_are_merged_into_the_matched_one() 
     assert_eq!(show.tmdb_id, Some(1416));
     assert_eq!(show.identity_key.as_deref(), Some("greys anatomy|"));
     assert_eq!(
-        h.season_one(folder),
+        h.season_one(folder).await,
         vec![
             (
                 1,
@@ -1356,10 +1363,10 @@ async fn titles_the_current_fold_reads_as_one_are_merged_into_the_matched_one() 
     assert_eq!(entries.len(), 1, "one default-edition entry");
     let on_entry = h
         .file_repo
-        .files
-        .lock()
+        .find_all_by_library_including_missing(h.library.id)
+        .await
         .unwrap()
-        .values()
+        .into_iter()
         .filter(|f| matches!(f.content, Some(MediaFileContent::Movie { movie_entry_id, .. }) if movie_entry_id == entries[0].id))
         .count();
     assert_eq!(on_entry, 2, "with both copies");
@@ -1396,7 +1403,7 @@ async fn titles_the_current_fold_reads_as_one_are_merged_into_the_matched_one() 
     h.scan().await;
     assert_eq!(h.only_show().id, folder);
     assert_eq!(h.only_movie().id, older);
-    assert_eq!(h.season_one(folder).len(), 2);
+    assert_eq!(h.season_one(folder).await.len(), 2);
 }
 
 /// A library indexed before part tokens were read (issue #233): each part of
@@ -1627,12 +1634,18 @@ async fn a_rekey_does_not_retitle_a_matched_title_older_rules_spelled() {
     );
     // Matched without renaming it: only the provider id says so.
     h.movie_repo
-        .movies
-        .lock()
-        .unwrap()
-        .get_mut(&id)
-        .unwrap()
-        .tmdb_id = Some(949);
+        .apply_enrichment(
+            id,
+            &MovieEnrichment {
+                title: "Heat - CD1".to_string(),
+                year: Some(1995),
+                tmdb_id: Some(949),
+                ..Default::default()
+            },
+            &beam_domain::models::enrichment::FieldLocks::none(),
+        )
+        .await
+        .unwrap();
 
     h.service
         .scan_all_libraries(ScanTrigger::Periodic)
@@ -1996,9 +2009,12 @@ async fn a_rekey_never_merges_shows_matched_to_different_entries() {
         (Some("grey s anatomy|".to_string()), Some(9999)),
         "the stale show keeps its key and its match"
     );
-    assert_eq!(h.season_one(scene), vec![(1, vec![scene_file.to_string()])]);
     assert_eq!(
-        h.season_one(folder),
+        h.season_one(scene).await,
+        vec![(1, vec![scene_file.to_string()])]
+    );
+    assert_eq!(
+        h.season_one(folder).await,
         vec![(1, vec![folder_file.to_string()])]
     );
     let warning = h
@@ -2931,7 +2947,11 @@ async fn a_merge_whose_survivor_loses_the_key_moves_no_file() {
     let stale_row = h.movie_repo.find_by_id(stale).await.unwrap().unwrap();
     let holder_row = h.movie_repo.find_by_id(holder).await.unwrap().unwrap();
     let stale_entries = h.movie_repo.find_entries_by_movie_id(stale).await.unwrap();
-    let files_before = h.file_repo.files.lock().unwrap().clone();
+    let files_before = h
+        .file_repo
+        .find_all_by_library_including_missing(h.library.id)
+        .await
+        .unwrap();
 
     // The movie repository as the pass sees it when a concurrent writer
     // takes `oceans eleven|2001` after the loser is released.
@@ -2970,28 +2990,29 @@ async fn a_merge_whose_survivor_loses_the_key_moves_no_file() {
         .returning(|_, _, _| Ok(false));
     movies.expect_find_or_create_entry().never();
     movies.expect_ensure_library_association().never();
-    let service = LocalIndexService::new(
-        h.library_repo.clone(),
-        h.file_repo.clone(),
-        Arc::new(movies),
-        h.show_repo.clone(),
-        Arc::new(InMemoryMediaStreamRepository::default()),
-        Arc::new(MockHashService::new()),
-        Arc::new(MockMediaInfoService::new()),
-        Arc::new(InMemoryNotificationService::new()),
-        Arc::new(LocalAdminLogService::new(
-            h.admin_log_repo.clone() as Arc<dyn AdminLogRepository>
-        )),
-        Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-    );
+    let service = IndexServiceBuilder::new()
+        .library_repo(h.library_repo.clone())
+        .file_repo(h.file_repo.clone())
+        .movie_repo(Arc::new(movies))
+        .show_repo(h.show_repo.clone())
+        .admin_log_repo(h.admin_log_repo.clone())
+        .build();
 
     let report = service.rekey_stale_titles().await.unwrap();
 
     assert!(report.merged_movies.is_empty(), "{report:?}");
-    let files_after = h.file_repo.files.lock().unwrap().clone();
-    for (id, before) in &files_before {
+    let files_after = h
+        .file_repo
+        .find_all_by_library_including_missing(h.library.id)
+        .await
+        .unwrap();
+    for before in &files_before {
+        let after = files_after
+            .iter()
+            .find(|after| after.id == before.id)
+            .expect("the file is still indexed");
         assert_eq!(
-            format!("{:?}", files_after[id].content),
+            format!("{:?}", after.content),
             format!("{:?}", before.content),
             "{}",
             before.path.display()
@@ -3128,13 +3149,13 @@ async fn stale_enriched_greys(h: &Harness) -> Uuid {
 }
 
 /// The stale show is untouched: reclassification was held.
-fn assert_held(h: &Harness, show: Uuid) {
+async fn assert_held(h: &Harness, show: Uuid) {
     let after = h.only_show();
     assert_eq!(after.id, show, "the stale show is not retired");
     assert_eq!(after.tmdb_id, Some(1416), "it keeps its enrichment");
     assert_eq!(after.identity_key.as_deref(), Some("grey s anatomy|"));
     assert_eq!(
-        h.season_one(show),
+        h.season_one(show).await,
         vec![(1, vec![GREYS.to_string()])],
         "it keeps its file"
     );
@@ -3172,14 +3193,14 @@ async fn a_failed_rekey_pass_holds_reclassification_until_a_pass_succeeds() {
         .scan_all_libraries(ScanTrigger::Periodic)
         .await
         .unwrap();
-    assert_held(&h, show);
+    assert_held(&h, show).await;
     h.scan().await;
-    assert_held(&h, show);
+    assert_held(&h, show).await;
     h.service
         .reconcile_path(h.library.id, h.root.join(GREYS), FsEventKind::Modified)
         .await
         .unwrap();
-    assert_held(&h, show);
+    assert_held(&h, show).await;
     let warning = h
         .admin_log_details("current naming rules")
         .await
@@ -3195,7 +3216,7 @@ async fn a_failed_rekey_pass_holds_reclassification_until_a_pass_succeeds() {
     assert_eq!(after.id, show, "the same show");
     assert_eq!(after.tmdb_id, Some(1416), "with its enrichment");
     assert_eq!(after.identity_key.as_deref(), Some("greys anatomy|"));
-    assert_eq!(h.season_one(show), vec![(1, vec![GREYS.to_string()])]);
+    assert_eq!(h.season_one(show).await, vec![(1, vec![GREYS.to_string()])]);
     assert_eq!(
         h.file_version(GREYS),
         CLASSIFIER_VERSION,
@@ -3226,19 +3247,11 @@ async fn a_watcher_event_with_nothing_to_reclassify_does_not_retry_the_passes() 
     let (size_bytes, mtime) = read_fs_meta(unprobed.parent().unwrap(), &unprobed).unwrap();
     h.file_repo
         .create(CreateMediaFile {
-            library_id: h.library.id,
-            path: unprobed,
             hash: u64::MAX,
             size_bytes,
             mtime,
-            identity: None,
-            mime_type: Some("video/x-matroska".to_string()),
-            duration: None,
             container_format: None,
-            content: None,
-            status: FileStatus::Unknown,
-            classifier_version: 0,
-            container_tags: None,
+            ..create_media_file(h.library.id, unprobed)
         })
         .await
         .unwrap();
@@ -3279,7 +3292,7 @@ async fn a_scan_of_one_library_rekeys_before_it_reclassifies() {
     assert_eq!(after.id, show, "the same show");
     assert_eq!(after.tmdb_id, Some(1416), "with its enrichment");
     assert_eq!(after.identity_key.as_deref(), Some("greys anatomy|"));
-    assert_eq!(h.season_one(show), vec![(1, vec![GREYS.to_string()])]);
+    assert_eq!(h.season_one(show).await, vec![(1, vec![GREYS.to_string()])]);
     assert_eq!(h.file_version(GREYS), CLASSIFIER_VERSION);
 
     h.service

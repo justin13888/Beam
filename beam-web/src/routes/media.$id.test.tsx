@@ -218,7 +218,9 @@ describe("EpisodeList", () => {
 describe("/media/$id (movie)", () => {
 	it("loads the media document through the route loader and renders it", async () => {
 		const requests = recordRequests();
-		serveMedia({ Movie: movie }, [source("file-hd", 1080, "h264")]);
+		serveMedia({ media_type: "movie", ...movie }, [
+			source("file-hd", 1080, "h264"),
+		]);
 		renderRoute("/media/movie-1");
 
 		expect(
@@ -239,7 +241,7 @@ describe("/media/$id (movie)", () => {
 	});
 
 	it("shows the source picker only when 2+ sources exist", async () => {
-		serveMedia({ Movie: movie }, [
+		serveMedia({ media_type: "movie", ...movie }, [
 			source("file-hd", 1080, "h264"),
 			source("file-sd", 480, "h264"),
 		]);
@@ -253,7 +255,9 @@ describe("/media/$id (movie)", () => {
 	});
 
 	it("hides the source picker when there is only one source", async () => {
-		serveMedia({ Movie: movie }, [source("file-hd", 1080, "h264")]);
+		serveMedia({ media_type: "movie", ...movie }, [
+			source("file-hd", 1080, "h264"),
+		]);
 		renderRoute("/media/movie-1");
 
 		await waitFor(() => expect(currentStreamSrc()).toContain("file-hd"));
@@ -261,7 +265,7 @@ describe("/media/$id (movie)", () => {
 	});
 
 	it("switches the stream URL passed to the player when a source is selected", async () => {
-		serveMedia({ Movie: movie }, [
+		serveMedia({ media_type: "movie", ...movie }, [
 			source("file-hd", 1080, "h264"),
 			source("file-sd", 480, "h264"),
 		]);
@@ -284,7 +288,7 @@ describe("/media/$id (movie)", () => {
 	});
 
 	it("deep-links to the file named by ?fileId= instead of the primary file", async () => {
-		serveMedia({ Movie: movie }, [
+		serveMedia({ media_type: "movie", ...movie }, [
 			source("file-hd", 1080, "h264"),
 			source("file-sd", 480, "h264"),
 		]);
@@ -300,7 +304,7 @@ describe("/media/$id (movie)", () => {
 	it("ignores a non-string fileId rather than deep-linking to it", async () => {
 		// `validateSearch` narrows the raw search object; a repeated parameter
 		// arrives as an array and must fall back to the primary file.
-		serveMedia({ Movie: movie }, [
+		serveMedia({ media_type: "movie", ...movie }, [
 			source("file-hd", 1080, "h264"),
 			source("file-sd", 480, "h264"),
 		]);
@@ -317,7 +321,7 @@ describe("/media/$id (movie)", () => {
 describe("/media/$id (browser capability)", () => {
 	it("plays the best source this browser decodes, not the first one listed", async () => {
 		// The server lists the 4K HEVC primary first; this browser has no HEVC.
-		serveMedia({ Movie: movie }, [
+		serveMedia({ media_type: "movie", ...movie }, [
 			source("file-4k", 2160, "hevc"),
 			source("file-hd", 1080, "h264"),
 			source("file-sd", 480, "h264"),
@@ -339,7 +343,7 @@ describe("/media/$id (browser capability)", () => {
 	});
 
 	it("does not follow a deep link to a source this browser cannot play", async () => {
-		serveMedia({ Movie: movie }, [
+		serveMedia({ media_type: "movie", ...movie }, [
 			source("file-4k", 2160, "hevc"),
 			source("file-hd", 1080, "h264"),
 		]);
@@ -353,7 +357,7 @@ describe("/media/$id (browser capability)", () => {
 	});
 
 	it("passes over a transport-stream source for one the browser opens", async () => {
-		serveMedia({ Movie: movie }, [
+		serveMedia({ media_type: "movie", ...movie }, [
 			{ ...source("file-m2ts", 1080, "h264"), container_format: "mpegts" },
 			source("file-mp4", 720, "h264"),
 		]);
@@ -366,7 +370,7 @@ describe("/media/$id (browser capability)", () => {
 	});
 
 	it("says a disc-only title cannot play here, with the reason, and offers the download", async () => {
-		serveMedia({ Movie: movie }, [
+		serveMedia({ media_type: "movie", ...movie }, [
 			{
 				...source("file-vob", 480, "mpeg2video"),
 				container_format: "mpeg",
@@ -411,7 +415,7 @@ describe("/media/$id (multi-part)", () => {
 
 	it("plays the parts in order, advancing when one ends", async () => {
 		const requests = recordRequests();
-		serveMedia({ Movie: movie }, [twoParts]);
+		serveMedia({ media_type: "movie", ...movie }, [twoParts]);
 		const user = userEvent.setup();
 		renderRoute("/media/movie-1");
 
@@ -439,7 +443,7 @@ describe("/media/$id (multi-part)", () => {
 	});
 
 	it("resumes the part that was playing, at its position", async () => {
-		serveMedia({ Movie: movie }, [twoParts]);
+		serveMedia({ media_type: "movie", ...movie }, [twoParts]);
 		server.use(
 			http.get(`${BASE_URL}/v1/continue-watching`, () =>
 				HttpResponse.json<components["schemas"]["ContinueWatchingConnection"]>(
@@ -459,7 +463,7 @@ describe("/media/$id (multi-part)", () => {
 	});
 
 	it("starts at the part a deep link names when no saved progress names one", async () => {
-		serveMedia({ Movie: movie }, [twoParts]);
+		serveMedia({ media_type: "movie", ...movie }, [twoParts]);
 		server.use(
 			http.get(`${BASE_URL}/v1/continue-watching`, () =>
 				HttpResponse.json<components["schemas"]["ContinueWatchingConnection"]>(
@@ -478,7 +482,7 @@ describe("/media/$id (multi-part)", () => {
 	});
 
 	it("starts at the deep-linked part when the progress lookup fails", async () => {
-		serveMedia({ Movie: movie }, [twoParts]);
+		serveMedia({ media_type: "movie", ...movie }, [twoParts]);
 		server.use(
 			http.get(`${BASE_URL}/v1/continue-watching`, () =>
 				problem(500, "boom", "#internal"),
@@ -493,7 +497,7 @@ describe("/media/$id (multi-part)", () => {
 
 describe("/media/$id (sources fail to load)", () => {
 	it("says the sources failed to load and retries on request", async () => {
-		serveMedia({ Movie: movie });
+		serveMedia({ media_type: "movie", ...movie });
 		let fail = true;
 		server.use(
 			http.get(`${BASE_URL}/v1/media/:id/sources`, () =>
@@ -530,7 +534,7 @@ describe("/media/$id (sources fail to load)", () => {
 
 describe("/media/$id (show)", () => {
 	it("renders the season/episode structure and prompts to pick an episode", async () => {
-		serveMedia({ Show: show });
+		serveMedia({ media_type: "show", ...show });
 		renderRoute("/media/show-1");
 
 		expect(
@@ -545,7 +549,9 @@ describe("/media/$id (show)", () => {
 
 	it("fetches the episode's sources and plays it when an episode is selected", async () => {
 		const requests = recordRequests();
-		serveMedia({ Show: show }, [source("file-1", 720, "h264")]);
+		serveMedia({ media_type: "show", ...show }, [
+			source("file-1", 720, "h264"),
+		]);
 		const user = userEvent.setup();
 		renderRoute("/media/show-1");
 
@@ -615,7 +621,7 @@ describe("/media/$id (decoding quality)", () => {
 
 	it("prefers a source the browser decodes in hardware over a software-only one listed first", async () => {
 		browserReports(hardwareUpTo(1080));
-		serveMedia({ Movie: movie }, [
+		serveMedia({ media_type: "movie", ...movie }, [
 			source("file-4k", 2160, "h264"),
 			source("file-hd", 1080, "h264"),
 		]);
@@ -631,7 +637,7 @@ describe("/media/$id (decoding quality)", () => {
 
 	it("plays the best source anyway when every one decodes in software, and says so", async () => {
 		browserReports(hardwareUpTo(0));
-		serveMedia({ Movie: movie }, [
+		serveMedia({ media_type: "movie", ...movie }, [
 			source("file-4k", 2160, "h264"),
 			source("file-hd", 1080, "h264"),
 		]);
@@ -657,7 +663,7 @@ describe("/media/$id (decoding quality)", () => {
 					};
 				}),
 		);
-		serveMedia({ Movie: movie }, [
+		serveMedia({ media_type: "movie", ...movie }, [
 			source("file-4k", 2160, "h264"),
 			source("file-hd", 1080, "h264"),
 		]);
@@ -689,7 +695,7 @@ describe("/media/$id (decoding quality)", () => {
 					};
 				}),
 		);
-		serveMedia({ Movie: movie }, [
+		serveMedia({ media_type: "movie", ...movie }, [
 			source("file-4k", 2160, "h264"),
 			source("file-hd", 1080, "h264"),
 		]);

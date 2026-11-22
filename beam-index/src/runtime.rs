@@ -26,6 +26,7 @@ use crate::services::enrichment::MetadataEnrichmentService;
 use crate::services::filesystem_probe::StatfsFilesystemProbe;
 use crate::services::index::{IndexError, LocalIndexService, ReconcileOutcome};
 use crate::services::scan::ScanTrigger;
+use crate::services::scan_deferrals::{ScanDeferral, ScanDeferrals, ScanDeferralsConsumer};
 use crate::services::watch_status::{WatchMode, WatchStatus, read_max_user_watches};
 use crate::services::watcher::{FsEvent, FsEventKind, FsWatcher, NotifyFsWatcher, PathDebouncer};
 
@@ -57,6 +58,14 @@ pub trait BackgroundIndexer: Send + Sync + std::fmt::Debug {
 
     /// The repository the watch refresher lists libraries from.
     fn library_repo(&self) -> Arc<dyn LibraryRepository>;
+
+    /// Where scans leave the files they deferred as still being written, for
+    /// the watch consumer to retry (issue #453).
+    fn scan_deferrals(&self) -> Arc<ScanDeferrals>;
+
+    /// Publish `library_changed { library_id }` (issue #454): a reconcile
+    /// changed what the library holds.
+    fn library_changed(&self, library_id: Uuid);
 }
 
 #[async_trait::async_trait]
@@ -82,12 +91,23 @@ impl BackgroundIndexer for LocalIndexService {
     fn library_repo(&self) -> Arc<dyn LibraryRepository> {
         LocalIndexService::library_repo(self).clone()
     }
+
+    fn scan_deferrals(&self) -> Arc<ScanDeferrals> {
+        LocalIndexService::scan_deferrals(self).clone()
+    }
+
+    fn library_changed(&self, library_id: Uuid) {
+        self.notification_service().library_changed(library_id);
+    }
 }
 
 /// Spawn the metadata-enrichment sweep loop. Runs forever, sweeping
 /// `interval` apart unless poked sooner via
-/// [`MetadataEnrichmentService::notify_handle`] (e.g. from a scan that just
-/// queued new titles). Safe to call with a service backed by
+/// [`MetadataEnrichmentService::notify_handle`]: by the indexer at the end of
+/// a scan or watcher reconcile that queued titles, when it was given the
+/// handle through
+/// [`LocalIndexService::with_enrichment_wake`](crate::services::index::LocalIndexService::with_enrichment_wake),
+/// and by an administrator's refresh. Safe to call with a service backed by
 /// `NoopEnrichmentProvider` -- every sweep short-circuits immediately since
 /// no providers are configured.
 pub fn spawn_enrichment_worker(
@@ -195,9 +215,9 @@ impl LibraryWatches {
 #[async_trait::async_trait]
 impl LibraryWatchHook for LibraryWatches {
     /// Registered on the blocking pool: registering walks the tree. A library
-    /// that comes back polled needs no scan here: it has never been scanned,
-    /// so its first scan -- an administrator's, or the next periodic one --
-    /// indexes everything already in it, as for a natively watched one.
+    /// that comes back polled needs no scan here: the library service runs
+    /// its first scan ([`ScanTrigger::Created`]) once this returns, and that
+    /// scan indexes everything already in it, as for a natively watched one.
     async fn library_created(&self, library: &Library) {
         let Some(watcher) = self.watcher.clone() else {
             return;
@@ -255,10 +275,13 @@ pub fn spawn_background_indexing_with(
     // poller waits for it. Dropped unused when the watcher is disabled.
     let (startup_scan_done, startup_scan_finished) = oneshot::channel();
 
+    // Attached before the startup scan can start, so no file it defers is
+    // dropped for want of a consumer.
     let watch_consumer = watcher.clone().map(|watcher| {
         tokio::spawn(run_watch_consumer(
             watcher,
             indexer.clone(),
+            indexer.scan_deferrals().attach(),
             clock.clone(),
             Duration::from_millis(config.watch_debounce_ms),
         ))
@@ -297,44 +320,54 @@ pub fn spawn_background_indexing_with(
 /// passed, measured on `clock`. A fresh event for the same path replaces the
 /// kept one, since it says more recently what happened there. Waiting on the
 /// library instead would stall every other library's events behind one scan.
+///
+/// A file a scan deferred as still being written (issue #453) joins the same
+/// set, as a [`FsEventKind::Modified`] event due once the scan's delay has
+/// passed: nothing else would come back to it before the next periodic
+/// rescan. An event already kept for the path stays as it was.
+///
+/// Each pass ends by publishing `library_changed` once for every library a
+/// reconcile in it finished (issue #454) -- not for a deferred one, which
+/// changed nothing yet, nor a failed one.
 async fn run_watch_consumer(
     watcher: Arc<dyn FsWatcher>,
     indexer: Arc<dyn BackgroundIndexer>,
+    scan_deferrals: ScanDeferralsConsumer,
     clock: Arc<dyn Clock>,
     debounce: Duration,
 ) {
     let mut deferred: HashMap<(Uuid, PathBuf), (FsEventKind, std::time::Instant)> = HashMap::new();
     loop {
-        // Block until the first event of a burst, or until a deferred event
-        // falls due.
+        // Block until the first event of a burst, until a deferred event
+        // falls due, or until a scan defers a file.
         let next_due = deferred.values().map(|(_, due)| *due).min();
-        let first = match next_due {
-            Some(due) => {
-                let wait = due.saturating_duration_since(clock.monotonic());
-                tokio::select! {
-                    event = watcher.next_event() => match event {
-                        Some(event) => Some(event),
-                        None => {
-                            info!("Filesystem watcher closed; stopping consumer");
-                            return;
-                        }
-                    },
-                    _ = clock.sleep(wait) => None,
+        let retry_due = async {
+            match next_due {
+                Some(due) => {
+                    clock
+                        .sleep(due.saturating_duration_since(clock.monotonic()))
+                        .await
                 }
+                None => std::future::pending().await,
             }
-            None => match watcher.next_event().await {
+        };
+        let first = tokio::select! {
+            event = watcher.next_event() => match event {
                 Some(event) => Some(event),
                 None => {
                     info!("Filesystem watcher closed; stopping consumer");
                     return;
                 }
             },
+            () = retry_due => None,
+            () = scan_deferrals.recorded() => None,
         };
 
         let mut batch: Vec<FsEvent> = Vec::new();
         if let Some(first) = first {
             let mut debouncer = PathDebouncer::new();
             debouncer.submit(first);
+            record_pending(debouncer.len());
 
             // Collect further events for the debounce window.
             let window = clock.sleep(debounce);
@@ -343,7 +376,10 @@ async fn run_watch_consumer(
                 tokio::select! {
                     _ = &mut window => break,
                     event = watcher.next_event() => match event {
-                        Some(e) => debouncer.submit(e),
+                        Some(e) => {
+                            debouncer.submit(e);
+                            record_pending(debouncer.len());
+                        }
                         None => break,
                     },
                 }
@@ -354,8 +390,21 @@ async fn run_watch_consumer(
             }
         }
 
-        // Every deferred event that has fallen due joins the batch.
+        // Every file a scan deferred since the last pass is kept until its
+        // delay has passed.
         let now = clock.monotonic();
+        for ScanDeferral {
+            library_id,
+            path,
+            retry_after,
+        } in scan_deferrals.take()
+        {
+            deferred
+                .entry((library_id, path))
+                .or_insert((FsEventKind::Modified, now + retry_after));
+        }
+
+        // Every deferred event that has fallen due joins the batch.
         let due: Vec<(Uuid, PathBuf)> = deferred
             .iter()
             .filter(|(_, (_, due))| *due <= now)
@@ -372,7 +421,12 @@ async fn run_watch_consumer(
             }
         }
 
+        record_pending(batch.len());
+        record_deferred(deferred.len());
+
         // Reconcile the coalesced events.
+        let mut remaining = batch.len();
+        let mut changed: HashSet<Uuid> = HashSet::new();
         for event in batch {
             let FsEvent {
                 library_id,
@@ -380,15 +434,40 @@ async fn run_watch_consumer(
                 kind,
             } = event;
             match indexer.reconcile_path(library_id, path.clone(), kind).await {
-                Ok(ReconcileOutcome::Done) => {}
+                Ok(ReconcileOutcome::Done) => {
+                    changed.insert(library_id);
+                }
                 Ok(ReconcileOutcome::Deferred { retry_after }) => {
                     let due = clock.monotonic() + retry_after;
                     deferred.insert((library_id, path), (kind, due));
+                    record_deferred(deferred.len());
                 }
                 Err(e) => warn!("Failed to reconcile {}: {e}", path.display()),
             }
+            remaining -= 1;
+            record_pending(remaining);
+        }
+
+        // One `library_changed` per library per batch, so per debounce
+        // window (issue #454): a burst of files copied into a library is one
+        // refetch for the clients showing it, not one per file.
+        for library_id in changed {
+            indexer.library_changed(library_id);
         }
     }
+}
+
+/// `beam_watcher_pending_paths` (issue #457): paths the consumer holds and
+/// has not reconciled yet -- collected in the debounce window, or waiting
+/// their turn in the batch being reconciled.
+fn record_pending(paths: usize) {
+    metrics::gauge!("beam_watcher_pending_paths").set(paths as f64);
+}
+
+/// `beam_watcher_deferred_paths` (issue #457): paths whose reconcile the
+/// indexer deferred, held for a retry.
+fn record_deferred(paths: usize) {
+    metrics::gauge!("beam_watcher_deferred_paths").set(paths as f64);
 }
 
 /// Poll the watcher's polled libraries once per `interval`, and reconcile
@@ -517,7 +596,9 @@ enum NewlyPolled {
 ///
 /// What is already watched is asked of the watcher, not remembered here: the
 /// watcher drops a registration on its own when it cannot move a library to
-/// the poller, and a copy kept here would never register that library again.
+/// the poller, or cannot watch a library again after its root was removed or
+/// unmounted (issue #452), and a copy kept here would never register that
+/// library again.
 ///
 /// The watcher calls run on the blocking pool: registering a library walks
 /// its tree, natively or to take the poller's snapshot.

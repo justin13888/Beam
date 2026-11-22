@@ -34,10 +34,31 @@ against the IdP itself, and holds the same opaque credential (see
    below. The IdP tokens are discarded — `beam-server` never talks to the IdP again mid-session.
 6. **Subsequent requests.** Middleware hashes the presented cookie value, looks it up by
    `token_hash`, checks expiry, slides the idle expiry forward, and attaches the resolved user to
-   the request. No token ever appears in a URL, query string, or `<video>` `src`.
+   the request. No session token ever appears in a URL, query string, or `<video>` `src`.
 7. **Logout.** `POST /v1/logout` deletes the session row server-side (so a stolen cookie value is
    useless after logout) and clears the cookie; `POST /v1/logout-all` and
    `DELETE /v1/sessions/{id}` revoke other sessions.
+
+## Media grants
+
+A client Beam does not drive -- an AirPlay or Cast receiver, an external player such as VLC -- is
+handed a URL and fetches it itself, with no cookie. For it, a signed-in session asks
+`POST /v1/files/{file_id}/grant` and receives `stream_url`, `download_url` and `expires_at`
+([ADR-0022](decisions/ADR-0022-signed-media-grants.md)):
+
+- The URLs carry a `grant` query parameter: an HMAC-SHA256 signature over the file, the user and an
+  expiry four hours out, under a 32-byte key drawn at startup and never persisted. Nothing is
+  stored; a restart voids every grant outstanding.
+- `MediaGrant` is its own Kynos security scheme, and only the four delivery operations
+  (`GET`/`HEAD` of `/stream` and `/download`) accept it, as an alternative to the cookie. Any other
+  operation answers a grant with 401, so a leaked grant opens one file's bytes and nothing else.
+- A grant presented for a different file is 404. Every request made with a grant is held to the
+  issuing user's access policy, so a title hidden after the grant was issued is hidden from it too.
+- An expired or altered grant is 401; the reason is logged at `debug`, and the grant itself never.
+- A grant of a disabled user is 401: the user row is read on every use, so disabling an account
+  stops its grants on their next request, as it revokes its sessions. A failed read is a 503.
+- A request carrying both the session cookie and a grant is the session's: the cookie is tried
+  first.
 
 ## Device authorization grant
 
@@ -155,6 +176,23 @@ certifications are grouped into. A user nobody restricted sees everything.
 
 The policy is read on every request that touches a title, so a change takes effect on the user's
 next request; an unrestricted policy short-circuits every check without further reads.
+
+**File delivery is the one exception, and only for a few seconds** (issue #462). A player seeking
+through a file sends many Range requests to `/stream` (and a resumed download many to `/download`),
+so the decision those make -- this user may have this file, and it is at this path -- is held in a
+bounded in-process cache keyed by `(user, file)` for five seconds after it is resolved
+(`beam-server/src/services/stream_cache.rs`). What that does and does not relax:
+
+- **The session is not cached.** Every request still resolves `beam_session` against the store and
+  slides its idle expiry, so a signed-out or revoked session is refused on its very next request,
+  and session-touch semantics are unchanged.
+- **A policy change is immediate.** Replacing a user's policy forgets their cached grants, and a
+  grant resolved from the old policy by a request still in flight is discarded rather than stored.
+- **Anything else is at most five seconds stale.** A title linked to another library or re-rated,
+  a file re-indexed to a new path, or a library removed is seen once the grant expires.
+- **Only grants are held.** A hidden or missing file is resolved afresh on every request.
+
+The file's bytes are always opened afresh, beneath its library root, on every request.
 
 ## Read-only media filesystem as a security boundary
 

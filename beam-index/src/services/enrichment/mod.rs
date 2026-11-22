@@ -39,6 +39,7 @@ use crate::services::notification::{
     AdminEvent, EnrichmentEvent, EventCategory, EventLevel, NotificationService,
 };
 use beam_domain::services::Clock;
+use beam_domain::utils::media_path::EpisodeNumbering;
 
 /// Tunables for the enrichment sweep. All fields are independent of any
 /// concrete provider so they can be exercised with
@@ -266,6 +267,25 @@ pub struct SweepReport {
     pub skipped_no_providers: bool,
 }
 
+/// Pokes the enrichment worker into sweeping now rather than at its next
+/// interval. The indexer holds one so a title it queues is enriched within
+/// seconds (issue #449); the periodic sweep stays the backstop for a wake
+/// that is lost or that arrives mid-sweep.
+pub trait EnrichmentWake: Send + Sync + std::fmt::Debug {
+    /// Ask for a sweep. Cheap and non-blocking; several wakes before the
+    /// worker next waits collapse into one sweep.
+    fn wake(&self);
+}
+
+/// The worker's own handle, [`MetadataEnrichmentService::notify_handle`]:
+/// a wake while it sweeps is kept as a permit, so the titles queued during
+/// that sweep are swept straight after it.
+impl EnrichmentWake for tokio::sync::Notify {
+    fn wake(&self) {
+        self.notify_one();
+    }
+}
+
 #[derive(Debug)]
 pub struct MetadataEnrichmentService {
     state_repo: Arc<dyn EnrichmentStateRepository>,
@@ -349,7 +369,27 @@ impl MetadataEnrichmentService {
 
     /// Processes up to `policy.batch_size` due rows. Stops early if the
     /// provider reports rate-limiting.
+    ///
+    /// Then refreshes `beam_enrichment_pending` (issue #457) -- even when no
+    /// provider is configured, since titles keep queueing up regardless.
     pub async fn sweep_once(&self) -> SweepReport {
+        let report = self.sweep_due().await;
+        self.record_queue_depth().await;
+        report
+    }
+
+    /// Set `beam_enrichment_pending` to the titles still pending
+    /// enrichment, due or backing off. A count that fails leaves the gauge
+    /// as it was.
+    async fn record_queue_depth(&self) {
+        match self.state_repo.count_by_status().await {
+            Ok(counts) => metrics::gauge!("beam_enrichment_pending").set(counts.pending as f64),
+            Err(err) => warn!(error = %err, "failed to count the enrichment queue"),
+        }
+    }
+
+    /// [`Self::sweep_once`]'s sweep, without the queue gauge.
+    async fn sweep_due(&self) -> SweepReport {
         if self.provider.available_providers().is_empty() {
             return SweepReport {
                 skipped_no_providers: true,
@@ -797,32 +837,34 @@ impl MetadataEnrichmentService {
     /// for from the provider's season of the same number. Never fabricates
     /// seasons or episodes that scanning hasn't created.
     ///
-    /// A local episode the provider's season has no episode for is read as
-    /// an absolute number (issue #267): `Show - 030` is indexed as episode 30
-    /// of season 1, or of its season folder's season, and the provider's
-    /// absolute order ([`matcher::absolute_episode`]) says which episode that
-    /// is. It takes that episode's metadata where it stands. Episode 30 of
-    /// season 1 is taken wherever the order places it; of a later season,
-    /// only when the order places it in that season, since a season folder
-    /// and the number must agree. Specials keep their own numbering: the
-    /// absolute order counts none of them.
+    /// Absolutely numbered episodes are re-homed first
+    /// ([`Self::rehome_absolute_episodes`]), so each takes the metadata of
+    /// the place it now has. One left where it was indexed -- its re-home
+    /// failed -- takes the metadata of the episode its running number names
+    /// where it stands (issue #267), on the same terms. An episode numbered
+    /// any other way that the provider does not list is left as it is.
     async fn enrich_seasons(&self, show_id: uuid::Uuid, ref_id: &ExternalMediaRef) {
+        let mut fetched = SeasonCache::default();
+        self.rehome_absolute_episodes(show_id, ref_id, &mut fetched)
+            .await;
         let Ok(seasons) = self.show_repo.find_seasons_by_show_id(show_id).await else {
             return;
         };
-        let mut fetched = SeasonCache::default();
         for season in seasons {
             let season_number = season.season_number;
             let provider_season = fetched.get(&*self.provider, ref_id, season_number).await;
-            let unplaced: Vec<u32> = match self
+            // `(episode_number, absolute_number)` of each absolutely numbered
+            // episode the provider's season does not list.
+            let unplaced: Vec<(u32, u32)> = match self
                 .show_repo
                 .find_episodes_by_season_id(season.id)
                 .await
             {
                 Ok(episodes) => episodes
                     .into_iter()
-                    .map(|episode| episode.episode_number)
-                    .filter(|number| {
+                    .filter(|episode| episode.numbering == EpisodeNumbering::Absolute)
+                    .filter_map(|episode| Some((episode.episode_number, episode.absolute_number?)))
+                    .filter(|(number, _)| {
                         provider_season.as_ref().is_none_or(|provider| {
                             !provider
                                 .episodes
@@ -839,15 +881,12 @@ impl MetadataEnrichmentService {
 
             let mut placed = Vec::new();
             if season_number != matcher::SPECIALS_SEASON && !unplaced.is_empty() {
+                let through = unplaced.iter().map(|(_, absolute)| *absolute).max();
                 let order = fetched
-                    .absolute_order(
-                        &*self.provider,
-                        ref_id,
-                        unplaced.iter().copied().max().unwrap_or(0),
-                    )
+                    .absolute_order(&*self.provider, ref_id, through.unwrap_or(0))
                     .await;
-                for number in unplaced {
-                    let Some((in_season, episode)) = matcher::absolute_episode(&order, number)
+                for (number, absolute) in unplaced {
+                    let Some((in_season, episode)) = matcher::absolute_episode(&order, absolute)
                     else {
                         continue;
                     };
@@ -875,6 +914,85 @@ impl MetadataEnrichmentService {
                 .await
             {
                 warn!(error = %err, show_id = %show_id, season_number, "failed to persist season enrichment");
+            }
+        }
+    }
+
+    /// Move each absolutely numbered episode of `show_id` to the season and
+    /// episode the provider's absolute order ([`matcher::absolute_episode`])
+    /// puts its running number at (issue #334), merging it into an episode
+    /// already there ([`ShowRepository::rehome_episode`]). `Show - 030` is
+    /// indexed as episode 30 of season 1, or of its season folder's season:
+    /// of season 1 it moves wherever the order places it; of a later season
+    /// only within that season, since a season folder and the number must
+    /// agree. One re-homed before follows the order from wherever it now is,
+    /// and one already at its place stays. A place another running number
+    /// holds is never merged into: two running numbers are not one episode.
+    /// Specials keep their own numbering: the order counts none of them.
+    /// Best-effort: a failure leaves the episode where it was.
+    async fn rehome_absolute_episodes(
+        &self,
+        show_id: uuid::Uuid,
+        ref_id: &ExternalMediaRef,
+        fetched: &mut SeasonCache,
+    ) {
+        let Ok(seasons) = self.show_repo.find_seasons_by_show_id(show_id).await else {
+            return;
+        };
+        let mut episodes = Vec::new();
+        for season in seasons
+            .iter()
+            .filter(|season| season.season_number != matcher::SPECIALS_SEASON)
+        {
+            match self.show_repo.find_episodes_by_season_id(season.id).await {
+                Ok(list) => episodes.extend(list.into_iter().map(|e| (season.season_number, e))),
+                Err(err) => {
+                    // Without every place's holder a move could merge two
+                    // running numbers: nothing moves this time.
+                    warn!(error = %err, show_id = %show_id, "failed to read a season's episodes");
+                    return;
+                }
+            }
+        }
+        let Some(through) = episodes.iter().filter_map(|(_, e)| e.absolute_number).max() else {
+            return;
+        };
+        let order = fetched
+            .absolute_order(&*self.provider, ref_id, through)
+            .await;
+        let mut held: std::collections::HashMap<(u32, u32), Option<u32>> = episodes
+            .iter()
+            .map(|(season, e)| ((*season, e.episode_number), e.absolute_number))
+            .collect();
+        for (season_number, episode) in episodes {
+            let Some(absolute) = episode.absolute_number else {
+                continue;
+            };
+            let Some((in_season, provider_episode)) = matcher::absolute_episode(&order, absolute)
+            else {
+                continue;
+            };
+            let from = (season_number, episode.episode_number);
+            let to = (in_season, provider_episode.episode_number);
+            let as_indexed = episode.episode_number == absolute
+                && episode.absolute_season_number == Some(season_number);
+            if from == to || (as_indexed && season_number != 1 && in_season != season_number) {
+                continue;
+            }
+            if held
+                .get(&to)
+                .is_some_and(|holder| holder.is_some_and(|other| other != absolute))
+            {
+                continue;
+            }
+            match self.show_repo.rehome_episode(episode.id, to.0, to.1).await {
+                Ok(_) => {
+                    held.remove(&from);
+                    held.insert(to, Some(absolute));
+                }
+                Err(err) => {
+                    warn!(error = %err, show_id = %show_id, absolute, "failed to re-home an episode");
+                }
             }
         }
     }
@@ -1687,6 +1805,81 @@ mod tests {
         assert_eq!(report.processed, 0);
     }
 
+    /// The worker sweeps at once, then waits: a title queued meanwhile waits
+    /// for the interval, unless the worker is poked, when it is swept at once.
+    /// The injected clock never moves here, so only the poke can wake it.
+    #[tokio::test]
+    async fn a_poke_starts_the_next_sweep_without_waiting_for_the_interval() {
+        // No candidate for anything: a swept title ends unmatched.
+        let (service, movie_repo, _show_repo, state_repo, _genre_repo, clock) =
+            harness(InMemoryEnrichmentProvider::new(&["tmdb"]));
+        let queue = |title: &'static str| {
+            let movie_repo = movie_repo.clone();
+            let state_repo = state_repo.clone();
+            async move {
+                let movie = movie_repo
+                    .find_or_create_by_identity(CreateMovie::new(title.to_string(), None, None))
+                    .await
+                    .unwrap();
+                let target = EnrichmentTargetId::Movie(movie.id);
+                state_repo.ensure_pending(target).await.unwrap();
+                target
+            }
+        };
+        let status = |target: EnrichmentTargetId| {
+            let state_repo = state_repo.clone();
+            async move {
+                state_repo
+                    .find_by_target(target)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .status
+            }
+        };
+        let first = queue("Heat").await;
+        let poke = service.notify_handle();
+        let service = Arc::new(service);
+        let worker = tokio::spawn({
+            let service = service.clone();
+            async move { service.run(Duration::from_secs(3600)).await }
+        });
+
+        // Bounded only against a hang; nothing here is ordered by time.
+        let swept = |target| async move {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while status(target).await != EnrichmentStatus::Unmatched {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .is_ok()
+        };
+        assert!(swept(first).await, "the first sweep runs at once");
+        // The worker is now waiting on the interval or a poke.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while clock.waiter_count() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the worker waits on the interval");
+
+        let second = queue("Alien").await;
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            status(second).await,
+            EnrichmentStatus::Pending,
+            "unpoked, the worker waits out the interval"
+        );
+
+        poke.notify_one();
+        assert!(swept(second).await, "a poke sweeps at once");
+        worker.abort();
+    }
+
     #[tokio::test]
     async fn successful_movie_match_applies_enrichment_and_genres() {
         let hit = MovieSearchHit {
@@ -2491,13 +2684,18 @@ mod tests {
         );
     }
 
-    /// Issue #267: a file numbered absolutely (`Show - 013`) is indexed as
-    /// that episode of season 1, or of its season folder's season, and takes
-    /// the metadata of the episode the provider's absolute order puts there.
+    /// Issues #267 and #334: a file numbered absolutely (`Show - 013`) is
+    /// indexed as that episode of season 1, or of its season folder's
+    /// season, and enrichment moves it to the episode the provider's
+    /// absolute order puts there -- merging it into an episode already
+    /// there -- where it takes that episode's metadata, and where enriching
+    /// again leaves it. An episode numbered as its season's that the
+    /// provider does not list is not read as a running number.
     #[tokio::test]
-    async fn an_absolutely_numbered_episode_takes_the_metadata_its_place_in_the_order_names() {
+    async fn an_absolutely_numbered_episode_moves_to_its_place_in_the_order() {
         use beam_domain::models::CreateEpisode;
         use beam_domain::providers::enrichment::{EpisodeEnrichment, SeasonEnrichment};
+        use beam_domain::utils::media_path::EpisodeNumbering::{Absolute, Standard};
 
         let show_ref = ExternalMediaRef::new("tvdb", "81797");
         let provider_season = |season_number: u32, count: u32| SeasonEnrichment {
@@ -2544,9 +2742,18 @@ mod tests {
             .await
             .unwrap();
         let mut local = Vec::new();
-        for (season_number, episode_number) in
-            [(0, 1), (1, 1), (1, 13), (1, 15), (1, 16), (2, 14), (3, 2)]
-        {
+        for (season_number, episode_number, numbering) in [
+            (0, 1, Standard),
+            (1, 3, Absolute),
+            (1, 13, Absolute),
+            (1, 15, Absolute),
+            (1, 16, Absolute),
+            (1, 17, Standard),
+            (2, 1, Absolute),
+            (2, 3, Standard),
+            (2, 14, Absolute),
+            (3, 2, Absolute),
+        ] {
             let season = show_repo
                 .find_or_create_season(show.id, season_number)
                 .await
@@ -2558,6 +2765,7 @@ mod tests {
                     title: format!("local {season_number}x{episode_number}"),
                     runtime: None,
                     air_date: None,
+                    numbering,
                 })
                 .await
                 .unwrap();
@@ -2570,34 +2778,66 @@ mod tests {
 
         assert_eq!(service.sweep_once().await.enriched, 1);
 
-        let mut titles = Vec::new();
-        for (position, episode_id) in local {
-            let episode = show_repo
-                .find_episode_by_id(episode_id)
-                .await
-                .unwrap()
-                .unwrap();
-            titles.push((position, episode.title));
-        }
+        // Where each indexed row is now, and its title; `None` once merged.
+        let placed = || async {
+            let mut placed = Vec::new();
+            for (indexed, episode_id) in &local {
+                let now = match show_repo.find_episode_by_id(*episode_id).await.unwrap() {
+                    Some(episode) => {
+                        let season = show_repo
+                            .find_season_by_id(episode.season_id)
+                            .await
+                            .unwrap()
+                            .unwrap();
+                        Some((season.season_number, episode.episode_number, episode.title))
+                    }
+                    None => None,
+                };
+                placed.push((*indexed, now));
+            }
+            placed
+        };
         let expected = [
             // A special keeps its own number: the order counts none.
-            ((0, 1), "S00E01"),
-            ((1, 1), "S01E01"),
-            // Past season 1's twelve: the order runs on into season 2.
-            ((1, 13), "S02E01"),
-            ((1, 15), "S02E03"),
+            ((0, 1), Some((0, 1, "S00E01"))),
+            ((1, 3), Some((1, 3, "S01E03"))),
+            // Past season 1's twelve the order runs on into season 2, but
+            // S02E01 holds another running number -- season 2's folder's 1,
+            // which the order puts in season 1 -- so 13 is not merged into
+            // it, and takes S02E01's metadata where it stands.
+            ((1, 13), Some((1, 13, "S02E01"))),
+            // S02E03 already has a row: 15 merges into it.
+            ((1, 15), None),
             // Past the order's end: left as indexed.
-            ((1, 16), "local 1x16"),
+            ((1, 16), Some((1, 16, "local 1x16"))),
+            // Numbered as season 1's: not a running number.
+            ((1, 17), Some((1, 17, "local 1x17"))),
+            ((2, 1), Some((2, 1, "S02E01"))),
+            ((2, 3), Some((2, 3, "S02E03"))),
             // In a season folder, and the order agrees it is that season's.
-            ((2, 14), "S02E02"),
+            ((2, 14), Some((2, 2, "S02E02"))),
             // The order puts 2 in season 1, not the folder's season 3.
-            ((3, 2), "local 3x2"),
+            ((3, 2), Some((3, 2, "local 3x2"))),
         ];
-        let expected: Vec<((u32, u32), String)> = expected
+        let expected: Vec<_> = expected
             .into_iter()
-            .map(|(position, title)| (position, title.to_string()))
+            .map(|(indexed, now)| {
+                (
+                    indexed,
+                    now.map(|(season, number, title)| (season, number, title.to_string())),
+                )
+            })
             .collect();
-        assert_eq!(titles, expected);
+        assert_eq!(placed().await, expected);
+        let merged = show_repo
+            .find_episode_by_id(local[7].1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(merged.absolute_number, Some(15));
+
+        service.enrich_seasons(show.id, &show_ref).await;
+        assert_eq!(placed().await, expected, "enriching again moves nothing");
 
         // Season 3 has nothing from the provider, so its row is left alone.
         let seasons = show_repo.find_seasons_by_show_id(show.id).await.unwrap();
@@ -2733,6 +2973,65 @@ mod tests {
         // Zero tallies must not mint a series at all.
         assert_eq!(outcome_count("unmatched"), None);
         assert_eq!(outcome_count("rate_limited"), None);
+    }
+
+    /// Every sweep gauges the queue it leaves behind (issue #457): with no
+    /// provider configured nothing drains it, so the gauge shows every
+    /// queued title; a sweep that enriches a title takes it off.
+    #[tokio::test]
+    async fn every_sweep_gauges_the_titles_still_pending() {
+        use crate::test_metrics::MetricsCapture;
+
+        let capture = MetricsCapture::new();
+        let _recorder = capture.install();
+        let pending = || capture.snapshot().gauge("beam_enrichment_pending", &[]);
+
+        let (idle, movie_repo, _shows, state_repo, _genres, _clock) =
+            harness(InMemoryEnrichmentProvider::new(&[]));
+        for title in ["The Matrix", "Ghost"] {
+            queue_movie(&movie_repo, &state_repo, title).await;
+        }
+        assert!(idle.sweep_once().await.skipped_no_providers);
+        assert_eq!(pending(), Some(2.0));
+
+        let provider = InMemoryEnrichmentProvider::new(&["tmdb"])
+            .with_movie_search(
+                "The Matrix",
+                vec![MovieSearchHit {
+                    external_ref: ExternalMediaRef::new("tmdb", "603"),
+                    title: "The Matrix".to_string(),
+                    original_title: None,
+                    year: Some(1999),
+                    popularity: Some(80.0),
+                    vote_average: Some(8.7),
+                }],
+            )
+            .with_movie_enrichment(MovieEnrichment {
+                tmdb_id: Some(603),
+                title: "The Matrix".to_string(),
+                year: Some(1999),
+                ..Default::default()
+            });
+        let (service, movie_repo, _shows, state_repo, _genres, _clock) = harness(provider);
+        queue_movie(&movie_repo, &state_repo, "The Matrix").await;
+        assert_eq!(service.sweep_once().await.enriched, 1);
+        assert_eq!(pending(), Some(0.0));
+    }
+
+    /// Queue the 1999 movie `title` for enrichment.
+    async fn queue_movie(
+        movie_repo: &InMemoryMovieRepository,
+        state_repo: &InMemoryEnrichmentStateRepository,
+        title: &str,
+    ) {
+        let movie = movie_repo
+            .find_or_create_by_identity(CreateMovie::new(title.to_string(), Some(1999), None))
+            .await
+            .unwrap();
+        state_repo
+            .ensure_pending(EnrichmentTargetId::Movie(movie.id))
+            .await
+            .unwrap();
     }
 
     /// A pinned movie, queued as the indexer queues a newly pinned one.

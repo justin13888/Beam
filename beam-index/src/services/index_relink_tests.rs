@@ -12,10 +12,10 @@
 
 use std::sync::atomic::AtomicUsize;
 
+use super::test_harness::IndexServiceBuilder;
 use super::*;
 use crate::library_file::test_support::snapshot;
 use crate::probe::metadata::MetadataError;
-use crate::services::admin_log::LocalAdminLogService;
 use crate::services::filesystem_probe::{FilesystemKind, FixedFilesystemProbe};
 use crate::services::hash::{HashConfig, LocalHashService};
 use crate::services::notification::InMemoryNotificationService;
@@ -29,9 +29,9 @@ use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
 use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
 use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
 use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
-use beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository;
 use beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository;
 use beam_domain::services::TestClock;
+use beam_domain::test_utils::media_file;
 use tempfile::TempDir;
 
 // ─── choose_relink_candidate ────────────────────────────────────────────────
@@ -43,22 +43,10 @@ fn instant(secs: i64) -> DateTime<Utc> {
 fn candidate(id: u128, path: &str, missing_since: Option<DateTime<Utc>>) -> MediaFile {
     MediaFile {
         id: Uuid::from_u128(id),
-        library_id: Uuid::nil(),
-        path: PathBuf::from(path),
         hash: 77,
         size_bytes: 1000,
-        mtime: None,
-        identity: None,
-        mime_type: None,
-        duration: None,
-        container_format: None,
-        content: None,
-        status: FileStatus::Unknown,
-        classifier_version: 0,
-        container_tags: None,
-        scanned_at: instant(0),
-        updated_at: instant(0),
         missing_since,
+        ..media_file(Uuid::nil(), path)
     }
 }
 
@@ -212,6 +200,66 @@ fn the_most_alike_candidate_wins_whatever_the_order() {
                 Some(Uuid::from_u128(expected)),
                 "{name}"
             );
+        }
+    }
+}
+
+mod relink_properties {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// A row of one of two contents, one of two sizes, at one of a few
+    /// paths, gone or not, under a small id so ids collide with plays.
+    fn any_candidate() -> impl Strategy<Value = MediaFile> {
+        (
+            0u128..6,
+            prop::sample::select(vec![
+                "/lib/a/One.mkv",
+                "/lib/a/Two.mkv",
+                "/lib/b/One.mkv",
+                "/lib/b/Two.mkv",
+                "/lib/c/Six.mkv",
+            ]),
+            prop::sample::select(vec![0u64, 77, 78]),
+            prop::sample::select(vec![999u64, 1000]),
+            any::<bool>(),
+        )
+            .prop_map(|(id, path, hash, size_bytes, gone)| MediaFile {
+                hash,
+                size_bytes,
+                ..candidate(id, path, gone.then(|| instant(0)))
+            })
+    }
+
+    proptest! {
+        /// The row a moved file relinks to does not depend on the order the
+        /// candidates come in: any permutation of them chooses the same row.
+        #[test]
+        fn the_chosen_row_is_the_same_whatever_the_order(
+            (rows, shuffled) in prop::collection::vec(any_candidate(), 0..8)
+                .prop_map(|rows| {
+                    // Distinct ids, as a store's rows have.
+                    let mut seen = std::collections::HashSet::new();
+                    rows.into_iter()
+                        .filter(|row| seen.insert(row.id))
+                        .collect::<Vec<MediaFile>>()
+                })
+                .prop_flat_map(|rows| (Just(rows.clone()), Just(rows).prop_shuffle())),
+            plays in prop::collection::hash_map(0u128..6, 0i64..4, 0..6),
+            hash in prop::sample::select(vec![0u64, 77, 78]),
+        ) {
+            let last_played: HashMap<Uuid, DateTime<Utc>> = plays
+                .into_iter()
+                .map(|(id, secs)| (Uuid::from_u128(id), instant(secs)))
+                .collect();
+            let new_path = Path::new("/lib/b/One.mkv");
+            let absent = |path: &Path| path.starts_with("/lib/c");
+
+            let chosen = |rows: &[MediaFile]| {
+                choose_relink_candidate(new_path, 1000, hash, rows, absent, &last_played)
+                    .map(|row| row.id)
+            };
+            prop_assert_eq!(chosen(&rows), chosen(&shuffled));
         }
     }
 }
@@ -662,24 +710,25 @@ impl Harness {
             })
             .await
             .unwrap();
-        let service = LocalIndexService::new(
-            library_repo.clone(),
-            file_repo.clone(),
-            Arc::new(InMemoryMovieRepository::with_files(file_repo.clone())),
-            Arc::new(InMemoryShowRepository::with_files(file_repo.clone())),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-            hasher.clone(),
-            prober.clone(),
-            notifications.clone(),
-            Arc::new(LocalAdminLogService::new(
-                admin_log_repo.clone() as Arc<dyn AdminLogRepository>
-            )),
-            progress.clone(),
-        )
-        .with_clock(clock)
-        // A local filesystem, whatever the temporary directory is on: its
-        // inode numbers are compared unless `configure` says otherwise.
-        .with_filesystem_probe(Arc::new(FixedFilesystemProbe(FilesystemKind::Local)));
+        let service = IndexServiceBuilder::new()
+            .library_repo(library_repo.clone())
+            .file_repo(file_repo.clone())
+            .movie_repo(Arc::new(InMemoryMovieRepository::with_files(
+                file_repo.clone(),
+            )))
+            .show_repo(Arc::new(InMemoryShowRepository::with_files(
+                file_repo.clone(),
+            )))
+            .hash_service(hasher.clone())
+            .media_info(prober.clone())
+            .notifications(notifications.clone())
+            .admin_log_repo(admin_log_repo.clone())
+            .progress_repo(progress.clone())
+            .build()
+            .with_clock(clock)
+            // A local filesystem, whatever the temporary directory is on: its
+            // inode numbers are compared unless `configure` says otherwise.
+            .with_filesystem_probe(Arc::new(FixedFilesystemProbe(FilesystemKind::Local)));
         let service = configure(service);
         Self {
             dir,
@@ -776,7 +825,38 @@ impl Harness {
     }
 
     async fn row_count(&self) -> usize {
-        self.file_repo.files.lock().unwrap().len()
+        self.file_repo
+            .find_all_by_library_including_missing(self.library.id)
+            .await
+            .unwrap()
+            .len()
+    }
+
+    /// Re-record every present row's identity as `change` makes it, as a
+    /// re-stat of each file at its own path would.
+    async fn rerecord_identities(
+        &self,
+        change: impl Fn(Option<FileIdentity>) -> Option<FileIdentity>,
+    ) {
+        let rows = self
+            .file_repo
+            .find_all_by_library(self.library.id)
+            .await
+            .unwrap();
+        let relinks = rows
+            .into_iter()
+            .map(|row| FileRelink {
+                id: row.id,
+                path: row.path,
+                size_bytes: row.size_bytes,
+                mtime: row.mtime,
+                identity: change(row.identity),
+            })
+            .collect();
+        self.file_repo
+            .relink(relinks, Vec::new(), Utc::now())
+            .await
+            .unwrap();
     }
 
     async fn move_logs(&self) -> Vec<AdminLog> {
@@ -815,6 +895,12 @@ async fn a_renamed_file_keeps_its_row_through_a_scan() {
         (after.duration, after.status, after.classifier_version),
         (before.duration, before.status, before.classifier_version)
     );
+    assert_eq!(
+        (after.hash, after.size_bytes),
+        (before.hash, before.size_bytes),
+        "the row carries the content it followed"
+    );
+    assert_eq!(after.size_bytes, std::fs::metadata(&new).unwrap().len());
     assert!(
         h.row(&old).await.is_none(),
         "nothing is left at the old path"
@@ -983,9 +1069,11 @@ async fn a_renamed_file_keeps_its_row_whichever_watcher_event_comes_first() {
             ReconcileOutcome::Done
         );
 
+        let after = h.present(&new).await;
+        assert_eq!(after.id, before.id, "old first: {old_first}");
         assert_eq!(
-            h.present(&new).await.id,
-            before.id,
+            (after.hash, after.size_bytes),
+            (before.hash, before.size_bytes),
             "old first: {old_first}"
         );
         assert!(h.row(&old).await.is_none());
@@ -1268,9 +1356,7 @@ async fn an_unprobed_row_without_an_identity_is_given_one_without_a_hash() {
     h.prober.fails.store(true, Ordering::SeqCst);
     let path = h.write("Heat (1995).mkv", "heat");
     h.scan().await;
-    for row in h.file_repo.files.lock().unwrap().values_mut() {
-        row.identity = None;
-    }
+    h.rerecord_identities(|_| None).await;
     let before = h.present(&path).await;
     assert_eq!(before.duration, None, "the probe failed");
     let hashes = h.hashes();
@@ -1398,8 +1484,6 @@ async fn a_removed_directory_under_a_root_with_no_video_is_left_to_the_scan() {
 /// and the rows of the library are not read to look beneath it.
 #[tokio::test]
 async fn a_removed_path_the_policy_never_indexes_is_not_looked_beneath() {
-    use crate::services::hash::MockHashService;
-    use crate::services::media_info::MockMediaInfoService;
     use beam_domain::repositories::file::MockFileRepository;
 
     let dir = TempDir::new().unwrap();
@@ -1415,20 +1499,11 @@ async fn a_removed_path_the_policy_never_indexes_is_not_looked_beneath() {
     let mut files = MockFileRepository::new();
     files.expect_find_by_path().returning(|_| Ok(None));
     files.expect_find_beneath_including_missing().never();
-    let service = LocalIndexService::new(
-        library_repo,
-        Arc::new(files),
-        Arc::new(InMemoryMovieRepository::default()),
-        Arc::new(InMemoryShowRepository::default()),
-        Arc::new(InMemoryMediaStreamRepository::default()),
-        Arc::new(MockHashService::new()),
-        Arc::new(MockMediaInfoService::new()),
-        Arc::new(InMemoryNotificationService::new()),
-        Arc::new(LocalAdminLogService::new(Arc::new(
-            InMemoryAdminLogRepository::default(),
-        ))),
-        Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-    );
+    let service = IndexServiceBuilder::new()
+        .library_repo(library_repo)
+        .file_repo(Arc::new(files))
+        .admin_log_repo(Arc::new(InMemoryAdminLogRepository::default()))
+        .build();
 
     for removed in [
         ".Heat (1995).mkv.part",
@@ -1626,9 +1701,7 @@ async fn a_row_without_an_identity_is_given_one_without_a_hash() {
     let files = same_size_same_mtime(&h, &["Heat (1995).mkv", "Ronin (1998).mkv"]).await;
     let (heat, heat_id) = files[0].clone();
     let (ronin, ronin_id) = files[1].clone();
-    for row in h.file_repo.files.lock().unwrap().values_mut() {
-        row.identity = None;
-    }
+    h.rerecord_identities(|_| None).await;
     let hashes = h.hashes();
 
     h.scan().await;
@@ -1800,11 +1873,13 @@ async fn a_chmod_on_a_network_library_costs_one_hash() {
 /// ctime -- as a network or FUSE filesystem can renumber a file after a
 /// remount or a cache eviction, while the file itself is untouched.
 #[cfg(unix)]
-fn renumber_recorded_inodes(h: &Harness) {
-    for row in h.file_repo.files.lock().unwrap().values_mut() {
-        let identity = row.identity.as_mut().expect("a Unix file has an identity");
+async fn renumber_recorded_inodes(h: &Harness) {
+    h.rerecord_identities(|identity| {
+        let mut identity = identity.expect("a Unix file has an identity");
         identity.inode = !identity.inode;
-    }
+        Some(identity)
+    })
+    .await;
 }
 
 /// A library on a network or FUSE filesystem is compared by size, mtime and
@@ -1824,7 +1899,7 @@ async fn a_network_library_whose_inodes_are_renumbered_is_not_hashed_again() {
     let before = [h.present(&heat).await, h.present(&ronin).await];
     let hashes = h.hashes();
 
-    renumber_recorded_inodes(&h);
+    renumber_recorded_inodes(&h).await;
     let progress = h.scan().await;
 
     assert_eq!(h.hashes(), hashes, "nothing is hashed");
@@ -1852,7 +1927,7 @@ async fn a_local_library_whose_inodes_differ_hashes_each_file_once() {
     let before = [h.present(&heat).await, h.present(&ronin).await];
     let hashes = h.hashes();
 
-    renumber_recorded_inodes(&h);
+    renumber_recorded_inodes(&h).await;
     let progress = h.scan().await;
 
     assert_eq!(h.hashes(), hashes + 2, "each file is hashed");
@@ -1886,7 +1961,7 @@ async fn a_library_whose_filesystem_cannot_be_classified_compares_inodes() {
     h.scan().await;
     let hashes = h.hashes();
 
-    renumber_recorded_inodes(&h);
+    renumber_recorded_inodes(&h).await;
     h.scan().await;
 
     assert_eq!(h.hashes(), hashes + 1, "the renumbered file is hashed");

@@ -8,28 +8,34 @@
 //!
 //! [`BeamClient`] is defined here with the server registry, sign-in and the
 //! plumbing every request shares. Each API resource adds its own exported
-//! `impl` block in a submodule: `playback`, `catalog`, `progress`, `telemetry`
-//! and `admin`.
+//! `impl` block in a submodule: `playback`, `catalog`, `progress`, `telemetry`,
+//! `download` and `admin`. `device_login` adds the device grant's poll loop.
 
 mod admin;
 mod catalog;
+mod device_login;
+mod download;
 mod playback;
 mod progress;
 mod telemetry;
 
-pub use playback::{PlaybackHttpConfig, PlaybackPlan, RebufferMonitor, ServerHttpConfig};
+pub use playback::{
+    MediaGrant, PlaybackHttpConfig, PlaybackPlan, RebufferMonitor, ServerHttpConfig,
+};
 
 use crate::api::Client as GeneratedClient;
 use crate::api::{MiddlewareBackend, ReqwestBackend};
 use crate::capability::DeviceProfile;
 use crate::catalog::{DeviceSession, ServerHealth};
 use crate::clock::{Clock, SystemClock};
+use crate::download::DownloadStore;
 use crate::error::BeamError;
 use crate::ports::kv::KeyValueStore;
 use crate::progress::{ProgressQueue, ProgressThrottle};
 use crate::servers::{ServerRecord, normalize_base_url, server_id_for};
 use crate::session::{
-    DeviceLoginPrompt, DeviceLoginStep, SessionEffect, SessionEvent, SessionState, UserSummary,
+    DeviceLoginPrompt, DeviceLoginStep, SessionAnnouncer, SessionEffect, SessionEvent,
+    SessionObserver, SessionState, UserSummary,
 };
 use crate::telemetry::{TelemetryClientKind, TelemetryQueue};
 use crate::transport::{ABOUT_BLANK, FailureKind, SessionMiddleware, TransportFailure, classify};
@@ -284,6 +290,8 @@ impl std::fmt::Debug for ServerContext {
 pub struct BeamClient {
     storage: Arc<dyn KeyValueStore>,
     clock: Arc<dyn Clock>,
+    /// Every server's download records, over [`Self::storage`].
+    downloads: DownloadStore,
     servers: RwLock<HashMap<String, ServerContext>>,
     active: RwLock<Option<String>>,
     device_profile: RwLock<Option<DeviceProfile>>,
@@ -299,6 +307,8 @@ pub struct BeamClient {
     /// here is what stops that. Held in memory, so it lasts as long as the
     /// process that failed the delete.
     abandoned_sessions: RwLock<HashSet<String>>,
+    /// Who is told when the server list changes, and what they last saw.
+    announcer: SessionAnnouncer,
 }
 
 /// A path parameter the API declares as `format: uuid`.
@@ -336,6 +346,90 @@ impl BeamClient {
     /// HTTP client refuses, and [`BeamError::Network`], not retryable, when a
     /// server's HTTP client cannot be built.
     pub async fn restore(&self) -> Result<Vec<ServerSummary>, BeamError> {
+        let restored = self.restore_registry().await;
+        self.announce();
+        restored
+    }
+
+    /// Make `observer` the one told whenever the server list changes: a
+    /// sign-in completing, a sign-out, a session the server rejected on any
+    /// call, and a server added, removed or selected.
+    ///
+    /// One observer at a time; registering another replaces it. Nothing is
+    /// announced on registration -- read [`Self::list_servers`] for the list
+    /// as it stands -- and the next change after it is announced in full.
+    pub fn set_session_observer(&self, observer: Arc<dyn SessionObserver>) {
+        self.announcer.register(observer);
+    }
+
+    /// Add a server, or return the existing one if it is already known.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::InvalidServerUrl`] for an unusable address,
+    /// [`BeamError::Storage`] when the registry cannot be written, and
+    /// [`BeamError::Network`], not retryable, when the server's HTTP client
+    /// cannot be built.
+    pub async fn add_server(
+        &self,
+        base_url: String,
+        display_name: Option<String>,
+    ) -> Result<ServerSummary, BeamError> {
+        let added = self
+            .register_server(&base_url, display_name.as_deref())
+            .await;
+        // Announced however it ended: a server installed before a storage
+        // write failed is in the list all the same.
+        self.announce();
+        added
+    }
+
+    /// Every known server, by display name.
+    ///
+    /// # Errors
+    ///
+    /// Never returns one: the registry is read from memory, which
+    /// [`Self::restore`] filled.
+    pub fn list_servers(&self) -> Result<Vec<ServerSummary>, BeamError> {
+        Ok(self.server_summaries())
+    }
+
+    /// Make a server the default for later operations.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::UnknownServer`] if it is not registered, and
+    /// [`BeamError::Storage`] when the choice cannot be persisted.
+    pub async fn select_server(&self, server_id: String) -> Result<(), BeamError> {
+        self.make_active(server_id).await?;
+        self.announce();
+        Ok(())
+    }
+
+    /// Forget a server and everything tied to it.
+    ///
+    /// Clears the record, the session cookie, and the progress queue together.
+    /// Leaving any one behind would be a leak across servers.
+    ///
+    /// Its downloads are left for [`Self::remove_server_downloads`]: only the
+    /// platform can delete their bytes, and it needs the records -- which
+    /// that call answers -- to know which bytes are the server's.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::Storage`] when the removal cannot be persisted.
+    pub async fn remove_server(&self, server_id: String) -> Result<(), BeamError> {
+        let removed = self.forget_server(&server_id).await;
+        // The server leaves the in-memory registry before anything is
+        // written, so a failed write still changed the list.
+        self.announce();
+        removed
+    }
+}
+
+impl BeamClient {
+    /// [`Self::restore`], without the announcement.
+    async fn restore_registry(&self) -> Result<Vec<ServerSummary>, BeamError> {
         let ids: Vec<String> = match self.storage.get(SERVER_INDEX_KEY.to_owned()).await? {
             Some(raw) => serde_json::from_str(&raw).unwrap_or_default(),
             None => Vec::new(),
@@ -380,29 +474,22 @@ impl BeamClient {
 
         *self.active.write().expect("active lock") =
             self.storage.get(ACTIVE_SERVER_KEY.to_owned()).await?;
-        self.list_servers()
+        Ok(self.server_summaries())
     }
 
-    /// Add a server, or return the existing one if it is already known.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`BeamError::InvalidServerUrl`] for an unusable address,
-    /// [`BeamError::Storage`] when the registry cannot be written, and
-    /// [`BeamError::Network`], not retryable, when the server's HTTP client
-    /// cannot be built.
-    pub async fn add_server(
+    /// [`Self::add_server`], without the announcement.
+    async fn register_server(
         &self,
-        base_url: String,
-        display_name: Option<String>,
+        base_url: &str,
+        display_name: Option<&str>,
     ) -> Result<ServerSummary, BeamError> {
-        let origin = normalize_base_url(&base_url)?;
+        let origin = normalize_base_url(base_url)?;
         let id = server_id_for(&origin);
 
         // Adding a server already present is idempotent rather than an error:
         // the user typing the same address twice means "go there", not "fail".
         if !self.servers.read().expect("servers lock").contains_key(&id) {
-            let record = ServerRecord::new(&origin, display_name.as_deref(), self.clock.now_unix());
+            let record = ServerRecord::new(&origin, display_name, self.clock.now_unix());
             // Installed before persisting, because `persist_record` writes the
             // index from the in-memory map. Persisting first wrote an index
             // that did not yet contain this server, so the very first server
@@ -412,17 +499,12 @@ impl BeamClient {
             self.persist_record(&record).await?;
         }
 
-        self.select_server(id.clone()).await?;
+        self.make_active(id.clone()).await?;
         self.summary(&id)
     }
 
-    /// Every known server, by display name.
-    ///
-    /// # Errors
-    ///
-    /// Never returns one: the registry is read from memory, which
-    /// [`Self::restore`] filled.
-    pub fn list_servers(&self) -> Result<Vec<ServerSummary>, BeamError> {
+    /// [`Self::list_servers`], which cannot fail.
+    fn server_summaries(&self) -> Vec<ServerSummary> {
         let servers = self.servers.read().expect("servers lock");
         let active = self.active.read().expect("active lock").clone();
         let mut summaries: Vec<ServerSummary> = servers
@@ -436,16 +518,11 @@ impl BeamClient {
             })
             .collect();
         summaries.sort_by(|a, b| a.display_name.cmp(&b.display_name));
-        Ok(summaries)
+        summaries
     }
 
-    /// Make a server the default for later operations.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`BeamError::UnknownServer`] if it is not registered, and
-    /// [`BeamError::Storage`] when the choice cannot be persisted.
-    pub async fn select_server(&self, server_id: String) -> Result<(), BeamError> {
+    /// [`Self::select_server`], without the announcement.
+    async fn make_active(&self, server_id: String) -> Result<(), BeamError> {
         if !self
             .servers
             .read()
@@ -461,25 +538,21 @@ impl BeamClient {
         Ok(())
     }
 
-    /// Forget a server and everything tied to it.
-    ///
-    /// Clears the record, the session cookie, and the progress queue together.
-    /// Leaving any one behind would be a leak across servers.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`BeamError::Storage`] when the removal cannot be persisted.
-    pub async fn remove_server(&self, server_id: String) -> Result<(), BeamError> {
+    /// [`Self::remove_server`], without the announcement.
+    async fn forget_server(&self, server_id: &str) -> Result<(), BeamError> {
         self.servers
             .write()
             .expect("servers lock")
-            .remove(&server_id);
+            .remove(server_id);
         self.storage.remove(format!("servers/{server_id}")).await?;
-        self.storage.remove_secret(session_key(&server_id)).await?;
-        self.storage.remove_secret(identity_key(&server_id)).await?;
-        self.forget_abandoned(&server_id);
+        self.storage.remove_secret(session_key(server_id)).await?;
+        self.storage.remove_secret(identity_key(server_id)).await?;
+        self.forget_abandoned(server_id);
         self.storage
             .remove(format!("progress_queue/{server_id}"))
+            .await?;
+        self.storage
+            .remove(crate::progress::LastPositions::storage_key(server_id))
             .await?;
 
         // The guard is taken and released before the await: holding a
@@ -487,7 +560,7 @@ impl BeamClient {
         // non-Send, which UniFFI's tokio runtime requires.
         let was_active = {
             let mut active = self.active.write().expect("active lock");
-            if active.as_deref() == Some(server_id.as_str()) {
+            if active.as_deref() == Some(server_id) {
                 *active = None;
                 true
             } else {
@@ -500,6 +573,15 @@ impl BeamClient {
         self.persist_index().await
     }
 
+    /// Tell the observer the server list, if it has changed since it was last
+    /// told.
+    fn announce(&self) {
+        self.announcer.announce(|| self.server_summaries());
+    }
+}
+
+#[uniffi::export(async_runtime = "tokio")]
+impl BeamClient {
     /// The URL to open in the in-app browser to sign in.
     ///
     /// The server cannot redirect to a custom scheme -- `sanitize_redirect_path`
@@ -549,10 +631,9 @@ impl BeamClient {
     /// Begin signing in without a browser, by the OAuth 2.0 device
     /// authorization grant (ADR-0017).
     ///
-    /// Show the prompt's user code and verification address, then call
-    /// [`Self::poll_device_login`] every `interval_secs` until it signs in or
-    /// fails. The pacing is the caller's: the core has no timer, and the
-    /// server refuses a poll that comes too soon anyway.
+    /// Show the prompt's user code and verification address, then hand the
+    /// prompt to [`Self::await_device_login`], which polls at the pace RFC
+    /// 8628 sets until it signs in or fails.
     ///
     /// # Errors
     ///
@@ -580,7 +661,8 @@ impl BeamClient {
         })
     }
 
-    /// Poll a device login once.
+    /// Poll a device login once. [`Self::await_device_login`] is the loop
+    /// over this a client wants; this is the single step it repeats.
     ///
     /// On approval the issued credential goes through exactly what a lifted
     /// cookie does -- installed, confirmed against `/v1/me`, persisted -- so a
@@ -625,7 +707,24 @@ impl BeamClient {
     /// Take a `beam_session` value the server issued, however it was
     /// obtained, and make it this server's session: install it, confirm it
     /// against `/v1/me`, and persist it only once confirmed.
+    ///
+    /// A sign-in is one change to the observer, announced where it ends --
+    /// signed in, rejected, or abandoned to a storage failure partway.
     async fn adopt_session(
+        &self,
+        server_id: &str,
+        session_cookie: String,
+    ) -> Result<UserSummary, BeamError> {
+        let adopted = self.adopt_session_steps(server_id, session_cookie).await;
+        // Whichever step it stopped at, the observer learns where the server
+        // was left. On the paths that already announced, this finds nothing
+        // new and says nothing.
+        self.announce();
+        adopted
+    }
+
+    /// [`Self::adopt_session`], without the closing announcement.
+    async fn adopt_session_steps(
         &self,
         server_id: &str,
         session_cookie: String,
@@ -633,7 +732,10 @@ impl BeamClient {
         let server_id = server_id.to_owned();
         let captured = SecretString::from(session_cookie.clone());
 
-        let effects = self.apply(&server_id, SessionEvent::LoginStarted)?;
+        let mut effects = self.apply(&server_id, SessionEvent::LoginStarted)?;
+        // `AwaitingLogin` is the sign-in's own business, not a change worth
+        // announcing: the observer hears the outcome, once.
+        effects.retain(|effect| *effect != SessionEffect::NotifyObserver);
         self.perform(&server_id, &effects, None).await?;
 
         // `CookieCaptured` is what registers the credential, so the `/v1/me`
@@ -886,6 +988,7 @@ impl BeamClient {
     /// asserted to the second rather than raced against the wall clock.
     fn over(storage: Arc<dyn KeyValueStore>, clock: Arc<dyn Clock>) -> Arc<Self> {
         Arc::new(Self {
+            downloads: DownloadStore::new(Arc::clone(&storage)),
             storage,
             clock,
             servers: RwLock::new(HashMap::new()),
@@ -893,6 +996,7 @@ impl BeamClient {
             device_profile: RwLock::new(None),
             client_kind: RwLock::new(TelemetryClientKind::default()),
             abandoned_sessions: RwLock::new(HashSet::new()),
+            announcer: SessionAnnouncer::default(),
         })
     }
 
@@ -1081,6 +1185,10 @@ impl BeamClient {
     /// `CookieCaptured` and `StoredSessionRestored` ask for a cookie to be
     /// installed, and both are applied by a caller that is holding it.
     ///
+    /// `NotifyObserver` is performed last and whatever the others did: the
+    /// transition has already moved the state, so a cookie the keystore would
+    /// not delete still leaves a sign-out the observer has to hear about.
+    ///
     /// # Errors
     ///
     /// Returns [`BeamError::Storage`] when `ClearCookie` cannot be performed,
@@ -1088,6 +1196,21 @@ impl BeamClient {
     /// Whether that is fatal is the caller's to decide: a sign-out propagates
     /// it, while the 401 path swallows it -- see [`Self::fail`].
     async fn perform(
+        &self,
+        server_id: &str,
+        effects: &[SessionEffect],
+        captured: Option<&SecretString>,
+    ) -> Result<(), BeamError> {
+        let performed = self.perform_credential(server_id, effects, captured).await;
+        if effects.contains(&SessionEffect::NotifyObserver) {
+            self.announce();
+        }
+        performed
+    }
+
+    /// The effects [`Self::perform`] carries out on the credential, stopping
+    /// at the first that fails.
+    async fn perform_credential(
         &self,
         server_id: &str,
         effects: &[SessionEffect],
@@ -1110,11 +1233,8 @@ impl BeamClient {
                 SessionEffect::PersistCookie
                 | SessionEffect::VerifyIdentity
                 | SessionEffect::RevokeRemoteSession => {}
-                // Nothing implements this. The core has no observer channel --
-                // the foreign side polls `session_state` -- so there is no
-                // handler to call, and inventing one is a change to the FFI
-                // surface rather than a fix to this one. Named here so the
-                // gap is visible at the point it would be filled.
+                // Performed by `perform`, after these, whether or not they
+                // all succeeded.
                 SessionEffect::NotifyObserver => {}
             }
         }

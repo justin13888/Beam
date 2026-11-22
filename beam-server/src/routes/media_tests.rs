@@ -381,6 +381,8 @@ pub(super) struct Library {
         Arc<beam_domain::repositories::chapter::in_memory::InMemoryChapterRepository>,
     pub(super) trickplay:
         Arc<beam_domain::repositories::trickplay::in_memory::InMemoryTrickplayRepository>,
+    pub(super) markers:
+        Arc<beam_domain::repositories::markers::in_memory::InMemoryMarkerRepository>,
 }
 
 impl Library {
@@ -404,6 +406,7 @@ impl Library {
             sidecars: Arc::default(),
             chapters: Arc::default(),
             trickplay: Arc::default(),
+            markers: Arc::default(),
             files,
         }
     }
@@ -446,6 +449,7 @@ impl Library {
                 title: "Pilot".to_string(),
                 runtime: None,
                 air_date: None,
+                numbering: beam_domain::utils::media_path::EpisodeNumbering::Standard,
             })
             .await
             .unwrap();
@@ -495,6 +499,7 @@ pub(super) fn real_service_over(
                 sidecars: library.sidecars.clone(),
                 chapters: library.chapters.clone(),
                 trickplay: library.trickplay.clone(),
+                markers: library.markers.clone(),
             },
         )),
         movies,
@@ -778,6 +783,86 @@ async fn sources_carry_their_chapters_markers_and_trickplay_sheets() {
     for field in ["chapters", "markers", "trickplay"] {
         assert_eq!(part[field], source[field], "the part's own {field}");
     }
+}
+
+/// A marker Beam keeps for a file -- an administrator's, or a detected one --
+/// overrides the chapter-named marker of its kind on the file's sources, and
+/// adds one for a kind no chapter names (issue #332).
+#[tokio::test]
+async fn sources_carry_the_markers_beam_keeps_over_the_chapters_ones() {
+    use beam_domain::models::chapter::{
+        Chapter as StoredChapter, MarkerDetection, MarkerKind, PlaybackMarker,
+    };
+    use beam_domain::repositories::{ChapterRepository, MarkerRepository};
+
+    let library = Library::new();
+    let (movie, file) = indexed_movie(&library.movies, &library.files, "Arrival").await;
+    library
+        .chapters
+        .replace_for_file(
+            file,
+            vec![
+                StoredChapter {
+                    index: 0,
+                    start_ms: 0,
+                    end_ms: 90_000,
+                    title: Some("Opening".into()),
+                },
+                StoredChapter {
+                    index: 1,
+                    start_ms: 90_000,
+                    end_ms: 7_000_000,
+                    title: None,
+                },
+            ],
+        )
+        .await
+        .unwrap();
+    library
+        .markers
+        .set_admin(
+            file,
+            PlaybackMarker {
+                kind: MarkerKind::Intro,
+                start_ms: 5_000,
+                end_ms: 85_000,
+            },
+        )
+        .await
+        .unwrap();
+    library
+        .markers
+        .record_detection(MarkerDetection {
+            file_id: file,
+            file_hash: 1,
+            markers: vec![PlaybackMarker {
+                kind: MarkerKind::Credits,
+                start_ms: 6_900_000,
+                end_ms: 7_000_000,
+            }],
+            detected_at: chrono::Utc::now(),
+        })
+        .await
+        .unwrap();
+    let (client, token) = signed_in_to(real_service(library)).await;
+
+    let body: serde_json::Value = client
+        .get(&format!("/v1/media/{movie}/sources"))
+        .cookie("beam_session", &token)
+        .send()
+        .await
+        .assert_status(StatusCode::OK)
+        .json();
+
+    let source = &body["items"][0];
+    assert_eq!(
+        source["markers"],
+        serde_json::json!([
+            {"kind": "intro", "start_ms": 5_000, "end_ms": 85_000},
+            {"kind": "credits", "start_ms": 6_900_000, "end_ms": 7_000_000},
+        ])
+    );
+    assert_eq!(source["parts"][0]["markers"], source["markers"]);
 }
 
 /// Sheets made from a file's earlier content describe a picture that is no

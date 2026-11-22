@@ -11,6 +11,7 @@ import dev.beam.android.core.ffi.repository.ServerRepository
 import dev.beam.android.core.ffi.toFailure
 import dev.beam.android.core.media.download.DownloadRepository
 import dev.beam.android.core.model.LoadState
+import dev.beam.android.core.model.PlaybackRequest
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -37,7 +38,7 @@ public data class DetailUiState(
     val selection: SourceSelection? = null,
     /** Whether the source picker is open. */
     val isPickingSource: Boolean = false,
-    /** Files already downloaded, so the action reads "Play offline". */
+    /** Files downloaded in full, so the action reads "Play offline"; read at each load. */
     val downloadedFileIds: Set<String> = emptySet(),
     /** What the last action reported, for a snackbar. */
     val message: String? = null,
@@ -67,6 +68,41 @@ public data class DetailUiState(
      */
     public val isSoftwareOnly: Boolean
         get() = selection?.playability is Playability.Software
+
+    /** Whether Play resumes part-way, so starting over is worth offering as its own action. */
+    public val canResume: Boolean
+        get() = summary.startPositionSecs > 0.0
+
+    /**
+     * What Play hands the player: the chosen file, from where the core says
+     * the title starts -- its resume point, or 0 for one not started or near
+     * its end (issue #466) -- or from 0 when the viewer asked to start over.
+     */
+    public fun play(fromBeginning: Boolean = false): PlaybackRequest? =
+        selection?.source?.let { source ->
+            request(source.fileId, null, summary.title, if (fromBeginning) 0.0 else summary.startPositionSecs)
+        }
+
+    /** A file the viewer picked by hand: pinned, and resumed like Play, since progress is the title's. */
+    public fun playPicked(source: MediaSourceView): PlaybackRequest =
+        request(source.fileId, null, summary.title, summary.startPositionSecs).copy(isSourcePicked = true)
+
+    /** One episode, from where the core says it starts; `null` for one with no file. */
+    public fun playEpisode(episode: EpisodeSummary): PlaybackRequest? =
+        episode.fileId?.let { fileId -> request(fileId, episode.id, episode.title, episode.startPositionSecs) }
+
+    private fun request(
+        fileId: String,
+        episodeId: String?,
+        title: String,
+        startPositionSecs: Double,
+    ) = PlaybackRequest(
+        mediaId = summary.id,
+        episodeId = episodeId,
+        fileId = fileId,
+        title = title,
+        startPositionSecs = startPositionSecs,
+    )
 }
 
 /**
@@ -104,6 +140,15 @@ public class DetailViewModel
         public fun refresh() {
             mutableState.value = LoadState.Loading(mutableState.value.previous())
             viewModelScope.launch { reload() }
+        }
+
+        /**
+         * The page is back on screen: reread the title in place, since this outlives the page
+         * under the player and a stale start would resume from -- and report over the server's
+         * newer point -- where the viewer was before (#466). A first visit's load is in flight.
+         */
+        public fun onShown() {
+            if (mutableState.value !is LoadState.Loading) viewModelScope.launch { reload() }
         }
 
         /**
@@ -151,10 +196,7 @@ public class DetailViewModel
                         .first()
                         .quality
                         .asPolicy()
-                val selection =
-                    runCatching {
-                        playback.selectSource(mediaId, policy)
-                    }.getOrNull()
+                val selection = runCatching { playback.selectSource(mediaId, policy) }.getOrNull()
 
                 val previous = mutableState.value.previous()
                 val seasons = (detail as? MediaDetail.Show)?.seasons.orEmpty()
@@ -169,6 +211,7 @@ public class DetailViewModel
                                     ?: seasons.firstOrNull()?.seasonNumber,
                             sources = sources,
                             selection = selection,
+                            downloadedFileIds = downloads.downloadedOf(selection),
                         ),
                     )
             } catch (failure: BeamException) {
@@ -199,10 +242,9 @@ public class DetailViewModel
         /**
          * Queue a file for offline playback.
          *
-         * The server is resolved here rather than demanded from the screen: a
-         * download belongs to the server it came from, so that a removed
-         * server can take its files with it, but which server is active is not
-         * something a detail screen knows or should have to pass down.
+         * The core queues it on the active server, which it records as the
+         * download's own, so a removed server can take its files with it.
+         * Checked here first only to say why nothing was queued.
          */
         public fun download(
             fileId: String,
@@ -219,7 +261,6 @@ public class DetailViewModel
                     runCatching {
                         downloads.enqueue(
                             fileId = fileId,
-                            serverId = serverId,
                             mediaId = mediaId,
                             title = title,
                             subtitle = subtitle,

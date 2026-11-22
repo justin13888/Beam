@@ -123,7 +123,10 @@ impl AdminUserService {
         self.sessions
             .delete_all_for_user(&target.id.to_string())
             .await
-            .map_err(|e| AdminUsersError::Internal(e.to_string()))
+            .map_err(|e| {
+                crate::metrics::session_store_failed();
+                AdminUsersError::Internal(e.to_string())
+            })
     }
 
     /// The access policy of the account `id` names.

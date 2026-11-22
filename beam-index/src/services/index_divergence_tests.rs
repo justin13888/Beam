@@ -1,10 +1,9 @@
 //! Duplicate and runtime-divergence warnings (issue #88).
 
+use super::test_harness::IndexServiceBuilder;
 use super::*;
 use crate::services::admin_log::LocalAdminLogService;
 use crate::services::admin_log::NoOpAdminLogService;
-use crate::services::hash::MockHashService;
-use crate::services::media_info::MockMediaInfoService;
 use crate::services::notification::EventLevel;
 use crate::services::notification::InMemoryNotificationService;
 use beam_domain::models::MediaFile;
@@ -12,12 +11,9 @@ use beam_domain::repositories::AdminLogRepository;
 use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
 use beam_domain::repositories::file::MockFileRepository;
 use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
-use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
 use beam_domain::repositories::movie::MockMovieRepository;
 use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
-use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
-use beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository;
-use std::path::PathBuf;
+use beam_domain::test_utils::{create_media_file, media_file};
 
 // ─── runtime-divergence detection (issue #88) ──────────────────────────────
 
@@ -31,44 +27,31 @@ fn make_divergence_service(
     notification: Arc<InMemoryNotificationService>,
     admin_log: Arc<dyn AdminLogService>,
 ) -> LocalIndexService {
-    LocalIndexService::new(
-        Arc::new(InMemoryLibraryRepository::default()),
-        file_repo,
-        movie_repo,
-        Arc::new(InMemoryShowRepository::default()),
-        Arc::new(InMemoryMediaStreamRepository::default()),
-        Arc::new(MockHashService::new()),
-        Arc::new(MockMediaInfoService::new()),
-        notification,
-        admin_log,
-        Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-    )
+    IndexServiceBuilder::new()
+        .file_repo(file_repo)
+        .movie_repo(movie_repo)
+        .notifications(notification)
+        .admin_log(admin_log)
+        .build()
 }
 
-fn make_file_with_content(
-    content: Option<MediaFileContent>,
+/// A classified file at `path`, probed at `duration_secs` when that is set.
+fn file_with_content(
+    content: MediaFileContent,
     duration_secs: Option<f64>,
     path: &str,
-) -> MediaFile {
-    MediaFile {
-        id: Uuid::new_v4(),
-        library_id: Uuid::new_v4(),
-        path: PathBuf::from(path),
-        hash: 0,
-        size_bytes: 1024,
-        mtime: None,
-        identity: None,
-        mime_type: None,
+) -> CreateMediaFile {
+    CreateMediaFile {
         duration: duration_secs.map(Duration::from_secs_f64),
-        container_format: None,
-        content,
+        content: Some(content),
         status: FileStatus::Known,
-        classifier_version: 0,
-        container_tags: None,
-        scanned_at: Utc::now(),
-        updated_at: Utc::now(),
-        missing_since: None,
+        ..create_media_file(Uuid::new_v4(), path)
     }
+}
+
+/// Store `file` through the repository, returning the row it stored.
+async fn seed(file_repo: &InMemoryFileRepository, file: CreateMediaFile) -> MediaFile {
+    file_repo.create(file).await.expect("the file is stored")
 }
 
 /// Seed a movie with two entries (one file each) under the same movie id and
@@ -115,22 +98,24 @@ async fn seed_two_movie_renditions(
         .await
         .unwrap();
 
-    let file_a = make_file_with_content(
-        Some(MediaFileContent::movie(entry_a.id)),
-        first_secs,
-        "/media/movie-a.mkv",
-    );
-    let file_b = make_file_with_content(
-        Some(MediaFileContent::movie(entry_b.id)),
-        second_secs,
-        "/media/movie-b.mkv",
-    );
-    file_repo
-        .files
-        .lock()
-        .unwrap()
-        .insert(file_a.id, file_a.clone());
-    file_repo.files.lock().unwrap().insert(file_b.id, file_b);
+    let file_a = seed(
+        &file_repo,
+        file_with_content(
+            MediaFileContent::movie(entry_a.id),
+            first_secs,
+            "/media/movie-a.mkv",
+        ),
+    )
+    .await;
+    seed(
+        &file_repo,
+        file_with_content(
+            MediaFileContent::movie(entry_b.id),
+            second_secs,
+            "/media/movie-b.mkv",
+        ),
+    )
+    .await;
 
     let service =
         make_divergence_service(file_repo, movie_repo, notification.clone(), admin_log_svc);
@@ -166,6 +151,94 @@ async fn test_divergence_movie_wildly_different_runtimes_warns() {
             && l.category == AdminLogCategory::LibraryScan
             && l.message.contains("Runtime mismatch")
     }));
+}
+
+/// When several renditions diverge, the one warning names the one that
+/// diverges most and counts them all, and the admin log lists each with its
+/// runtime; a rendition within the thresholds is in neither.
+#[tokio::test]
+async fn test_divergence_names_the_worst_of_several_diverging_renditions() {
+    use beam_domain::models::{CreateMovie, CreateMovieEntry};
+
+    let movie_repo = Arc::new(InMemoryMovieRepository::default());
+    let file_repo = Arc::new(InMemoryFileRepository::default());
+    let notification = Arc::new(InMemoryNotificationService::new());
+    let admin_log_repo = Arc::new(InMemoryAdminLogRepository::default());
+    let library_id = Uuid::new_v4();
+    let movie = movie_repo
+        .find_or_create_by_identity(CreateMovie::new("Some Movie".to_string(), None, None))
+        .await
+        .unwrap();
+    // 40 minutes checked against 90, 150 and 41: the first two diverge, the
+    // 150 most, and the 41 is within the thresholds.
+    let mut checked = None;
+    for (edition, minutes, path) in [
+        (None, 40.0, "/media/checked.mkv"),
+        (Some("Extended"), 90.0, "/media/extended.mkv"),
+        (Some("Ultimate"), 150.0, "/media/ultimate.mkv"),
+        (Some("Theatrical"), 41.0, "/media/theatrical.mkv"),
+    ] {
+        let entry = movie_repo
+            .find_or_create_entry(CreateMovieEntry {
+                library_id,
+                movie_id: movie.id,
+                edition: edition.map(str::to_string),
+            })
+            .await
+            .unwrap();
+        let file = file_repo
+            .create(CreateMediaFile {
+                content: Some(MediaFileContent::movie(entry.id)),
+                status: FileStatus::Known,
+                duration: Some(Duration::from_secs_f64(minutes * 60.0)),
+                ..create_media_file(library_id, path)
+            })
+            .await
+            .unwrap();
+        checked.get_or_insert(file);
+    }
+    let service = make_divergence_service(
+        file_repo,
+        movie_repo,
+        notification.clone(),
+        Arc::new(LocalAdminLogService::new(
+            admin_log_repo.clone() as Arc<dyn AdminLogRepository>
+        )),
+    );
+
+    service
+        .check_and_report_runtime_divergence(&checked.unwrap())
+        .await;
+
+    let events = notification.published_events();
+    assert_eq!(events.len(), 1, "one warning for all of them");
+    assert_eq!(
+        events[0].message,
+        "Runtime mismatch: '/media/checked.mkv' (40 min) differs from '/media/ultimate.mkv' \
+         (150 min); 2 rendition(s) of the same title diverge -- likely a misnamed or \
+         mismatched file"
+    );
+    let logs = admin_log_repo.list(100, 0).await.unwrap();
+    assert_eq!(logs.len(), 1);
+    let mut siblings: Vec<(String, f64)> = logs[0].details.as_ref().unwrap()["siblings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|sibling| {
+            (
+                sibling["path"].as_str().unwrap().to_string(),
+                sibling["duration_secs"].as_f64().unwrap(),
+            )
+        })
+        .collect();
+    siblings.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        siblings,
+        [
+            ("/media/extended.mkv".to_string(), 90.0 * 60.0),
+            ("/media/ultimate.mkv".to_string(), 150.0 * 60.0),
+        ]
+    );
 }
 
 /// One part of a multi-part movie (issue #233) lasts that part: it is
@@ -255,22 +328,24 @@ async fn test_divergence_short_content_guard_no_warning() {
     let file_repo = Arc::new(InMemoryFileRepository::default());
     let notification = Arc::new(InMemoryNotificationService::new());
 
-    let file_a = make_file_with_content(
-        Some(MediaFileContent::episode(episode_id)),
-        Some(2.0 * 60.0),
-        "/media/ep-a.mkv",
-    );
-    let file_b = make_file_with_content(
-        Some(MediaFileContent::episode(episode_id)),
-        Some(3.0 * 60.0),
-        "/media/ep-b.mkv",
-    );
-    file_repo
-        .files
-        .lock()
-        .unwrap()
-        .insert(file_a.id, file_a.clone());
-    file_repo.files.lock().unwrap().insert(file_b.id, file_b);
+    let file_a = seed(
+        &file_repo,
+        file_with_content(
+            MediaFileContent::episode(episode_id),
+            Some(2.0 * 60.0),
+            "/media/ep-a.mkv",
+        ),
+    )
+    .await;
+    seed(
+        &file_repo,
+        file_with_content(
+            MediaFileContent::episode(episode_id),
+            Some(3.0 * 60.0),
+            "/media/ep-b.mkv",
+        ),
+    )
+    .await;
 
     let service = make_divergence_service(
         file_repo,
@@ -294,22 +369,24 @@ async fn test_divergence_episode_siblings_warn() {
     let file_repo = Arc::new(InMemoryFileRepository::default());
     let notification = Arc::new(InMemoryNotificationService::new());
 
-    let file_a = make_file_with_content(
-        Some(MediaFileContent::episode(episode_id)),
-        Some(30.0 * 60.0),
-        "/media/ep-a.mkv",
-    );
-    let file_b = make_file_with_content(
-        Some(MediaFileContent::episode(episode_id)),
-        Some(60.0 * 60.0),
-        "/media/ep-b.mkv",
-    );
-    file_repo
-        .files
-        .lock()
-        .unwrap()
-        .insert(file_a.id, file_a.clone());
-    file_repo.files.lock().unwrap().insert(file_b.id, file_b);
+    let file_a = seed(
+        &file_repo,
+        file_with_content(
+            MediaFileContent::episode(episode_id),
+            Some(30.0 * 60.0),
+            "/media/ep-a.mkv",
+        ),
+    )
+    .await;
+    seed(
+        &file_repo,
+        file_with_content(
+            MediaFileContent::episode(episode_id),
+            Some(60.0 * 60.0),
+            "/media/ep-b.mkv",
+        ),
+    )
+    .await;
 
     let service = make_divergence_service(
         file_repo,
@@ -337,34 +414,39 @@ async fn test_divergence_multi_episode_sibling_is_not_compared_with_a_single_epi
     let file_repo = Arc::new(InMemoryFileRepository::default());
     let notification = Arc::new(InMemoryNotificationService::new());
 
-    let single = make_file_with_content(
-        Some(MediaFileContent::episode(episode_id)),
-        Some(30.0 * 60.0),
-        "/media/S01E01.mkv",
-    );
-    let double = make_file_with_content(
-        Some(MediaFileContent::Episode {
-            episode_id,
-            last_episode_number: Some(2),
-        }),
-        Some(60.0 * 60.0),
-        "/media/S01E01E02.mkv",
-    );
-    let other_double = make_file_with_content(
-        Some(MediaFileContent::Episode {
-            episode_id,
-            last_episode_number: Some(2),
-        }),
-        Some(20.0 * 60.0),
-        "/media/S01E01E02.short.mkv",
-    );
-    for file in [&single, &double, &other_double] {
-        file_repo
-            .files
-            .lock()
-            .unwrap()
-            .insert(file.id, (*file).clone());
-    }
+    let single = seed(
+        &file_repo,
+        file_with_content(
+            MediaFileContent::episode(episode_id),
+            Some(30.0 * 60.0),
+            "/media/S01E01.mkv",
+        ),
+    )
+    .await;
+    let double = seed(
+        &file_repo,
+        file_with_content(
+            MediaFileContent::Episode {
+                episode_id,
+                last_episode_number: Some(2),
+            },
+            Some(60.0 * 60.0),
+            "/media/S01E01E02.mkv",
+        ),
+    )
+    .await;
+    seed(
+        &file_repo,
+        file_with_content(
+            MediaFileContent::Episode {
+                episode_id,
+                last_episode_number: Some(2),
+            },
+            Some(20.0 * 60.0),
+            "/media/S01E01E02.short.mkv",
+        ),
+    )
+    .await;
 
     let service = make_divergence_service(
         file_repo,
@@ -420,11 +502,12 @@ async fn test_divergence_check_never_fails_on_repo_error() {
         Arc::new(NoOpAdminLogService),
     );
 
-    let file = make_file_with_content(
-        Some(MediaFileContent::episode(Uuid::new_v4())),
-        Some(45.0 * 60.0),
-        "/media/only.mkv",
-    );
+    let file = MediaFile {
+        duration: Some(Duration::from_secs(45 * 60)),
+        content: Some(MediaFileContent::episode(Uuid::new_v4())),
+        status: FileStatus::Known,
+        ..media_file(Uuid::new_v4(), "/media/only.mkv")
+    };
 
     // Must complete (infallible) and publish nothing.
     service.check_and_report_runtime_divergence(&file).await;

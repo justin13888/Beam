@@ -1,4 +1,4 @@
-# An ingress in front of a NodePort Service: clients can reach the server
+# An ingress in front of a NodePort Service, and metrics on: clients can reach the server
 # without the ingress, so X-Forwarded-For must not be trusted by default.
 server:
   publicUrl: https://beam.example.test
@@ -9,3 +9,7 @@ service:
 ingress:
   enabled: true
   host: beam.example.test
+# Metrics on with every monitoring object left off: annotations only, so the
+# ServiceMonitor, PrometheusRule and dashboard must each render nothing.
+metrics:
+  enabled: true

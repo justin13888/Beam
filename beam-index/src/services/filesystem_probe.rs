@@ -12,8 +12,9 @@
 //! `TempDir` cannot be put on NFS. The classification tables are pure
 //! functions so they are tested directly.
 
+use std::collections::HashSet;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Whether a filesystem delivers native change events for changes made
 /// anywhere, or only for changes made through this host's kernel.
@@ -25,9 +26,27 @@ pub enum FilesystemKind {
     Network,
 }
 
-/// Answers which [`FilesystemKind`] a path lives on.
+/// Answers which [`FilesystemKind`] a path lives on, and which other
+/// filesystems are mounted beneath it.
 pub trait FilesystemProbe: Send + Sync + std::fmt::Debug {
     fn kind(&self, path: &Path) -> io::Result<FilesystemKind>;
+
+    /// One directory on each filesystem mounted beneath `root`, other than
+    /// the one `root` itself is on (issue #452).
+    ///
+    /// A local root can hold a network share mounted inside it, and native
+    /// events miss what other hosts change there just as they would at the
+    /// root; [`Self::kind`] of each directory returned says whether one is.
+    /// One directory per filesystem is enough, because the kind is a property
+    /// of the filesystem. Symbolic links are not followed: they are not part
+    /// of a library. A subtree that cannot be read is skipped, so the answer
+    /// covers what the watcher itself can see.
+    ///
+    /// Nothing, by default: the answer before mounts were looked for, and
+    /// the right one for a probe that is only ever asked about files.
+    fn filesystems_beneath(&self, _root: &Path) -> io::Result<Vec<PathBuf>> {
+        Ok(Vec::new())
+    }
 }
 
 /// Linux `statfs(2)` `f_type` magic numbers of filesystems whose contents
@@ -89,6 +108,56 @@ impl FilesystemProbe for StatfsFilesystemProbe {
     fn kind(&self, path: &Path) -> io::Result<FilesystemKind> {
         statfs_kind(path)
     }
+
+    fn filesystems_beneath(&self, root: &Path) -> io::Result<Vec<PathBuf>> {
+        walk_filesystems_beneath(root)
+    }
+}
+
+/// The first of `directories` on each device other than `root_device`.
+///
+/// `directories` is a pre-order walk, so the first directory seen on a
+/// device is the top of that filesystem's subtree -- its mount point, or the
+/// first directory of it the walk could reach.
+pub fn first_directory_per_device(
+    root_device: u64,
+    directories: impl IntoIterator<Item = (PathBuf, u64)>,
+) -> Vec<PathBuf> {
+    let mut seen = HashSet::from([root_device]);
+    directories
+        .into_iter()
+        .filter(|(_, device)| seen.insert(*device))
+        .map(|(path, _)| path)
+        .collect()
+}
+
+/// Walk `root` comparing each directory's `st_dev` with the root's: one
+/// `lstat` per directory, none per file.
+#[cfg(unix)]
+fn walk_filesystems_beneath(root: &Path) -> io::Result<Vec<PathBuf>> {
+    use std::os::unix::fs::MetadataExt;
+
+    let root_device = std::fs::metadata(root)?.dev();
+    let directories = walkdir::WalkDir::new(root)
+        .min_depth(1)
+        .follow_links(false)
+        .into_iter()
+        // An unreadable entry is skipped, and walkdir does not descend into a
+        // directory it could not read.
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_dir())
+        .filter_map(|entry| {
+            let device = entry.metadata().ok()?.dev();
+            Some((entry.into_path(), device))
+        });
+    Ok(first_directory_per_device(root_device, directories))
+}
+
+/// Without `st_dev` a mount point cannot be told apart, so nothing beneath a
+/// root is reported -- the behaviour before mounts were looked for.
+#[cfg(not(unix))]
+fn walk_filesystems_beneath(_root: &Path) -> io::Result<Vec<PathBuf>> {
+    Ok(Vec::new())
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -153,11 +222,44 @@ pub mod in_memory {
         fn kind(&self, _path: &Path) -> io::Result<FilesystemKind> {
             Err(io::Error::from(io::ErrorKind::PermissionDenied))
         }
+
+        fn filesystems_beneath(&self, _root: &Path) -> io::Result<Vec<PathBuf>> {
+            Err(io::Error::from(io::ErrorKind::PermissionDenied))
+        }
+    }
+
+    /// Local storage with other filesystems mounted at the given directories
+    /// -- how a test mounts an NFS share inside a `TempDir`. A path's kind is
+    /// that of the innermost mount holding it, and local outside them all.
+    #[derive(Debug, Clone, Default)]
+    pub struct MountedFilesystemProbe {
+        pub mounts: Vec<(PathBuf, FilesystemKind)>,
+    }
+
+    impl FilesystemProbe for MountedFilesystemProbe {
+        fn kind(&self, path: &Path) -> io::Result<FilesystemKind> {
+            Ok(self
+                .mounts
+                .iter()
+                .filter(|(mount, _)| path.starts_with(mount))
+                .max_by_key(|(mount, _)| mount.components().count())
+                .map_or(FilesystemKind::Local, |(_, kind)| *kind))
+        }
+
+        fn filesystems_beneath(&self, root: &Path) -> io::Result<Vec<PathBuf>> {
+            Ok(self
+                .mounts
+                .iter()
+                .map(|(mount, _)| mount)
+                .filter(|mount| mount.starts_with(root) && mount.as_path() != root)
+                .cloned()
+                .collect())
+        }
     }
 }
 
 #[cfg(any(test, feature = "test-utils"))]
-pub use in_memory::{FailingFilesystemProbe, FixedFilesystemProbe};
+pub use in_memory::{FailingFilesystemProbe, FixedFilesystemProbe, MountedFilesystemProbe};
 
 #[cfg(test)]
 mod tests {
@@ -241,6 +343,105 @@ mod tests {
         assert_eq!(
             StatfsFilesystemProbe.kind(dir.path()).unwrap(),
             FilesystemKind::Local
+        );
+    }
+
+    /// The walk is pre-order, so a filesystem's first directory is where it
+    /// is mounted; nothing after it on the same device, and nothing on the
+    /// root's own device, is reported.
+    #[test]
+    fn the_first_directory_on_each_other_device_is_reported() {
+        let walk = [
+            ("/m/a", 1),
+            ("/m/nfs", 2),
+            ("/m/nfs/deeper", 2),
+            ("/m/nfs/usb", 3),
+            ("/m/b", 1),
+            ("/m/bind-of-nfs", 2),
+        ]
+        .map(|(path, device)| (PathBuf::from(path), device));
+        assert_eq!(
+            first_directory_per_device(1, walk),
+            [PathBuf::from("/m/nfs"), PathBuf::from("/m/nfs/usb")],
+        );
+    }
+
+    mod properties {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            /// Each device other than the root's is reported exactly once,
+            /// by the first directory the walk met on it, in walk order.
+            #[test]
+            fn every_other_device_is_reported_once_by_its_first_directory(
+                root_device in 0u64..4,
+                devices in prop::collection::vec(0u64..4, 0..30),
+            ) {
+                let walk: Vec<(PathBuf, u64)> = devices
+                    .iter()
+                    .enumerate()
+                    .map(|(n, device)| (PathBuf::from(format!("/d{n}")), *device))
+                    .collect();
+                let reported = first_directory_per_device(root_device, walk.clone());
+
+                let expected: Vec<PathBuf> = walk
+                    .iter()
+                    .enumerate()
+                    .filter(|(n, (_, device))| {
+                        *device != root_device
+                            && walk.iter().position(|(_, d)| d == device) == Some(*n)
+                    })
+                    .map(|(_, (path, _))| path.clone())
+                    .collect();
+                prop_assert_eq!(reported, expected);
+            }
+        }
+    }
+
+    /// The real walk over a tree on one filesystem: nested directories are
+    /// on the root's device, and a symbolic link to another directory is not
+    /// followed, so nothing is reported.
+    #[cfg(unix)]
+    #[test]
+    fn a_tree_on_one_filesystem_has_nothing_mounted_beneath_it() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("a/b/c")).unwrap();
+        // `/dev` is a filesystem of its own on Linux and macOS alike.
+        std::os::unix::fs::symlink("/dev", dir.path().join("a/linked")).unwrap();
+
+        assert_eq!(
+            StatfsFilesystemProbe
+                .filesystems_beneath(dir.path())
+                .unwrap(),
+            Vec::<PathBuf>::new()
+        );
+    }
+
+    /// The real walk finds a real mount. `/dev` holds mounts of its own on
+    /// Linux (`/dev/shm`, `/dev/pts`, `/dev/mqueue`), found in the mount table
+    /// rather than assumed; a host with none skips the assertion.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_filesystem_mounted_beneath_the_root_is_reported() {
+        let Ok(table) = std::fs::read_to_string("/proc/self/mountinfo") else {
+            return;
+        };
+        let mounted: Vec<PathBuf> = table
+            .lines()
+            .filter_map(|line| line.split(' ').nth(4).map(PathBuf::from))
+            .filter(|point| point.parent() == Some(Path::new("/dev")))
+            .collect();
+        if mounted.is_empty() {
+            return;
+        }
+
+        let reported = StatfsFilesystemProbe
+            .filesystems_beneath(Path::new("/dev"))
+            .unwrap();
+        assert!(
+            mounted.iter().any(|point| reported.contains(point)),
+            "none of {mounted:?} was reported beneath /dev: {reported:?}"
         );
     }
 

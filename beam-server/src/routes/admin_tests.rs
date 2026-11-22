@@ -788,8 +788,11 @@ async fn an_admin_creates_a_library_and_it_is_then_listed() {
 // ─── Library scans (issue #181) ──────────────────────────────────────────────
 
 /// Create a library through the API -- the fixture's validator resolves it to
-/// the fixture's library root -- and return it with its id parsed.
+/// the fixture's library root -- and return it with its id parsed once the
+/// scan its creation started (FR-213) has finished, so the test's own scans
+/// are not refused behind it.
 async fn create_movies_library(
+    fixture: &TestFixture,
     client: &TestClient<AppState>,
     token: &str,
 ) -> (Library, uuid::Uuid) {
@@ -804,6 +807,16 @@ async fn create_movies_library(
         .await
         .json();
     let id = created.id;
+    let first = wait_for_scan(fixture, id, finished).await;
+    assert_eq!(
+        (first.trigger, first.state),
+        (
+            beam_index::services::ScanTrigger::Created,
+            beam_index::services::ScanState::Succeeded
+        ),
+        "{:?}",
+        first.failure
+    );
     (created, id)
 }
 
@@ -840,7 +853,7 @@ async fn scanning_a_library_answers_202_with_a_queued_job_that_then_succeeds() {
     let fixture = make_scan_test_state(Gate::Open);
     let client = build_client(&fixture);
     let token = seed_user_session(&fixture, true).await;
-    let (created, library_id) = create_movies_library(&client, &token).await;
+    let (created, library_id) = create_movies_library(&fixture, &client, &token).await;
     let video = fixture.library_root().join("Heat (1995).mkv");
     std::fs::write(&video, b"not really a film").unwrap();
 
@@ -885,6 +898,66 @@ async fn scanning_a_library_answers_202_with_a_queued_job_that_then_succeeds() {
     assert!(read.finished_at.is_some());
 }
 
+/// A library created over a folder that already holds a film is scanned at
+/// once (FR-213), without an administrator's scan or the periodic rescan:
+/// the request answers with the first scan's job already registered, and
+/// that scan indexes the file. Held at the hash, the job reads as the
+/// creation's, and it holds the library: an administrator's scan meanwhile
+/// is refused.
+#[tokio::test]
+async fn creating_a_library_scans_what_its_root_already_holds() {
+    let fixture = make_scan_test_state(Gate::Closed);
+    let client = build_client(&fixture);
+    let token = seed_user_session(&fixture, true).await;
+    let video = fixture.library_root().join("Heat (1995).mkv");
+    std::fs::write(&video, b"not really a film").unwrap();
+
+    let created = client
+        .post("/v1/admin/libraries")
+        .cookie("beam_session", &token)
+        .json(&CreateLibraryRequest {
+            name: "Movies".to_string(),
+            root_path: "movies".to_string(),
+        })
+        .send()
+        .await;
+    assert_eq!(created.status(), StatusCode::OK);
+    let created: Library = created.json();
+
+    let read = client
+        .get(&format!("/v1/admin/libraries/{}/scan", created.id))
+        .cookie("beam_session", &token)
+        .send()
+        .await;
+    assert_eq!(read.status(), StatusCode::OK, "the job exists at once");
+    let job: ScanJob = read.json();
+    assert_eq!(job.library_id, created.id);
+    assert_eq!(job.trigger, ScanTrigger::Created);
+
+    wait_for_scan(&fixture, created.id, running).await;
+    let refused = client
+        .post(&format!("/v1/admin/libraries/{}/scan", created.id))
+        .cookie("beam_session", &token)
+        .send()
+        .await;
+    assert_eq!(refused.status(), StatusCode::CONFLICT);
+
+    fixture.open_gate();
+    let done = wait_for_scan(&fixture, created.id, finished).await;
+    assert_eq!(done.id, job.id, "the creation's job is the one that ran");
+    assert_eq!(done.state, beam_index::services::ScanState::Succeeded);
+    assert_eq!(done.progress.added, 1);
+    assert!(
+        fixture
+            .file_repo
+            .find_by_path(&video.to_string_lossy())
+            .await
+            .unwrap()
+            .is_some(),
+        "the first scan indexed the file"
+    );
+}
+
 /// One scan per library at a time: asking again while one runs is a 409 with
 /// its own problem type, and starts nothing. Once it has finished, a new scan
 /// is accepted.
@@ -893,7 +966,7 @@ async fn a_second_scan_while_one_runs_is_409_and_starts_nothing() {
     let fixture = make_scan_test_state(Gate::Closed);
     let client = build_client(&fixture);
     let token = seed_user_session(&fixture, true).await;
-    let (created, library_id) = create_movies_library(&client, &token).await;
+    let (created, library_id) = create_movies_library(&fixture, &client, &token).await;
     std::fs::write(fixture.library_root().join("Heat (1995).mkv"), b"film").unwrap();
     let scan = format!("/v1/admin/libraries/{}/scan", created.id);
 
@@ -948,7 +1021,7 @@ async fn deleting_a_library_mid_scan_waits_for_the_cancelled_scan() {
     let fixture = make_scan_test_state(Gate::Closed);
     let client = build_client(&fixture);
     let token = seed_user_session(&fixture, true).await;
-    let (created, library_id) = create_movies_library(&client, &token).await;
+    let (created, library_id) = create_movies_library(&fixture, &client, &token).await;
     for name in ["Heat (1995).mkv", "Ronin (1998).mkv"] {
         std::fs::write(fixture.library_root().join(name), b"film").unwrap();
     }
@@ -1017,7 +1090,8 @@ async fn scanning_a_library_whose_root_has_gone_is_400_without_a_path() {
     let fixture = make_scan_test_state(Gate::Open);
     let client = build_client(&fixture);
     let token = seed_user_session(&fixture, true).await;
-    let (created, library_id) = create_movies_library(&client, &token).await;
+    let (created, library_id) = create_movies_library(&fixture, &client, &token).await;
+    let first = fixture.index.scan_job(library_id).map(|job| job.id);
     std::fs::remove_dir(fixture.library_root()).unwrap();
 
     let response = client
@@ -1045,21 +1119,37 @@ async fn scanning_a_library_whose_root_has_gone_is_400_without_a_path() {
         "no filesystem path may reach the client: {detail}"
     );
     assert_eq!(
-        fixture.index.scan_job(library_id),
-        None,
-        "no job was registered"
+        fixture.index.scan_job(library_id).map(|job| job.id),
+        first,
+        "no job was registered: the latest is still the creation's"
     );
 }
 
 /// Scan jobs live in memory: a library not scanned since the server started
 /// has none, which is its own 404 -- distinct from a library that does not
-/// exist.
+/// exist. A library whose first scan could not start -- its root gone by
+/// then -- is created all the same, and is such a library.
 #[tokio::test]
 async fn reading_the_scan_of_a_library_never_scanned_is_404_scan_not_found() {
-    let fixture = make_scan_test_state(Gate::Open);
+    // The plain fixture's root does not exist, so the first scan is refused.
+    let fixture = make_test_state();
     let client = build_client(&fixture);
     let token = seed_user_session(&fixture, true).await;
-    let (created, _) = create_movies_library(&client, &token).await;
+    let created = client
+        .post("/v1/admin/libraries")
+        .cookie("beam_session", &token)
+        .json(&CreateLibraryRequest {
+            name: "Movies".to_string(),
+            root_path: "movies".to_string(),
+        })
+        .send()
+        .await;
+    assert_eq!(
+        created.status(),
+        StatusCode::OK,
+        "a first scan that cannot start does not fail the creation"
+    );
+    let created: Library = created.json();
 
     let response = client
         .get(&format!("/v1/admin/libraries/{}/scan", created.id))
@@ -1123,7 +1213,8 @@ async fn scans_are_closed_to_a_regular_user() {
     let fixture = make_scan_test_state(Gate::Open);
     let client = build_client(&fixture);
     let admin = seed_user_session(&fixture, true).await;
-    let (created, library_id) = create_movies_library(&client, &admin).await;
+    let (created, library_id) = create_movies_library(&fixture, &client, &admin).await;
+    let first = fixture.index.scan_job(library_id).map(|job| job.id);
     let token = seed_user_session(&fixture, false).await;
     let scan = format!("/v1/admin/libraries/{}/scan", created.id);
 
@@ -1146,9 +1237,9 @@ async fn scans_are_closed_to_a_regular_user() {
         StatusCode::FORBIDDEN
     );
     assert_eq!(
-        fixture.index.scan_job(library_id),
-        None,
-        "a refused request starts no scan"
+        fixture.index.scan_job(library_id).map(|job| job.id),
+        first,
+        "a refused request starts no scan: the latest is still the creation's"
     );
 }
 

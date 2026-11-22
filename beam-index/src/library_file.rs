@@ -1259,6 +1259,62 @@ mod tests {
              permission test would skip, so run the suite as an unprivileged user"
         );
     }
+
+    mod checked_relative_properties {
+        use super::*;
+        use proptest::prelude::*;
+
+        /// A path built from names, `.`, `..`, empty segments and leading
+        /// or doubled separators -- every way a relative path can try to
+        /// leave its root.
+        fn any_relative() -> impl Strategy<Value = String> {
+            prop::collection::vec(
+                prop::sample::select(vec!["a", "b.mkv", ".", "..", "", "...", ".hidden"]),
+                0..6,
+            )
+            .prop_flat_map(|segments| {
+                (Just(segments.join("/")), any::<bool>())
+                    .prop_map(|(joined, rooted)| if rooted { format!("/{joined}") } else { joined })
+            })
+        }
+
+        proptest! {
+            /// A path `checked_relative` accepts never leaves the root it is
+            /// joined to: it is one or more plain names, the ones the input
+            /// held, and joining it beneath any root stays beneath that root.
+            /// A path naming a parent or the filesystem root is refused.
+            #[test]
+            fn an_accepted_path_never_escapes_its_root(relative in any_relative()) {
+                let relative = Path::new(&relative);
+                let escapes = relative
+                    .components()
+                    .any(|c| matches!(c, Component::ParentDir | Component::RootDir | Component::Prefix(_)));
+
+                match checked_relative(relative) {
+                    Ok(names) => {
+                        prop_assert!(!escapes, "{relative:?} was accepted");
+                        prop_assert!(names.components().count() >= 1);
+                        prop_assert!(names.components().all(|c| matches!(c, Component::Normal(_))));
+                        let kept: Vec<_> = relative
+                            .components()
+                            .filter(|c| matches!(c, Component::Normal(_)))
+                            .collect();
+                        prop_assert_eq!(names.components().collect::<Vec<_>>(), kept);
+                        let root = Path::new("/srv/library");
+                        let joined = root.join(&names);
+                        prop_assert!(joined.starts_with(root) && joined != root);
+                    }
+                    Err(err) => {
+                        prop_assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+                        prop_assert!(
+                            escapes || !relative.components().any(|c| matches!(c, Component::Normal(_))),
+                            "{relative:?} was refused"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// What the suites that hold the indexer to never writing into a library

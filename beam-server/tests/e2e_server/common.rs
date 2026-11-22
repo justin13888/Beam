@@ -64,8 +64,34 @@ impl Admin {
         }
     }
 
-    /// Add the library rooted at `root`, relative to the video directory.
+    /// Add the library rooted at `root`, relative to the video directory,
+    /// once its first scan has indexed what the root held -- so a test's own
+    /// scans are never refused behind that one.
     pub async fn add_library(&self, name: &str, root: &str) -> Uuid {
+        self.add_library_scanned(name, root).await.0
+    }
+
+    /// Add the library rooted at `root`, as [`Self::add_library`]; return it
+    /// with what its first scan found.
+    pub async fn add_library_scanned(
+        &self,
+        name: &str,
+        root: &str,
+    ) -> (Uuid, api::types::ScanProgress) {
+        let library = self.create_library(name, root).await;
+        let first = self.first_scan(library).await;
+        assert_eq!(
+            first.state,
+            api::types::ScanState::Succeeded,
+            "the first scan succeeds: {:?}",
+            first.failure
+        );
+        (library, first.progress)
+    }
+
+    /// Create the library rooted at `root`, relative to the video directory,
+    /// and return at once: its first scan is registered but may not have run.
+    pub async fn create_library(&self, name: &str, root: &str) -> Uuid {
         let body = api::types::CreateLibraryRequest {
             name: name.to_owned(),
             root_path: root.to_owned(),
@@ -76,6 +102,23 @@ impl Admin {
             .unwrap_or_else(|e| panic!("create the library {name}: {e:?}"))
             .into_inner()
             .id
+    }
+
+    /// Wait for the scan creating `library` started (FR-213) to finish, and
+    /// return it.
+    pub async fn first_scan(&self, library: Uuid) -> api::types::ScanJob {
+        let job = self
+            .api
+            .get_library_scan(library)
+            .await
+            .unwrap_or_else(|e| panic!("read the first scan: {e:?}"))
+            .into_inner();
+        assert_eq!(
+            job.trigger,
+            api::types::ScanTrigger::Created,
+            "a new library's latest scan is the one its creation started"
+        );
+        self.finished_scan(library, job.id).await
     }
 
     /// Start a scan of `library` and wait for it to finish; return the job
@@ -235,32 +278,32 @@ pub async fn browse(client: &api::Client, query: Option<&str>) -> Vec<Title> {
 pub fn title_of(item: &api::types::MediaMetadata) -> Title {
     match item {
         api::types::MediaMetadata::MediaMetadataVariant1(movie) => Title {
-            id: movie.movie.id,
-            name: movie.movie.title.original.clone(),
-            year: movie.movie.year,
+            id: movie.id,
+            name: movie.title.original.clone(),
+            year: movie.year,
             is_show: false,
         },
         api::types::MediaMetadata::MediaMetadataVariant0(show) => Title {
-            id: show.show.id,
-            name: show.show.title.original.clone(),
-            year: show.show.year,
+            id: show.id,
+            name: show.title.original.clone(),
+            year: show.year,
             is_show: true,
         },
     }
 }
 
 /// The movie a detail response describes.
-pub fn movie_of(item: api::types::MediaMetadata) -> api::types::MovieMetadata {
+pub fn movie_of(item: api::types::MediaMetadata) -> api::types::MediaMetadataVariant1 {
     match item {
-        api::types::MediaMetadata::MediaMetadataVariant1(movie) => movie.movie,
+        api::types::MediaMetadata::MediaMetadataVariant1(movie) => *movie,
         other => panic!("expected a movie, got {other:?}"),
     }
 }
 
 /// The show a detail response describes.
-pub fn show_of(item: api::types::MediaMetadata) -> api::types::ShowMetadata {
+pub fn show_of(item: api::types::MediaMetadata) -> api::types::MediaMetadataVariant0 {
     match item {
-        api::types::MediaMetadata::MediaMetadataVariant0(show) => show.show,
+        api::types::MediaMetadata::MediaMetadataVariant0(show) => *show,
         other => panic!("expected a show, got {other:?}"),
     }
 }

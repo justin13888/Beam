@@ -463,6 +463,66 @@ async fn an_idp_outage_is_503_and_keeps_the_flow_for_the_next_poll() {
     poll(&harness, &handle).await.assert_status(StatusCode::OK);
 }
 
+/// `beam_auth_logins_total{flow="device"}` (#458): a poll still waiting ends
+/// no sign-in, an IdP outage is an error, a refusal a failure, and an
+/// approval a success.
+#[tokio::test]
+async fn each_poll_that_ends_a_device_sign_in_is_counted_by_result() {
+    use crate::routes::test_support::Recorded;
+
+    let recorder = metrics_util::debugging::DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let _local = metrics::set_default_local_recorder(&recorder);
+    // Sign-ins as `[success, failure, error]` since the previous call, which
+    // drains them.
+    let logins = || {
+        let recorded = Recorded::of(&snapshotter);
+        ["success", "failure", "error"].map(|result| {
+            recorded
+                .counter(
+                    "beam_auth_logins_total",
+                    &[("flow", "device"), ("result", result)],
+                )
+                .unwrap_or(0)
+        })
+    };
+
+    let harness = harness(FakeOidcClient::default().with_device_script(vec![
+        Ok(DevicePoll::Pending),
+        Err(OidcError::Exchange("connection refused".to_owned())),
+        Ok(DevicePoll::Complete(identity(json!({})))),
+    ]));
+    let handle = started(&harness).await;
+    let wait = || {
+        harness
+            .clock
+            .advance(Duration::from_secs(FAKE_DEVICE_INTERVAL_SECS))
+    };
+
+    poll(&harness, &handle)
+        .await
+        .assert_status(StatusCode::ACCEPTED);
+    assert_eq!(logins(), [0, 0, 0], "a pending poll ends nothing");
+
+    wait();
+    poll(&harness, &handle)
+        .await
+        .assert_status(StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(logins(), [0, 0, 1]);
+
+    wait();
+    poll(&harness, &handle).await.assert_status(StatusCode::OK);
+    assert_eq!(logins(), [1, 0, 0]);
+
+    let refusing =
+        self::harness(FakeOidcClient::default().with_device_script(vec![Ok(DevicePoll::Denied)]));
+    let refused = started(&refusing).await;
+    poll(&refusing, &refused)
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+    assert_eq!(logins(), [0, 1, 0]);
+}
+
 #[tokio::test]
 async fn approval_mints_a_session_the_client_presents_as_the_cookie() {
     let harness = harness(

@@ -1,0 +1,189 @@
+{{- if and .Values.metrics.enabled .Values.metrics.prometheusRule.enabled }}
+{{- $rule := .Values.metrics.prometheusRule }}
+{{- $sel := include "beam.metricsSelector" . }}
+{{- $alertLabels := $rule.alertLabels }}
+{{- /*
+Every metric named here must be one the server describes: a test in
+beam-server/src/metrics_tests.rs reads this file and fails on any it does not.
+Prometheus's own `{{ $labels.x }}` is written as {{ "{{" }} ... {{ "}}" }} so
+Helm leaves it for the alert template.
+*/}}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "beam.fullname" . }}
+  labels:
+    {{- include "beam.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+    {{- with $rule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: beam.availability
+      rules:
+        - alert: BeamTargetDown
+          expr: up{ {{- $sel -}} } == 0 or absent(up{ {{- $sel -}} })
+          for: 5m
+          labels:
+            severity: critical
+            {{- with $alertLabels }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          annotations:
+            summary: Beam's /metrics cannot be scraped.
+            description: >-
+              Prometheus has not scraped {{ include "beam.fullname" . }} in {{ .Release.Namespace }}
+              for 5 minutes: the server is down, restarting, or metrics are disabled.
+        - alert: BeamDependencyDown
+          expr: beam_dependency_up{ {{- $sel -}} } == 0
+          for: 5m
+          labels:
+            severity: critical
+            {{- with $alertLabels }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          annotations:
+            summary: A Beam dependency fails its health probe.
+            description: >-
+              The {{ "{{" }} $labels.dependency {{ "}}" }} check of /v1/health has failed for
+              5 minutes, so the server answers 503 and is not ready.
+    - name: beam.http
+      rules:
+        - alert: BeamHighErrorRatio
+          expr: |-
+            sum(rate(beam_http_requests_total{ {{- $sel -}} ,status=~"5.."}[5m]))
+              / sum(rate(beam_http_requests_total{ {{- $sel -}} }[5m]))
+              > {{ $rule.errorRatio }}
+          for: 10m
+          labels:
+            severity: warning
+            {{- with $alertLabels }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          annotations:
+            summary: Beam answers too many requests with a 5xx.
+            description: >-
+              {{ "{{" }} $value | humanizePercentage {{ "}}" }} of responses over the last 5 minutes
+              were 5xx (threshold {{ $rule.errorRatio }}).
+        - alert: BeamHighApiLatency
+          expr: |-
+            histogram_quantile(0.95,
+              sum by (le) (rate(beam_http_request_duration_seconds_bucket{ {{- $sel -}} ,route=~"/v1/.*"}[5m])))
+              > {{ $rule.latencyP95Seconds }}
+          for: 10m
+          labels:
+            severity: warning
+            {{- with $alertLabels }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          annotations:
+            summary: Beam's API is slow.
+            description: >-
+              The 95th percentile time to a /v1 response head is
+              {{ "{{" }} $value | humanizeDuration {{ "}}" }} (threshold {{ $rule.latencyP95Seconds }}s).
+    - name: beam.database
+      rules:
+        - alert: BeamDatabasePoolSaturated
+          expr: |-
+            max(beam_db_pool_connections{ {{- $sel -}} ,state="in_use"})
+              / max(beam_db_pool_max{ {{- $sel -}} })
+              > {{ $rule.dbPoolSaturation }}
+          for: 10m
+          labels:
+            severity: warning
+            {{- with $alertLabels }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          annotations:
+            summary: Beam's database pool is nearly exhausted.
+            description: >-
+              {{ "{{" }} $value | humanizePercentage {{ "}}" }} of the pool's connections are in use
+              (threshold {{ $rule.dbPoolSaturation }}); requests queue for a connection.
+    - name: beam.indexing
+      rules:
+        - alert: BeamLibraryScanStale
+          expr: |-
+            (time() - beam_scan_last_success_timestamp_seconds{ {{- $sel -}} })
+              > {{ $rule.scanStaleHours }} * 3600
+            and beam_scan_last_success_timestamp_seconds{ {{- $sel -}} } > 0
+          for: 15m
+          labels:
+            severity: warning
+            {{- with $alertLabels }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          annotations:
+            summary: A Beam library has not been scanned successfully.
+            description: >-
+              Library {{ "{{" }} $labels.library {{ "}}" }} last finished a scan
+              {{ "{{" }} $value | humanizeDuration {{ "}}" }} ago (threshold {{ $rule.scanStaleHours }}h).
+        - alert: BeamLibraryScanFailing
+          # The server creates a library's counter at 1 on its first failure,
+          # so increase() alone never sees that failure: a series that has
+          # appeared within the window fires too.
+          expr: |-
+            increase(beam_scan_failures_total{ {{- $sel -}} }[1h]) > 0
+              or (beam_scan_failures_total{ {{- $sel -}} }
+                unless beam_scan_failures_total{ {{- $sel -}} } offset 1h)
+          labels:
+            severity: warning
+            {{- with $alertLabels }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          annotations:
+            summary: A Beam library scan failed.
+            description: >-
+              A scan of library {{ "{{" }} $labels.library {{ "}}" }} failed or was interrupted in
+              the last hour; the server log has the cause.
+        - alert: BeamWatcherErrors
+          # As BeamLibraryScanFailing: a counter created by its first error
+          # fires through the newly-appeared half.
+          expr: |-
+            increase(beam_watcher_errors_total{ {{- $sel -}} }[15m]) > 0
+              or (beam_watcher_errors_total{ {{- $sel -}} }
+                unless beam_watcher_errors_total{ {{- $sel -}} } offset 15m)
+          labels:
+            severity: warning
+            {{- with $alertLabels }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          annotations:
+            summary: Beam's filesystem watcher is failing.
+            description: >-
+              The watcher of library {{ "{{" }} $labels.library {{ "}}" }} reported errors in the last
+              15 minutes, so changes may reach Beam only at the next scan.
+        - alert: BeamWatcherPolling
+          expr: beam_watcher_mode{ {{- $sel -}} ,mode="poll"} == 1
+          for: 30m
+          labels:
+            severity: info
+            {{- with $alertLabels }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          annotations:
+            summary: A Beam library is polled rather than watched.
+            description: >-
+              Library {{ "{{" }} $labels.library {{ "}}" }} is observed by polling: it is on a network
+              filesystem, or past the node's fs.inotify.max_user_watches. New files take up to
+              watch.pollIntervalSeconds to appear.
+    - name: beam.enrichment
+      rules:
+        - alert: BeamProviderFailing
+          expr: |-
+            sum by (provider) (rate(beam_provider_requests_total{ {{- $sel -}} ,result=~"transport_error|provider_error"}[15m]))
+              / sum by (provider) (rate(beam_provider_requests_total{ {{- $sel -}} ,result!="not_configured"}[15m]))
+              > {{ $rule.providerFailureRatio }}
+          for: 15m
+          labels:
+            severity: warning
+            {{- with $alertLabels }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          annotations:
+            summary: A metadata provider is failing.
+            description: >-
+              {{ "{{" }} $value | humanizePercentage {{ "}}" }} of requests to
+              {{ "{{" }} $labels.provider {{ "}}" }} ended in a transport or provider error over the
+              last 15 minutes (threshold {{ $rule.providerFailureRatio }}).
+{{- end }}

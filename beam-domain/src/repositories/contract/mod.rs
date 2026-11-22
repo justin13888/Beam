@@ -32,6 +32,7 @@ mod genre;
 mod language_preference;
 mod library;
 mod library_shape;
+mod markers;
 mod media_stream;
 mod movie;
 mod person;
@@ -128,8 +129,15 @@ pub mod fixture {
         /// The file repository over the same store.
         fn files(&self) -> &dyn crate::repositories::FileRepository;
 
+        /// The watch-state repository over the same store, which re-homing
+        /// an episode onto another carries rows through.
+        fn watch_state(&self) -> &dyn crate::repositories::WatchStateRepository;
+
         /// A library that exists as far as the backing store is concerned.
         async fn new_library(&self) -> Uuid;
+
+        /// A user that exists as far as the backing store is concerned.
+        async fn new_user(&self) -> Uuid;
 
         /// A show titled `title`, created at `created_at`, with no identity
         /// key -- a row from before keys existed, which the trait itself can
@@ -380,6 +388,18 @@ pub mod fixture {
         async fn new_file(&self) -> Uuid;
     }
 
+    /// Everything the [`crate::marker_repository_contract`] suite needs: the
+    /// repository under contract and the files a marker belongs to, which a
+    /// real Postgres holds to a foreign key.
+    #[async_trait::async_trait]
+    pub trait MarkerFixture: Send + Sync {
+        /// The repository under contract.
+        fn repo(&self) -> &dyn crate::repositories::MarkerRepository;
+
+        /// A video file that exists as far as the backing store is concerned.
+        async fn new_file(&self) -> Uuid;
+    }
+
     /// Everything the [`crate::admin_log_repository_contract`] suite needs:
     /// a log of its own -- listing and counting are global -- and the clock
     /// it stamps entries from, so entries are ordered without sleeping.
@@ -392,14 +412,21 @@ pub mod fixture {
     }
 
     /// Everything the [`crate::library_repository_contract`] suite needs: a
-    /// store of its own -- listing and counting are global -- and the file
-    /// store whose rows a library's file count is read from.
+    /// store of its own -- listing and counting are global -- the file store
+    /// whose rows a library's file count is read from, and the title stores
+    /// its title count resolves those files through.
     pub trait LibraryRepositoryFixture: Send + Sync {
         /// The repository under contract, empty when the fixture is made.
         fn repo(&self) -> &dyn crate::repositories::LibraryRepository;
 
         /// The file store sharing the repository's backing store.
         fn files(&self) -> &dyn crate::repositories::FileRepository;
+
+        /// The movie store sharing the repository's backing store.
+        fn movies(&self) -> &dyn crate::repositories::MovieRepository;
+
+        /// The show store sharing the repository's backing store.
+        fn shows(&self) -> &dyn crate::repositories::ShowRepository;
     }
 
     /// Everything the [`crate::media_stream_repository_contract`] suite

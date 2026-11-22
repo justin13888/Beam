@@ -2,8 +2,9 @@
 
 ## Status
 
-Accepted. Closes the freeze [#190](https://github.com/justin13888/beam/issues/190) set out to make,
-with one item still waiting on a spargen release ([#300](https://github.com/justin13888/beam/issues/300)).
+Accepted. Closes the freeze [#190](https://github.com/justin13888/beam/issues/190) set out to make.
+Its last item, which waited on a spargen release, landed in
+[#300](https://github.com/justin13888/beam/issues/300) before the freeze shipped.
 Builds on [ADR-0010](ADR-0010-openapi-3-2-kynos.md) and [ADR-0012](ADR-0012-native-client-rust-core.md).
 
 ## Context
@@ -30,9 +31,10 @@ document and fails on any violation, with no exception list -- a schema that can
 changed, not waived: R1 (`snake_case` enum values and consts), R2 (no `Dto`/`Response` names), R2b
 (no two enums with one value set), R3 (no bare-array response; every list is a `*Connection`), R4
 (identifiers are UUIDs), R5 (`*_at` instants, `format: date` days, no epochs), R6 (measured numbers
-name their unit), R8 (`info.version` is the release) and R10 (a `409` or `422` names its problem
-type, Kynos's own body rejection aside). `docs/architecture/api.md` describes them; the test is the
-contract. R9 (no single-key `oneOf` wrapper) waits on #300.
+name their unit), R8 (`info.version` is the release), R9 (no single-key `oneOf` or `anyOf`
+wrapper: `MediaMetadata` carries a `media_type` tag beside its fields) and R10 (a `409` or `422`
+names its problem type, Kynos's own body rejection aside). `docs/architecture/api.md` describes
+them; the test is the contract.
 
 **`info.version` is the release, not the contract.** It is `CARGO_PKG_VERSION`, so the document a
 release ships names that release, and the release workflow regenerates both committed copies on the

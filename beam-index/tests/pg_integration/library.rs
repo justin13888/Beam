@@ -1,12 +1,16 @@
 //! The shared `LibraryRepository` contract (issue #349), run against real
 //! SQL: a scan's progress written field by field in one `UPDATE`, a no-op
-//! for a library that does not exist, and a file count read from the `files`
-//! table.
+//! for a library that does not exist, a file count read from the `files`
+//! table, and a title count joined from it (issue #494).
 //!
 //! Listing and counting are global, so each test owns a migrated schema.
 
-use beam_domain::repositories::{FileRepository, LibraryRepository};
-use beam_index::repositories::{SqlFileRepository, SqlLibraryRepository};
+use beam_domain::repositories::{
+    FileRepository, LibraryRepository, MovieRepository, ShowRepository,
+};
+use beam_index::repositories::{
+    SqlFileRepository, SqlLibraryRepository, SqlMovieRepository, SqlShowRepository,
+};
 use beam_test_support::postgres::ScopedSchema;
 
 struct PgFixture {
@@ -14,6 +18,8 @@ struct PgFixture {
     _schema: ScopedSchema,
     repo: SqlLibraryRepository,
     files: SqlFileRepository,
+    movies: SqlMovieRepository,
+    shows: SqlShowRepository,
 }
 
 impl beam_domain::repositories::contract::fixture::LibraryRepositoryFixture for PgFixture {
@@ -23,6 +29,14 @@ impl beam_domain::repositories::contract::fixture::LibraryRepositoryFixture for 
 
     fn files(&self) -> &dyn FileRepository {
         &self.files
+    }
+
+    fn movies(&self) -> &dyn MovieRepository {
+        &self.movies
+    }
+
+    fn shows(&self) -> &dyn ShowRepository {
+        &self.shows
     }
 }
 
@@ -35,7 +49,9 @@ async fn setup() -> PgFixture {
     let db = schema.db();
     PgFixture {
         repo: SqlLibraryRepository::new(db.clone()),
-        files: SqlFileRepository::new(db),
+        files: SqlFileRepository::new(db.clone()),
+        movies: SqlMovieRepository::new(db.clone()),
+        shows: SqlShowRepository::new(db),
         _schema: schema,
     }
 }

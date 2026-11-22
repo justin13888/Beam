@@ -19,14 +19,15 @@ use sea_orm::DbErr;
 use uuid::Uuid;
 
 use beam_domain::models::chapter::{
-    Chapter as StoredChapter, MarkerKind, PlaybackMarker as StoredMarker, markers_from_chapters,
+    Chapter as StoredChapter, MarkerKind, PlaybackMarker as DomainMarker, ResolvedMarker,
+    StoredMarker, resolve_markers,
 };
 use beam_domain::models::language_preferences::LanguagePreferences;
 use beam_domain::models::sidecar::{SidecarSubtitle, SubtitleFormat};
 use beam_domain::models::trickplay::TrickplayRecord;
 use beam_domain::models::{Episode, MediaFile, MediaFileContent, MediaStream, StreamMetadata};
 use beam_domain::repositories::{
-    ChapterRepository, FileRepository, MediaStreamRepository, MovieRepository,
+    ChapterRepository, FileRepository, MarkerRepository, MediaStreamRepository, MovieRepository,
     SidecarSubtitleRepository, TrickplayRepository,
 };
 use beam_domain::utils::disc::{DiscKind, disc_stream_kind};
@@ -163,6 +164,9 @@ pub struct SourceRepositories {
     pub chapters: Arc<dyn ChapterRepository>,
     /// Each file's trickplay record (issue #265).
     pub trickplay: Arc<dyn TrickplayRepository>,
+    /// The markers Beam keeps for each file, which override the ones its
+    /// chapters name (issue #332).
+    pub markers: Arc<dyn MarkerRepository>,
 }
 
 /// Reads a title's sources from the index.
@@ -174,6 +178,7 @@ pub struct SourceCatalog {
     sidecars: Arc<dyn SidecarSubtitleRepository>,
     chapters: Arc<dyn ChapterRepository>,
     trickplay: Arc<dyn TrickplayRepository>,
+    markers: Arc<dyn MarkerRepository>,
 }
 
 impl SourceCatalog {
@@ -185,6 +190,7 @@ impl SourceCatalog {
             sidecars,
             chapters,
             trickplay,
+            markers,
         } = repositories;
         Self {
             movies,
@@ -193,6 +199,7 @@ impl SourceCatalog {
             sidecars,
             chapters,
             trickplay,
+            markers,
         }
     }
 
@@ -313,6 +320,7 @@ impl SourceCatalog {
                 extras.push(PartExtras {
                     sidecars: self.sidecars.find_by_file_id(file_id).await?,
                     chapters: self.chapters.find_by_file_id(file_id).await?,
+                    kept_markers: self.markers.find_by_file_id(file_id).await?,
                     trickplay: self.trickplay.find(file_id).await?,
                 });
             }
@@ -412,30 +420,47 @@ struct PartExtras {
     sidecars: Vec<SidecarSubtitle>,
     /// Its chapters, by index.
     chapters: Vec<StoredChapter>,
+    /// The markers Beam keeps for it.
+    kept_markers: Vec<StoredMarker>,
     /// Its trickplay record, for whichever content it was made from.
     trickplay: Option<TrickplayRecord>,
 }
 
-/// The chapters and markers of one file, as the wire carries them.
-fn chapters_and_markers(chapters: &[StoredChapter]) -> (Vec<Chapter>, Vec<PlaybackMarker>) {
-    let markers = markers_from_chapters(chapters)
+/// A file's marker as the wire carries it.
+pub fn wire_marker(marker: DomainMarker) -> PlaybackMarker {
+    let DomainMarker {
+        kind,
+        start_ms,
+        end_ms,
+    } = marker;
+    PlaybackMarker {
+        kind: wire_marker_kind(kind),
+        start_ms,
+        end_ms,
+    }
+}
+
+/// A marker kind as the wire names it.
+pub fn wire_marker_kind(kind: MarkerKind) -> PlaybackMarkerKind {
+    match kind {
+        MarkerKind::Recap => PlaybackMarkerKind::Recap,
+        MarkerKind::Intro => PlaybackMarkerKind::Intro,
+        MarkerKind::Credits => PlaybackMarkerKind::Credits,
+        MarkerKind::Preview => PlaybackMarkerKind::Preview,
+    }
+}
+
+/// The chapters and markers of one file, as the wire carries them: each
+/// marker the one Beam keeps for its kind, else the one a chapter names.
+fn chapters_and_markers(
+    chapters: &[StoredChapter],
+    kept: &[StoredMarker],
+) -> (Vec<Chapter>, Vec<PlaybackMarker>) {
+    let markers = resolve_markers(chapters, kept)
         .into_iter()
-        .map(|marker| {
-            let StoredMarker {
-                kind,
-                start_ms,
-                end_ms,
-            } = marker;
-            PlaybackMarker {
-                kind: match kind {
-                    MarkerKind::Recap => PlaybackMarkerKind::Recap,
-                    MarkerKind::Intro => PlaybackMarkerKind::Intro,
-                    MarkerKind::Credits => PlaybackMarkerKind::Credits,
-                    MarkerKind::Preview => PlaybackMarkerKind::Preview,
-                },
-                start_ms,
-                end_ms,
-            }
+        .map(|resolved| {
+            let ResolvedMarker { marker, origin: _ } = resolved;
+            wire_marker(marker)
         })
         .collect();
     let chapters = chapters
@@ -491,9 +516,10 @@ fn build_source(
         let PartExtras {
             sidecars,
             chapters,
+            kept_markers,
             trickplay,
         } = extras;
-        let (chapters, markers) = chapters_and_markers(&chapters);
+        let (chapters, markers) = chapters_and_markers(&chapters, &kept_markers);
         let trickplay = trickplay_of(&file, trickplay.as_ref());
         let MediaFile {
             id: file_id,

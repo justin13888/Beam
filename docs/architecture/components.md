@@ -131,11 +131,11 @@ RPC boundary); `runtime.rs` exposes `spawn_background_indexing` and `spawn_enric
   re-registers any the watcher no longer holds, asking the watcher rather than remembering what it
   registered — the backstop to `LibraryWatches`, the `LibraryWatchHook` through which
   `beam-server`'s library service registers a library as soon as it is created (on a task of its
-  own, so the request does not wait on the walk) and unwatches it as soon as it is deleted
-  (FR-213); the watcher keeps one registration per root, so a
+  own, so the request does not wait on the walk, and then runs the library's first scan) and
+  unwatches it as soon as it is deleted (FR-213); the watcher keeps one registration per root, so a
   library re-created at a deleted one's root owns its events; `watch_status.rs` records each library's watch mode for the
   admin status); `scan.rs` (`ScanCoordinator`: one lock per library that every scan — startup,
-  periodic, newly polled, administrator's — and every watcher reconcile takes, the latest
+  periodic, newly polled, a new library's first, administrator's — and every watcher reconcile takes, the latest
   `ScanJob` per library in memory, and a catalog gate the identity-key passes hold exclusively while
   every scan and reconcile holds it shared; a scan is `begin_scan` then `run_scan`, so the server
   answers before it runs; a reconcile never waits, but is handed back `Deferred` and retried by
@@ -329,10 +329,15 @@ which does not cross-compile to Android.
   scope rip is `1080p`). The constants a platform needs to agree with the core -- the progress
   interval, the telemetry batch size, the session cookie name -- and `BeamError.is_retryable` are
   exported alongside them, so no client restates them.
+- **`download/`** — what an offline download is, for every client: the plan (every part of the
+  title's source and each subtitle file beside one, from the server's download route), the record
+  with its display fields and a local artwork path, the six states, and progress, which is `None`
+  until a total is known. Records are kept per server through `KeyValueStore`, so they render
+  offline and signed out; the platform transfers what the plan names and reports each item back.
 
 - **`ffi/`** — the UniFFI surface, a façade over the modules above. `BeamClient` lives in
   `ffi/mod.rs` with the server registry, sign-in and the shared request plumbing; each resource
-  has its own exported `impl` block in `ffi/{playback,catalog,progress,telemetry,admin}.rs`. The
+  has its own exported `impl` block in `ffi/{playback,catalog,progress,telemetry,download,admin}.rs`. The
   failures every request can have are documented once, on `BeamClient`.
 
 **Testing:** all pure or against an `InMemoryKeyValueStore`. Certificates in the TLS
@@ -355,7 +360,15 @@ plugins in `build-logic/`: `core/{model,ffi,designsystem,ui,media,testing}` and
 - **`core:media`** owns Media3. Playback and the API client are handed the same credential and
   trust decision by the core, because a mismatch surfaces as apparently corrupt media rather than
   as an auth error. Downloads go through Media3's `DownloadManager` so their bytes land in a cache
-  ExoPlayer can read directly.
+  ExoPlayer reads directly; the records the downloads screen renders are the core's
+  (`download/`), and Media3 only transfers the items each record's plan names. The
+  player's upstream is a read-only `CacheDataSource` over that cache,
+  so a cached span is read from disk and streaming writes nothing to it. Each part of the core's
+  playback plan that has a completed download plays from the URL its download was fetched from,
+  the key its bytes are cached under, while the plan's other parts and sidecar subtitles stay the
+  core's. Where the core cannot plan at all -- signed out, or the session expired -- a completed
+  download still plays from its download record alone: a download holds one file, so that plan is
+  the file alone, without sidecar subtitles or later parts.
 - **Auth** lifts the `beam_session` cookie from an in-app WebView on a phone, as it always has,
   and offers a secondary **Sign in with a code** that runs the device authorization grant — the
   screen shows the user code and the verification address while the core polls. Where there is no

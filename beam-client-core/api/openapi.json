@@ -2693,6 +2693,16 @@
               "minimum": 0.0,
               "format": "double"
             }
+          },
+          {
+            "name": "library_id",
+            "in": "query",
+            "description": "Filter to the titles indexed in this library. A library the caller\nmay not see, or one that does not exist, lists nothing: the answer is\nthe same either way, so it does not say which libraries exist.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
           }
         ],
         "responses": {
@@ -6999,6 +7009,9 @@
         "security": [
           {
             "BeamSession": []
+          },
+          {
+            "MediaGrant": []
           }
         ]
       },
@@ -7408,6 +7421,9 @@
         "security": [
           {
             "BeamSession": []
+          },
+          {
+            "MediaGrant": []
           }
         ]
       }
@@ -7819,6 +7835,9 @@
         "security": [
           {
             "BeamSession": []
+          },
+          {
+            "MediaGrant": []
           }
         ]
       },
@@ -8155,6 +8174,226 @@
                       }
                     }
                   ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "File not found; Source file missing from disk",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#file-not-found"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "File not found"
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#source-file-missing"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Source file missing from disk"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#internal"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BeamSession": []
+          },
+          {
+            "MediaGrant": []
+          }
+        ]
+      }
+    },
+    "/v1/files/{file_id}/grant": {
+      "post": {
+        "tags": [
+          "playback"
+        ],
+        "summary": "Grant one file's bytes to a client without the session cookie.",
+        "description": "The URLs carry a signature over the file, the caller and an expiry a few\nhours out, and fetch this file through the stream and download\noperations and nothing else: no other operation accepts a grant. The\ncaller's access policy applies on every request made with them, so a\ntitle hidden from the caller after the grant was issued is hidden from it\ntoo. A file the caller may not see answers `404`, as an id naming nothing\ndoes.\n\nNothing is stored, so a grant cannot be revoked on its own; it lapses at\n`expires_at`, and every grant outstanding lapses when the server restarts.",
+        "operationId": "grantFile",
+        "parameters": [
+          {
+            "name": "file_id",
+            "in": "path",
+            "description": "File ID.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Unauthorized",
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "The challenge the client must answer, per RFC 9110 section 11.6.1.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "example": "ApiKey"
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden; Cross-origin request rejected; Malformed Origin/Referer header",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "headers": {
+              "Retry-After": {
+                "description": "How long to wait before retrying, in seconds or as an HTTP-date",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        },
+                        "errors": {
+                          "items": {
+                            "properties": {
+                              "pointer": {
+                                "type": "string",
+                                "format": "json-pointer"
+                              },
+                              "detail": {
+                                "type": "string"
+                              }
+                            },
+                            "type": "object",
+                            "required": [
+                              "pointer",
+                              "detail"
+                            ]
+                          },
+                          "type": "array"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MediaGrantUrls"
                 }
               }
             }
@@ -12941,6 +13180,1163 @@
                           "const": "https://beam.justinchung.net/reference/errors/#library-not-found"
                         }
                       }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#internal"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BeamSession": [
+              "admin"
+            ]
+          }
+        ]
+      }
+    },
+    "/v1/libraries/changes": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "The libraries whose contents changed since `since`, among those the caller can see.",
+        "description": "Poll it while a library is on screen, passing back the `cursor` each\nanswer returns; refetch each library in `library_ids`, or every library\nwhen `reset` is `true`. Library-level only: it never names a file.",
+        "operationId": "getLibraryChanges",
+        "parameters": [
+          {
+            "name": "since",
+            "in": "query",
+            "description": "The `cursor` the previous poll returned. Absent on a client's first\npoll; absent, malformed or issued before the server restarted, the\nanswer is a reset.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Unauthorized",
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "The challenge the client must answer, per RFC 9110 section 11.6.1.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "example": "ApiKey"
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden; Cross-origin request rejected; Malformed Origin/Referer header",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "headers": {
+              "Retry-After": {
+                "description": "How long to wait before retrying, in seconds or as an HTTP-date",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        },
+                        "errors": {
+                          "items": {
+                            "properties": {
+                              "pointer": {
+                                "type": "string",
+                                "format": "json-pointer"
+                              },
+                              "detail": {
+                                "type": "string"
+                              }
+                            },
+                            "type": "object",
+                            "required": [
+                              "pointer",
+                              "detail"
+                            ]
+                          },
+                          "type": "array"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LibraryChanges"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#internal"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BeamSession": []
+          }
+        ]
+      }
+    },
+    "/v1/admin/files/{file_id}/markers": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "A file's markers, and where each comes from.",
+        "operationId": "getFileMarkers",
+        "parameters": [
+          {
+            "name": "file_id",
+            "in": "path",
+            "description": "The video file.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Unauthorized",
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "The challenge the client must answer, per RFC 9110 section 11.6.1.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "example": "ApiKey"
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden; Cross-origin request rejected; Malformed Origin/Referer header",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "about:blank"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#admin-required"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#cross-origin-rejected"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Cross-origin request rejected"
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#malformed-origin"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Malformed Origin/Referer header"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "headers": {
+              "Retry-After": {
+                "description": "How long to wait before retrying, in seconds or as an HTTP-date",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        },
+                        "errors": {
+                          "items": {
+                            "properties": {
+                              "pointer": {
+                                "type": "string",
+                                "format": "json-pointer"
+                              },
+                              "detail": {
+                                "type": "string"
+                              }
+                            },
+                            "type": "object",
+                            "required": [
+                              "pointer",
+                              "detail"
+                            ]
+                          },
+                          "type": "array"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FileMarkerList"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "File not found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#file-not-found"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#validation-failed"
+                        },
+                        "errors": {
+                          "items": {
+                            "$ref": "#/components/schemas/FieldError"
+                          },
+                          "type": "array"
+                        }
+                      },
+                      "required": [
+                        "errors"
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#internal"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BeamSession": [
+              "admin"
+            ]
+          }
+        ]
+      }
+    },
+    "/v1/admin/files/{file_id}/markers/{kind}": {
+      "put": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Set or correct one of a file's markers. It replaces a detected marker of its kind, overrides a chapter's, and is never replaced by detection.",
+        "operationId": "setFileMarker",
+        "parameters": [
+          {
+            "name": "file_id",
+            "in": "path",
+            "description": "The video file.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "path",
+            "description": "Which of its markers.",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/PlaybackMarkerKind"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetFileMarkerRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "401": {
+            "description": "Unauthorized",
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "The challenge the client must answer, per RFC 9110 section 11.6.1.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "example": "ApiKey"
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden; Cross-origin request rejected; Malformed Origin/Referer header",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "about:blank"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#admin-required"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#cross-origin-rejected"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Cross-origin request rejected"
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#malformed-origin"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Malformed Origin/Referer header"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "headers": {
+              "Retry-After": {
+                "description": "How long to wait before retrying, in seconds or as an HTTP-date",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        },
+                        "errors": {
+                          "items": {
+                            "properties": {
+                              "pointer": {
+                                "type": "string",
+                                "format": "json-pointer"
+                              },
+                              "detail": {
+                                "type": "string"
+                              }
+                            },
+                            "type": "object",
+                            "required": [
+                              "pointer",
+                              "detail"
+                            ]
+                          },
+                          "type": "array"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Payload Too Large",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Unsupported Media Type",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Entity; Validation failed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "about:blank"
+                            },
+                            "errors": {
+                              "items": {
+                                "properties": {
+                                  "pointer": {
+                                    "type": "string",
+                                    "format": "json-pointer"
+                                  },
+                                  "detail": {
+                                    "type": "string"
+                                  }
+                                },
+                                "type": "object",
+                                "required": [
+                                  "pointer",
+                                  "detail"
+                                ]
+                              },
+                              "type": "array"
+                            }
+                          },
+                          "required": [
+                            "errors"
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#validation-failed"
+                            },
+                            "errors": {
+                              "items": {
+                                "$ref": "#/components/schemas/FieldError"
+                              },
+                              "type": "array"
+                            }
+                          },
+                          "required": [
+                            "errors"
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FileMarkerList"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "File not found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#file-not-found"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#internal"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BeamSession": [
+              "admin"
+            ]
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Clear one of a file's markers, whether an administrator set it or Beam detected it, so the file's chapters decide that kind again. Clearing a kind Beam keeps none of changes nothing.",
+        "operationId": "clearFileMarker",
+        "parameters": [
+          {
+            "name": "file_id",
+            "in": "path",
+            "description": "The video file.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "path",
+            "description": "Which of its markers.",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/PlaybackMarkerKind"
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Unauthorized",
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "The challenge the client must answer, per RFC 9110 section 11.6.1.",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "example": "ApiKey"
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden; Cross-origin request rejected; Malformed Origin/Referer header",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "about:blank"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#admin-required"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#cross-origin-rejected"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Cross-origin request rejected"
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/Problem"
+                        },
+                        {
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "https://beam.justinchung.net/reference/errors/#malformed-origin"
+                            }
+                          }
+                        }
+                      ],
+                      "title": "Malformed Origin/Referer header"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "headers": {
+              "Retry-After": {
+                "description": "How long to wait before retrying, in seconds or as an HTTP-date",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "about:blank"
+                        },
+                        "errors": {
+                          "items": {
+                            "properties": {
+                              "pointer": {
+                                "type": "string",
+                                "format": "json-pointer"
+                              },
+                              "detail": {
+                                "type": "string"
+                              }
+                            },
+                            "type": "object",
+                            "required": [
+                              "pointer",
+                              "detail"
+                            ]
+                          },
+                          "type": "array"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FileMarkerList"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "File not found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#file-not-found"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Problem"
+                    },
+                    {
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "const": "https://beam.justinchung.net/reference/errors/#validation-failed"
+                        },
+                        "errors": {
+                          "items": {
+                            "$ref": "#/components/schemas/FieldError"
+                          },
+                          "type": "array"
+                        }
+                      },
+                      "required": [
+                        "errors"
+                      ]
                     }
                   ]
                 }
@@ -21797,31 +23193,48 @@
       "MediaMetadata": {
         "oneOf": [
           {
-            "properties": {
-              "Show": {
+            "allOf": [
+              {
+                "properties": {
+                  "media_type": {
+                    "type": "string",
+                    "const": "show"
+                  }
+                },
+                "type": "object",
+                "required": [
+                  "media_type"
+                ]
+              },
+              {
                 "$ref": "#/components/schemas/ShowMetadata"
               }
-            },
-            "additionalProperties": false,
-            "type": "object",
-            "required": [
-              "Show"
             ]
           },
           {
-            "properties": {
-              "Movie": {
+            "allOf": [
+              {
+                "properties": {
+                  "media_type": {
+                    "type": "string",
+                    "const": "movie"
+                  }
+                },
+                "type": "object",
+                "required": [
+                  "media_type"
+                ]
+              },
+              {
                 "$ref": "#/components/schemas/MovieMetadata"
               }
-            },
-            "additionalProperties": false,
-            "type": "object",
-            "required": [
-              "Movie"
             ]
           }
         ],
-        "description": "Media metadata"
+        "description": "Media metadata: a movie or a show, told apart by `media_type` beside its\nfields (`{\"media_type\": \"movie\", \"id\": ...}`), never a single-key wrapper\n(wire rule R9).",
+        "discriminator": {
+          "propertyName": "media_type"
+        }
       },
       "EpisodeSpan": {
         "properties": {
@@ -22006,7 +23419,7 @@
           "start_ms",
           "end_ms"
         ],
-        "description": "A span of a file a client offers to skip (issue #265), read from the\nfile's chapter titled for it (`Previously On`, `Opening`, `Intro`,\n`Ending`, `End Credits`, `Next Episode`). At most one of each kind per\nfile."
+        "description": "A span of a file a client offers to skip (issue #265): the one an\nadministrator set, or Beam detected (issue #332), else the one read from\nthe file's chapter titled for it (`Previously On`, `Opening`, `Intro`,\n`Ending`, `End Credits`, `Next Episode`). At most one of each kind per\nfile."
       },
       "Trickplay": {
         "properties": {
@@ -22423,7 +23836,7 @@
               "$ref": "#/components/schemas/PlaybackMarker"
             },
             "type": "array",
-            "description": "The spans of the file a client offers to skip -- its intro, its\ncredits, a recap, a preview -- read from the chapters titled for\nthem, in the order they start; empty when no chapter is."
+            "description": "The spans of the file a client offers to skip -- its intro, its\ncredits, a recap, a preview -- in the order they start: for each\nkind, the one an administrator set or Beam detected in the audio a\nseason's episodes share (issue #332), else the one a chapter titled\nfor it names; empty when there is none."
           },
           "trickplay": {
             "anyOf": [
@@ -23446,6 +24859,30 @@
         ],
         "description": "One page of the viewer's watchlist or favourites, newest addition first.\n\nPass `page_info.end_cursor` as `after` for the next page. `total` counts\nevery title on the list."
       },
+      "MediaGrantUrls": {
+        "properties": {
+          "stream_url": {
+            "type": "string",
+            "description": "The file streamed inline, as `/v1/files/{file_id}/stream` serves it.\nRelative to the server's origin, as a source's `stream_url` is."
+          },
+          "download_url": {
+            "type": "string",
+            "description": "The file as an attachment, as `/v1/files/{file_id}/download` serves\nit. Relative to the server's origin."
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "The first instant at which both URLs are refused. A player still\nplaying then is refused its next range, so a client asks for a fresh\ngrant to start again."
+          }
+        },
+        "type": "object",
+        "required": [
+          "stream_url",
+          "download_url",
+          "expires_at"
+        ],
+        "description": "A media grant (ADR-0022): URLs that fetch one file with no session\ncookie, for a client that holds none -- an AirPlay or Cast receiver, or\nan external player such as VLC."
+      },
       "Library": {
         "properties": {
           "id": {
@@ -23660,7 +25097,8 @@
           "manual",
           "startup",
           "periodic",
-          "newly_polled"
+          "newly_polled",
+          "created"
         ],
         "description": "What started a scan."
       },
@@ -23816,6 +25254,114 @@
           "progress"
         ],
         "description": "One scan of one library. A library has at most one queued or running\nscan; the latest is kept until the server restarts."
+      },
+      "LibraryChanges": {
+        "properties": {
+          "cursor": {
+            "type": "string",
+            "description": "Opaque. Pass it as `since` on the next poll."
+          },
+          "reset": {
+            "type": "boolean",
+            "description": "Whether every library is to be refetched, the cursor passed being\nunknown to this server."
+          },
+          "library_ids": {
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": "array",
+            "description": "The libraries the caller can see whose contents changed since the\ncursor passed, each once, in no particular order."
+          }
+        },
+        "type": "object",
+        "required": [
+          "cursor",
+          "reset",
+          "library_ids"
+        ],
+        "description": "The libraries changed since the cursor a client passed: what\n`GET /v1/libraries/changes` returns.\n\nA client keeps `cursor` and passes it back as `since` on its next poll.\nWhen `reset` is `true` the server cannot say what changed -- there was no\ncursor, or it was issued before the server restarted -- and the client is\nto refetch every library it shows; `library_ids` is then empty."
+      },
+      "PlaybackMarkerOrigin": {
+        "type": "string",
+        "enum": [
+          "chapter",
+          "detected",
+          "admin"
+        ],
+        "description": "Where one of a file's markers comes from (issue #332)."
+      },
+      "FileMarker": {
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/PlaybackMarkerKind"
+          },
+          "start_ms": {
+            "type": "integer",
+            "minimum": 0.0,
+            "format": "uint64",
+            "description": "Where the span starts, in milliseconds from the file's start."
+          },
+          "end_ms": {
+            "type": "integer",
+            "minimum": 0.0,
+            "format": "uint64",
+            "description": "Where it ends; always after `start_ms`."
+          },
+          "origin": {
+            "$ref": "#/components/schemas/PlaybackMarkerOrigin",
+            "description": "Where it comes from: a set or detected marker overrides the\nchapter-named one of its kind."
+          }
+        },
+        "type": "object",
+        "required": [
+          "kind",
+          "start_ms",
+          "end_ms",
+          "origin"
+        ],
+        "description": "One of a file's markers, as an administrator manages it."
+      },
+      "FileMarkerList": {
+        "properties": {
+          "file_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/FileMarker"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object",
+        "required": [
+          "file_id",
+          "items"
+        ],
+        "description": "A file's markers, as every `/v1/admin/files/{file_id}/markers` operation\nanswers: at most one of each kind, in the order they start -- the\n`markers` its sources carry, with where each comes from."
+      },
+      "SetFileMarkerRequest": {
+        "properties": {
+          "start_ms": {
+            "type": "integer",
+            "minimum": 0.0,
+            "format": "uint64"
+          },
+          "end_ms": {
+            "type": "integer",
+            "minimum": 0.0,
+            "format": "uint64",
+            "description": "After `start_ms`, and no later than the file's end."
+          }
+        },
+        "type": "object",
+        "required": [
+          "start_ms",
+          "end_ms"
+        ],
+        "description": "The span to mark, in milliseconds from the file's start."
       },
       "LogLevel": {
         "type": "string",
@@ -25560,6 +27106,12 @@
         "name": "beam_session",
         "in": "cookie",
         "description": "Opaque session cookie issued by the OIDC login flow (ADR-0003). Hashed at rest; never recoverable from the API."
+      },
+      "MediaGrant": {
+        "type": "apiKey",
+        "name": "grant",
+        "in": "query",
+        "description": "Short-lived signature over one file and one user, issued by `POST /v1/files/{file_id}/grant` (ADR-0022). Fetches that file's bytes and nothing else, under the user's access policy."
       }
     }
   },

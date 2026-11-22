@@ -54,7 +54,8 @@ describe("ContinueWatchingRow", () => {
 			],
 			{
 				"movie-9": {
-					Movie: factory.movie({
+					media_type: "movie",
+					...factory.movie({
 						id: "movie-9",
 						title: {
 							original: "Primer",
@@ -89,7 +90,8 @@ describe("ContinueWatchingRow", () => {
 			],
 			{
 				"movie-ok": {
-					Movie: factory.movie({
+					media_type: "movie",
+					...factory.movie({
 						id: "movie-ok",
 						title: {
 							original: "Still Here",

@@ -125,8 +125,11 @@ telemetry:
   existingSecretKey: url
 
 # Media libraries. Each is mounted read-only at /videos/<name> (Beam never
-# writes under a library root, FR-202); create the library in Beam's admin UI
-# with that path. `volume` is one Kubernetes volume source. Every source kind
+# writes under a library root, FR-202) and declared to the server as
+# BEAM_LIBRARIES, so Beam creates the library `name` at that path when it starts
+# and the library is not stored yet. A library already stored at the path keeps
+# its own name; Beam never renames, moves or deletes one, and removing an entry
+# here leaves its library stored. `volume` is one Kubernetes volume source. Every source kind
 # with a readOnly field (persistentVolumeClaim, nfs, csi, iscsi, rbd, cephfs,
 # ...) is forced to readOnly: true, which also keeps the kubelet from
 # applying the pod's fsGroup to your media. hostPath and image volumes are
@@ -138,6 +141,17 @@ telemetry:
 # configMap, ...) are refused by the schema. The pod reads media as uid 1000,
 # gid 1000 and server.podSecurityContext.supplementalGroups.
 #
+# A hostPath library may set `mountPropagation: HostToContainer`, so a disk
+# the host mounts or remounts under the path after the pod started (a USB
+# drive, a NAS automount) shows up inside the pod instead of staying stale.
+# It is opt-in, hostPath-only, and never Bidirectional: the pod only ever
+# receives mounts, it never propagates its own back to the host.
+#
+# Libraries on a network filesystem (NFS, CephFS, SMB through a CSI driver,
+# ...) cannot be watched natively: Beam polls them every
+# watch.pollIntervalSeconds instead, so new files there take up to that long,
+# plus scan.settleSeconds, to appear. See docs/operations/deployment.md.
+#
 # libraries:
 #   - name: movies
 #     volume:
@@ -148,7 +162,30 @@ telemetry:
 #       nfs:
 #         server: nas.lan
 #         path: /export/anime
+#   - name: usb
+#     mountPropagation: HostToContainer
+#     volume:
+#       hostPath:
+#         path: /media/usb
 libraries: []
+
+# The filesystem watcher that picks up library changes between full rescans.
+# Local roots get native events (inotify); roots on a network filesystem, and
+# libraries past the node's fs.inotify.max_user_watches, are polled.
+watch:
+  # BEAM_WATCH_POLL_INTERVAL_SECS: seconds between walks of every polled
+  # library. Lower means new files on network storage appear sooner, at the
+  # cost of walking the whole library that often. At least 1.
+  pollIntervalSeconds: 300
+  # BEAM_WATCH_DEBOUNCE_MS: bursts of events for one path within this many
+  # milliseconds collapse into one.
+  debounceMs: 2000
+
+scan:
+  # BEAM_SCAN_SETTLE_SECS: seconds a file must go without a write before it is
+  # hashed and probed, so a file still being copied in is not indexed while
+  # partial. 0 indexes every file on sight.
+  settleSeconds: 30
 
 persistence:
   # Server-writable state at /data (artwork cache and the like). Disabled
@@ -197,6 +234,56 @@ metrics:
   # BEAM_ENABLE_METRICS, plus prometheus.io/* scrape annotations on the pod.
   # /metrics is served on the API port and is never routed by the ingress.
   enabled: false
+  # The three objects below are for the Prometheus Operator and the Grafana
+  # sidecar (kube-prometheus-stack). Each needs metrics.enabled: the chart
+  # refuses to render one without it, since it would scrape, alert on or chart
+  # a /metrics that answers 503.
+  serviceMonitor:
+    # A monitoring.coreos.com/v1 ServiceMonitor scraping /metrics through the
+    # server Service. The Operator ignores the prometheus.io/* annotations.
+    enabled: false
+    interval: 30s
+    # Empty uses the Prometheus default.
+    scrapeTimeout: ""
+    # Added to the ServiceMonitor's own labels: kube-prometheus-stack selects
+    # ServiceMonitors by `release: <its release name>` unless told otherwise.
+    labels: {}
+    # RelabelConfigs applied to the target before the scrape, and to each
+    # scraped series after it.
+    relabelings: []
+    metricRelabelings: []
+  prometheusRule:
+    # A monitoring.coreos.com/v1 PrometheusRule with Beam's alerts. Every
+    # expression selects the series by the `namespace` and `service` target
+    # labels the ServiceMonitor gives them, so a Prometheus scraping Beam some
+    # other way must attach the same two.
+    enabled: false
+    # Added to the PrometheusRule's labels, e.g. the `release` label
+    # kube-prometheus-stack's ruleSelector matches.
+    labels: {}
+    # Added to every alert's labels, beside its severity.
+    alertLabels: {}
+    # BeamHighErrorRatio: share of API responses that are 5xx, over 5 minutes.
+    errorRatio: 0.05
+    # BeamHighApiLatency: p95 seconds to the response head of /v1 requests.
+    latencyP95Seconds: 1
+    # BeamDatabasePoolSaturated: share of the pool's maximum in use.
+    dbPoolSaturation: 0.9
+    # BeamLibraryScanStale: hours since a library's last successful scan.
+    # Keep it above the periodic scan interval (BEAM_SCAN_INTERVAL_SECS).
+    scanStaleHours: 48
+    # BeamProviderFailing: share of a metadata provider's requests that end
+    # in a transport or provider error, over 15 minutes.
+    providerFailureRatio: 0.5
+  grafanaDashboard:
+    # A ConfigMap holding dashboards/beam.json, labelled for the Grafana
+    # dashboard sidecar.
+    enabled: false
+    # The label the sidecar watches for (kube-prometheus-stack's default).
+    labels:
+      grafana_dashboard: "1"
+    # e.g. the sidecar's folder annotation (grafana_folder: Beam).
+    annotations: {}
 
 serviceAccount:
   create: true

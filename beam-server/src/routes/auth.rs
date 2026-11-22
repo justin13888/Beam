@@ -48,6 +48,7 @@ use kynos::response::status::{InvalidLocation, Location, NoContent, Redirect};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::metrics::session_store_failed;
 use crate::models::auth::{
     CurrentUser, DeviceLoginComplete, DeviceLoginPending, DeviceLoginPoll, DeviceLoginStart,
     DeviceLoginWait, SessionConnection, SessionSummary,
@@ -412,6 +413,68 @@ impl From<CookieEncodingError> for InternalError {
     }
 }
 
+// ── Sign-in metrics ──────────────────────────────────────────────────────────
+
+/// Which flow a sign-in came through: the `flow` label of
+/// `beam_auth_logins_total` ([#458](https://github.com/justin13888/beam/issues/458)).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LoginFlow {
+    /// The browser's Authorization Code callback.
+    Browser,
+    /// A device grant poll (RFC 8628).
+    Device,
+}
+
+/// How a sign-in ended: the `result` label of `beam_auth_logins_total`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LoginResult {
+    /// A session was minted.
+    Success,
+    /// The attempt was refused: the user, the identity provider's verdict, or
+    /// the attempt itself (stale, forged, expired) said no. A 4xx.
+    Failure,
+    /// Beam or the identity provider failed, so the attempt could not be
+    /// decided. A 5xx, and the result to alert on.
+    Error,
+}
+
+fn record_login(flow: LoginFlow, result: LoginResult) {
+    let flow = match flow {
+        LoginFlow::Browser => "browser",
+        LoginFlow::Device => "device",
+    };
+    let result = match result {
+        LoginResult::Success => "success",
+        LoginResult::Failure => "failure",
+        LoginResult::Error => "error",
+    };
+    metrics::counter!("beam_auth_logins_total", "flow" => flow, "result" => result).increment(1);
+}
+
+impl LoginCallbackError {
+    /// How the browser sign-in this error ended is counted.
+    fn login_result(&self) -> LoginResult {
+        match self {
+            Self::AttemptInvalid(_) | Self::LoginFailed(_) | Self::AccountDisabled(_) => {
+                LoginResult::Failure
+            }
+            Self::Internal(_) => LoginResult::Error,
+        }
+    }
+}
+
+/// How the device sign-in a failed poll ended is counted.
+fn device_login_result(error: &DevicePollError) -> LoginResult {
+    match error {
+        DevicePollError::Invalid
+        | DevicePollError::Expired
+        | DevicePollError::Denied
+        | DevicePollError::AccountDisabled { .. }
+        | DevicePollError::LoginFailed(_) => LoginResult::Failure,
+        DevicePollError::IdpUnavailable(_) | DevicePollError::Internal(_) => LoginResult::Error,
+    }
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 /// The header the session record's device fingerprint is taken from.
@@ -664,157 +727,171 @@ pub async fn oidc_callback(
     Inject(config): Inject<OidcRuntimeConfig>,
     Inject(admin_log): Inject<Arc<dyn AdminLogService>>,
 ) -> Result<WithHeaders<Redirect<302>, SetCookie>, LoginCallbackError> {
-    let client = client_context(&headers, &forwarded);
-    // Every refusal before the pending login is consumed is one any request
-    // can produce, so it is logged here and kept out of the admin log (see
-    // `record_sign_in`). Only a fixed reason is logged: every query parameter
-    // here is the caller's to write.
-    let invalid = |reason: &'static str, error: String| {
-        tracing::warn!(
-            method = SignInMethod::Browser.as_str(),
-            ip = %client.ip,
-            reason,
-            "refused a browser sign-in callback"
-        );
-        error
-    };
+    // Every answer the callback gives ends a sign-in, so each is counted; the
+    // block is the handler's body, so no early return can skip the count.
+    let outcome = async move {
+        let client = client_context(&headers, &forwarded);
+        // Every refusal before the pending login is consumed is one any request
+        // can produce, so it is logged here and kept out of the admin log (see
+        // `record_sign_in`). Only a fixed reason is logged: every query parameter
+        // here is the caller's to write.
+        let invalid = |reason: &'static str, error: String| {
+            tracing::warn!(
+                method = SignInMethod::Browser.as_str(),
+                ip = %client.ip,
+                reason,
+                "refused a browser sign-in callback"
+            );
+            error
+        };
 
-    if let Some(error) = query.error {
-        let description = query.error_description.unwrap_or_default();
-        let detail = invalid(
-            "idp_error",
-            format!("IdP returned error: {error} {description}"),
-        );
-        return Err(LoginCallbackError::LoginFailed(detail));
-    }
+        if let Some(error) = query.error {
+            let description = query.error_description.unwrap_or_default();
+            let detail = invalid(
+                "idp_error",
+                format!("IdP returned error: {error} {description}"),
+            );
+            return Err(LoginCallbackError::LoginFailed(detail));
+        }
 
-    let state_cookie = cookies.beam_oidc_state.ok_or_else(|| {
-        LoginCallbackError::AttemptInvalid(invalid(
-            "attempt_invalid",
-            "Missing state cookie".into(),
-        ))
-    })?;
-
-    let query_state = query.state.ok_or_else(|| {
-        LoginCallbackError::AttemptInvalid(invalid(
-            "attempt_invalid",
-            "Missing state parameter".into(),
-        ))
-    })?;
-
-    if state_cookie != query_state {
-        return Err(LoginCallbackError::AttemptInvalid(invalid(
-            "attempt_invalid",
-            "State mismatch between cookie and callback".into(),
-        )));
-    }
-
-    let pending = pending_auth_store
-        .consume(&query_state)
-        .await
-        .map_err(|e| LoginCallbackError::Internal(ServerFault::new(e)))?
-        .ok_or_else(|| {
+        let state_cookie = cookies.beam_oidc_state.ok_or_else(|| {
             LoginCallbackError::AttemptInvalid(invalid(
                 "attempt_invalid",
-                "Unknown, already-used, or expired login attempt".into(),
+                "Missing state cookie".into(),
             ))
         })?;
 
-    let Some(code) = query.code else {
-        let detail = "Missing code parameter".to_owned();
-        record_sign_in(
-            admin_log.as_ref(),
-            SignInMethod::Browser,
-            &client,
-            SignInOutcome::Failed {
-                reason: "attempt_invalid",
-                error: Some(detail.clone()),
-            },
-        )
-        .await;
-        return Err(LoginCallbackError::AttemptInvalid(detail));
-    };
+        let query_state = query.state.ok_or_else(|| {
+            LoginCallbackError::AttemptInvalid(invalid(
+                "attempt_invalid",
+                "Missing state parameter".into(),
+            ))
+        })?;
 
-    // Every exchange failure is the same failed login. A wrong nonce among
-    // them: openidconnect's verifier reports it as a claims failure like any
-    // other, so it needs no answer of its own.
-    let identity = match oidc_client
-        .exchange_code(&code, &pending.pkce_verifier, &pending.nonce)
-        .await
-    {
-        Ok(identity) => identity,
-        Err(e) => {
-            let detail = format!("Login failed: {e}");
+        if state_cookie != query_state {
+            return Err(LoginCallbackError::AttemptInvalid(invalid(
+                "attempt_invalid",
+                "State mismatch between cookie and callback".into(),
+            )));
+        }
+
+        let pending = pending_auth_store
+            .consume(&query_state)
+            .await
+            .map_err(|e| LoginCallbackError::Internal(ServerFault::new(e)))?
+            .ok_or_else(|| {
+                LoginCallbackError::AttemptInvalid(invalid(
+                    "attempt_invalid",
+                    "Unknown, already-used, or expired login attempt".into(),
+                ))
+            })?;
+
+        let Some(code) = query.code else {
+            let detail = "Missing code parameter".to_owned();
             record_sign_in(
                 admin_log.as_ref(),
                 SignInMethod::Browser,
                 &client,
                 SignInOutcome::Failed {
-                    reason: "verification_failed",
+                    reason: "attempt_invalid",
                     error: Some(detail.clone()),
                 },
             )
             .await;
-            return Err(LoginCallbackError::LoginFailed(detail));
-        }
-    };
+            return Err(LoginCallbackError::AttemptInvalid(detail));
+        };
 
-    let minted = complete_login(
-        &identity,
-        &client,
-        user_repo.as_ref(),
-        session_store.as_ref(),
-        &config,
-    )
+        // Every exchange failure is the same failed login. A wrong nonce among
+        // them: openidconnect's verifier reports it as a claims failure like any
+        // other, so it needs no answer of its own.
+        let identity = match oidc_client
+            .exchange_code(&code, &pending.pkce_verifier, &pending.nonce)
+            .await
+        {
+            Ok(identity) => identity,
+            Err(e) => {
+                let detail = format!("Login failed: {e}");
+                record_sign_in(
+                    admin_log.as_ref(),
+                    SignInMethod::Browser,
+                    &client,
+                    SignInOutcome::Failed {
+                        reason: "verification_failed",
+                        error: Some(detail.clone()),
+                    },
+                )
+                .await;
+                return Err(LoginCallbackError::LoginFailed(detail));
+            }
+        };
+
+        let minted = complete_login(
+            &identity,
+            &client,
+            user_repo.as_ref(),
+            session_store.as_ref(),
+            &config,
+        )
+        .await;
+        let MintedSession {
+            token,
+            user,
+            absolute_ttl_secs,
+        } = match minted {
+            Ok(minted) => minted,
+            Err(e @ LoginError::AccountDisabled { user_id }) => {
+                record_sign_in(
+                    admin_log.as_ref(),
+                    SignInMethod::Browser,
+                    &client,
+                    SignInOutcome::AccountDisabled { user_id },
+                )
+                .await;
+                return Err(LoginCallbackError::AccountDisabled(e.to_string()));
+            }
+            Err(LoginError::Internal(message)) => {
+                return Err(LoginCallbackError::Internal(ServerFault::new(message)));
+            }
+        };
+        record_sign_in(
+            admin_log.as_ref(),
+            SignInMethod::Browser,
+            &client,
+            SignInOutcome::SignedIn {
+                user_id: user.id,
+                is_admin: user.is_admin,
+            },
+        )
+        .await;
+
+        let cookie = build_cookie(
+            SESSION_COOKIE,
+            token,
+            "/",
+            config.cookie_secure,
+            Duration::from_secs(absolute_ttl_secs),
+        );
+
+        let redirect_path = pending.redirect_path.unwrap_or_else(|| "/".to_owned());
+
+        Ok(WithHeaders::new(
+            Redirect::to(Location::try_from(format!(
+                "{}{}",
+                config.web_url, redirect_path
+            ))?),
+            SetCookie::new(&cookie)?,
+        ))
+    }
     .await;
-    let MintedSession {
-        token,
-        user,
-        absolute_ttl_secs,
-    } = match minted {
-        Ok(minted) => minted,
-        Err(e @ LoginError::AccountDisabled { user_id }) => {
-            record_sign_in(
-                admin_log.as_ref(),
-                SignInMethod::Browser,
-                &client,
-                SignInOutcome::AccountDisabled { user_id },
-            )
-            .await;
-            return Err(LoginCallbackError::AccountDisabled(e.to_string()));
-        }
-        Err(LoginError::Internal(message)) => {
-            return Err(LoginCallbackError::Internal(ServerFault::new(message)));
-        }
-    };
-    record_sign_in(
-        admin_log.as_ref(),
-        SignInMethod::Browser,
-        &client,
-        SignInOutcome::SignedIn {
-            user_id: user.id,
-            is_admin: user.is_admin,
+
+    record_login(
+        LoginFlow::Browser,
+        match &outcome {
+            Ok(_) => LoginResult::Success,
+            Err(error) => error.login_result(),
         },
-    )
-    .await;
-
-    let cookie = build_cookie(
-        SESSION_COOKIE,
-        token,
-        "/",
-        config.cookie_secure,
-        Duration::from_secs(absolute_ttl_secs),
     );
-
-    let redirect_path = pending.redirect_path.unwrap_or_else(|| "/".to_owned());
-
-    Ok(WithHeaders::new(
-        Redirect::to(Location::try_from(format!(
-            "{}{}",
-            config.web_url, redirect_path
-        ))?),
-        SetCookie::new(&cookie)?,
-    ))
+    outcome
 }
 
 /// Starts a device login (RFC 8628) for a client that has no browser.
@@ -924,7 +1001,7 @@ pub async fn poll_device_login(
         )
     };
 
-    let outcome = match poll_device_login_once(
+    let outcome = poll_device_login_once(
         &device_handle,
         &client,
         oidc_client.as_ref(),
@@ -933,8 +1010,18 @@ pub async fn poll_device_login(
         session_store.as_ref(),
         &config,
     )
-    .await
-    {
+    .await;
+
+    // A poll that is still waiting ends nothing; every other answer ends the
+    // device's sign-in one way or the other.
+    match &outcome {
+        Ok(DevicePollOutcome::SignedIn(_)) => record_login(LoginFlow::Device, LoginResult::Success),
+        Ok(DevicePollOutcome::AuthorizationPending { .. } | DevicePollOutcome::SlowDown { .. }) => {
+        }
+        Err(error) => record_login(LoginFlow::Device, device_login_result(error)),
+    }
+
+    let outcome = match outcome {
         Ok(outcome) => outcome,
         Err(e) => {
             let detail = e.to_string();
@@ -1060,10 +1147,10 @@ pub async fn oidc_logout(
             Ok(session) => session.map(|session| session.user_id),
             Err(_) => None,
         };
-        session_store
-            .delete(&token)
-            .await
-            .map_err(|e| InternalError::Internal(ServerFault::new(e)))?;
+        session_store.delete(&token).await.map_err(|e| {
+            session_store_failed();
+            InternalError::Internal(ServerFault::new(e))
+        })?;
         if let Some(user_id) = user_id {
             tracing::info!(user_id, "signed out of one session");
         }
@@ -1084,7 +1171,10 @@ pub async fn oidc_logout_all(
     let revoked = session_store
         .delete_all_for_user(&auth.0.user_id.to_string())
         .await
-        .map_err(|e| InternalError::Internal(ServerFault::new(e)))?;
+        .map_err(|e| {
+            session_store_failed();
+            InternalError::Internal(ServerFault::new(e))
+        })?;
     tracing::info!(
         user_id = %auth.0.user_id,
         revoked,
@@ -1106,7 +1196,10 @@ pub async fn oidc_list_sessions(
     let sessions = session_store
         .list_for_user(&auth.0.user_id.to_string())
         .await
-        .map_err(|e| InternalError::Internal(ServerFault::new(e)))?;
+        .map_err(|e| {
+            session_store_failed();
+            InternalError::Internal(ServerFault::new(e))
+        })?;
 
     let summaries = sessions
         .into_iter()
@@ -1132,7 +1225,10 @@ pub async fn oidc_delete_session(
     let deleted = session_store
         .delete_by_id(path.id, &auth.0.user_id.to_string())
         .await
-        .map_err(|e| SessionRevokeError::Internal(ServerFault::new(e)))?;
+        .map_err(|e| {
+            session_store_failed();
+            SessionRevokeError::Internal(ServerFault::new(e))
+        })?;
 
     if !deleted {
         return Err(SessionRevokeError::SessionNotFound(
@@ -1156,7 +1252,10 @@ pub async fn oidc_delete_session(
         Some(token) => session_store
             .get(&token)
             .await
-            .map_err(|e| SessionRevokeError::Internal(ServerFault::new(e)))?
+            .map_err(|e| {
+                session_store_failed();
+                SessionRevokeError::Internal(ServerFault::new(e))
+            })?
             .is_some(),
         None => false,
     };

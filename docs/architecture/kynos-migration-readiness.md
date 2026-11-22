@@ -230,8 +230,7 @@ packages until a release contains the required behavior.
 3.2 (reading it as 3.1), and it is inside the `^1.34.6` range 7.13.0 declares, so the root
 `package.json` raises the floor with an `overrides` entry and no fork is needed to read the file
 ([#146](https://github.com/justin13888/beam/issues/146)). `beam-web` is regenerated against the
-contract, and `ts:typecheck`, `ts:test` and the web build are back in `mise run ci`, the pre-push
-hook and CI.
+contract, and `ts:typecheck`, `ts:test` and the web build are back in `mise run ci` and CI.
 
 What 3.1-as-read does not give is the SSE half of the list above: `itemSchema` is not modelled, so
 the stream's body is typed `unknown` and there is no typed subscription API; `useAdminEventStream`

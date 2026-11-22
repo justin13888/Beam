@@ -6,10 +6,12 @@
 //! handlers over a `FakeOidcClient` and the in-memory stores (NFR-201).
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use beam_auth::utils::oidc::fake::FakeOidcClient;
 use beam_auth::utils::repository::in_memory::InMemoryUserRepository;
 use beam_auth::utils::session_store::in_memory::{InMemorySessionStore, SessionStoreOperation};
+use beam_auth::utils::session_store::{SessionData, SessionError, SessionStore};
 use kynos::http::StatusCode;
 use kynos::test::TestResponse;
 use serde_json::Value;
@@ -88,6 +90,49 @@ async fn a_session_store_failure_on_logout_is_500_and_keeps_the_cookie() {
         StatusCode::OK,
         "the session the failed logout left is still valid, as the 500 says"
     );
+}
+
+/// `beam_session_store_errors_total` (#458): a store that cannot look a
+/// cookie up -- every signed-in request's 503 -- and one that cannot sign a
+/// session out are each one error, and a working call is none.
+#[tokio::test]
+async fn each_failed_session_store_call_is_counted() {
+    use crate::routes::test_support::Recorded;
+
+    let recorder = metrics_util::debugging::DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let _local = metrics::set_default_local_recorder(&recorder);
+    // Errors since the previous call, which drains them.
+    let errors = || {
+        Recorded::of(&snapshotter)
+            .counter("beam_session_store_errors_total", &[])
+            .unwrap_or(0)
+    };
+
+    let lookup_fails = harness_failing("lookup@example.com", SessionStoreOperation::Get);
+    let cookie = login_and_get_session_cookie(&lookup_fails, "lookup@example.com").await;
+    assert_eq!(errors(), 0, "signing in touched no failing call");
+
+    get_me(&lookup_fails, &cookie)
+        .await
+        .assert_status(StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(errors(), 1);
+
+    let delete_fails = harness_failing("delete@example.com", SessionStoreOperation::Delete);
+    let cookie = login_and_get_session_cookie(&delete_fails, "delete@example.com").await;
+    get_me(&delete_fails, &cookie)
+        .await
+        .assert_status(StatusCode::OK);
+    assert_eq!(errors(), 0, "a working lookup is no error");
+
+    delete_fails
+        .client
+        .post("/v1/logout")
+        .cookie(SESSION_COOKIE, &cookie)
+        .send()
+        .await
+        .assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(errors(), 1);
 }
 
 /// NFR-108 over the session routes: whichever store call fails, the 500's
@@ -565,5 +610,156 @@ async fn revoking_the_session_in_use_clears_the_callers_cookie() {
     assert!(
         clears_session_cookie(&response),
         "revoking the session in use must clear its cookie"
+    );
+}
+
+/// `beam_session_store_errors_total` (#458) over the session-list routes:
+/// signing out everywhere, listing sessions and revoking one each count the
+/// store failure they answer with a 500.
+#[tokio::test]
+async fn a_failed_session_list_or_revocation_is_counted() {
+    use crate::routes::test_support::Recorded;
+
+    let recorder = metrics_util::debugging::DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let _local = metrics::set_default_local_recorder(&recorder);
+    // Errors since the previous call, which drains them.
+    let errors = || {
+        Recorded::of(&snapshotter)
+            .counter("beam_session_store_errors_total", &[])
+            .unwrap_or(0)
+    };
+
+    let harness = harness_failing("all@example.com", SessionStoreOperation::DeleteAllForUser);
+    let cookie = login_and_get_session_cookie(&harness, "all@example.com").await;
+    harness
+        .client
+        .post("/v1/logout-all")
+        .cookie(SESSION_COOKIE, &cookie)
+        .send()
+        .await
+        .assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(errors(), 1, "logout-all");
+
+    let harness = harness_failing("list@example.com", SessionStoreOperation::ListForUser);
+    let cookie = login_and_get_session_cookie(&harness, "list@example.com").await;
+    harness
+        .client
+        .get("/v1/sessions")
+        .cookie(SESSION_COOKIE, &cookie)
+        .send()
+        .await
+        .assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(errors(), 1, "listing sessions");
+
+    let harness = harness_failing("revoke@example.com", SessionStoreOperation::DeleteById);
+    let cookie = login_and_get_session_cookie(&harness, "revoke@example.com").await;
+    let ids = list_session_ids(&harness, &cookie).await;
+    assert_eq!(errors(), 0, "a working list is no error");
+    harness
+        .client
+        .delete(&format!("/v1/sessions/{}", ids[0]))
+        .cookie(SESSION_COOKIE, &cookie)
+        .send()
+        .await
+        .assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(errors(), 1, "revoking a session");
+}
+
+/// An [`InMemorySessionStore`] whose `get` fails once a session has been
+/// revoked by id: the store going down between the revocation and the
+/// re-read of the caller's own cookie. A store failing one method throughout
+/// cannot produce it -- its failing `get` would refuse the cookie before the
+/// handler ran.
+#[derive(Debug, Default)]
+struct FailsAfterRevoke {
+    inner: InMemorySessionStore,
+    revoked: AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl SessionStore for FailsAfterRevoke {
+    fn now(&self) -> chrono::DateTime<chrono::Utc> {
+        self.inner.now()
+    }
+
+    async fn create(
+        &self,
+        data: &SessionData,
+        idle_ttl_secs: u64,
+        absolute_ttl_secs: u64,
+    ) -> Result<String, SessionError> {
+        self.inner
+            .create(data, idle_ttl_secs, absolute_ttl_secs)
+            .await
+    }
+
+    async fn get(&self, token: &str) -> Result<Option<SessionData>, SessionError> {
+        if self.revoked.load(Ordering::SeqCst) {
+            return Err(sea_orm::DbErr::Custom("store unavailable".to_owned()).into());
+        }
+        self.inner.get(token).await
+    }
+
+    async fn touch(&self, token: &str, idle_ttl_secs: u64) -> Result<(), SessionError> {
+        self.inner.touch(token, idle_ttl_secs).await
+    }
+
+    async fn delete(&self, token: &str) -> Result<(), SessionError> {
+        self.inner.delete(token).await
+    }
+
+    async fn delete_all_for_user(&self, user_id: &str) -> Result<u64, SessionError> {
+        self.inner.delete_all_for_user(user_id).await
+    }
+
+    async fn list_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<(uuid::Uuid, SessionData)>, SessionError> {
+        self.inner.list_for_user(user_id).await
+    }
+
+    async fn delete_by_id(&self, id: uuid::Uuid, user_id: &str) -> Result<bool, SessionError> {
+        let deleted = self.inner.delete_by_id(id, user_id).await?;
+        self.revoked.store(true, Ordering::SeqCst);
+        Ok(deleted)
+    }
+}
+
+/// A revocation whose re-read of the caller's own cookie fails is a 500 and
+/// one `beam_session_store_errors_total` (#458), never a guess at whether to
+/// clear the cookie.
+#[tokio::test]
+async fn a_failed_reread_after_revoking_a_session_is_counted() {
+    use crate::routes::test_support::Recorded;
+
+    let recorder = metrics_util::debugging::DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let _local = metrics::set_default_local_recorder(&recorder);
+
+    let harness = make_harness_sharing_store(
+        FakeOidcClient::with_identity(identity("reread@example.com", true)),
+        Arc::new(InMemoryUserRepository::default()),
+        Arc::new(FailsAfterRevoke::default()),
+        test_config(),
+    );
+    let cookie = login_and_get_session_cookie(&harness, "reread@example.com").await;
+    let ids = list_session_ids(&harness, &cookie).await;
+
+    let response = harness
+        .client
+        .delete(&format!("/v1/sessions/{}", ids[0]))
+        .cookie(SESSION_COOKIE, &cookie)
+        .send()
+        .await;
+    response.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(
+        !clears_session_cookie(&response),
+        "a cookie whose session could not be re-read is left alone"
+    );
+    assert_eq!(
+        Recorded::of(&snapshotter).counter("beam_session_store_errors_total", &[]),
+        Some(1)
     );
 }

@@ -7,11 +7,12 @@ import dagger.Provides
 import dagger.hilt.components.SingletonComponent
 import dagger.hilt.testing.TestInstallIn
 import dev.beam.android.core.media.di.MediaBindsModule
+import dev.beam.android.core.media.download.CompletedDownloads
 import dev.beam.android.core.media.download.DownloadManagerHolder
 import dev.beam.android.core.media.download.DownloadRepository
-import dev.beam.android.core.model.DownloadRecord
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import uniffi.beam_client_core.DownloadRecord
 import javax.inject.Singleton
 
 /**
@@ -31,6 +32,10 @@ object FakeDownloadsModule {
     @Provides
     @Singleton
     fun downloads(): DownloadRepository = NoDownloads()
+
+    /** Nothing is downloaded, so nothing plays from the download cache. */
+    @Provides
+    fun completedDownloads(): CompletedDownloads = CompletedDownloads { null }
 
     /**
      * Only the download service asks for the manager, and no test here starts
@@ -52,11 +57,11 @@ private class NoDownloads : DownloadRepository {
 
     override suspend fun enqueue(
         fileId: String,
-        serverId: String,
         mediaId: String,
         title: String,
         subtitle: String?,
         posterUrl: String?,
+        episodeId: String?,
     ) = Unit
 
     override suspend fun pause(fileId: String) = Unit
@@ -66,6 +71,8 @@ private class NoDownloads : DownloadRepository {
     override suspend fun remove(fileId: String) = Unit
 
     override suspend fun removeAll() = Unit
+
+    override suspend fun removeServer(serverId: String) = Unit
 
     override suspend fun setRequiresUnmeteredNetwork(required: Boolean) = Unit
 

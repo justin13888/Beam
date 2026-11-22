@@ -82,6 +82,9 @@ async fn main() -> Result<()> {
     // the hermetic SQL-shape tests need that feature -- so the sharing is
     // explicit rather than a `.clone()` per consumer.
     let db = std::sync::Arc::new(db);
+    // The pool behind it, for the metrics sampler below. A handle, not a
+    // second pool: SQLx's pool is reference-counted.
+    let pool = db.get_postgres_connection_pool().clone();
 
     // Deep-health probe over the same pool.
     let probe: std::sync::Arc<dyn beam_server::services::health::DependencyProbe> =
@@ -101,6 +104,11 @@ async fn main() -> Result<()> {
     } = beam_server::state::AppServices::build(&config, db, clock.clone())
         .await
         .map_err(|e| eyre!("Failed to initialize services: {e}"))?;
+
+    // Libraries the deployment declares (BEAM_LIBRARIES) are created before
+    // the indexer starts, so its startup pass watches and scans them with
+    // every other library.
+    beam_server::bootstrap::declare_libraries(services.library.as_ref(), &config.libraries).await;
 
     // Start in-process indexing (startup scan, filesystem watcher, periodic
     // rescan backstop). There is no separate indexer process.
@@ -144,6 +152,12 @@ async fn main() -> Result<()> {
         let trickplay = services.trickplay.clone();
         tokio::spawn(async move { trickplay.run().await });
     }
+    // Skip markers are detected in the background for every episode file
+    // not yet heard in its current version, one file at a time (issue #332).
+    {
+        let markers = services.markers.clone();
+        tokio::spawn(async move { markers.run().await });
+    }
     if config.playback_telemetry_enabled {
         info!(
             "Playback telemetry enabled -- counts kept {} days, read at /v1/admin/telemetry/playback",
@@ -159,9 +173,15 @@ async fn main() -> Result<()> {
     // `/metrics` answers 503 rather than disappearing -- the router's shape,
     // and therefore the exported description, must not depend on configuration.
     let metrics_handle = if config.enable_metrics {
-        let handle = metrics_exporter_prometheus::PrometheusBuilder::new()
-            .install_recorder()
+        // `install` also gives every `*_seconds` histogram real buckets,
+        // registers each metric's HELP text and records `beam_build_info`.
+        let handle = beam_server::metrics::install()
             .map_err(|e| eyre!("Failed to install Prometheus metrics recorder: {e}"))?;
+        // The recorder drains histogram samples only on render or upkeep, so
+        // without this task an unscraped histogram grows without bound.
+        beam_server::metrics::spawn_upkeep(handle.clone());
+        // The pool's connections and acquire wait, which no request reports.
+        beam_server::db::spawn_pool_sampler(pool, clock.clone());
         info!("Metrics enabled -- Prometheus exposition at /metrics");
         Some(handle)
     } else {

@@ -11,7 +11,16 @@
 //! chapters a file carries ([`markers_from_chapters`]): a chapter titled
 //! `Opening` or `Intro` is the intro, one titled `Ending` or `End Credits`
 //! the credits, `Recap` or `Previously` a recap, `Preview` or `Next Episode`
-//! a preview. A file without such chapters has no markers.
+//! a preview.
+//!
+//! Beam also keeps markers of its own for a file (issue #332): ones an
+//! administrator set, and ones the background detector found by matching the
+//! audio a season's episodes share. A kept marker overrides the chapter-named
+//! one of the same kind ([`resolve_markers`]), so a file whose chapters carry
+//! generic titles -- or none -- still has its intro and credits.
+
+use chrono::{DateTime, Utc};
+use uuid::Uuid;
 
 /// One chapter of a file, on that file's timeline.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +80,90 @@ pub struct PlaybackMarker {
     pub start_ms: u64,
     /// Where it ends; always after `start_ms`.
     pub end_ms: u64,
+}
+
+/// Who set a marker Beam keeps for a file (issue #332).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StoredMarkerSource {
+    /// An administrator set or corrected it. Detection never replaces it.
+    Admin,
+    /// The background detector found it in the audio the file shares with
+    /// other episodes of its season.
+    Detected,
+}
+
+/// A marker Beam keeps for a file, beside the ones its chapters name: at
+/// most one of each kind per file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoredMarker {
+    pub marker: PlaybackMarker,
+    pub source: StoredMarkerSource,
+}
+
+/// Where a file's marker comes from, as a client is told it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MarkerOrigin {
+    /// A chapter titled for it.
+    Chapter,
+    /// The background detector.
+    Detected,
+    /// An administrator.
+    Admin,
+}
+
+/// One of a file's markers, and where it comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedMarker {
+    pub marker: PlaybackMarker,
+    pub origin: MarkerOrigin,
+}
+
+/// What one detection of a file found (issue #332): the markers its audio
+/// shares with other episodes of its season, for the version of the file
+/// they were found in. Recorded even when it found none, so a file is not
+/// listened to again until its content changes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkerDetection {
+    pub file_id: Uuid,
+    /// The content hash (`MediaFile::hash`) of the file the markers were
+    /// found in.
+    pub file_hash: u64,
+    /// At most one of each kind.
+    pub markers: Vec<PlaybackMarker>,
+    pub detected_at: DateTime<Utc>,
+}
+
+/// A file's markers: for each kind, the one Beam keeps for the file if it
+/// keeps one, else the one its chapters name ([`markers_from_chapters`]). At
+/// most one of each kind, in the order they start.
+pub fn resolve_markers(chapters: &[Chapter], stored: &[StoredMarker]) -> Vec<ResolvedMarker> {
+    let derived = markers_from_chapters(chapters);
+    let mut markers: Vec<ResolvedMarker> = MarkerKind::ALL
+        .into_iter()
+        .filter_map(|kind| {
+            let kept = stored
+                .iter()
+                .find(|stored| stored.marker.kind == kind)
+                .map(|stored| ResolvedMarker {
+                    marker: stored.marker,
+                    origin: match stored.source {
+                        StoredMarkerSource::Admin => MarkerOrigin::Admin,
+                        StoredMarkerSource::Detected => MarkerOrigin::Detected,
+                    },
+                });
+            kept.or_else(|| {
+                derived
+                    .iter()
+                    .find(|marker| marker.kind == kind)
+                    .map(|marker| ResolvedMarker {
+                        marker: *marker,
+                        origin: MarkerOrigin::Chapter,
+                    })
+            })
+        })
+        .collect();
+    markers.sort_by_key(|resolved| (resolved.marker.start_ms, resolved.marker.end_ms));
+    markers
 }
 
 /// The chapter titles that name a recap, compared after
@@ -329,6 +422,117 @@ mod tests {
                 end_ms: 40_000,
             }]
         );
+    }
+
+    fn stored(
+        kind: MarkerKind,
+        start_ms: u64,
+        end_ms: u64,
+        source: StoredMarkerSource,
+    ) -> StoredMarker {
+        StoredMarker {
+            marker: PlaybackMarker {
+                kind,
+                start_ms,
+                end_ms,
+            },
+            source,
+        }
+    }
+
+    #[test]
+    fn a_kept_marker_overrides_the_chapter_named_one_of_its_kind_and_no_other() {
+        let chapters = [
+            chapter(0, 0, 30_000, Some("Recap")),
+            chapter(1, 30_000, 90_000, Some("Opening")),
+            chapter(2, 1_200_000, 1_290_000, Some("Ending")),
+        ];
+        let kept = [
+            stored(
+                MarkerKind::Intro,
+                45_000,
+                120_000,
+                StoredMarkerSource::Admin,
+            ),
+            stored(
+                MarkerKind::Preview,
+                1_290_000,
+                1_320_000,
+                StoredMarkerSource::Detected,
+            ),
+        ];
+        let resolved = |kind, start_ms, end_ms, origin| ResolvedMarker {
+            marker: PlaybackMarker {
+                kind,
+                start_ms,
+                end_ms,
+            },
+            origin,
+        };
+
+        assert_eq!(
+            resolve_markers(&chapters, &kept),
+            vec![
+                resolved(MarkerKind::Recap, 0, 30_000, MarkerOrigin::Chapter),
+                resolved(MarkerKind::Intro, 45_000, 120_000, MarkerOrigin::Admin),
+                resolved(
+                    MarkerKind::Credits,
+                    1_200_000,
+                    1_290_000,
+                    MarkerOrigin::Chapter
+                ),
+                resolved(
+                    MarkerKind::Preview,
+                    1_290_000,
+                    1_320_000,
+                    MarkerOrigin::Detected
+                ),
+            ]
+        );
+    }
+
+    proptest::proptest! {
+        /// Whatever the chapters and kept markers, each kind resolves to the
+        /// kept marker when there is one and to the chapter-named one
+        /// otherwise -- so with nothing kept the chapters alone decide -- and
+        /// the result runs in the order the markers start.
+        #[test]
+        fn each_kind_resolves_to_its_kept_marker_else_its_chapter(
+            chapters in any_chapters(),
+            kept_kinds in proptest::sample::subsequence(MarkerKind::ALL.to_vec(), 0..=4),
+            admin in proptest::bool::ANY,
+        ) {
+            use proptest::prelude::*;
+            let source = if admin { StoredMarkerSource::Admin } else { StoredMarkerSource::Detected };
+            let kept: Vec<StoredMarker> = kept_kinds
+                .iter()
+                .enumerate()
+                .map(|(at, kind)| stored(*kind, at as u64 * 10, at as u64 * 10 + 7, source))
+                .collect();
+            let derived = markers_from_chapters(&chapters);
+            let resolved = resolve_markers(&chapters, &kept);
+
+            for kind in MarkerKind::ALL {
+                let expected = kept
+                    .iter()
+                    .find(|stored| stored.marker.kind == kind)
+                    .map(|stored| stored.marker)
+                    .or_else(|| derived.iter().copied().find(|marker| marker.kind == kind));
+                let got = resolved.iter().find(|r| r.marker.kind == kind).map(|r| r.marker);
+                prop_assert_eq!(got, expected, "{:?}", kind);
+            }
+            prop_assert!(resolved
+                .windows(2)
+                .all(|pair| (pair[0].marker.start_ms, pair[0].marker.end_ms)
+                    <= (pair[1].marker.start_ms, pair[1].marker.end_ms)));
+            if kept.is_empty() {
+                prop_assert_eq!(
+                    resolved.iter().map(|r| r.marker).collect::<Vec<_>>(),
+                    derived
+                );
+                prop_assert!(resolved.iter().all(|r| r.origin == MarkerOrigin::Chapter));
+            }
+        }
     }
 
     #[test]

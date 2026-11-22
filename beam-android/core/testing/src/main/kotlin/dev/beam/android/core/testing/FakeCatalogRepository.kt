@@ -4,7 +4,6 @@ import dev.beam.android.core.ffi.repository.CatalogRepository
 import uniffi.beam_client_core.BeamException
 import uniffi.beam_client_core.BrowseQuery
 import uniffi.beam_client_core.EpisodeSummary
-import uniffi.beam_client_core.LibraryFileSummary
 import uniffi.beam_client_core.LibrarySummary
 import uniffi.beam_client_core.MediaDetail
 import uniffi.beam_client_core.MediaPage
@@ -25,18 +24,6 @@ public class FakeCatalogRepository : CatalogRepository {
 
     /** Libraries returned by [libraries]. */
     public var libraryList: List<LibrarySummary> = listOf(Fixtures.library())
-
-    /** Files returned by [libraryFiles]. */
-    public var files: List<LibraryFileSummary> = emptyList()
-
-    /**
-     * Set to make [libraryFiles] alone fail.
-     *
-     * A library whose files cannot be read is not the same as a library that
-     * is gone, and the screen treats them differently; one failure mode for
-     * both could not express that.
-     */
-    public var filesFailWith: BeamException? = null
 
     /** The episode [upNext] resolves to. */
     public var nextEpisode: EpisodeSummary? = null
@@ -84,18 +71,6 @@ public class FakeCatalogRepository : CatalogRepository {
     override suspend fun libraries(): List<LibrarySummary> {
         failWith?.let { throw it }
         return libraryList
-    }
-
-    override suspend fun library(libraryId: String): LibrarySummary {
-        failWith?.let { throw it }
-        return libraryList.firstOrNull { it.id == libraryId }
-            ?: throw BeamException.NotFound("No library with id $libraryId", "about:blank")
-    }
-
-    override suspend fun libraryFiles(libraryId: String): List<LibraryFileSummary> {
-        filesFailWith?.let { throw it }
-        failWith?.let { throw it }
-        return files
     }
 
     /**

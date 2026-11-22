@@ -6,20 +6,16 @@
 //! purged only once it has stayed missing for the grace period. Time is the
 //! injected `TestClock`, the filesystem a real `TempDir`.
 
+use super::test_harness::IndexServiceBuilder;
 use super::*;
-use crate::services::admin_log::LocalAdminLogService;
-use crate::services::hash::MockHashService;
-use crate::services::media_info::MockMediaInfoService;
 use crate::services::notification::{EventLevel, InMemoryNotificationService};
 use beam_domain::models::{CreateLibrary, Library};
 use beam_domain::repositories::AdminLogRepository;
 use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
 use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
 use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
-use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
-use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
-use beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository;
 use beam_domain::services::TestClock;
+use beam_domain::test_utils::{create_media_file, media_file};
 use tempfile::TempDir;
 
 // ─── plan_missing ────────────────────────────────────────────────────────────
@@ -32,23 +28,8 @@ fn instant(secs: i64) -> DateTime<Utc> {
 
 fn row_at(path: &str, missing_since: Option<DateTime<Utc>>) -> MediaFile {
     MediaFile {
-        id: Uuid::new_v4(),
-        library_id: Uuid::nil(),
-        path: PathBuf::from(path),
-        hash: 0,
-        size_bytes: 0,
-        mtime: None,
-        identity: None,
-        mime_type: None,
-        duration: None,
-        container_format: None,
-        content: None,
-        status: FileStatus::Known,
-        classifier_version: 0,
-        container_tags: None,
-        scanned_at: instant(0),
-        updated_at: instant(0),
         missing_since,
+        ..media_file(Uuid::nil(), path)
     }
 }
 
@@ -179,6 +160,77 @@ fn plan_missing_shields_every_row_after_an_unscoped_walk_failure() {
             shielded: 2,
         }
     );
+}
+
+mod plan_missing_properties {
+    use super::*;
+    use proptest::prelude::*;
+    use std::collections::HashSet;
+
+    const DIRS: [&str; 4] = ["/lib/a", "/lib/a/b", "/lib/ab", "/lib/c"];
+
+    /// An unseen row in one of [`DIRS`], missing since some second of the
+    /// last ten days or not missing.
+    fn unseen_row() -> impl Strategy<Value = MediaFile> {
+        (
+            prop::sample::select(DIRS.to_vec()),
+            prop::option::of(0i64..10 * 86_400),
+        )
+            .prop_map(|(dir, since)| row_at(&format!("{dir}/x.mkv"), since.map(instant)))
+    }
+
+    proptest! {
+        /// Every unseen row is either shielded -- left alone, in neither
+        /// list -- or decided, and each decision names the row at most
+        /// once. A row's first stamp is never replaced, a row is never
+        /// purged before it has been missing for the whole grace, and
+        /// nothing outside the input is named.
+        #[test]
+        fn plan_missing_partitions_its_input(
+            rows in prop::collection::vec(unseen_row(), 0..30),
+            failed in prop::sample::subsequence(DIRS.to_vec(), 0..=DIRS.len()),
+            unscoped in any::<bool>(),
+            grace_secs in 0u64..12 * 86_400,
+        ) {
+            let failed: Vec<PathBuf> = failed.iter().map(PathBuf::from).collect();
+            let now = instant(10 * 86_400);
+            let grace = Duration::from_secs(grace_secs);
+
+            let plan = plan_missing(&rows, &failed, unscoped, now, grace);
+
+            let shielded: Vec<&MediaFile> = rows
+                .iter()
+                .filter(|row| unscoped || failed.iter().any(|dir| row.path.starts_with(dir)))
+                .collect();
+            prop_assert_eq!(plan.shielded, shielded.len());
+
+            let marked: HashSet<Uuid> = plan.mark.iter().copied().collect();
+            let purged: HashSet<Uuid> = plan.purge.iter().copied().collect();
+            prop_assert_eq!(marked.len(), plan.mark.len(), "marked at most once");
+            prop_assert_eq!(purged.len(), plan.purge.len(), "purged at most once");
+            for row in &rows {
+                let is_shielded = shielded.iter().any(|s| s.id == row.id);
+                if is_shielded {
+                    prop_assert!(!marked.contains(&row.id) && !purged.contains(&row.id));
+                    continue;
+                }
+                if row.missing_since.is_some() {
+                    prop_assert!(!marked.contains(&row.id), "its first stamp is kept");
+                } else {
+                    prop_assert!(marked.contains(&row.id), "an unshielded row is stamped");
+                }
+                if purged.contains(&row.id) {
+                    let since = row.missing_since.unwrap_or(now);
+                    prop_assert!(
+                        now - since >= chrono::TimeDelta::from_std(grace).unwrap(),
+                        "purged before the grace was up"
+                    );
+                }
+            }
+            let ids: HashSet<Uuid> = rows.iter().map(|row| row.id).collect();
+            prop_assert!(marked.is_subset(&ids) && purged.is_subset(&ids));
+        }
+    }
 }
 
 // ─── the scan and the watcher ────────────────────────────────────────────────
@@ -347,22 +399,14 @@ impl Harness {
             .unwrap();
         // No hasher or prober expectations: every file here is either already
         // indexed and unchanged, or gone. Reaching either would be a rehash.
-        let service = LocalIndexService::new(
-            lib_repo.clone(),
-            files.clone(),
-            Arc::new(InMemoryMovieRepository::default()),
-            Arc::new(InMemoryShowRepository::default()),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-            Arc::new(MockHashService::new()),
-            Arc::new(MockMediaInfoService::new()),
-            notifications.clone(),
-            Arc::new(LocalAdminLogService::new(
-                admin_log_repo.clone() as Arc<dyn AdminLogRepository>
-            )),
-            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-        )
-        .with_clock(clock.clone())
-        .with_missing_file_grace(grace);
+        let service = IndexServiceBuilder::new()
+            .library_repo(lib_repo.clone())
+            .file_repo(files.clone())
+            .notifications(notifications.clone())
+            .admin_log_repo(admin_log_repo.clone())
+            .build()
+            .with_clock(clock.clone())
+            .with_missing_file_grace(grace);
 
         Self {
             dir,
@@ -380,36 +424,23 @@ impl Harness {
 
     /// Put `rel` on disk and index it as an earlier scan would have: a row
     /// whose size and mtime match, so reconciling it touches no hasher.
-    fn index_on_disk(&self, rel: &str) -> MediaFile {
+    async fn index_on_disk(&self, rel: &str) -> MediaFile {
         let path = self.root.join(rel);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, rel.as_bytes()).unwrap();
         let (size_bytes, mtime) = read_fs_meta(path.parent().unwrap(), &path).unwrap();
-        let row = MediaFile {
-            id: Uuid::new_v4(),
-            library_id: self.library.id,
-            path,
-            hash: 7,
-            size_bytes,
-            mtime,
-            identity: None,
-            mime_type: Some("video/mp4".to_string()),
-            duration: Some(Duration::from_secs(60)),
-            container_format: None,
-            content: None,
-            status: FileStatus::Known,
-            classifier_version: 0,
-            container_tags: None,
-            scanned_at: instant(0),
-            updated_at: instant(0),
-            missing_since: None,
-        };
         self.file_repo
-            .files
-            .lock()
+            .create(CreateMediaFile {
+                hash: 7,
+                size_bytes,
+                mtime,
+                mime_type: Some("video/mp4".to_string()),
+                duration: Some(Duration::from_secs(60)),
+                container_format: None,
+                ..create_media_file(self.library.id, path)
+            })
+            .await
             .unwrap()
-            .insert(row.id, row.clone());
-        row
     }
 
     /// Move an indexed file out of the library, keeping its mtime.
@@ -466,8 +497,8 @@ impl Harness {
 #[tokio::test]
 async fn a_file_gone_from_disk_is_marked_missing_and_hidden_not_deleted() {
     let h = Harness::new().await;
-    let kept = h.index_on_disk("kept.mp4");
-    let gone = h.index_on_disk("gone.mp4");
+    let kept = h.index_on_disk("kept.mp4").await;
+    let gone = h.index_on_disk("gone.mp4").await;
     h.park(&gone);
     h.clock.advance(Duration::from_secs(90));
 
@@ -489,8 +520,8 @@ async fn a_file_gone_from_disk_is_marked_missing_and_hidden_not_deleted() {
 #[tokio::test]
 async fn a_missing_file_within_the_grace_keeps_its_first_stamp() {
     let h = Harness::new().await;
-    h.index_on_disk("kept.mp4");
-    let gone = h.index_on_disk("gone.mp4");
+    h.index_on_disk("kept.mp4").await;
+    let gone = h.index_on_disk("gone.mp4").await;
     h.park(&gone);
     h.scan().await.unwrap();
 
@@ -507,8 +538,8 @@ async fn a_missing_file_within_the_grace_keeps_its_first_stamp() {
 #[tokio::test]
 async fn a_file_missing_for_the_whole_grace_is_purged_by_the_next_scan() {
     let h = Harness::new().await;
-    let kept = h.index_on_disk("kept.mp4");
-    let gone = h.index_on_disk("gone.mp4");
+    let kept = h.index_on_disk("kept.mp4").await;
+    let gone = h.index_on_disk("gone.mp4").await;
     h.park(&gone);
     h.scan().await.unwrap();
 
@@ -531,8 +562,8 @@ async fn a_file_missing_for_the_whole_grace_is_purged_by_the_next_scan() {
 #[tokio::test]
 async fn a_zero_grace_purges_at_the_first_healthy_scan() {
     let h = Harness::with_grace(Duration::ZERO).await;
-    h.index_on_disk("kept.mp4");
-    let gone = h.index_on_disk("gone.mp4");
+    h.index_on_disk("kept.mp4").await;
+    let gone = h.index_on_disk("gone.mp4").await;
     h.park(&gone);
 
     h.scan().await.unwrap();
@@ -550,8 +581,8 @@ async fn a_zero_grace_purges_at_the_first_healthy_scan() {
 #[tokio::test]
 async fn a_scan_that_cannot_mark_rows_missing_fails_and_purges_nothing() {
     let h = Harness::new().await;
-    let kept = h.index_on_disk("kept.mp4");
-    let long_gone = h.index_on_disk("long-gone.mp4");
+    let kept = h.index_on_disk("kept.mp4").await;
+    let long_gone = h.index_on_disk("long-gone.mp4").await;
     h.park(&long_gone);
     h.scan().await.unwrap();
     let finished = h
@@ -561,7 +592,7 @@ async fn a_scan_that_cannot_mark_rows_missing_fails_and_purges_nothing() {
         .unwrap()
         .unwrap()
         .last_scan_finished_at;
-    let newly_gone = h.index_on_disk("newly-gone.mp4");
+    let newly_gone = h.index_on_disk("newly-gone.mp4").await;
     h.park(&newly_gone);
     h.clock.advance(GRACE);
     h.files.fail_marking.store(true, Ordering::SeqCst);
@@ -602,11 +633,11 @@ async fn a_scan_that_cannot_mark_rows_missing_fails_and_purges_nothing() {
 #[tokio::test]
 async fn a_scan_that_cannot_purge_fails_and_keeps_what_it_marked() {
     let h = Harness::new().await;
-    h.index_on_disk("kept.mp4");
-    let long_gone = h.index_on_disk("long-gone.mp4");
+    h.index_on_disk("kept.mp4").await;
+    let long_gone = h.index_on_disk("long-gone.mp4").await;
     h.park(&long_gone);
     h.scan().await.unwrap();
-    let newly_gone = h.index_on_disk("newly-gone.mp4");
+    let newly_gone = h.index_on_disk("newly-gone.mp4").await;
     h.park(&newly_gone);
     h.clock.advance(GRACE);
     h.files.fail_purging.store(true, Ordering::SeqCst);
@@ -638,7 +669,7 @@ async fn a_scan_that_cannot_purge_fails_and_keeps_what_it_marked() {
 #[tokio::test]
 async fn a_watcher_removal_that_cannot_be_recorded_fails_and_leaves_the_row() {
     let h = Harness::new().await;
-    let row = h.index_on_disk("show.mkv");
+    let row = h.index_on_disk("show.mkv").await;
     h.park(&row);
     h.files.fail_marking.store(true, Ordering::SeqCst);
 
@@ -657,8 +688,8 @@ async fn a_watcher_removal_that_cannot_be_recorded_fails_and_leaves_the_row() {
 #[tokio::test]
 async fn a_file_that_comes_back_is_restored_under_the_same_id_without_a_rehash() {
     let h = Harness::new().await;
-    h.index_on_disk("kept.mp4");
-    let away = h.index_on_disk("away.mp4");
+    h.index_on_disk("kept.mp4").await;
+    let away = h.index_on_disk("away.mp4").await;
     h.park(&away);
     h.scan().await.unwrap();
     assert!(h.stored(&away).await.unwrap().missing_since.is_some());
@@ -683,8 +714,8 @@ async fn a_file_that_comes_back_is_restored_under_the_same_id_without_a_rehash()
 #[tokio::test]
 async fn an_empty_root_is_still_refused_when_the_indexed_files_are_already_missing() {
     let h = Harness::new().await;
-    let a = h.index_on_disk("a.mp4");
-    let b = h.index_on_disk("b.mkv");
+    let a = h.index_on_disk("a.mp4").await;
+    let b = h.index_on_disk("b.mkv").await;
     h.park(&a);
     h.park(&b);
     // Mark both missing through the watcher, as a volume emptied file by file
@@ -714,7 +745,7 @@ async fn an_empty_root_is_still_refused_when_the_indexed_files_are_already_missi
 #[tokio::test]
 async fn a_watcher_removal_marks_the_file_missing_and_a_creation_restores_it() {
     let h = Harness::new().await;
-    let row = h.index_on_disk("show.mkv");
+    let row = h.index_on_disk("show.mkv").await;
     h.park(&row);
     h.clock.advance(Duration::from_secs(30));
 
@@ -746,7 +777,7 @@ async fn a_watcher_removal_marks_the_file_missing_and_a_creation_restores_it() {
 #[tokio::test]
 async fn a_watcher_removal_while_the_root_is_gone_changes_nothing() {
     let h = Harness::new().await;
-    let row = h.index_on_disk("film.mp4");
+    let row = h.index_on_disk("film.mp4").await;
     // The whole volume goes away, not one file.
     std::fs::remove_dir_all(&h.root).unwrap();
 
@@ -768,9 +799,9 @@ async fn rows_under_an_unreadable_directory_are_left_alone_and_the_failure_repor
     use std::os::unix::fs::PermissionsExt;
 
     let h = Harness::new().await;
-    let kept = h.index_on_disk("kept.mp4");
-    let locked_row = h.index_on_disk("locked/inside.mp4");
-    let gone = h.index_on_disk("gone.mp4");
+    let kept = h.index_on_disk("kept.mp4").await;
+    let locked_row = h.index_on_disk("locked/inside.mp4").await;
+    let gone = h.index_on_disk("gone.mp4").await;
     h.park(&gone);
     let locked = h.root.join("locked");
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
@@ -841,8 +872,8 @@ fn restore_searchable(dir: &Path) {
 #[tokio::test]
 async fn a_listed_file_the_scan_cannot_stat_is_shielded_not_marked_missing() {
     let h = Harness::new().await;
-    h.index_on_disk("kept.mp4");
-    let unstattable = h.index_on_disk("locked/a.mkv");
+    h.index_on_disk("kept.mp4").await;
+    let unstattable = h.index_on_disk("locked/a.mkv").await;
     let locked = h.root.join("locked");
     if !make_unsearchable(&locked, &unstattable.path) {
         return;
@@ -874,7 +905,7 @@ async fn a_listed_file_the_scan_cannot_stat_is_shielded_not_marked_missing() {
 #[tokio::test]
 async fn a_watcher_event_for_a_path_that_cannot_be_statted_changes_nothing() {
     let h = Harness::new().await;
-    let row = h.index_on_disk("locked/a.mkv");
+    let row = h.index_on_disk("locked/a.mkv").await;
     let locked = h.root.join("locked");
     if !make_unsearchable(&locked, &row.path) {
         return;
@@ -904,7 +935,7 @@ async fn a_watcher_event_for_a_path_that_cannot_be_statted_changes_nothing() {
 #[tokio::test]
 async fn a_symlink_to_a_file_is_not_indexed() {
     let h = Harness::new().await;
-    let real = h.index_on_disk("real.mkv");
+    let real = h.index_on_disk("real.mkv").await;
     let target = h.dir.path().join("parked").join("elsewhere.mkv");
     std::fs::write(&target, b"outside the root").unwrap();
     std::os::unix::fs::symlink(&target, h.root.join("linked.mkv")).unwrap();
@@ -917,7 +948,7 @@ async fn a_symlink_to_a_file_is_not_indexed() {
 #[tokio::test]
 async fn a_symlinked_directory_is_not_descended() {
     let h = Harness::new().await;
-    let real = h.index_on_disk("real.mkv");
+    let real = h.index_on_disk("real.mkv").await;
     let outside = h.dir.path().join("parked").join("more-movies");
     std::fs::create_dir_all(&outside).unwrap();
     std::fs::write(outside.join("movie.mkv"), b"outside the root").unwrap();
@@ -934,8 +965,8 @@ async fn a_symlinked_directory_is_not_descended() {
 #[tokio::test]
 async fn an_indexed_file_replaced_by_a_symlink_is_marked_missing() {
     let h = Harness::new().await;
-    let kept = h.index_on_disk("kept.mkv");
-    let replaced = h.index_on_disk("replaced.mkv");
+    let kept = h.index_on_disk("kept.mkv").await;
+    let replaced = h.index_on_disk("replaced.mkv").await;
     h.park(&replaced);
     std::os::unix::fs::symlink(h.parked(&replaced), &replaced.path).unwrap();
     h.clock.advance(Duration::from_secs(60));
@@ -965,7 +996,7 @@ async fn a_watcher_event_for_a_symlink_indexes_nothing_and_hides_a_replaced_file
         "a created link is not indexed"
     );
 
-    let replaced = h.index_on_disk("replaced.mkv");
+    let replaced = h.index_on_disk("replaced.mkv").await;
     h.park(&replaced);
     std::os::unix::fs::symlink(h.parked(&replaced), &replaced.path).unwrap();
     h.clock.advance(Duration::from_secs(5));

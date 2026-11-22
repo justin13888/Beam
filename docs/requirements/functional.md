@@ -176,7 +176,12 @@ strength. Each requirement is independently testable. See `product.md` for narra
   starts, and MUST schedule no single-library scan alongside it); a library MUST be watched as soon
   as it is created -- registered in the background, so creating it does not wait on a walk of its
   tree -- and stop being watched as soon as it is deleted, with the periodic maintenance cycle as
-  the backstop for a registration that failed or landed after the delete; the admin status MUST report each library's watch mode and whether the watch limit has
+  the backstop for a registration that failed or landed after the delete; a library MUST be scanned
+  as soon as it is created, so what its root already holds is indexed without an administrator's
+  scan or the periodic rescan: creating it MUST register that scan's job (trigger `created`) before
+  answering, and the scan MUST run once the new library's watch is registered, whether watched or
+  polled -- for a polled library it is the scan it starts being polled with -- while a scan that
+  cannot start MUST be logged and MUST NOT fail the creation; the admin status MUST report each library's watch mode and whether the watch limit has
   been reached. Every scan of a library is serialised (FR-218).
 - **FR-214**: The indexer MUST match a file to an existing movie or show by an identity key derived
   from the filename parse -- the normalised title and year, and for a show its series folder --
@@ -222,11 +227,13 @@ strength. Each requirement is independently testable. See `product.md` for narra
   rows.
 - **FR-218**: A library scan MUST be a job: requesting one MUST answer once the job is registered
   (`202` with the job) rather than when the scan finishes, and the latest job of each library MUST
-  be readable. Every scan of a library -- administrator's, startup, periodic, newly polled -- and
-  every watcher reconcile of it MUST be serialised: a request while a scan is queued or running MUST
+  be readable. Every scan of a library -- administrator's, startup, periodic, newly polled, a new
+  library's first -- and every watcher reconcile of it MUST be serialised: a request while a scan is queued or running MUST
   be refused with `library-scan-in-progress` (409), the periodic rescan MUST skip such a library,
   and a watcher event MUST be deferred and retried rather than wait. A file MUST NOT be hashed until
-  it has gone `BEAM_SCAN_SETTLE_SECS` without a write (measured with the injected `Clock`), and a
+  it has gone `BEAM_SCAN_SETTLE_SECS` without a write (measured with the injected `Clock`); a file a
+  scan defers for that reason MUST be retried once the window has passed, not left to the next scan,
+  whenever the watcher runs; and a
   file whose probe failed MUST be probed again on each visit and classified when a probe succeeds;
   when a file's content changes and its probe fails, the old content's probe results and streams
   MUST be cleared rather than kept; when its size, modification time or identity (FR-221: inode and
@@ -500,8 +507,14 @@ strength. Each requirement is independently testable. See `product.md` for narra
   argument and for the client-side work that answers the compatibility and bandwidth problems
   instead.
 - **FR-504**: Streaming and download endpoints MUST authenticate the request using the session
-  cookie established per FR-103. The server MUST NOT accept a bearer or stream token supplied via URL
-  query string.
+  cookie established per FR-103, or a media grant for the file the path names. A media grant is
+  issued to a signed-in session by `POST /v1/files/{file_id}/grant` for a client that holds no
+  cookie (an AirPlay or Cast receiver, an external player); it is a signature over one file, one
+  user and an expiry, it MUST be accepted by the streaming and download endpoints and by no other,
+  and the requests made with it MUST be held to that user's access policy. The server MUST NOT
+  accept a session or bearer token supplied via URL query string. (Amended for
+  [#461](https://github.com/justin13888/beam/issues/461); see
+  [ADR-0022](../architecture/decisions/ADR-0022-signed-media-grants.md).)
 - **FR-505**: For a title with multiple indexed file versions, the server MUST expose an endpoint
   (`/media/{id}/sources`) enumerating the available versions — container, size, edition, and each
   version's video, audio and subtitle tracks, every track tied to its file by its stream index and

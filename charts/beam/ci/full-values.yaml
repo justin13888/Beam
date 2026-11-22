@@ -1,7 +1,9 @@
 # Every optional server feature on, secrets from existing Secrets, media
 # readable through a supplemental group, and libraries on three source kinds
-# the chart forces read-only (a claim, NFS and a CSI driver) plus a hostPath,
-# which has no readOnly field and whose type the chart pins to Directory.
+# the chart forces read-only (a claim, NFS and a CSI driver) plus two
+# hostPaths, which have no readOnly field and whose type the chart pins to
+# Directory -- one opting in to HostToContainer mount propagation, one not --
+# and every watcher and settle value moved off its default.
 server:
   publicUrl: https://beam.example.test
   podSecurityContext:
@@ -10,7 +12,9 @@ server:
   extraAllowedOrigins:
     - https://other.example.test
   cookieSecure: true
-  shutdownTimeoutSeconds: 120
+  # A million or more: Helm reads it as float64, so the chart must render it
+  # through int64 or it reaches the server as "1e+06" (#481).
+  shutdownTimeoutSeconds: 1000000
   logLevel: beam_server=debug
   env:
     BEAM_SCAN_INTERVAL_SECS: "600"
@@ -48,9 +52,21 @@ libraries:
         nodePublishSecretRef:
           name: smb-credentials
   - name: local
+    mountPropagation: HostToContainer
     volume:
       hostPath:
         path: /srv/media/local
+  - name: archive
+    volume:
+      hostPath:
+        path: /srv/media/archive
+watch:
+  # A million or more, which Helm reads as a float and would render as
+  # "1e+06" unless the chart converts it to an integer first.
+  pollIntervalSeconds: 1000000
+  debounceMs: 500
+scan:
+  settleSeconds: 10
 persistence:
   data:
     existingClaim: beam-data
@@ -62,5 +78,29 @@ ingress:
     secretName: beam-tls
 metrics:
   enabled: true
+  serviceMonitor:
+    enabled: true
+    interval: 15s
+    scrapeTimeout: 10s
+    labels:
+      release: kube-prometheus-stack
+    relabelings:
+      - sourceLabels: [__meta_kubernetes_pod_node_name]
+        targetLabel: node
+    metricRelabelings:
+      - sourceLabels: [__name__]
+        regex: process_virtual_memory_max_bytes
+        action: drop
+  prometheusRule:
+    enabled: true
+    labels:
+      release: kube-prometheus-stack
+    alertLabels:
+      team: media
+    scanStaleHours: 72
+  grafanaDashboard:
+    enabled: true
+    annotations:
+      grafana_folder: Beam
 imagePullSecrets:
   - name: ghcr

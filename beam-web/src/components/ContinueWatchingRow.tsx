@@ -67,13 +67,11 @@ export function ContinueWatchingRow() {
 			</h2>
 			<div className="flex gap-4 overflow-x-auto pb-2">
 				{cards.map(({ item, metadata }) => {
-					const isMovie = "Movie" in metadata;
-					const media = isMovie ? metadata.Movie : metadata.Show;
-					const title = media.title.original;
+					const title = metadata.title.original;
 					const poster = artworkSrc(
-						isMovie
-							? metadata.Movie.poster_url
-							: (metadata.Show.seasons[0]?.poster_url ?? null),
+						metadata.media_type === "movie"
+							? metadata.poster_url
+							: (metadata.seasons[0]?.poster_url ?? null),
 					);
 					const progressPct = item.duration_secs
 						? Math.min(100, (item.position_secs / item.duration_secs) * 100)
@@ -87,7 +85,7 @@ export function ContinueWatchingRow() {
 						<Link
 							key={item.file_id}
 							to="/media/$id"
-							params={{ id: media.id }}
+							params={{ id: metadata.id }}
 							search={{ fileId: item.file_id }}
 							className="group w-40 shrink-0"
 						>
