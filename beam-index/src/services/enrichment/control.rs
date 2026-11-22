@@ -26,11 +26,12 @@ use beam_domain::models::enrichment::{
 use beam_domain::models::{AdminLogCategory, PinSource, ProviderPin};
 use beam_domain::providers::enrichment::{EnrichmentError, EnrichmentProvider, MediaQuery};
 use beam_domain::repositories::{
-    EnrichmentStateRepository, LibraryRepository, MovieRepository, ShowRepository,
+    AdminLogRepository, EnrichmentStateRepository, LibraryRepository, MovieRepository,
+    ShowRepository,
 };
 
 use super::matcher;
-use crate::services::admin_log::{AdminLogService, record_admin_action};
+use crate::services::admin_log::record_admin_action;
 use crate::services::index::{IndexError, LocalIndexService};
 
 /// How many candidates a search offers an administrator.
@@ -146,7 +147,7 @@ pub struct EnrichmentControlDeps {
     pub states: Arc<dyn EnrichmentStateRepository>,
     pub libraries: Arc<dyn LibraryRepository>,
     pub provider: Arc<dyn EnrichmentProvider>,
-    pub admin_log: Arc<dyn AdminLogService>,
+    pub admin_log: Arc<dyn AdminLogRepository>,
     pub nfo_pins: Arc<dyn TitleNfoPins>,
     /// The enrichment worker's wake-up
     /// ([`super::MetadataEnrichmentService::notify_handle`]): every change

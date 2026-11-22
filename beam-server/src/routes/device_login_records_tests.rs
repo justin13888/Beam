@@ -9,7 +9,7 @@ use super::*;
 pub(super) async fn sign_in_records(harness: &Harness) -> Vec<beam_domain::models::AdminLog> {
     let mut entries = harness
         .admin_log
-        .get_logs_by_category(beam_domain::models::AdminLogCategory::Auth, 100, 0)
+        .list_by_category(beam_domain::models::AdminLogCategory::Auth, 100, 0)
         .await
         .unwrap();
     entries.reverse();

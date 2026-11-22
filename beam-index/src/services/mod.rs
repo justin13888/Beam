@@ -13,9 +13,6 @@ pub mod trickplay;
 pub mod watch_status;
 pub mod watcher;
 
-#[cfg(any(test, feature = "test-utils"))]
-pub use admin_log::NoOpAdminLogService;
-pub use admin_log::{AdminLogService, LocalAdminLogService};
 pub use enrichment::{EnrichmentPolicy, EnrichmentWake, MetadataEnrichmentService};
 pub use hash::{HashConfig, HashService, LocalHashService};
 #[cfg(any(test, feature = "test-utils"))]
@@ -28,7 +25,8 @@ pub use media_info::{LocalMediaInfoService, MediaInfoService};
 #[cfg(any(test, feature = "test-utils"))]
 pub use notification::InMemoryNotificationService;
 pub use notification::{
-    AdminEvent, EventCategory, EventLevel, LocalNotificationService, NotificationService,
+    AdminEvent, EventCategory, EventLevel, LocalNotificationService, NewAdminEvent,
+    NotificationService,
 };
 pub use scan::{
     Retirement, ScanJob, ScanPhase, ScanProgress, ScanState, ScanTicket, ScanTrigger, StoppedScan,

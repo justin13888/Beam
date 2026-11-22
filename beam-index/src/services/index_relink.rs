@@ -404,7 +404,7 @@ impl LocalIndexService {
                 from.display(),
                 path.display()
             );
-            self.notification_service.publish(AdminEvent::info(
+            self.notification_service.publish(NewAdminEvent::info(
                 EventCategory::LibraryScan,
                 message.clone(),
                 Some(library.id),
@@ -412,17 +412,17 @@ impl LocalIndexService {
             ));
             let _ = self
                 .admin_log
-                .log(
-                    AdminLogLevel::Info,
-                    AdminLogCategory::LibraryScan,
+                .create(CreateAdminLog {
+                    level: AdminLogLevel::Info,
+                    category: AdminLogCategory::LibraryScan,
                     message,
-                    Some(serde_json::json!({
+                    details: Some(serde_json::json!({
                         "library_id": library.id.to_string(),
                         "file_id": row.id.to_string(),
                         "from": from.display().to_string(),
                         "to": path.display().to_string(),
                     })),
-                )
+                })
                 .await;
         }
         for row in displaced {
@@ -433,19 +433,19 @@ impl LocalIndexService {
             );
             let _ = self
                 .admin_log
-                .log(
-                    AdminLogLevel::Info,
-                    AdminLogCategory::LibraryScan,
-                    format!(
+                .create(CreateAdminLog {
+                    level: AdminLogLevel::Info,
+                    category: AdminLogCategory::LibraryScan,
+                    message: format!(
                         "File replaced: '{}' now holds another file; its old row is kept as missing",
                         row.path.display()
                     ),
-                    Some(serde_json::json!({
+                    details: Some(serde_json::json!({
                         "library_id": library.id.to_string(),
                         "file_id": row.id.to_string(),
                         "path": row.path.display().to_string(),
                     })),
-                )
+                })
                 .await;
         }
         Ok(())

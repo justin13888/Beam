@@ -45,7 +45,7 @@ pub(super) mod tests {
     use crate::routes::test_support::make_app_state;
     use crate::services::health::InMemoryDependencyProbe;
     use crate::state::{AppServices, AppState};
-    use beam_index::services::admin_log::AdminLogService;
+    use beam_domain::repositories::AdminLogRepository;
 
     pub(crate) const STATE_COOKIE: &str = "beam_oidc_state";
 
@@ -116,7 +116,7 @@ pub(super) mod tests {
         /// waiting for it.
         pending_clock: Arc<TestClock>,
         /// The admin log the handlers record sign-in outcomes in.
-        admin_log: Arc<dyn AdminLogService>,
+        admin_log: Arc<dyn AdminLogRepository>,
     }
 
     pub(crate) fn make_harness(oidc_client: FakeOidcClient) -> Harness {
@@ -1595,7 +1595,7 @@ pub(super) mod tests {
     async fn sign_in_records(harness: &Harness) -> Vec<(AdminLogLevel, Value)> {
         let mut entries = harness
             .admin_log
-            .get_logs_by_category(AdminLogCategory::Auth, 100, 0)
+            .list_by_category(AdminLogCategory::Auth, 100, 0)
             .await
             .unwrap();
         entries.reverse();

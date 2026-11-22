@@ -287,7 +287,7 @@ async fn change_records(f: &Fixture) -> Vec<(String, Value)> {
         .state
         .services
         .admin_log
-        .get_logs_by_category(beam_domain::models::AdminLogCategory::System, 100, 0)
+        .list_by_category(beam_domain::models::AdminLogCategory::System, 100, 0)
         .await
         .unwrap();
     entries.reverse();

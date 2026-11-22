@@ -39,7 +39,8 @@ use beam_auth::utils::pending_auth_store::{PendingAuth, PendingAuthStore};
 use beam_auth::utils::repository::UserRepository;
 use beam_auth::utils::session_store::SessionStore;
 use beam_domain::models::{AdminLogCategory, AdminLogLevel};
-use beam_index::services::admin_log::{AdminLogService, record};
+use beam_domain::repositories::AdminLogRepository;
+use beam_index::services::admin_log::record;
 use kynos::http::forwarded::Forwarded;
 use kynos::prelude::*;
 use kynos::response::cookie::{Cookie, SameSite};
@@ -595,7 +596,7 @@ enum SignInOutcome {
 /// IdP token, a device code or a device handle: none of them reaches this
 /// function.
 async fn record_sign_in(
-    admin_log: &dyn AdminLogService,
+    admin_log: &dyn AdminLogRepository,
     method: SignInMethod,
     client: &ClientContext,
     outcome: SignInOutcome,
@@ -725,7 +726,7 @@ pub async fn oidc_callback(
     Inject(session_store): Inject<Arc<dyn SessionStore>>,
     Inject(user_repo): Inject<Arc<dyn UserRepository>>,
     Inject(config): Inject<OidcRuntimeConfig>,
-    Inject(admin_log): Inject<Arc<dyn AdminLogService>>,
+    Inject(admin_log): Inject<Arc<dyn AdminLogRepository>>,
 ) -> Result<WithHeaders<Redirect<302>, SetCookie>, LoginCallbackError> {
     // Every answer the callback gives ends a sign-in, so each is counted; the
     // block is the handler's body, so no early return can skip the count.
@@ -984,7 +985,7 @@ pub async fn poll_device_login(
     Inject(session_store): Inject<Arc<dyn SessionStore>>,
     Inject(user_repo): Inject<Arc<dyn UserRepository>>,
     Inject(config): Inject<OidcRuntimeConfig>,
-    Inject(admin_log): Inject<Arc<dyn AdminLogService>>,
+    Inject(admin_log): Inject<Arc<dyn AdminLogRepository>>,
     Json(body): Json<DeviceLoginPoll>,
 ) -> Result<WithHeaders<DeviceLoginPollReply, NoStore>, DeviceLoginPollError> {
     let DeviceLoginPoll { device_handle } = body;

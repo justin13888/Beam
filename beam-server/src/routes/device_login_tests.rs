@@ -37,7 +37,7 @@ use crate::routes::session_auth::SESSION_COOKIE;
 use crate::routes::test_support::make_app_state_full;
 use crate::services::health::InMemoryDependencyProbe;
 use crate::state::{AppServices, AppState};
-use beam_index::services::admin_log::AdminLogService;
+use beam_domain::repositories::AdminLogRepository;
 
 #[path = "device_login_records_tests.rs"]
 mod records;
@@ -57,7 +57,7 @@ struct Harness {
     clock: Arc<TestClock>,
     oidc_config: OidcRuntimeConfig,
     /// The admin log the handlers record sign-in outcomes in.
-    admin_log: Arc<dyn AdminLogService>,
+    admin_log: Arc<dyn AdminLogRepository>,
 }
 
 fn identity(claims: Value) -> OidcIdentity {
@@ -103,7 +103,7 @@ type Built = (
     Arc<InMemorySessionStore>,
     Arc<TestClock>,
     OidcRuntimeConfig,
-    Arc<dyn AdminLogService>,
+    Arc<dyn AdminLogRepository>,
 );
 
 fn build(

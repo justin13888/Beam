@@ -14,12 +14,11 @@ use crate::probe::metadata::{
     SubtitleStreamMetadata as UtilSubtitleStream, VideoFileMetadata, VideoMetadata,
     VideoStreamMetadata as UtilVideoStream,
 };
-use crate::services::admin_log::{LocalAdminLogService, NoOpAdminLogService};
 use crate::services::hash::MockHashService;
 use crate::services::media_info::MockMediaInfoService;
 use crate::services::notification::InMemoryNotificationService;
 use beam_domain::models::{CreateLibrary, Library};
-use beam_domain::repositories::AdminLogRepository;
+use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
 use beam_domain::repositories::file::MockFileRepository;
 use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
 use beam_domain::repositories::library::MockLibraryRepository;
@@ -38,8 +37,8 @@ use tempfile::TempDir;
 
 /// The one place a test builds a [`LocalIndexService`]: every dependency a
 /// test does not name is a fresh in-memory store, a strict mock with no
-/// expectations (the hasher and prober -- reaching one is a failure), a
-/// no-op admin log, or an empty notification sink. A test names only the
+/// expectations (the hasher and prober -- reaching one is a failure), an
+/// in-memory admin log, or an empty notification sink. A test names only the
 /// doubles it scripts or asserts through, and chains the service's own
 /// `with_*` options onto [`Self::build`]'s result.
 #[derive(Default)]
@@ -52,7 +51,7 @@ pub(crate) struct IndexServiceBuilder {
     hash_service: Option<Arc<dyn HashService>>,
     media_info: Option<Arc<dyn MediaInfoService>>,
     notifications: Option<Arc<dyn NotificationService>>,
-    admin_log: Option<Arc<dyn AdminLogService>>,
+    admin_log: Option<Arc<dyn AdminLogRepository>>,
     progress_repo: Option<Arc<dyn WatchStateRepository>>,
 }
 
@@ -110,15 +109,11 @@ impl IndexServiceBuilder {
         self
     }
 
-    pub(crate) fn admin_log(mut self, admin_log: Arc<dyn AdminLogService>) -> Self {
-        self.admin_log = Some(admin_log);
-        self
-    }
-
     /// An admin log that records into `repo`, for a test that reads what was
     /// logged.
-    pub(crate) fn admin_log_repo(self, repo: Arc<dyn AdminLogRepository>) -> Self {
-        self.admin_log(Arc::new(LocalAdminLogService::new(repo)))
+    pub(crate) fn admin_log_repo(mut self, repo: Arc<dyn AdminLogRepository>) -> Self {
+        self.admin_log = Some(repo);
+        self
     }
 
     pub(crate) fn progress_repo(mut self, repo: Arc<dyn WatchStateRepository>) -> Self {
@@ -148,7 +143,7 @@ impl IndexServiceBuilder {
             hash_service.unwrap_or_else(|| Arc::new(MockHashService::new())),
             media_info.unwrap_or_else(|| Arc::new(MockMediaInfoService::new())),
             notifications.unwrap_or_else(|| Arc::new(InMemoryNotificationService::new())),
-            admin_log.unwrap_or_else(|| Arc::new(NoOpAdminLogService)),
+            admin_log.unwrap_or_else(|| Arc::new(InMemoryAdminLogRepository::default())),
             progress_repo.unwrap_or_else(|| Arc::new(InMemoryWatchStateRepository::default())),
         )
     }

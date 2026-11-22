@@ -16,13 +16,12 @@ use crate::library_file::{
     EntryKind, FileMeta, LibraryFile, StatCursor, is_refusal, stat_regular_file,
 };
 use crate::probe::metadata::{StreamMetadata, VideoFileMetadata};
-use crate::services::admin_log::AdminLogService;
 use crate::services::enrichment::EnrichmentWake;
 use crate::services::filesystem_probe::{FilesystemKind, FilesystemProbe, StatfsFilesystemProbe};
 use crate::services::hash::HashService;
 use crate::services::media_info::MediaInfoService;
 use crate::services::mime::container_mime_type;
-use crate::services::notification::{AdminEvent, EventCategory, NotificationService};
+use crate::services::notification::{EventCategory, NewAdminEvent, NotificationService};
 use crate::services::scan::{
     CANCELLED, CatalogExclusive, ProgressThrottle, SCAN_STOP_TIMEOUT, ScanCoordinator, ScanEvent,
     ScanJob, ScanPhase, ScanProgress, ScanRefused, ScanState, ScanTicket, ScanTrigger, Settle,
@@ -31,7 +30,7 @@ use crate::services::scan::{
 use crate::services::scan_deferrals::ScanDeferrals;
 use crate::services::watcher::FsEventKind;
 use beam_domain::models::Library;
-use beam_domain::models::admin_log::{AdminLogCategory, AdminLogLevel};
+use beam_domain::models::admin_log::{AdminLogCategory, AdminLogLevel, CreateAdminLog};
 use beam_domain::models::chapter::Chapter;
 use beam_domain::models::enrichment::{EnrichmentTargetId, FieldLocks, MetadataField};
 use beam_domain::models::file::{
@@ -43,8 +42,8 @@ use beam_domain::models::show::{CreateEpisode, CreateShow, Episode, Show};
 use beam_domain::models::watch_state::{TitleRef, WatchTarget};
 use beam_domain::models::{PinSource, ProviderPin};
 use beam_domain::repositories::{
-    AppliedNfoRepository, ChapterRepository, EnrichmentStateRepository, FileRepository,
-    LibraryRepository, MediaStreamRepository, MovieRepository, ShowRepository,
+    AdminLogRepository, AppliedNfoRepository, ChapterRepository, EnrichmentStateRepository,
+    FileRepository, LibraryRepository, MediaStreamRepository, MovieRepository, ShowRepository,
     SidecarSubtitleRepository, UserListRepository, WatchStateRepository,
 };
 use beam_domain::services::{Clock, IdGenerator, RealClock, UuidGenerator};
@@ -380,9 +379,6 @@ pub trait IndexService: Send + Sync + std::fmt::Debug {
     /// The latest scan job of `library_id` in this process, if any.
     fn scan_job(&self, library_id: Uuid) -> Option<ScanJob>;
 
-    /// Follow `library_id`'s scan jobs.
-    fn subscribe_scan(&self, library_id: Uuid) -> tokio::sync::watch::Receiver<Option<ScanJob>>;
-
     /// Stop `library_id`'s scan before the library is deleted.
     ///
     /// The library is retired first: while the returned
@@ -411,7 +407,7 @@ pub struct LocalIndexService {
     hash_service: Arc<dyn HashService>,
     media_info_service: Arc<dyn MediaInfoService>,
     notification_service: Arc<dyn NotificationService>,
-    admin_log: Arc<dyn AdminLogService>,
+    admin_log: Arc<dyn AdminLogRepository>,
     /// Asked when each candidate row was last played, to break a tie
     /// between identical copies of a moved file (issue #180).
     progress_repo: Arc<dyn WatchStateRepository>,
@@ -467,7 +463,7 @@ impl LocalIndexService {
         hash_service: Arc<dyn HashService>,
         media_info_service: Arc<dyn MediaInfoService>,
         notification_service: Arc<dyn NotificationService>,
-        admin_log: Arc<dyn AdminLogService>,
+        admin_log: Arc<dyn AdminLogRepository>,
         progress_repo: Arc<dyn WatchStateRepository>,
     ) -> Self {
         Self {
@@ -638,11 +634,20 @@ impl LocalIndexService {
         self
     }
 
-    /// The repository backing this service's library lookups, exposed so
-    /// callers (e.g. background maintenance tasks) can list/query libraries
-    /// without needing their own separate handle to the same repository.
-    pub fn library_repo(&self) -> &Arc<dyn LibraryRepository> {
-        &self.library_repo
+    /// Follow `library_id`'s scan jobs: the receiver holds the latest job
+    /// and sees every change to it, and each job that replaces it.
+    ///
+    /// Not on [`IndexService`]: nothing serving a request follows a job, it
+    /// reads [`IndexService::scan_job`]. This is how a test waits on a job's
+    /// state without a clock. [`NotificationService`] cannot stand in for
+    /// it: scan progress is live-only, so a subscriber that arrives after a
+    /// transition never sees it, and its events carry a phase rather than
+    /// the job's state, so a queued job is not observable there.
+    pub fn subscribe_scan(
+        &self,
+        library_id: Uuid,
+    ) -> tokio::sync::watch::Receiver<Option<ScanJob>> {
+        self.scans.subscribe(library_id)
     }
 
     /// The files this service's scans deferred as still being written, for
@@ -1132,12 +1137,12 @@ impl LocalIndexService {
         }
         let _ = self
             .admin_log
-            .log(
-                AdminLogLevel::Warning,
-                AdminLogCategory::LibraryScan,
+            .create(CreateAdminLog {
+                level: AdminLogLevel::Warning,
+                category: AdminLogCategory::LibraryScan,
                 message,
-                Some(metadata),
-            )
+                details: Some(metadata),
+            })
             .await;
     }
 
@@ -1851,7 +1856,7 @@ impl LocalIndexService {
     ) {
         error!("Failed to process file {}: {}", path.display(), err);
         record_file_outcome("failed");
-        self.notification_service.publish(AdminEvent::warning(
+        self.notification_service.publish(NewAdminEvent::warning(
             EventCategory::LibraryScan,
             format!("Failed to process file '{}': {}", path.display(), err),
             Some(lib_uuid),
@@ -1859,16 +1864,16 @@ impl LocalIndexService {
         ));
         let _ = self
             .admin_log
-            .log(
-                AdminLogLevel::Warning,
-                AdminLogCategory::LibraryScan,
-                format!("Failed to process file: {}", path.display()),
-                Some(serde_json::json!({
+            .create(CreateAdminLog {
+                level: AdminLogLevel::Warning,
+                category: AdminLogCategory::LibraryScan,
+                message: format!("Failed to process file: {}", path.display()),
+                details: Some(serde_json::json!({
                     "library_id": lib_uuid.to_string(),
                     "path": path.display().to_string(),
                     "error": err.to_string(),
                 })),
-            )
+            })
             .await;
     }
 
@@ -1889,7 +1894,7 @@ impl LocalIndexService {
             shielded,
             "library walk could not read part of the root; rows beneath were left untouched"
         );
-        self.notification_service.publish(AdminEvent::warning(
+        self.notification_service.publish(NewAdminEvent::warning(
             EventCategory::LibraryScan,
             format!(
                 "Library '{}': {} path(s) could not be read during the scan; {} indexed file(s) \
@@ -1908,23 +1913,23 @@ impl LocalIndexService {
             .collect();
         let _ = self
             .admin_log
-            .log(
-                AdminLogLevel::Warning,
-                AdminLogCategory::LibraryScan,
-                format!(
+            .create(CreateAdminLog {
+                level: AdminLogLevel::Warning,
+                category: AdminLogCategory::LibraryScan,
+                message: format!(
                     "Library scan could not read {} path(s) in \"{}\"; {} indexed file(s) left untouched",
                     failed_subtrees.len(),
                     library_name,
                     shielded
                 ),
-                Some(serde_json::json!({
+                details: Some(serde_json::json!({
                     "library_id": lib_uuid.to_string(),
                     "failed_path_count": failed_subtrees.len(),
                     "failed_paths": reported,
                     "unscoped_failure": unscoped_failure,
                     "shielded": shielded,
                 })),
-            )
+            })
             .await;
     }
 
@@ -2529,7 +2534,7 @@ impl LocalIndexService {
             library_id = %library.id,
             "library root is not a directory"
         );
-        self.notification_service.publish(AdminEvent::error(
+        self.notification_service.publish(NewAdminEvent::error(
             EventCategory::LibraryScan,
             format!(
                 "Library '{}' root path does not exist or is not a directory: {}",
@@ -2541,18 +2546,18 @@ impl LocalIndexService {
         ));
         let _ = self
             .admin_log
-            .log(
-                AdminLogLevel::Error,
-                AdminLogCategory::LibraryScan,
-                format!(
+            .create(CreateAdminLog {
+                level: AdminLogLevel::Error,
+                category: AdminLogCategory::LibraryScan,
+                message: format!(
                     "Library scan failed: root path does not exist or is not a directory for \"{}\"",
                     library.name
                 ),
-                Some(serde_json::json!({
+                details: Some(serde_json::json!({
                     "library_id": library.id.to_string(),
                     "path": library.root_path
                 })),
-            )
+            })
             .await;
     }
 
@@ -2579,13 +2584,13 @@ impl LocalIndexService {
         let library_id = Some(library.id);
         let library_name = Some(name.clone());
         let event = match phase {
-            ScanPhase::Failed => AdminEvent::error(
+            ScanPhase::Failed => NewAdminEvent::error(
                 EventCategory::ScanProgress,
                 message,
                 library_id,
                 library_name,
             ),
-            ScanPhase::Started | ScanPhase::Progress | ScanPhase::Completed => AdminEvent::info(
+            ScanPhase::Started | ScanPhase::Progress | ScanPhase::Completed => NewAdminEvent::info(
                 EventCategory::ScanProgress,
                 message,
                 library_id,
@@ -2706,10 +2711,6 @@ impl IndexService for LocalIndexService {
 
     fn scan_job(&self, library_id: Uuid) -> Option<ScanJob> {
         self.scans.job(library_id)
-    }
-
-    fn subscribe_scan(&self, library_id: Uuid) -> tokio::sync::watch::Receiver<Option<ScanJob>> {
-        self.scans.subscribe(library_id)
     }
 
     async fn stop_scan(&self, library_id: Uuid) -> StoppedScan {
@@ -2838,7 +2839,7 @@ impl LocalIndexService {
             library.name, library.root_path
         );
 
-        self.notification_service.publish(AdminEvent::info(
+        self.notification_service.publish(NewAdminEvent::info(
             EventCategory::LibraryScan,
             format!("Library scan started for '{}'", library.name),
             Some(lib_uuid),
@@ -2846,12 +2847,14 @@ impl LocalIndexService {
         ));
         let _ = self
             .admin_log
-            .log(
-                AdminLogLevel::Info,
-                AdminLogCategory::LibraryScan,
-                format!("Library scan started: \"{}\"", library.name),
-                Some(serde_json::json!({ "library_id": library_id, "path": library.root_path })),
-            )
+            .create(CreateAdminLog {
+                level: AdminLogLevel::Info,
+                category: AdminLogCategory::LibraryScan,
+                message: format!("Library scan started: \"{}\"", library.name),
+                details: Some(
+                    serde_json::json!({ "library_id": library_id, "path": library.root_path }),
+                ),
+            })
             .await;
 
         // A refused scan never stamps `last_scan_started_at`: the start time is
@@ -2914,7 +2917,7 @@ impl LocalIndexService {
                 indexed_video_files,
                 "library root contains no video files but video files are indexed; refusing to reconcile"
             );
-            self.notification_service.publish(AdminEvent::error(
+            self.notification_service.publish(NewAdminEvent::error(
                 EventCategory::LibraryScan,
                 format!(
                     "Library '{}' root contains no video files but {} are indexed; refusing to \
@@ -2928,19 +2931,19 @@ impl LocalIndexService {
             ));
             let _ = self
                 .admin_log
-                .log(
-                    AdminLogLevel::Error,
-                    AdminLogCategory::LibraryScan,
-                    format!(
+                .create(CreateAdminLog {
+                    level: AdminLogLevel::Error,
+                    category: AdminLogCategory::LibraryScan,
+                    message: format!(
                         "Library scan refused: root contains no video files but {} are indexed for \"{}\"",
                         indexed_video_files, library.name
                     ),
-                    Some(serde_json::json!({
+                    details: Some(serde_json::json!({
                         "library_id": library_id,
                         "path": library.root_path,
                         "indexed_video_files": indexed_video_files,
                     })),
-                )
+                })
                 .await;
             return Err(IndexError::PathNotFound(
                 "Library root contains no video files but video files are indexed; refusing to \
@@ -3180,19 +3183,19 @@ impl LocalIndexService {
             );
             let _ = self
                 .admin_log
-                .log(
-                    AdminLogLevel::Info,
-                    AdminLogCategory::LibraryScan,
-                    format!(
+                .create(CreateAdminLog {
+                    level: AdminLogLevel::Info,
+                    category: AdminLogCategory::LibraryScan,
+                    message: format!(
                         "Purged {} files from \"{}\" that were missing for longer than the grace period",
                         purged_count, library.name
                     ),
-                    Some(serde_json::json!({
+                    details: Some(serde_json::json!({
                         "library_id": library_id,
                         "purged": purged_count,
                         "grace_secs": self.missing_file_grace.as_secs(),
                     })),
-                )
+                })
                 .await;
         }
 
@@ -3256,7 +3259,7 @@ impl LocalIndexService {
             total_files
         );
 
-        self.notification_service.publish(AdminEvent::info(
+        self.notification_service.publish(NewAdminEvent::info(
             EventCategory::LibraryScan,
             format!(
                 "Library scan complete for '{}': added {}, moved {}, missing {}, restored {}, purged {}, total {}",
@@ -3273,10 +3276,10 @@ impl LocalIndexService {
         ));
         let _ = self
             .admin_log
-            .log(
-                AdminLogLevel::Info,
-                AdminLogCategory::LibraryScan,
-                format!(
+            .create(CreateAdminLog {
+                level: AdminLogLevel::Info,
+                category: AdminLogCategory::LibraryScan,
+                message: format!(
                     "Library scan completed: \"{}\" — {} added, {} moved, {} marked missing, {} restored, {} purged, {} total",
                     library.name,
                     added_count,
@@ -3286,7 +3289,7 @@ impl LocalIndexService {
                     purged_count,
                     total_files
                 ),
-                Some(serde_json::json!({
+                details: Some(serde_json::json!({
                     "library_id": library_id,
                     "added": added_count,
                     "relinked": relinked_count,
@@ -3298,7 +3301,7 @@ impl LocalIndexService {
                     "titles_removed": titles_removed,
                     "total": total_files,
                 })),
-            )
+            })
             .await;
 
         Ok(progress)
