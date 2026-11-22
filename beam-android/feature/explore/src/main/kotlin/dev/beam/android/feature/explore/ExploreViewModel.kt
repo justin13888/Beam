@@ -77,9 +77,8 @@ public class ExploreViewModel
     @Inject
     constructor(
         private val catalog: CatalogRepository,
-        // Hilt always supplies one, empty on the explore tab. Defaulted so a
-        // test of the whole catalog need not build one.
-        savedStateHandle: SavedStateHandle = SavedStateHandle(),
+        // Empty on the explore tab; a library's destination provides its id.
+        savedStateHandle: SavedStateHandle,
     ) : ViewModel() {
         /** The library this screen lists, or null for the whole catalog. */
         private val libraryId: String? = savedStateHandle["libraryId"]
