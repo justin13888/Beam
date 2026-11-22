@@ -1,7 +1,9 @@
 //! `/v1/files/{file_id}/stream` and `/v1/files/{file_id}/download` -- direct
 //! byte delivery of an indexed source file. Beam never transcodes or remuxes
 //! server-side (ADR-0004), so both endpoints serve the file exactly as indexed
-//! and differ only in `Content-Disposition`.
+//! and differ only in `Content-Disposition`. Both accept the session cookie
+//! or a media grant, which `POST /v1/files/{file_id}/grant` issues for a
+//! client that holds no cookie (ADR-0022).
 //!
 //! The Kynos migration replaced roughly three hundred lines of hand-rolled
 //! range parsing and header assembly with `Served<S, M>` over a [`ByteSource`].
@@ -32,11 +34,11 @@ use uuid::Uuid;
 
 use beam_index::library_file::{open_regular_file, relative_to};
 
-use crate::routes::access::caller_access;
 use crate::routes::api_error::{DeliveryError, ServerFault};
-use crate::routes::session_auth::SessionAuth;
+use crate::routes::session_auth::{DeliveryAuth, DeliveryCaller, SessionAuth};
 use crate::routes::tags::Playback;
 use crate::services::library::LocatedFile;
+use crate::services::media_grant::IssuedGrant;
 use crate::state::AppState;
 
 /// What both delivery endpoints capture.
@@ -220,10 +222,10 @@ pub type MediaDelivery = Delivery<SourceFileRanges>;
 /// Resolve `file_id` to the file's on-disk path, its library's root and its
 /// detected content type.
 ///
-/// The caller must be signed in via the `beam_session` cookie (ADR-0003) -- a
-/// `<video>` element sends that automatically, so there is no separate
-/// stream-token step. Authentication itself is `SessionAuth` in the handler
-/// signature; this only resolves the file.
+/// The caller is signed in via the `beam_session` cookie (ADR-0003) -- a
+/// `<video>` element sends that automatically -- or presents a media grant
+/// for this file (ADR-0022). Authentication itself is `DeliveryAuth` in the
+/// handler signature; this only resolves the file.
 async fn locate_file(state: &AppState, file_id: Uuid) -> Result<LocatedFile, DeliveryError> {
     match state.services.library.get_file_by_id(file_id).await {
         Ok(Some(file)) => Ok(file),
@@ -242,14 +244,23 @@ async fn locate_file(state: &AppState, file_id: Uuid) -> Result<LocatedFile, Del
 /// A grant resolved within the last few seconds is served from the access
 /// service's stream grants (issue #462), so a player's run of Range requests
 /// costs the database one policy read, one access check and one file lookup
-/// rather than one of each per request. The session is not part of that:
-/// `SessionAuth` has already resolved and touched it for this request.
+/// rather than one of each per request. The credential is not part of that:
+/// `DeliveryAuth` has already resolved it for this request.
+///
+/// A media grant names one file, and for any other it is a 404 -- the answer
+/// a file its user may not see gets, so a grant reveals nothing about the
+/// ids it does not name. The grant's user's policy then applies exactly as a
+/// session's does, on every request, so a title hidden after the grant was
+/// issued is hidden from it too.
 async fn granted_file(
     state: &AppState,
-    auth: &SessionAuth,
+    caller: DeliveryCaller,
     file_id: Uuid,
 ) -> Result<LocatedFile, DeliveryError> {
-    let user_id = auth.0.user_id;
+    if !caller.may_request(file_id) {
+        return Err(DeliveryError::FileNotFound("File not found".into()));
+    }
+    let user_id = caller.user_id();
     let stream_grants = state.services.access.stream_grants();
     let ticket = match stream_grants.map(|grants| grants.lookup(user_id, file_id)) {
         Some(Ok(file)) => return Ok(file),
@@ -259,7 +270,7 @@ async fn granted_file(
 
     // A file of a title the caller may not see is one that does not exist
     // (issue #263).
-    if hides_file(state, auth, file_id).await? {
+    if hides_file_for(state, user_id, file_id).await? {
         return Err(DeliveryError::FileNotFound("File not found".into()));
     }
     let file = locate_file(state, file_id).await?;
@@ -277,9 +288,22 @@ pub(crate) async fn hides_file(
     auth: &SessionAuth,
     file_id: Uuid,
 ) -> Result<bool, DeliveryError> {
-    // `caller_access` logged its cause where it built the fault, so it moves
-    // across as is; the file lookup's own failure is logged here.
-    let (_, policy) = caller_access(state, auth).await?;
+    hides_file_for(state, auth.0.user_id, file_id).await
+}
+
+/// Whether `user_id`'s access policy hides the file `file_id`, whichever
+/// credential the caller acts for them with.
+async fn hides_file_for(
+    state: &AppState,
+    user_id: Uuid,
+    file_id: Uuid,
+) -> Result<bool, DeliveryError> {
+    let policy = state
+        .services
+        .access
+        .policy(user_id)
+        .await
+        .map_err(|err| DeliveryError::Internal(ServerFault::new(err)))?;
     state
         .services
         .access
@@ -312,7 +336,7 @@ pub(crate) fn validator_tag(modified: SystemTime, length: u64) -> String {
 /// Builds the delivery both endpoints share.
 async fn deliver(
     state: &AppState,
-    auth: &SessionAuth,
+    auth: &DeliveryAuth,
     file_id: Uuid,
     conditions: &Conditions,
     attachment: bool,
@@ -322,7 +346,7 @@ async fn deliver(
         path,
         library_root,
         mime_type,
-    } = granted_file(state, auth, file_id).await?;
+    } = granted_file(state, DeliveryCaller::from(auth), file_id).await?;
     let content_type = mime_type.unwrap_or_else(|| "application/octet-stream".to_owned());
     // Missing, or no longer a regular file reached without a link: either
     // way the file indexed is not there to serve.
@@ -371,7 +395,7 @@ fn download_filename(path: &FsPath, file_id: Uuid) -> String {
 #[kynos::get("/files/{file_id}/stream", tag = Playback, operation_id = "streamFile")]
 #[tracing::instrument(skip_all)]
 pub async fn stream_file(
-    auth: SessionAuth,
+    auth: DeliveryAuth,
     Path(path): Path<FilePath>,
     conditions: Conditions,
     Inject(state): Inject<AppState>,
@@ -384,7 +408,7 @@ pub async fn stream_file(
 #[kynos::head("/files/{file_id}/stream", tag = Playback, operation_id = "headStreamFile")]
 #[tracing::instrument(skip_all)]
 pub async fn head_stream_file(
-    auth: SessionAuth,
+    auth: DeliveryAuth,
     Path(path): Path<FilePath>,
     conditions: Conditions,
     Inject(state): Inject<AppState>,
@@ -399,7 +423,7 @@ pub async fn head_stream_file(
 #[kynos::get("/files/{file_id}/download", tag = Playback, operation_id = "downloadFile")]
 #[tracing::instrument(skip_all)]
 pub async fn download_file(
-    auth: SessionAuth,
+    auth: DeliveryAuth,
     Path(path): Path<FilePath>,
     conditions: Conditions,
     Inject(state): Inject<AppState>,
@@ -411,12 +435,68 @@ pub async fn download_file(
 #[kynos::head("/files/{file_id}/download", tag = Playback, operation_id = "headDownloadFile")]
 #[tracing::instrument(skip_all)]
 pub async fn head_download_file(
-    auth: SessionAuth,
+    auth: DeliveryAuth,
     Path(path): Path<FilePath>,
     conditions: Conditions,
     Inject(state): Inject<AppState>,
 ) -> Result<MediaDelivery, DeliveryError> {
     deliver(&state, &auth, path.file_id, &conditions, true).await
+}
+
+/// A media grant (ADR-0022): URLs that fetch one file with no session
+/// cookie, for a client that holds none -- an AirPlay or Cast receiver, or
+/// an external player such as VLC.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Schema)]
+pub struct MediaGrantUrls {
+    /// The file streamed inline, as `/v1/files/{file_id}/stream` serves it.
+    /// Relative to the server's origin, as a source's `stream_url` is.
+    pub stream_url: String,
+    /// The file as an attachment, as `/v1/files/{file_id}/download` serves
+    /// it. Relative to the server's origin.
+    pub download_url: String,
+    /// The first instant at which both URLs are refused. A player still
+    /// playing then is refused its next range, so a client asks for a fresh
+    /// grant to start again.
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Grant one file's bytes to a client without the session cookie.
+///
+/// The URLs carry a signature over the file, the caller and an expiry a few
+/// hours out, and fetch this file through the stream and download
+/// operations and nothing else: no other operation accepts a grant. The
+/// caller's access policy applies on every request made with them, so a
+/// title hidden from the caller after the grant was issued is hidden from it
+/// too. A file the caller may not see answers `404`, as an id naming nothing
+/// does.
+///
+/// Nothing is stored, so a grant cannot be revoked on its own; it lapses at
+/// `expires_at`, and every grant outstanding lapses when the server restarts.
+#[kynos::post("/files/{file_id}/grant", tag = Playback, operation_id = "grantFile")]
+#[tracing::instrument(skip_all)]
+pub async fn grant_file(
+    auth: SessionAuth,
+    Path(path): Path<FilePath>,
+    Inject(state): Inject<AppState>,
+) -> Result<Json<MediaGrantUrls>, DeliveryError> {
+    let FilePath { file_id } = path;
+    let user_id = auth.0.user_id;
+    if hides_file_for(&state, user_id, file_id).await? {
+        return Err(DeliveryError::FileNotFound("File not found".into()));
+    }
+    // A grant of a file the index does not have would answer 404 on every
+    // use; refusing it here tells the client while it can still say so.
+    locate_file(&state, file_id).await?;
+
+    let IssuedGrant { token, expires_at } =
+        state
+            .media_grants()
+            .issue(file_id, user_id, state.clock().now());
+    Ok(Json(MediaGrantUrls {
+        stream_url: format!("/v1/files/{file_id}/stream?grant={token}"),
+        download_url: format!("/v1/files/{file_id}/download?grant={token}"),
+        expires_at,
+    }))
 }
 
 #[cfg(test)]

@@ -543,7 +543,19 @@ impl Fixture {
 
     /// A session for a new user, and the user.
     async fn viewer(&self) -> (String, Uuid) {
-        let user_id = Uuid::new_v4();
+        // A real user row, as the login flow provisions: a media grant reads
+        // its user's row on every use (ADR-0022).
+        let user_id = self
+            .state
+            .services
+            .user_repo
+            .create(beam_auth::utils::models::test_utils::create_user(
+                "https://idp.test",
+                &Uuid::new_v4().to_string(),
+            ))
+            .await
+            .expect("the in-memory user repository provisions a user")
+            .id;
         let token = self
             .state
             .services
@@ -1116,6 +1128,59 @@ async fn a_hidden_titles_files_are_not_found_to_stream_download_or_subtitle() {
         .await
         .assert_status(StatusCode::NOT_FOUND)
         .assert_problem_type("https://beam.justinchung.net/reference/errors/#trickplay-not-found");
+}
+
+/// A media grant (ADR-0022) acts for its user under their access policy, on
+/// every request: a file the user may not see cannot be granted, and a grant
+/// issued while it was visible stops working the moment the user's policy
+/// hides it -- both as the same 404 an unknown file gets.
+#[tokio::test]
+async fn a_grant_is_held_to_its_users_access_on_every_request() {
+    let fixture = fixture();
+    let (kids, titles) = fixture.catalogue().await;
+    let client = Router::new()
+        .nest(
+            "/v1",
+            Router::new().mount(kynos::routes![
+                stream_file,
+                download_file,
+                crate::routes::stream::grant_file,
+            ]),
+        )
+        .build(fixture.state.clone())
+        .map(TestClient::new)
+        .expect("the router describes itself");
+    let (restricted, _) = fixture.kids_viewer(kids).await;
+    let (viewer, viewer_id) = fixture.viewer().await;
+
+    client
+        .post(&format!("/v1/files/{}/grant", titles.grown_file))
+        .cookie("beam_session", &restricted)
+        .send()
+        .await
+        .assert_status(StatusCode::NOT_FOUND)
+        .assert_problem_type(FILE_NOT_FOUND);
+
+    let granted = client
+        .post(&format!("/v1/files/{}/grant", titles.grown_file))
+        .cookie("beam_session", &viewer)
+        .send()
+        .await;
+    assert_eq!(granted.status(), StatusCode::OK);
+    let grant: crate::routes::stream::MediaGrantUrls = granted.json();
+    let streamed = client.get(&grant.stream_url).send().await;
+    assert_eq!(streamed.status(), StatusCode::OK);
+    assert_eq!(streamed.bytes().as_ref(), FILE_BYTES);
+
+    fixture.restrict(viewer_id, kids).await;
+    for url in [&grant.stream_url, &grant.download_url] {
+        client
+            .get(url)
+            .send()
+            .await
+            .assert_status(StatusCode::NOT_FOUND)
+            .assert_problem_type(FILE_NOT_FOUND);
+    }
 }
 
 /// Every URL a source carries is one of the server's own routes, and

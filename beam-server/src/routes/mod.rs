@@ -132,6 +132,7 @@ pub fn rest_routes() -> Router<AppState, Propagate, (), RestScopes> {
             stream::head_stream_file,
             stream::download_file,
             stream::head_download_file,
+            stream::grant_file,
         ])
         .mount(kynos::routes![
             subtitle::get_subtitle,

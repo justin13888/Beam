@@ -14,6 +14,10 @@ requirements (referenced below as FR-xxx).
   by the server, minting the same session.
 - **NFR-102**: No bearer token, session token, or other credential MUST ever appear in a URL, query
   string, or Referer-visible location, for any endpoint including streaming and download (FR-504).
+  The one exception is a media grant (FR-504), which names one file, expires within hours, and
+  authenticates nothing but that file's streaming and download endpoints. (Amended for
+  [#461](https://github.com/justin13888/beam/issues/461); see
+  [ADR-0022](../architecture/decisions/ADR-0022-signed-media-grants.md).)
 - **NFR-103**: The session cookie MUST be `httpOnly` and `SameSite=Lax` (FR-103). The web application
   MUST NOT persist any authentication-relevant value in `localStorage`, `sessionStorage`, or a
   non-httpOnly cookie. A likely cookie-`Secure` misconfiguration (e.g., `BEAM_COOKIE_SECURE=false`
