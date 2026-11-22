@@ -305,18 +305,9 @@ impl MarkerService {
             others
                 .sort_by_key(|(other, _, other_number)| (other_number.abs_diff(number), other.id));
 
-            let own = match self.listen(library, file, &mut prints).await {
-                Heard::Print(print) => print,
-                Heard::Nothing => {
-                    self.record(file, Vec::new()).await?;
-                    report.without_markers += 1;
-                    continue;
-                }
-                Heard::Later => {
-                    report.deferred += 1;
-                    continue;
-                }
-            };
+            // The partners first: with none to compare with, the file is
+            // not decoded at all, so a season whose other files never decode
+            // costs a failed open each pass rather than a decode.
             let mut partners: Vec<Arc<AudioFingerprint>> = Vec::new();
             for (other, ..) in others {
                 if partners.len() == PARTNERS {
@@ -330,6 +321,18 @@ impl MarkerService {
                 report.deferred += 1;
                 continue;
             }
+            let own = match self.listen(library, file, &mut prints).await {
+                Heard::Print(print) => print,
+                Heard::Nothing => {
+                    self.record(file, Vec::new()).await?;
+                    report.without_markers += 1;
+                    continue;
+                }
+                Heard::Later => {
+                    report.deferred += 1;
+                    continue;
+                }
+            };
             // Matching compares every alignment of two fingerprints -- a
             // second or so of work per episode -- so it runs off the
             // runtime's threads, as the decoding does.
