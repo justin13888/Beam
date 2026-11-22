@@ -6,6 +6,7 @@ pub mod cursor;
 pub mod health;
 pub mod library;
 pub mod lists;
+pub mod media_grant;
 pub mod metadata;
 pub mod paging;
 pub mod people;
