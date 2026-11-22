@@ -9,7 +9,6 @@
 //! the rescan cadence could only be exercised by waiting for it.
 
 use std::collections::{HashMap, HashSet};
-use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -117,9 +116,8 @@ pub fn spawn_enrichment_worker(
 #[derive(Debug, Clone)]
 pub struct BackgroundIndexingConfig {
     /// Interval between periodic full rescans of every library, in seconds.
-    /// Acts as the backstop that catches changes the watcher missed. Never
-    /// zero: a zero interval would rescan every library back to back.
-    pub scan_interval_secs: NonZeroU64,
+    /// Acts as the backstop that catches changes the watcher missed.
+    pub scan_interval_secs: u64,
     /// Debounce window for filesystem-watcher events, in milliseconds. Bursts
     /// of events for the same path within this window collapse into one.
     pub watch_debounce_ms: u64,
@@ -306,7 +304,7 @@ pub fn spawn_background_indexing_with(
         libraries,
         watcher,
         clock,
-        Duration::from_secs(config.scan_interval_secs.get()),
+        Duration::from_secs(config.scan_interval_secs),
         startup_scan_done,
     ));
 

@@ -116,9 +116,7 @@ async fn main() -> Result<()> {
         index_service,
         services.library_repo.clone(),
         beam_index::runtime::BackgroundIndexingConfig {
-            // Zero is refused when the configuration is validated.
-            scan_interval_secs: std::num::NonZeroU64::new(config.scan_interval_secs)
-                .ok_or_else(|| eyre!("BEAM_SCAN_INTERVAL_SECS must be at least 1"))?,
+            scan_interval_secs: config.scan_interval_secs,
             watch_debounce_ms: config.watch_debounce_ms,
             watch_poll_interval_secs: config.watch_poll_interval_secs,
         },

@@ -250,8 +250,7 @@ impl RecordingIndexer {
 
 fn config(scan_interval_secs: u64, watch_debounce_ms: u64) -> BackgroundIndexingConfig {
     BackgroundIndexingConfig {
-        scan_interval_secs: NonZeroU64::new(scan_interval_secs)
-            .expect("a test interval is never zero"),
+        scan_interval_secs,
         watch_debounce_ms,
         watch_poll_interval_secs: 300,
     }
