@@ -23,14 +23,16 @@ use beam_domain::models::enrichment::{
     EnrichmentListFilter, EnrichmentListPosition, EnrichmentListQuery, EnrichmentState,
     EnrichmentStatus, EnrichmentTargetId, FieldLocks, MetadataField,
 };
-use beam_domain::models::{AdminLogCategory, AdminLogLevel, PinSource, ProviderPin};
+use beam_domain::models::{
+    AdminLogCategory, AdminLogLevel, CreateAdminLog, PinSource, ProviderPin,
+};
 use beam_domain::providers::enrichment::{EnrichmentError, EnrichmentProvider, MediaQuery};
 use beam_domain::repositories::{
-    EnrichmentStateRepository, LibraryRepository, MovieRepository, ShowRepository,
+    AdminLogRepository, EnrichmentStateRepository, LibraryRepository, MovieRepository,
+    ShowRepository,
 };
 
 use super::matcher;
-use crate::services::admin_log::AdminLogService;
 use crate::services::index::{IndexError, LocalIndexService};
 
 /// How many candidates a search offers an administrator.
@@ -146,7 +148,7 @@ pub struct EnrichmentControlDeps {
     pub states: Arc<dyn EnrichmentStateRepository>,
     pub libraries: Arc<dyn LibraryRepository>,
     pub provider: Arc<dyn EnrichmentProvider>,
-    pub admin_log: Arc<dyn AdminLogService>,
+    pub admin_log: Arc<dyn AdminLogRepository>,
     pub nfo_pins: Arc<dyn TitleNfoPins>,
     /// The enrichment worker's wake-up
     /// ([`super::MetadataEnrichmentService::notify_handle`]): every change
@@ -646,12 +648,12 @@ impl EnrichmentControl {
         if let Err(err) = self
             .deps
             .admin_log
-            .log(
-                AdminLogLevel::Info,
-                AdminLogCategory::Enrichment,
+            .create(CreateAdminLog {
+                level: AdminLogLevel::Info,
+                category: AdminLogCategory::Enrichment,
                 message,
-                Some(details),
-            )
+                details: Some(details),
+            })
             .await
         {
             tracing::warn!(error = %err, "could not record an administrator's enrichment action");

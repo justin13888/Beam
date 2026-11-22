@@ -91,6 +91,11 @@ spec:
               value: /videos
             - name: BEAM_DATA_DIR
               value: /data
+            {{- if .Values.libraries }}
+            # Each mounted library, created at boot when it is not stored yet.
+            - name: BEAM_LIBRARIES
+              value: {{ include "beam.libraryDeclarations" . | quote }}
+            {{- end }}
             - name: BEAM_SERVER_URL
               value: {{ .Values.server.publicUrl | quote }}
             {{- with include "beam.webUrl" . }}
@@ -107,12 +112,22 @@ spec:
             {{- end }}
             - name: BEAM_AUTO_MIGRATE
               value: {{ .Values.server.autoMigrate | quote }}
+            {{- /* int64 first, as for the watcher values below. */}}
             - name: BEAM_SHUTDOWN_TIMEOUT_SECS
-              value: {{ .Values.server.shutdownTimeoutSeconds | quote }}
+              value: {{ .Values.server.shutdownTimeoutSeconds | int64 | quote }}
             - name: BEAM_ENABLE_METRICS
               value: {{ .Values.metrics.enabled | quote }}
             - name: BEAM_RATE_LIMIT_TRUST_FORWARDED_FOR
               value: {{ include "beam.trustForwardedFor" . | quote }}
+            {{- /* int64 first: Helm reads YAML numbers as float64, and quoting
+                   one of a million or more renders "1e+06", which the server
+                   cannot parse as an integer. */}}
+            - name: BEAM_WATCH_POLL_INTERVAL_SECS
+              value: {{ .Values.watch.pollIntervalSeconds | int64 | quote }}
+            - name: BEAM_WATCH_DEBOUNCE_MS
+              value: {{ .Values.watch.debounceMs | int64 | quote }}
+            - name: BEAM_SCAN_SETTLE_SECS
+              value: {{ .Values.scan.settleSeconds | int64 | quote }}
             - name: RUST_LOG
               value: {{ .Values.server.logLevel | quote }}
             - name: BEAM_DATABASE_URL
@@ -252,6 +267,13 @@ spec:
             - name: library-{{ .name }}
               mountPath: /videos/{{ .name }}
               readOnly: true
+              {{- /* Opt-in, and the schema admits it only on a hostPath
+                     library and only as HostToContainer: never
+                     Bidirectional, which would let the pod mount onto the
+                     host. */}}
+              {{- with .mountPropagation }}
+              mountPropagation: {{ . }}
+              {{- end }}
             {{- end }}
       volumes:
         - name: data

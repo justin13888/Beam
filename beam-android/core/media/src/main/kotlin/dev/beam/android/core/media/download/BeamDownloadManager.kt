@@ -18,156 +18,198 @@ import androidx.media3.exoplayer.offline.Download
 import androidx.media3.exoplayer.offline.DownloadManager
 import androidx.media3.exoplayer.offline.DownloadRequest
 import androidx.media3.exoplayer.scheduler.Requirements
-import dev.beam.android.core.ffi.repository.PlaybackRepository
-import dev.beam.android.core.media.http.BeamHttpClientFactory
 import dev.beam.android.core.media.http.beamDataSourceFactory
-import dev.beam.android.core.model.DownloadRecord
-import dev.beam.android.core.model.DownloadState
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
-import uniffi.beam_client_core.ServerHttpConfig
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import okhttp3.Call
+import uniffi.beam_client_core.BeamClient
+import uniffi.beam_client_core.DownloadRecord
 import java.io.File
 import java.util.concurrent.Executors
+import uniffi.beam_client_core.DownloadRequest as CoreDownloadRequest
 
 /**
- * Offline downloads, on top of Media3's own download stack.
+ * Offline downloads: the core's records, transferred by Media3.
  *
- * Media3's [DownloadManager] is used rather than a hand-rolled fetcher for one
- * decisive reason: the bytes it writes land in a [Cache] that ExoPlayer can
- * read directly. A downloader that wrote plain files would leave playback
- * unable to use them without a second code path, and partial downloads
- * unplayable at all.
+ * The core owns what a download *is* -- its plan, its display fields, its
+ * state and its progress -- so this client and the Apple one cannot disagree
+ * about any of them. What stays here is the transfer: Media3's
+ * [DownloadManager] writes into a [Cache] that ExoPlayer can read directly,
+ * with range-resume, retry with backoff and a pause on a metered network;
+ * a reimplementation of those is how an 8 GB download dies in a tunnel.
  *
- * Range-resume, retry with backoff, and the constraint handling that pauses on
- * a metered network come with it. Reimplementing those is exactly the kind of
- * thing that looks finished and then loses a viewer's 8 GB download to a
- * tunnel.
+ * Each item of a download's plan -- every part, and every subtitle file
+ * beside one -- is one Media3 download, keyed by the item's id, and what
+ * Media3 says about it goes back to the core as a report.
  */
 public class BeamDownloadManager internal constructor(
     private val manager: DownloadManager,
-    private val titles: DownloadTitleStore,
+    private val commands: DownloadCommands,
+    private val core: BeamClient,
     private val artwork: DownloadArtwork,
 ) {
     /** The underlying manager, for the foreground service that drives it. */
     internal val raw: DownloadManager get() = manager
 
-    /** Every download, re-emitted whenever any of them changes. */
+    /**
+     * Every download, re-emitted whenever any of them changes.
+     *
+     * Read from the core's records rather than from Media3's index: the
+     * index forgets nothing it was not told, but knows nothing of titles,
+     * and its `currentDownloads` leaves out a finished download altogether.
+     */
     public val downloads: Flow<List<DownloadRecord>> =
         callbackFlow {
-            fun publish() {
-                trySend(manager.currentDownloads.map { it.toRecord(titles, artwork) })
-            }
-
+            // Media3 calls back on its own thread and the core is suspending,
+            // so the changes queue here and are reported in order.
+            val changes = Channel<Pair<List<Download>, Int>>(Channel.UNLIMITED)
             val listener =
                 object : DownloadManager.Listener {
                     override fun onDownloadChanged(
                         downloadManager: DownloadManager,
                         download: Download,
                         finalException: Exception?,
-                    ) = publish()
+                    ) {
+                        changes.trySend(listOf(download) to downloadManager.notMetRequirements)
+                    }
 
                     override fun onDownloadRemoved(
                         downloadManager: DownloadManager,
                         download: Download,
-                    ) = publish()
+                    ) {
+                        changes.trySend(emptyList<Download>() to downloadManager.notMetRequirements)
+                    }
 
-                    override fun onIdle(downloadManager: DownloadManager) = publish()
+                    override fun onRequirementsStateChanged(
+                        downloadManager: DownloadManager,
+                        requirements: Requirements,
+                        notMetRequirements: Int,
+                    ) {
+                        changes.trySend(downloadManager.currentDownloads to notMetRequirements)
+                    }
                 }
 
             manager.addListener(listener)
-            publish()
-            awaitClose { manager.removeListener(listener) }
+            val unmetAtStart = manager.notMetRequirements
+            launch {
+                // Nothing reports while nobody collects, so what finished or
+                // failed meanwhile is caught up from the index, which unlike
+                // `currentDownloads` holds both. Read after the listener is
+                // added, so a change racing the read is reported after it.
+                val indexed = withContext(Dispatchers.IO) { manager.downloadIndex.indexedDownloads() }
+                send(core.reportDownloadTransfers(indexed.map { it.toReport(unmetAtStart) }))
+                // The requirements are read with the downloads, on Media3's
+                // thread, since the manager is not to be read from any other.
+                for ((batch, unmet) in changes) {
+                    send(core.reportDownloadTransfers(batch.map { it.toReport(unmet) }))
+                }
+            }
+            awaitClose {
+                manager.removeListener(listener)
+                changes.close()
+            }
         }
 
     /**
      * Queue a file for offline playback.
      *
-     * The display fields are stored alongside, because the downloads screen has
-     * to render with no network at all -- resolving a title over the network to
-     * show an offline download would defeat the feature. The poster's bytes are
-     * fetched now for the same reason: a URL alone renders as a placeholder
-     * once the network is gone.
+     * The core plans it and records it with its display fields, because the
+     * downloads screen has to render with no network at all. The poster's
+     * bytes are fetched now for the same reason, and the record names where
+     * they are kept rather than the URL they came from: a URL renders as a
+     * placeholder once the network is gone.
      *
      * The poster fetch is awaited but cannot fail the enqueue; it runs after
-     * the download is queued, so a slow poster never delays the bytes.
+     * the transfer is queued, so a slow poster never delays the bytes.
      */
     public suspend fun enqueue(
         fileId: String,
-        serverId: String,
         mediaId: String,
+        episodeId: String?,
         title: String,
         subtitle: String?,
         posterUrl: String?,
-        repository: PlaybackRepository,
     ) {
-        val config = repository.playbackConfig(fileId)
-        titles.put(
-            DownloadTitle(
-                fileId = fileId,
-                serverId = serverId,
-                mediaId = mediaId,
-                title = title,
-                subtitle = subtitle,
-                posterUrl = posterUrl,
-            ),
-        )
-        val request = DownloadRequest.Builder(fileId, config.url.toUri()).build()
-        manager.addDownload(request)
+        val record =
+            core.enqueueDownload(
+                CoreDownloadRequest(
+                    mediaId = mediaId,
+                    episodeId = episodeId,
+                    fileId = fileId,
+                    title = title,
+                    subtitle = subtitle,
+                    artworkPath = posterUrl?.let(artwork::pathFor),
+                ),
+            )
+        record.plan.parts.forEach { part ->
+            commands.add(DownloadRequest.Builder(part.fileId, part.downloadUrl.toUri()).build())
+        }
+        record.plan.subtitles.forEach { sidecar ->
+            commands.add(DownloadRequest.Builder(sidecar.sidecarId, sidecar.url.toUri()).build())
+        }
         if (posterUrl != null) {
             artwork.pin(posterUrl)
             // The fetch suspends on the network, so the download may have been
             // removed while it was in flight -- and that removal found nothing
-            // to evict yet. Checking again once the bytes have landed is what
+            // to delete yet. Checking again once the bytes have landed is what
             // keeps a removed download from leaving its poster behind.
-            releaseIfUnused(posterUrl)
+            record.artworkPath?.let { releaseIfUnused(it) }
         }
     }
 
     /** Stop a download, keeping the bytes already fetched. */
-    public fun pause(fileId: String) {
-        manager.setStopReason(fileId, STOP_REASON_USER)
+    public suspend fun pause(fileId: String) {
+        recordOf(fileId)?.itemIds()?.forEach { commands.setStopReason(it, STOP_REASON_USER) }
     }
 
-    /** Resume a paused download from where it stopped. */
-    public fun resume(fileId: String) {
-        manager.setStopReason(fileId, Download.STOP_REASON_NONE)
-    }
-
-    /** Delete a download, its bytes, and the poster kept for it. */
-    public suspend fun remove(fileId: String) {
-        val posterUrl = titles.get(fileId)?.posterUrl
-        manager.removeDownload(fileId)
-        titles.remove(fileId)
-        if (posterUrl != null) {
-            releaseIfUnused(posterUrl)
+    /** Resume a paused download, or retry a failed one: see [failedRequest]. */
+    public suspend fun resume(fileId: String) {
+        val items = recordOf(fileId)?.itemIds() ?: return
+        val index = manager.downloadIndex
+        withContext(Dispatchers.IO) { items.associateWith(index::failedRequest) }.forEach { (item, failed) ->
+            if (failed != null) commands.add(failed) else commands.setStopReason(item, Download.STOP_REASON_NONE)
         }
     }
 
-    /** Delete every download, and every poster kept for one. */
-    public fun removeAll() {
-        manager.removeAllDownloads()
-        // The titles go too. They are what decides whether a poster is still
-        // needed, so one left behind here would keep a later download's
-        // shared poster pinned after that download was removed as well.
-        val removed = titles.all()
-        removed.forEach { title -> titles.remove(title.fileId) }
-        removed
-            .mapNotNull(DownloadTitle::posterUrl)
-            .distinct()
-            .forEach(artwork::unpin)
+    /** Delete a download, the bytes of every item, and the poster kept for it. */
+    public suspend fun remove(fileId: String) {
+        val removed = core.removeDownload(fileId)
+        if (removed == null) {
+            // Nothing the core knows of; whatever Media3 holds under the id goes.
+            commands.remove(fileId)
+            return
+        }
+        release(listOf(removed))
     }
 
     /**
-     * Stop keeping [posterUrl] unless another download still shows it.
+     * Delete every download that came from [serverId], with its bytes and
+     * the posters only it kept.
      *
-     * Episodes of one series share a poster, so the poster outlives any one
-     * of them and is released with the last.
+     * A download belongs to the server it was fetched from; once that server
+     * is forgotten its downloads can no longer be resumed, re-authenticated or
+     * reported against. Downloads from any other server are left alone.
      */
-    private fun releaseIfUnused(posterUrl: String) {
-        if (titles.all().none { it.posterUrl == posterUrl }) {
-            artwork.unpin(posterUrl)
-        }
+    public suspend fun removeServer(serverId: String) {
+        release(core.removeServerDownloads(serverId))
+    }
+
+    /** Delete every download, and every poster kept for one. */
+    public suspend fun removeAll() {
+        // The records go first, as in every removal here: the list the screen
+        // shows is re-read when Media3 reports the removal, and a record still
+        // there then would stay on screen with nothing left to report it gone.
+        val removed = core.removeAllDownloads()
+        commands.removeAll()
+        removed
+            .mapNotNull(DownloadRecord::artworkPath)
+            .distinct()
+            .forEach(artwork::release)
     }
 
     /**
@@ -175,13 +217,34 @@ public class BeamDownloadManager internal constructor(
      *
      * Defaults to on in [MediaDownloadRepository], which applies it to a
      * manager as it is built, and the viewer's stored cellular preference,
-     * which that repository follows, turns it off. A media file is large enough that
-     * getting this wrong costs the viewer real money, so the safe default is
-     * the one that cannot.
+     * which that repository follows, turns it off. A media file is large enough
+     * that getting this wrong costs real money, so the default cannot.
      */
     public fun setRequiresUnmeteredNetwork(required: Boolean) {
         val flags = if (required) Requirements.NETWORK_UNMETERED else Requirements.NETWORK
         manager.requirements = Requirements(flags)
+    }
+
+    private suspend fun recordOf(fileId: String): DownloadRecord? = core.downloads().firstOrNull { it.fileId == fileId }
+
+    /** Remove every item of [removed] from Media3, then the posters nothing else shows. */
+    private suspend fun release(removed: List<DownloadRecord>) {
+        removed.flatMap { it.itemIds() }.forEach(commands::remove)
+        removed
+            .mapNotNull(DownloadRecord::artworkPath)
+            .distinct()
+            .forEach { releaseIfUnused(it) }
+    }
+
+    /**
+     * Stop keeping the poster at [path] unless another download still shows
+     * it. Episodes of one series share a poster, so the poster outlives any
+     * one of them and is released with the last.
+     */
+    private suspend fun releaseIfUnused(path: String) {
+        if (core.downloads().none { it.artworkPath == path }) {
+            artwork.release(path)
+        }
     }
 
     internal companion object {
@@ -199,25 +262,36 @@ public class BeamDownloadManager internal constructor(
          */
         const val PARALLEL_DOWNLOADS: Int = 1
 
+        /**
+         * Build the manager over [calls], which must resolve the server's
+         * credential per request.
+         *
+         * No credential is taken here. The manager lives as long as the
+         * process, and a download as long as the viewer keeps it, across
+         * sign-outs, re-sign-ins and server switches; a credential captured at
+         * construction would be stale after the first of those, and with none
+         * to capture -- signed out, offline -- the manager could not be built
+         * at all, leaving the downloads list empty exactly when it is needed.
+         */
         fun create(
             context: Context,
-            clients: BeamHttpClientFactory,
+            calls: Call.Factory,
+            commands: DownloadCommands,
             cache: Cache,
-            titles: DownloadTitleStore,
+            core: BeamClient,
             artwork: DownloadArtwork,
-            server: ServerHttpConfig,
         ): BeamDownloadManager {
             val manager =
                 DownloadManager(
                     context,
                     StandaloneDatabaseProvider(context),
                     cache,
-                    beamDataSourceFactory(context, clients, server),
+                    beamDataSourceFactory(context, calls),
                     Executors.newFixedThreadPool(PARALLEL_DOWNLOADS),
                 ).apply {
                     maxParallelDownloads = PARALLEL_DOWNLOADS
                 }
-            return BeamDownloadManager(manager, titles, artwork)
+            return BeamDownloadManager(manager, commands, core, artwork)
         }
 
         /**
@@ -235,44 +309,4 @@ public class BeamDownloadManager internal constructor(
                 StandaloneDatabaseProvider(context),
             )
     }
-}
-
-internal fun Download.toRecord(
-    titles: DownloadTitleStore,
-    artwork: DownloadArtwork,
-): DownloadRecord {
-    val title = titles.get(request.id)
-    return DownloadRecord(
-        fileId = request.id,
-        mediaId = title?.mediaId.orEmpty(),
-        episodeId = title?.episodeId,
-        serverId = title?.serverId.orEmpty(),
-        title = title?.title ?: request.id,
-        subtitle = title?.subtitle,
-        // The copy kept at enqueue time where there is one, so the poster
-        // renders with no network.
-        posterUrl = title?.posterUrl?.let(artwork::displayUrl),
-        state =
-            when (state) {
-                Download.STATE_QUEUED -> DownloadState.Queued
-                Download.STATE_DOWNLOADING -> DownloadState.Downloading
-                Download.STATE_COMPLETED -> DownloadState.Completed
-                Download.STATE_FAILED -> DownloadState.Failed
-                Download.STATE_STOPPED -> DownloadState.Paused
-                Download.STATE_RESTARTING -> DownloadState.Downloading
-                Download.STATE_REMOVING -> DownloadState.Paused
-                else -> DownloadState.Queued
-            },
-        downloadedBytes = bytesDownloaded,
-        // Media3 reports a negative length until the server has answered with
-        // a Content-Length, and a negative total would render as a nonsense
-        // progress bar.
-        totalBytes = contentLength.coerceAtLeast(0L),
-        failureMessage =
-            if (state == Download.STATE_FAILED) {
-                "The download stopped. It will resume when you retry it."
-            } else {
-                null
-            },
-    )
 }

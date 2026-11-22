@@ -13,6 +13,8 @@
     "pullPolicy": { "enum": ["Always", "IfNotPresent", "Never"] },
     "serviceType": { "enum": ["ClusterIP", "NodePort", "LoadBalancer"] },
     "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+    "promDuration": { "type": "string", "pattern": "^([0-9]+(ms|s|m|h|d|w|y))+$" },
+    "ratio": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 },
     "resources": {
       "type": "object",
       "additionalProperties": false,
@@ -108,6 +110,9 @@
                 "BEAM_ENABLE_METRICS",
                 "BEAM_RATE_LIMIT_TRUST_FORWARDED_FOR",
                 "BEAM_SHUTDOWN_TIMEOUT_SECS",
+                "BEAM_WATCH_POLL_INTERVAL_SECS",
+                "BEAM_WATCH_DEBOUNCE_MS",
+                "BEAM_SCAN_SETTLE_SECS",
                 "BEAM_OIDC_ISSUER",
                 "BEAM_OIDC_CLIENT_ID",
                 "BEAM_OIDC_CLIENT_SECRET",
@@ -234,6 +239,35 @@
         }
       ]
     },
+    "watch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pollIntervalSeconds", "debounceMs"],
+      "properties": {
+        "pollIntervalSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "BEAM_WATCH_POLL_INTERVAL_SECS: seconds between walks of the libraries the watcher polls (network filesystems, libraries past fs.inotify.max_user_watches)."
+        },
+        "debounceMs": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "BEAM_WATCH_DEBOUNCE_MS: bursts of events for one path within this window collapse into one."
+        }
+      }
+    },
+    "scan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["settleSeconds"],
+      "properties": {
+        "settleSeconds": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "BEAM_SCAN_SETTLE_SECS: seconds a file must go without a write before it is indexed; 0 indexes on sight."
+        }
+      }
+    },
     "telemetry": {
       "type": "object",
       "additionalProperties": false,
@@ -256,7 +290,13 @@
         "type": "object",
         "additionalProperties": false,
         "required": ["name", "volume"],
+        "if": { "required": ["mountPropagation"] },
+        "then": { "properties": { "volume": { "required": ["hostPath"] } } },
         "properties": {
+          "mountPropagation": {
+            "const": "HostToContainer",
+            "description": "Opt-in, hostPath libraries only: a disk the host mounts or remounts under the path after the pod started (USB, NAS automount) becomes visible in the pod. Bidirectional is refused: the pod must never propagate a mount back to the host."
+          },
           "name": {
             "type": "string",
             "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
@@ -365,7 +405,44 @@
     "metrics": {
       "type": "object",
       "additionalProperties": false,
-      "properties": { "enabled": { "type": "boolean" } }
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "serviceMonitor": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "interval": { "$ref": "#/definitions/promDuration" },
+            "scrapeTimeout": { "anyOf": [{ "const": "" }, { "$ref": "#/definitions/promDuration" }] },
+            "labels": { "$ref": "#/definitions/stringMap" },
+            "relabelings": { "type": "array", "items": { "type": "object" } },
+            "metricRelabelings": { "type": "array", "items": { "type": "object" } }
+          }
+        },
+        "prometheusRule": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "labels": { "$ref": "#/definitions/stringMap" },
+            "alertLabels": { "$ref": "#/definitions/stringMap" },
+            "errorRatio": { "$ref": "#/definitions/ratio" },
+            "latencyP95Seconds": { "type": "number", "exclusiveMinimum": 0 },
+            "dbPoolSaturation": { "$ref": "#/definitions/ratio" },
+            "scanStaleHours": { "type": "number", "exclusiveMinimum": 0 },
+            "providerFailureRatio": { "$ref": "#/definitions/ratio" }
+          }
+        },
+        "grafanaDashboard": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "labels": { "$ref": "#/definitions/stringMap" },
+            "annotations": { "$ref": "#/definitions/stringMap" }
+          }
+        }
+      }
     },
     "serviceAccount": {
       "type": "object",

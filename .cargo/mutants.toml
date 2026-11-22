@@ -111,6 +111,12 @@ exclude_globs = [
     # `FakeOidcClient`, declared the same way for the same reason (issue
     # #359).
     "beam-auth/src/utils/oidc/fake.rs",
+    # `InMemoryShowRepository`, declared the same way for the same reason
+    # (issue #334).
+    "beam-domain/src/repositories/show_in_memory.rs",
+    # The filesystem-watcher doubles, declared the same way for the same
+    # reason (issue #426).
+    "beam-index/src/services/watcher_in_memory.rs",
 
     # Pure DDL: sea-orm-migration up/down bodies, with no unit tests by design
     # (docs/testing.md). The only thing that can validate a migration is running

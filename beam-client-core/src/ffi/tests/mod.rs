@@ -7,9 +7,13 @@ use crate::transport::CannedBackend;
 
 mod admin;
 mod catalog;
+mod device_login;
+mod download;
+mod drain;
 mod playback;
 mod preferences;
 mod progress;
+mod session_observer;
 mod telemetry;
 
 /// The library the library and scan tests name.

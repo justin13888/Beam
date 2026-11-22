@@ -23,7 +23,8 @@ use beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateReposit
 
 use beam_domain::providers::enrichment::{EnrichmentProvider, NoopEnrichmentProvider};
 use beam_domain::repositories::{
-    EnrichmentStateRepository, LibraryRepository, MovieRepository, ShowRepository,
+    AdminLogRepository, EnrichmentStateRepository, LibraryRepository, MovieRepository,
+    ShowRepository,
 };
 use beam_index::services::enrichment::control::{
     EnrichmentControl, EnrichmentControlDeps, TitleNfoPins,
@@ -39,7 +40,6 @@ use crate::services::playback_telemetry::{PlaybackTelemetryConfig, PlaybackTelem
 use crate::services::sources::SourceCatalog;
 use crate::services::telemetry::{LibraryReportConfig, LibraryReportService};
 use crate::state::{AppServices, AppState};
-use beam_index::services::admin_log::{AdminLogService, LocalAdminLogService};
 use beam_index::services::notification::InMemoryNotificationService;
 
 #[derive(Debug)]
@@ -75,6 +75,13 @@ impl crate::services::library::LibraryService for StubLibraryService {
         _name: String,
         _path: String,
     ) -> Result<crate::models::Library, LibraryError> {
+        unimplemented!("not called in routing tests")
+    }
+    async fn declare_library(
+        &self,
+        _name: String,
+        _path: String,
+    ) -> Result<crate::services::library::LibraryDeclared, LibraryError> {
         unimplemented!("not called in routing tests")
     }
     async fn start_scan(
@@ -162,7 +169,7 @@ pub(crate) fn in_memory_playback(
 ) -> Arc<dyn PlaybackService> {
     let sources = Arc::new(SourceCatalog::new(crate::services::sources::SourceRepositories {movies: movies.clone(), files: files.clone(), streams: Arc::new(InMemoryMediaStreamRepository::default()), sidecars: Arc::new(
             beam_domain::repositories::sidecar_subtitle::in_memory::InMemorySidecarSubtitleRepository::default(),
-        ), chapters: Arc::new(beam_domain::repositories::chapter::in_memory::InMemoryChapterRepository::default()), trickplay: Arc::new(beam_domain::repositories::trickplay::in_memory::InMemoryTrickplayRepository::default()),}));
+        ), chapters: Arc::new(beam_domain::repositories::chapter::in_memory::InMemoryChapterRepository::default()), trickplay: Arc::new(beam_domain::repositories::trickplay::in_memory::InMemoryTrickplayRepository::default()), markers: Arc::new(beam_domain::repositories::markers::in_memory::InMemoryMarkerRepository::default()),}));
     Arc::new(DbPlaybackService::new(PlaybackRepositories {
         watch_state: Arc::new(InMemoryWatchStateRepository::new(clock)),
         files,
@@ -264,7 +271,7 @@ pub(crate) fn enrichment_control(
     states: Arc<dyn EnrichmentStateRepository>,
     libraries: Arc<dyn LibraryRepository>,
     provider: Arc<dyn EnrichmentProvider>,
-    admin_log: Arc<dyn AdminLogService>,
+    admin_log: Arc<dyn AdminLogRepository>,
 ) -> Arc<EnrichmentControl> {
     let nfo_pins = Arc::new(NoNfoPins {
         movies: movies.clone(),
@@ -327,6 +334,28 @@ pub(crate) fn idle_trickplay() -> Arc<crate::services::trickplay::TrickplayServi
                 beam_domain::repositories::trickplay::in_memory::InMemoryTrickplayRepository::default(),
             ),
             generator: Arc::new(beam_index::services::trickplay::MockTrickplayGenerator::new()),
+            clock: Arc::new(beam_domain::services::RealClock),
+        },
+    ))
+}
+
+/// Skip markers over empty in-memory stores: every file is unknown, and no
+/// detection pass is ever run.
+pub(crate) fn idle_markers() -> Arc<crate::services::markers::MarkerService> {
+    Arc::new(crate::services::markers::MarkerService::new(
+        crate::services::markers::MarkerDependencies {
+            libraries: Arc::new(
+                beam_domain::repositories::library::in_memory::InMemoryLibraryRepository::default(),
+            ),
+            files: Arc::new(InMemoryFileRepository::default()),
+            shows: Arc::new(InMemoryShowRepository::default()),
+            chapters: Arc::new(
+                beam_domain::repositories::chapter::in_memory::InMemoryChapterRepository::default(),
+            ),
+            markers: Arc::new(
+                beam_domain::repositories::markers::in_memory::InMemoryMarkerRepository::default(),
+            ),
+            fingerprinter: Arc::new(beam_index::services::FakeAudioFingerprinter::default()),
             clock: Arc::new(beam_domain::services::RealClock),
         },
     ))
@@ -631,9 +660,7 @@ fn services_over(
     enrichment_provider: Arc<dyn EnrichmentProvider>,
 ) -> AppServices {
     let notification = Arc::new(InMemoryNotificationService::new());
-    let admin_log: Arc<dyn AdminLogService> = Arc::new(LocalAdminLogService::new(Arc::new(
-        InMemoryAdminLogRepository::default(),
-    )));
+    let admin_log: Arc<dyn AdminLogRepository> = Arc::new(InMemoryAdminLogRepository::default());
 
     let file_repo = Arc::new(InMemoryFileRepository::default());
     let movie_repo = Arc::new(InMemoryMovieRepository::default());
@@ -712,5 +739,74 @@ fn services_over(
         telemetry,
         playback_telemetry,
         trickplay: idle_trickplay(),
+        markers: idle_markers(),
+    }
+}
+
+/// What a test's local `DebuggingRecorder` holds, read back by name and
+/// exact label set.
+///
+/// Every reader returns `None` for a metric that was never recorded under
+/// those labels, so "not counted" and "counted zero times" stay apart.
+///
+/// Taking one drains the recorder: a counter or a gauge reads as its change
+/// since the previous `Recorded` of the same recorder, and a histogram as the
+/// samples recorded since. So a test takes one per phase and reads every
+/// metric of that phase from it.
+pub(crate) struct Recorded(
+    Vec<(
+        metrics_util::CompositeKey,
+        Option<metrics::Unit>,
+        Option<metrics::SharedString>,
+        metrics_util::debugging::DebugValue,
+    )>,
+);
+
+impl Recorded {
+    /// Everything `snapshotter`'s recorder holds now.
+    pub(crate) fn of(snapshotter: &metrics_util::debugging::Snapshotter) -> Self {
+        Self(snapshotter.snapshot().into_vec())
+    }
+
+    fn find(
+        &self,
+        name: &str,
+        labels: &[(&str, &str)],
+    ) -> Option<&metrics_util::debugging::DebugValue> {
+        let mut expected = labels.to_vec();
+        expected.sort_unstable();
+        self.0.iter().find_map(|(key, _, _, value)| {
+            let key = key.key();
+            let mut actual: Vec<(&str, &str)> =
+                key.labels().map(|l| (l.key(), l.value())).collect();
+            actual.sort_unstable();
+            (key.name() == name && actual == expected).then_some(value)
+        })
+    }
+
+    /// The counter `name` carrying exactly `labels`.
+    pub(crate) fn counter(&self, name: &str, labels: &[(&str, &str)]) -> Option<u64> {
+        match self.find(name, labels)? {
+            metrics_util::debugging::DebugValue::Counter(count) => Some(*count),
+            _ => None,
+        }
+    }
+
+    /// The gauge `name` carrying exactly `labels`.
+    pub(crate) fn gauge(&self, name: &str, labels: &[(&str, &str)]) -> Option<f64> {
+        match self.find(name, labels)? {
+            metrics_util::debugging::DebugValue::Gauge(value) => Some(value.into_inner()),
+            _ => None,
+        }
+    }
+
+    /// The samples of histogram `name` carrying exactly `labels`.
+    pub(crate) fn histogram(&self, name: &str, labels: &[(&str, &str)]) -> Option<Vec<f64>> {
+        match self.find(name, labels)? {
+            metrics_util::debugging::DebugValue::Histogram(samples) => {
+                Some(samples.iter().map(|sample| sample.into_inner()).collect())
+            }
+            _ => None,
+        }
     }
 }

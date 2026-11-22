@@ -101,6 +101,13 @@ mounts the **generated route tree** over `createMemoryHistory` with a real `Auth
 records what MSW actually saw) rather than against a mocked client's call arguments, and every
 handler and factory is typed against `components["schemas"]` from the generated client.
 
+Because a route is not on screen until the auth check and the page's own query have both
+round-tripped through MSW, waits are slow under host load. Testing Library's `asyncUtilTimeout` is
+15s (`src/test/setup.ts`), and vitest's `testTimeout` and `hookTimeout` are 30s
+(`vitest.config.ts`). The second must stay above the first: at vitest's 5s default a loaded run
+killed tests before their own waits could expire, and a different handful failed each time (#480).
+A genuine break still fails fast, at the 15s wait.
+
 Nothing mocks `@tanstack/react-router` or `@/lib/apiClient`. Two collaborators are still
 substituted, both for environment reasons rather than convenience: Vidstack's `<MediaPlayer>`,
 which needs a real media element (its own logic is extracted into `playerHandlers` and tested
@@ -111,7 +118,7 @@ when the module is first imported, which is before any test interceptor installs
 could never see a request the app made, and that is *why* every test had mocked the client away.
 `apiClient` now resolves `fetch` per call.
 
-`ts:typecheck` and `ts:test` both run in `mise run ci`, in the pre-push hook, and in CI's
+`ts:typecheck` and `ts:test` both run in `mise run ci` and in CI's
 `ts-typecheck` and `ts-test` jobs; `ts-test` runs `ts:coverage`, which enforces the threshold below.
 `ts:typecheck` regenerates the gitignored `api.gen.ts` from the committed `openapi.json` first (see
 [architecture/api.md](architecture/api.md#openapi-docs-and-codegen)), so the doubles are checked
@@ -265,7 +272,8 @@ Two mechanisms close that:
 - **`sea_orm::MockDatabase`** asserts the SQL a repository actually generates -- which column a
   filter binds and to what value, sort direction, pagination numbers, the `ON CONFLICT` target and
   its update list -- with no database running. Hermetic, and part of the default suite
-  (`beam-index/src/repositories/sql_shape_tests.rs`). These assert *properties*, never a
+  (`beam-index/src/repositories/sql_shape/`, one file per repository, over the helpers in
+  `sql_shape_tests.rs`). These assert *properties*, never a
   full statement string: pinning the whole generated SQL is a second copy of the query builder's
   output, which fails on harmless formatting changes and catches nothing a property does not.
 - **The `pg-integration` cargo feature** runs the shared behavioural contract against a real

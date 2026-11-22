@@ -165,6 +165,7 @@ macro_rules! catalog_repository_contract {
                         title: format!("Episode {number}"),
                         runtime: None,
                         air_date: None,
+                        numbering: $crate::utils::media_path::EpisodeNumbering::Standard,
                     })
                     .await
                     .expect("create an episode");
@@ -310,6 +311,7 @@ macro_rules! catalog_repository_contract {
                             title: "Pilot".to_string(),
                             runtime: None,
                             air_date: None,
+                            numbering: $crate::utils::media_path::EpisodeNumbering::Standard,
                         })
                         .await
                         .expect("create an episode");

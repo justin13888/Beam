@@ -21,7 +21,7 @@ pub struct LibraryFilePage {
 }
 use beam_index::runtime::LibraryWatchHook;
 use beam_index::services::index::{IndexError, IndexService};
-use beam_index::services::notification::{AdminEvent, EventCategory, NotificationService};
+use beam_index::services::notification::{EventCategory, NewAdminEvent, NotificationService};
 use beam_index::services::scan::{ScanTrigger, StoppedScan};
 
 pub trait PathValidator: Send + Sync + std::fmt::Debug {
@@ -361,6 +361,23 @@ pub trait LibraryService: Send + Sync + std::fmt::Debug {
         root_path: String,
     ) -> Result<Library, LibraryError>;
 
+    /// Make sure the library the configuration declares (`BEAM_LIBRARIES`,
+    /// issue #455) is stored, creating it if it is not. Never renames,
+    /// moves or deletes a stored library.
+    ///
+    /// The root is validated exactly as [`Self::create_library`] validates
+    /// one. A stored library at the same canonical root is the declared one,
+    /// whatever it is called; a stored library holding the name at another
+    /// root leaves the declaration unapplied. A created library is neither
+    /// scanned nor watched here: it is declared before the background
+    /// indexer starts, whose startup pass watches and scans every stored
+    /// library.
+    async fn declare_library(
+        &self,
+        name: String,
+        root_path: String,
+    ) -> Result<LibraryDeclared, LibraryError>;
+
     /// Start a scan of a library, returning its job as registered: queued.
     /// The scan runs on a task of its own; follow it with
     /// [`Self::get_scan`]. Fails with [`LibraryError::ScanInProgress`] while
@@ -382,6 +399,19 @@ pub trait LibraryService: Send + Sync + std::fmt::Debug {
     /// library may instead be reported as [`LibraryError::LibraryNotFound`] --
     /// [`LocalLibraryService`] does so, and never returns `false`.
     async fn delete_library(&self, library_id: Uuid) -> Result<bool, LibraryError>;
+}
+
+/// What [`LibraryService::declare_library`] found or did.
+#[derive(Debug, Clone)]
+pub enum LibraryDeclared {
+    /// No library was stored at the root, so this one was created.
+    Created(Library),
+    /// A library is already stored at the root. It is left as it is, under
+    /// `stored_name` -- which may differ from the declared name.
+    AlreadyStored { stored_name: String },
+    /// A library at another root already has the declared name. Nothing was
+    /// created, and the stored library was not moved.
+    NameTaken,
 }
 
 #[derive(Debug)]
@@ -439,6 +469,59 @@ impl LocalLibraryService {
             path_validator,
             watch_hook,
         }
+    }
+
+    /// Store a library at `canonical_target`, a validated root, unless it
+    /// overlaps one of the `stored` libraries or the data directory, and
+    /// announce it. Neither scans nor watches it.
+    async fn store_library(
+        &self,
+        name: String,
+        canonical_target: PathBuf,
+        stored: Vec<beam_domain::models::Library>,
+    ) -> Result<beam_domain::models::Library, LibraryError> {
+        // As with the validator, the rejections name no path (NFR-108); the
+        // log does.
+        let existing_roots: Vec<PathBuf> = stored
+            .into_iter()
+            .map(|library| library.root_path)
+            .collect();
+        match find_root_conflict(&canonical_target, &existing_roots, &self.data_dir) {
+            None => {}
+            Some(RootConflict::DataDir) => {
+                warn!(
+                    requested = %canonical_target.display(),
+                    data_dir = %self.data_dir.display(),
+                    "library path overlaps the data directory"
+                );
+                return Err(LibraryError::PathOverlapsDataDir);
+            }
+            Some(RootConflict::Library(existing)) => {
+                warn!(
+                    requested = %canonical_target.display(),
+                    existing = %existing.display(),
+                    "library path overlaps an existing library"
+                );
+                return Err(LibraryError::PathOverlapsLibrary);
+            }
+        }
+
+        let created = self
+            .library_repo
+            .create(beam_domain::models::CreateLibrary {
+                name,
+                root_path: canonical_target,
+                description: None,
+            })
+            .await?;
+
+        self.notification_service.publish(NewAdminEvent::info(
+            EventCategory::System,
+            format!("Library '{}' created", created.name),
+            Some(created.id),
+            Some(created.name.clone()),
+        ));
+        Ok(created)
     }
 }
 
@@ -524,50 +607,31 @@ impl LibraryService for LocalLibraryService {
         name: String,
         root_path: String,
     ) -> Result<Library, LibraryError> {
-        use beam_domain::models::CreateLibrary;
-
-        let requested_path = PathBuf::from(&root_path);
-
         let canonical_target = self
             .path_validator
-            .validate_library_root(&requested_path, &self.video_dir)?;
+            .validate_library_root(Path::new(&root_path), &self.video_dir)?;
+        let stored = self.library_repo.find_all().await?;
+        let created = self.store_library(name, canonical_target, stored).await?;
 
-        // As with the validator, the rejections name no path (NFR-108); the
-        // log does.
-        let existing_roots: Vec<PathBuf> = self
-            .library_repo
-            .find_all()
-            .await?
-            .into_iter()
-            .map(|library| library.root_path)
-            .collect();
-        match find_root_conflict(&canonical_target, &existing_roots, &self.data_dir) {
-            None => {}
-            Some(RootConflict::DataDir) => {
-                warn!(
-                    requested = %canonical_target.display(),
-                    data_dir = %self.data_dir.display(),
-                    "library path overlaps the data directory"
-                );
-                return Err(LibraryError::PathOverlapsDataDir);
+        // What the root already holds is indexed by a scan of its own
+        // (FR-213), registered now so the job is readable as soon as the
+        // request answers. A scan that cannot start -- the root gone since it
+        // was validated, or the library already being scanned -- does not
+        // undo the creation: it is logged, and the periodic rescan or an
+        // administrator's indexes the library instead.
+        let library_id = created.id;
+        let ticket = match self
+            .index_service
+            .begin_scan(library_id, ScanTrigger::Created)
+            .await
+        {
+            Ok(ticket) => Some(ticket),
+            Err(e) => {
+                warn!(%library_id, error = %e, "could not start the new library's first scan");
+                None
             }
-            Some(RootConflict::Library(existing)) => {
-                warn!(
-                    requested = %canonical_target.display(),
-                    existing = %existing.display(),
-                    "library path overlaps an existing library"
-                );
-                return Err(LibraryError::PathOverlapsLibrary);
-            }
-        }
-
-        let create = CreateLibrary {
-            name: name.clone(),
-            root_path: canonical_target,
-            description: None,
         };
 
-        let created = self.library_repo.create(create).await?;
         // Watched from now, not from the next maintenance cycle -- but on a
         // task of its own: registering walks the library's tree (a native
         // watch per directory, or a poller's first snapshot of a network
@@ -575,19 +639,52 @@ impl LibraryService for LocalLibraryService {
         // A failure is logged by the hook, and the cycle registers the
         // library instead; a library deleted before its registration lands
         // is unwatched by that cycle too.
+        //
+        // The first scan runs once the watch is registered, as the startup
+        // scan follows every registration: a file written while the scan
+        // walks is then reported by the watch rather than missed until the
+        // periodic rescan. Until then the job reads as queued. A task that
+        // dies unfinished fails the job as interrupted.
         let watch_hook = self.watch_hook.clone();
+        let index_service = self.index_service.clone();
         let watched = created.clone();
-        tokio::spawn(async move { watch_hook.library_created(&watched).await });
+        tokio::spawn(async move {
+            watch_hook.library_created(&watched).await;
+            if let Some(ticket) = ticket
+                && let Err(e) = index_service.run_scan(ticket).await
+            {
+                warn!(%library_id, error = %e, "new library's first scan failed");
+            }
+        });
 
-        self.notification_service.publish(AdminEvent::info(
-            EventCategory::System,
-            format!("Library '{}' created", created.name),
-            Some(created.id),
-            Some(created.name.clone()),
-        ));
-
-        // Nothing is indexed until its first scan.
+        // Nothing is indexed until its first scan has run.
         Ok(Library::from_domain(created, 0))
+    }
+
+    async fn declare_library(
+        &self,
+        name: String,
+        root_path: String,
+    ) -> Result<LibraryDeclared, LibraryError> {
+        let canonical_target = self
+            .path_validator
+            .validate_library_root(Path::new(&root_path), &self.video_dir)?;
+        let stored = self.library_repo.find_all().await?;
+        // The root is the identity: it is what the deployment mounts, and an
+        // administrator may have created the library under another name.
+        if let Some(existing) = stored
+            .iter()
+            .find(|library| library.root_path == canonical_target)
+        {
+            return Ok(LibraryDeclared::AlreadyStored {
+                stored_name: existing.name.clone(),
+            });
+        }
+        if stored.iter().any(|library| library.name == name) {
+            return Ok(LibraryDeclared::NameTaken);
+        }
+        let created = self.store_library(name, canonical_target, stored).await?;
+        Ok(LibraryDeclared::Created(Library::from_domain(created, 0)))
     }
 
     async fn start_scan(&self, library_id: Uuid) -> Result<ScanJob, LibraryError> {
@@ -648,7 +745,7 @@ impl LibraryService for LocalLibraryService {
         self.index_service.forget_library(lib_uuid);
         self.watch_hook.library_deleted(lib_uuid).await;
 
-        self.notification_service.publish(AdminEvent::info(
+        self.notification_service.publish(NewAdminEvent::info(
             EventCategory::System,
             format!("Library '{}' deleted", library.name),
             Some(lib_uuid),

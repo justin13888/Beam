@@ -94,8 +94,47 @@ pub fn progress_fraction(position_secs: f64, duration_secs: Option<f64>) -> Opti
     }
 }
 
+/// The fraction of a known duration from which a resume point counts as the
+/// end, so Play starts the title again rather than in its credits.
+///
+/// Matches `COMPLETED_THRESHOLD` in `beam-domain/src/models/watch_state.rs`,
+/// past which the server marks a title played and resets its position: a
+/// client that resumed from a point the server would call finished would
+/// open a title the viewer just watched on its last few seconds.
+pub const NEAR_END_FRACTION: f64 = 0.95;
+
+/// Where Play starts a title, in seconds, from where the viewer stopped.
+///
+/// The one rule every client starts playback from (issue #466), so a title
+/// opened from its detail page, a download or Continue Watching starts at the
+/// same moment on every platform:
+///
+/// - **none**: never started, or a position that is not a moment at all
+///   (negative, NaN, infinite) -- the start.
+/// - **mid**: part-way through -- the resume point.
+/// - **near end**: at or past [`NEAR_END_FRACTION`] of a known, positive
+///   duration -- the start, as for a title watched to its end.
+/// - **watched**: the server resets a finished title's position to 0, so it
+///   reads as none and starts at the start; one rewound and partly rewatched
+///   resumes like any other.
+///
+/// Without a known duration nothing can be near its end, so any real position
+/// resumes. "Play from beginning" is the caller's own choice of 0, not an
+/// input here.
+#[uniffi::export]
+#[must_use]
+pub fn start_position_secs(resume_position_secs: f64, duration_secs: Option<f64>) -> f64 {
+    if !resume_position_secs.is_finite() || resume_position_secs <= 0.0 {
+        return 0.0;
+    }
+    let near_end = duration_secs.is_some_and(|duration| {
+        duration > 0.0 && resume_position_secs >= duration * NEAR_END_FRACTION
+    });
+    if near_end { 0.0 } else { resume_position_secs }
+}
+
 /// Map the server's `media_type` onto the core's own enum.
-fn kind_from_wire(media_type: wire::TitleKind) -> MediaKind {
+pub(super) fn kind_from_wire(media_type: wire::TitleKind) -> MediaKind {
     match media_type {
         wire::TitleKind::Movie => MediaKind::Movie,
         wire::TitleKind::Show => MediaKind::Show,
@@ -203,6 +242,11 @@ impl RowDisplay {
             } else {
                 0.0
             },
+            start_position_secs: if self.kind == MediaKind::Movie {
+                start_position_secs(self.position_secs, self.duration_secs)
+            } else {
+                0.0
+            },
             watched_episode_count: 0,
         };
         let episode = self.episode_id.as_ref().map(|id| EpisodeSummary {
@@ -216,6 +260,7 @@ impl RowDisplay {
             file_id: Some(self.file_id.clone()),
             played: self.played,
             resume_position_secs: self.position_secs,
+            start_position_secs: start_position_secs(self.position_secs, self.duration_secs),
         });
         (media, episode)
     }
@@ -321,6 +366,49 @@ mod tests {
         assert_eq!(progress_fraction(-5.0, Some(120.0)), Some(0.0));
     }
 
+    /// The start-position rule, case by case (issue #466). The near-end
+    /// boundary is derived from the constant, so the table checks which side
+    /// of it each case falls on rather than restating its value.
+    #[test]
+    fn play_starts_from_the_resume_point_unless_there_is_none_or_it_is_the_end() {
+        let duration = 1_000.0;
+        let boundary = duration * NEAR_END_FRACTION;
+        for (case, position, duration_secs, expected) in [
+            ("none: never started", 0.0, Some(duration), 0.0),
+            ("none: a negative position", -5.0, Some(duration), 0.0),
+            ("none: not a number", f64::NAN, Some(duration), 0.0),
+            ("none: infinite", f64::INFINITY, None, 0.0),
+            ("mid", 300.0, Some(duration), 300.0),
+            (
+                "mid: just short of the end",
+                boundary - 1.0,
+                Some(duration),
+                boundary - 1.0,
+            ),
+            ("near end: at the boundary", boundary, Some(duration), 0.0),
+            (
+                "near end: past a short probe",
+                duration + 10.0,
+                Some(duration),
+                0.0,
+            ),
+            (
+                "watched: the server reset it to 0",
+                0.0,
+                Some(duration),
+                0.0,
+            ),
+            ("unknown duration resumes", 2_000.0, None, 2_000.0),
+            ("a zero duration is unknown", 300.0, Some(0.0), 300.0),
+        ] {
+            assert_eq!(
+                start_position_secs(position, duration_secs).to_bits(),
+                f64::to_bits(expected),
+                "{case}"
+            );
+        }
+    }
+
     /// A continue-watching row as the server sends one: a movie to
     /// resume, or an episode of a show.
     fn continue_json(media_type: &str, episode_id: Option<&str>) -> String {
@@ -358,6 +446,13 @@ mod tests {
             Some("00000000-0000-0000-0000-0000000000e1")
         );
         assert!(!entry.is_next_up, "a resume row");
+        let episode = entry.episode.expect("the row's episode");
+        assert!((episode.start_position_secs - 30.0).abs() < f64::EPSILON);
+        let media = entry.media.expect("the row's title");
+        assert!(
+            media.start_position_secs.abs() < f64::EPSILON,
+            "a series starts through its episode, not itself"
+        );
     }
 
     /// The row draws itself from what the server sent (issue #188): the
@@ -418,6 +513,10 @@ mod tests {
             Some("00000000-0000-0000-0000-0000000000f1")
         );
         assert!((media.resume_position_secs - 30.0).abs() < f64::EPSILON);
+        assert!(
+            (media.start_position_secs - 30.0).abs() < f64::EPSILON,
+            "30 s of 120 s resumes"
+        );
     }
 
     #[test]
@@ -507,6 +606,22 @@ mod tests {
                 proptest::prop_assert!((0.0..=1.0).contains(&fraction), "{fraction}");
             } else {
                 proptest::prop_assert!(!duration.is_some_and(|known| known > 0.0));
+            }
+        }
+
+        /// Play starts either where the viewer stopped or at the start --
+        /// never at an invented moment, and never inside the stretch of a
+        /// known duration that counts as its end.
+        #[test]
+        fn a_start_position_is_the_resume_point_or_the_start(
+            position in proptest::num::f64::ANY,
+            duration in proptest::option::of(proptest::num::f64::ANY),
+        ) {
+            let start = start_position_secs(position, duration);
+            proptest::prop_assert!(start == 0.0 || start.to_bits() == position.to_bits(), "{start}");
+            proptest::prop_assert!(start >= 0.0 && start.is_finite());
+            if let Some(known) = duration.filter(|known| *known > 0.0) {
+                proptest::prop_assert!(start < known * NEAR_END_FRACTION, "{start} of {known}");
             }
         }
     }

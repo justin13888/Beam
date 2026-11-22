@@ -76,10 +76,12 @@ impl WatchStatus {
 
     pub fn set_mode(&self, library_id: Uuid, mode: WatchMode) {
         self.lock().libraries.insert(library_id, mode);
+        record_mode(library_id, Some(mode));
     }
 
     pub fn remove(&self, library_id: Uuid) {
         self.lock().libraries.remove(&library_id);
+        record_mode(library_id, None);
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, WatchStatusSnapshot> {
@@ -89,6 +91,22 @@ impl WatchStatus {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
+}
+
+/// Set `beam_watcher_mode{library,mode}` (issue #457): 1 for the mode the
+/// library is watched in and 0 for the other, or 0 for both once nothing
+/// watches it. Both series are written every time, so an alert on
+/// `mode="poll"` sees a library move back to native rather than a stale 1.
+fn record_mode(library_id: Uuid, mode: Option<WatchMode>) {
+    let library = library_id.to_string();
+    let (native, poll) = match mode {
+        Some(WatchMode::Native) => (1.0, 0.0),
+        Some(WatchMode::Polling(_)) => (0.0, 1.0),
+        None => (0.0, 0.0),
+    };
+    metrics::gauge!("beam_watcher_mode", "library" => library.clone(), "mode" => "native")
+        .set(native);
+    metrics::gauge!("beam_watcher_mode", "library" => library, "mode" => "poll").set(poll);
 }
 
 /// Where Linux publishes the per-user inotify watch limit.
@@ -136,5 +154,34 @@ mod tests {
             snapshot.libraries.into_iter().collect::<Vec<_>>(),
             vec![(a, WatchMode::Polling(PollReason::WatchLimitReached))],
         );
+    }
+
+    /// The mode gauge follows a library from native to polled and out of
+    /// the status, one series per mode.
+    #[test]
+    fn the_mode_gauge_follows_the_library() {
+        use crate::test_metrics::MetricsCapture;
+
+        let capture = MetricsCapture::new();
+        let _recorder = capture.install();
+        let status = WatchStatus::new();
+        let library = Uuid::from_u128(7);
+        let label = library.to_string();
+        let modes = || {
+            let recorded = capture.snapshot();
+            let read = |mode| {
+                recorded
+                    .gauge("beam_watcher_mode", &[("library", &label), ("mode", mode)])
+                    .expect("both modes are always written")
+            };
+            (read("native"), read("poll"))
+        };
+
+        status.set_mode(library, WatchMode::Native);
+        assert_eq!(modes(), (1.0, 0.0));
+        status.set_mode(library, WatchMode::Polling(PollReason::NetworkFilesystem));
+        assert_eq!(modes(), (0.0, 1.0));
+        status.remove(library);
+        assert_eq!(modes(), (0.0, 0.0));
     }
 }

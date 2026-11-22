@@ -9,7 +9,9 @@ pub mod collections;
 pub mod enrichment;
 pub mod genres;
 pub mod health;
+pub mod library_changes;
 pub mod lists;
+pub mod markers;
 pub mod me;
 pub mod media;
 pub mod metrics_mw;
@@ -131,6 +133,7 @@ pub fn rest_routes() -> Router<AppState, Propagate, (), RestScopes> {
             stream::head_stream_file,
             stream::download_file,
             stream::head_download_file,
+            stream::grant_file,
         ])
         .mount(kynos::routes![
             subtitle::get_subtitle,
@@ -151,6 +154,12 @@ pub fn rest_routes() -> Router<AppState, Propagate, (), RestScopes> {
             admin::get_library_scan,
             admin::refresh_media_metadata,
             admin::delete_library,
+        ])
+        .mount(kynos::routes![library_changes::get_library_changes])
+        .mount(kynos::routes![
+            markers::get_file_markers,
+            markers::set_file_marker,
+            markers::clear_file_marker,
         ])
         .mount(kynos::routes![
             admin::get_admin_logs,
@@ -240,7 +249,7 @@ pub fn rest_routes() -> Router<AppState, Propagate, (), RestScopes> {
 /// forge, and a cross-origin reader of `/openapi` has nothing to steal.
 pub fn create_router(
     cors_origins: &bootstrap::AllowedOrigins,
-) -> Router<AppState, Propagate, (), ServedScopes> {
+) -> Router<AppState, Propagate, Cons<metrics_mw::InFlight, ()>, ServedScopes> {
     Router::new()
         // The release's own version: release-please bumps it in `Cargo.toml`,
         // and the release workflow regenerates both committed copies of the
@@ -256,6 +265,9 @@ pub fn create_router(
         )
         .mount(kynos::routes![metrics_mw::render_metrics])
         .observe(metrics_mw::HttpMetrics)
+        // At the root, so it counts every request the router handles -- the
+        // fallbacks no operation answers included.
+        .intercept(metrics_mw::InFlight)
         .docs(
             Docs::scalar()
                 .at("/openapi")

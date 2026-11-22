@@ -342,8 +342,22 @@ index on `(show_id, season_number)`; index on `show_id`.
 null), `title` (TEXT, not null — the text after the episode marker at index time, else
 `Episode N`; refined by enrichment), `description` (TEXT, nullable), `air_date` (DATE, nullable —
 set at index time for a date-based episode), `runtime_mins` (INTEGER,
-nullable), `thumbnail_url` (TEXT, nullable), `created_at` (TIMESTAMPTZ, not null). Unique index on
-`(season_id, episode_number)`; index on `season_id`.
+nullable), `thumbnail_url` (TEXT, nullable), `numbering` (TEXT, not null, default `standard` — how
+the number of the file that created the row was written: `standard`, `daily` or `absolute`, a
+`CHECK` holding it to those), `absolute_number` (INTEGER, nullable, positive — the running number an
+absolutely numbered file gave the episode), `absolute_season_number` (INTEGER, nullable — the season
+that file was indexed into, set exactly when `absolute_number` is, a `CHECK` holding the two
+together), `created_at` (TIMESTAMPTZ, not null). Unique index on `(season_id, episode_number)`;
+index on `season_id`; partial index on `absolute_number` where set.
+
+An absolutely numbered file (`Show - 030`) is indexed as episode 30 of season 1 (or of its season
+folder). Once the show is matched, enrichment re-homes the row to the season and episode the
+provider's absolute order puts 30 at, merging it into a row already there (its files and watch
+state with it), and the row keeps `absolute_number` and `absolute_season_number`, so a rescan of the
+file finds it there rather than making a new row at 30 (issue #334). The lookup is by the pair: a
+bare `03` in `Season 1/` and in `Season 2/` is two episodes. Rows indexed before these columns
+existed are all `standard`; an absolutely numbered file that a rescan finds on a `standard` row with
+no running number upgrades it to `absolute`, so enrichment re-homes it.
 
 ## Media-file tables
 
@@ -497,8 +511,8 @@ A video file's chapters as its container lists them (issue #265), written whole 
 transaction, deleted and reinserted -- each time the file is probed; a changed file whose probe
 fails is left with none. `GET /v1/media/{id}/sources` lists them on the file's source and part, and
 reads the recap, intro, credits and preview markers from their titles
-(`beam_domain::models::chapter::markers_from_chapters`): markers are not stored. A file indexed
-before this table has none until its next probe.
+(`beam_domain::models::chapter::markers_from_chapters`) for every kind `file_markers` keeps none
+of. A file indexed before this table has none until its next probe.
 
 | Column | Type | Nullable | Notes |
 |---|---|---|---|
@@ -506,6 +520,34 @@ before this table has none until its next probe.
 | `chapter_index` | INTEGER | no | PK; the chapter's position among the file's, from 0 (`CHECK >= 0`) |
 | `start_ms` / `end_ms` | BIGINT | no | milliseconds from the file's start; `CHECK (start_ms >= 0 AND end_ms >= start_ms)` (`file_chapters_span`) |
 | `title` | TEXT | yes | the chapter's own title |
+
+### `file_markers`
+The skip markers Beam keeps for a video file (issue #332), at most one of each kind: an
+administrator's (`PUT /v1/admin/files/{file_id}/markers/{kind}`), or one the background marker
+worker (`beam-server/src/services/markers.rs`) detected in the audio the file shares with other
+episodes of its season. A kept marker overrides the chapter-named one of its kind
+(`beam_domain::models::chapter::resolve_markers`). An administrator's replaces a detected one of
+its kind, and no detection replaces it; a detection replaces the file's detected rows in one
+transaction, inserting with `ON CONFLICT (file_id, kind) DO NOTHING`.
+
+| Column | Type | Nullable | Notes |
+|---|---|---|---|
+| `file_id` | UUID | no | PK (with `kind`); FK → `files.id`, cascade |
+| `kind` | TEXT | no | PK; `recap` \| `intro` \| `credits` \| `preview` (`file_markers_kind`) |
+| `start_ms` / `end_ms` | BIGINT | no | milliseconds from the file's start; `CHECK (start_ms >= 0 AND end_ms > start_ms)` (`file_markers_span`) |
+| `source` | TEXT | no | `admin` \| `detected` (`file_markers_source`) |
+
+### `file_marker_detections`
+The version of each episode file the marker worker last listened to (issue #332), recorded even when
+it found nothing -- or found no audio that decodes -- so a file is decoded again only once its
+`files.hash_xxh3` changes. A file that could not be read, or whose season has no other episode
+file to compare it with yet, has no row and is tried again on the next pass.
+
+| Column | Type | Nullable | Notes |
+|---|---|---|---|
+| `file_id` | UUID | no | PK; FK → `files.id`, cascade |
+| `file_hash` | BIGINT | no | the `files.hash_xxh3` bits the worker heard |
+| `detected_at` | TIMESTAMPTZ | no | |
 
 ### `file_trickplay`
 What Beam made of one video file's scrub-preview sheets (issue #265), for the content it made them

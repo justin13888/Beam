@@ -9,7 +9,7 @@ async fn playback_needs_a_session_before_it_will_hand_over_a_url() {
     let (client, _) = client_with_server().await;
 
     assert!(matches!(
-        client.playback_config("file-1".to_owned()),
+        client.playback_config("f1000000-0000-4000-8000-000000000001".to_owned()),
         Err(BeamError::Unauthenticated)
     ));
     assert!(matches!(
@@ -18,21 +18,105 @@ async fn playback_needs_a_session_before_it_will_hand_over_a_url() {
     ));
 }
 
+/// A download queued from one server keeps fetching from it after the
+/// viewer switches to another, so that server's config must be reachable
+/// by id and carry its own cookie and pins -- never the active server's.
+#[tokio::test]
+async fn a_server_config_by_id_carries_that_servers_session_not_the_active_ones() {
+    let client = client();
+    let home = sign_in_to(&client, "https://home.beam.test", "home-cookie").await;
+    client
+        .trust_certificate(home.clone(), "AA:BB".to_owned())
+        .await
+        .expect("home is registered");
+    let cabin = sign_in_to(&client, "https://cabin.beam.test", "cabin-cookie").await;
+    assert!(
+        client
+            .list_servers()
+            .expect("listed")
+            .iter()
+            .any(|server| server.id == cabin && server.is_active),
+        "cabin, added last, is the active server"
+    );
+
+    let config = client
+        .server_http_config_for(home)
+        .expect("home is signed in");
+
+    assert_eq!(config.base_url, "https://home.beam.test");
+    assert_eq!(config.host, "home.beam.test");
+    assert_eq!(
+        config.headers.get("Cookie").map(String::as_str),
+        Some("beam_session=home-cookie")
+    );
+    assert_eq!(config.trusted_fingerprints, vec!["AA:BB".to_owned()]);
+    assert_eq!(
+        client
+            .server_http_config()
+            .expect("cabin is signed in")
+            .headers
+            .get("Cookie")
+            .map(String::as_str),
+        Some("beam_session=cabin-cookie"),
+        "the active server's config is still the active server's"
+    );
+}
+
+#[tokio::test]
+async fn a_server_config_by_id_refuses_an_unknown_or_signed_out_server() {
+    let (client, signed_out) = client_with_server().await;
+    sign_in_to(&client, "https://cabin.beam.test", "cabin-cookie").await;
+
+    assert!(matches!(
+        client.server_http_config_for(signed_out),
+        Err(BeamError::Unauthenticated)
+    ));
+    assert!(matches!(
+        client.server_http_config_for("no-such-server".to_owned()),
+        Err(BeamError::UnknownServer { server_id }) if server_id == "no-such-server"
+    ));
+}
+
 #[tokio::test]
 async fn a_playback_config_carries_the_cookie_and_the_stream_url() {
     let (_, client, _) = restarted_after_sign_in(ME, "opaque-value").await;
 
     let config = client
-        .playback_config("file-1".to_owned())
+        .playback_config("f1000000-0000-4000-8000-000000000001".to_owned())
         .expect("configured");
 
-    assert_eq!(config.url, "https://beam.test/v1/files/file-1/stream");
+    assert_eq!(
+        config.url,
+        "https://beam.test/v1/files/f1000000-0000-4000-8000-000000000001/stream"
+    );
     assert_eq!(
         config.headers.get("Cookie").map(String::as_str),
         Some("beam_session=opaque-value"),
         "Media3 fetches the bytes itself, so the credential has to travel with it"
     );
     assert_eq!(config.pinned_host, "beam.test");
+}
+
+/// A file id is a UUID or nothing: one that is not would be interpolated
+/// into the stream URL, and an id holding a path or a query names some other
+/// resource on the origin the session cookie travels to.
+#[tokio::test]
+async fn a_playback_config_for_a_malformed_file_id_is_refused() {
+    let (_, client, _) = restarted_after_sign_in(ME, "opaque-value").await;
+
+    for malformed in ["file-1", "../../v1/admin/users", "a?b=1"] {
+        assert!(
+            matches!(
+                client.playback_config(malformed.to_owned()),
+                Err(BeamError::BadRequest { .. })
+            ),
+            "{malformed} became a URL"
+        );
+        assert!(matches!(
+            client.playback_plan(None, malformed.to_owned()).await,
+            Err(BeamError::BadRequest { .. })
+        ));
+    }
 }
 
 /// The server's one track model (issue #189) reaches the platform as the
@@ -349,13 +433,22 @@ async fn a_plan_whose_source_cannot_be_listed_is_the_file_alone() {
     .await;
 
     let plan = client
-        .playback_plan(Some(MEDIA_ID.to_owned()), "f-1".to_owned())
+        .playback_plan(
+            Some(MEDIA_ID.to_owned()),
+            "f1000000-0000-4000-8000-000000000001".to_owned(),
+        )
         .await
         .expect("a failed lookup is not a failed plan");
 
     assert_eq!(plan.parts.len(), 1);
-    assert_eq!(plan.parts[0].file_id, "f-1");
-    assert_eq!(plan.parts[0].url, "https://beam.test/v1/files/f-1/stream");
+    assert_eq!(
+        plan.parts[0].file_id,
+        "f1000000-0000-4000-8000-000000000001"
+    );
+    assert_eq!(
+        plan.parts[0].url,
+        "https://beam.test/v1/files/f1000000-0000-4000-8000-000000000001/stream"
+    );
     assert_eq!(plan.start_part_index, 0);
     assert_eq!(
         plan.parts[0].start_tracks, None,
@@ -370,12 +463,15 @@ async fn a_plan_without_a_title_is_the_file_alone_and_asks_nothing() {
     let (client, backend) = one_answer(500, r#"{"type":"about:blank","status":500}"#).await;
 
     let plan = client
-        .playback_plan(None, "f-1".to_owned())
+        .playback_plan(None, "f1000000-0000-4000-8000-000000000001".to_owned())
         .await
         .expect("a plan of one file");
 
     assert_eq!(plan.parts.len(), 1);
-    assert_eq!(plan.parts[0].url, "https://beam.test/v1/files/f-1/stream");
+    assert_eq!(
+        plan.parts[0].url,
+        "https://beam.test/v1/files/f1000000-0000-4000-8000-000000000001/stream"
+    );
     assert_eq!(plan.start_part_index, 0);
     assert!(backend.recorded().is_empty(), "no title, so no lookup");
 }
@@ -398,14 +494,23 @@ async fn a_plan_whose_source_lookup_never_answers_is_the_file_alone_once_bounded
     let started = tokio::time::Instant::now();
 
     let plan = client
-        .playback_plan(Some(MEDIA_ID.to_owned()), "f-1".to_owned())
+        .playback_plan(
+            Some(MEDIA_ID.to_owned()),
+            "f1000000-0000-4000-8000-000000000001".to_owned(),
+        )
         .await
         .expect("a lookup that never answers is not a failed plan");
 
     assert_eq!(started.elapsed(), PLAYBACK_PLAN_LOOKUP_TIMEOUT);
     assert_eq!(plan.parts.len(), 1);
-    assert_eq!(plan.parts[0].file_id, "f-1");
-    assert_eq!(plan.parts[0].url, "https://beam.test/v1/files/f-1/stream");
+    assert_eq!(
+        plan.parts[0].file_id,
+        "f1000000-0000-4000-8000-000000000001"
+    );
+    assert_eq!(
+        plan.parts[0].url,
+        "https://beam.test/v1/files/f1000000-0000-4000-8000-000000000001/stream"
+    );
     assert_eq!(plan.start_part_index, 0);
 }
 
@@ -595,6 +700,83 @@ async fn the_highest_playable_source_is_selected() {
         selection.source.file_id,
         "a1a1a1a1-0000-4000-8000-000000000001"
     );
+}
+
+const GRANTED_FILE: &str = "b2b2b2b2-0000-4000-8000-000000000002";
+
+/// A grant is asked for of the file it names, as the signed-in session, and
+/// both URLs come back absolute on the server's origin: an AirPlay receiver
+/// or an external player is handed them with nothing else attached.
+#[tokio::test]
+async fn a_media_grant_is_asked_for_by_the_session_and_resolved_to_absolute_urls() {
+    let (client, backend) = client_answering_in_turn(vec![(
+        200,
+        "application/json",
+        r#"{"stream_url":"/v1/files/b2b2b2b2-0000-4000-8000-000000000002/stream?grant=abc_-9",
+            "download_url":"/v1/files/b2b2b2b2-0000-4000-8000-000000000002/download?grant=abc_-9",
+            "expires_at":"2026-03-01T20:00:00Z"}"#,
+    )])
+    .await;
+
+    let grant = client
+        .media_grant(GRANTED_FILE.to_owned())
+        .await
+        .expect("the server granted it");
+
+    assert_eq!(
+        grant,
+        crate::ffi::MediaGrant {
+            stream_url: format!("https://beam.test/v1/files/{GRANTED_FILE}/stream?grant=abc_-9"),
+            download_url: format!(
+                "https://beam.test/v1/files/{GRANTED_FILE}/download?grant=abc_-9"
+            ),
+            expires_at_unix: 1_772_395_200,
+        }
+    );
+    let asked = backend.recorded().pop().expect("one request");
+    assert_eq!(asked.method, reqwest::Method::POST);
+    assert_eq!(asked.url.path(), format!("/v1/files/{GRANTED_FILE}/grant"));
+    assert_eq!(cookies_of(&asked), vec!["beam_session=opaque-value"]);
+}
+
+/// A grant URL off the server's origin is no grant: it fails rather than
+/// handing a player somewhere else.
+#[tokio::test]
+async fn a_media_grant_off_the_servers_origin_is_refused() {
+    let (client, _) = client_answering_in_turn(vec![(
+        200,
+        "application/json",
+        r#"{"stream_url":"https://elsewhere.test/stream?grant=abc",
+            "download_url":"/v1/files/b2b2b2b2-0000-4000-8000-000000000002/download?grant=abc",
+            "expires_at":"2026-03-01T20:00:00Z"}"#,
+    )])
+    .await;
+
+    assert!(matches!(
+        client.media_grant(GRANTED_FILE.to_owned()).await,
+        Err(BeamError::InvalidServerUrl { .. })
+    ));
+}
+
+/// A file the viewer may not see is the server's 404, and a malformed id
+/// never reaches the server.
+#[tokio::test]
+async fn a_media_grant_of_a_hidden_or_malformed_file_is_refused() {
+    let (client, _) = client_answering(
+        404,
+        r#"{"type":"https://beam.justinchung.net/reference/errors/#file-not-found",
+            "title":"File not found","status":404,"detail":"File not found"}"#,
+    )
+    .await;
+
+    assert!(matches!(
+        client.media_grant(GRANTED_FILE.to_owned()).await,
+        Err(BeamError::NotFound { .. })
+    ));
+    assert!(matches!(
+        client.media_grant("not-a-uuid".to_owned()).await,
+        Err(BeamError::BadRequest { .. })
+    ));
 }
 
 #[tokio::test]

@@ -443,8 +443,18 @@ fn equal_counts_keep_key_order() {
 
 // ── Retention ───────────────────────────────────────────────────────────────
 
+/// Yield to the spawned retention loop until `condition` holds, or fail after
+/// a generous deadline.
+///
+/// The loop's work here stays on this runtime's thread -- the stores are
+/// in-memory and the `TestClock` sleep is a registered waiter -- so a handful
+/// of yields lets it land. The bound is still a deadline rather than a yield
+/// count, so a store that moves its work off the task cannot turn this into
+/// a load-dependent failure. The deadline only bounds a hang and never orders
+/// anything: the `TestClock` never advances on its own.
 async fn until(label: &str, mut condition: impl FnMut() -> bool) {
-    for _ in 0..100_000 {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
         if condition() {
             return;
         }

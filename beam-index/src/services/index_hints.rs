@@ -396,20 +396,20 @@ impl LocalIndexService {
                 );
                 let _ = self
                     .admin_log
-                    .log(
-                        AdminLogLevel::Warning,
-                        AdminLogCategory::LibraryScan,
-                        format!(
+                    .create(CreateAdminLog {
+                        level: AdminLogLevel::Warning,
+                        category: AdminLogCategory::LibraryScan,
+                        message: format!(
                             "An NFO pins a title to {stored}, but the title is already pinned to \
                              {current}; the existing pin is kept: {}",
                             source.display()
                         ),
-                        Some(serde_json::json!({
+                        details: Some(serde_json::json!({
                             "path": source.display().to_string(),
                             "pinned": current,
                             "nfo": stored,
                         })),
-                    )
+                    })
                     .await;
                 return Ok(PinOutcome::Settled);
             }
@@ -448,6 +448,15 @@ impl LocalIndexService {
         Ok(PinOutcome::Settled)
     }
 
+    /// Note that classification has queued a title for enrichment, for the
+    /// scan or reconcile under way to wake the worker once it ends (issue
+    /// #449). `ensure_pending` does not say whether the row is new, so a
+    /// title already queued or enriched counts too: such a wake costs one
+    /// sweep that finds the title not due.
+    fn mark_enrichment_queued(&self) {
+        self.enrichment_queued.store(true, Ordering::Release);
+    }
+
     /// The movie a file is attached to: the one `pin` names, if one does,
     /// else the one `create` keys (created if new), pinned to `pin`.
     pub(super) async fn movie_for(
@@ -468,6 +477,7 @@ impl LocalIndexService {
             enrichment_repo
                 .ensure_pending(EnrichmentTargetId::Movie(movie.id))
                 .await?;
+            self.mark_enrichment_queued();
         }
         if let Some(pin) = pin {
             let carried = carries(
@@ -513,6 +523,7 @@ impl LocalIndexService {
             enrichment_repo
                 .ensure_pending(EnrichmentTargetId::Show(show.id))
                 .await?;
+            self.mark_enrichment_queued();
         }
         if let Some(pin) = pin {
             let carried = carries(
@@ -718,19 +729,19 @@ impl LocalIndexService {
         );
         let _ = self
             .admin_log
-            .log(
-                AdminLogLevel::Warning,
-                AdminLogCategory::LibraryScan,
-                format!(
+            .create(CreateAdminLog {
+                level: AdminLogLevel::Warning,
+                category: AdminLogCategory::LibraryScan,
+                message: format!(
                     "An NFO pins several {titles} to {stored}; an id pins one title, so only one \
                      of them is pinned: {}",
                     nfo_path.display()
                 ),
-                Some(serde_json::json!({
+                details: Some(serde_json::json!({
                     "path": nfo_path.display().to_string(),
                     "nfo": stored,
                 })),
-            )
+            })
             .await;
     }
 

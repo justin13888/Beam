@@ -127,6 +127,18 @@ kind the schema accepts has a readOnly field, which the chart forces true.
 {{- end }}
 
 {{/*
+BEAM_LIBRARIES: every library under `libraries`, declared to the server at the
+path the chart mounts it on, so the server creates each one missing at boot.
+*/}}
+{{- define "beam.libraryDeclarations" -}}
+{{- $declared := list }}
+{{- range .Values.libraries }}
+{{- $declared = append $declared (dict "name" .name "path" (printf "/videos/%s" .name)) }}
+{{- end }}
+{{- toJson $declared }}
+{{- end }}
+
+{{/*
 Fail rendering on combinations the schema cannot express, so `helm template`
 refuses them as well as `helm install`.
 */}}
@@ -147,4 +159,17 @@ refuses them as well as `helm install`.
 {{- end }}
 {{- $_ := set $names .name true }}
 {{- end }}
+{{- range $object := list "serviceMonitor" "prometheusRule" "grafanaDashboard" }}
+{{- if and (get $.Values.metrics $object).enabled (not $.Values.metrics.enabled) }}
+{{- fail (printf "metrics.%s.enabled needs metrics.enabled: without it /metrics answers 503" $object) }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
+The PromQL label matchers that pick out this release's series: the `namespace`
+and `service` target labels the ServiceMonitor gives everything it scrapes.
+*/}}
+{{- define "beam.metricsSelector" -}}
+namespace="{{ .Release.Namespace }}",service="{{ include "beam.fullname" . }}"
 {{- end }}

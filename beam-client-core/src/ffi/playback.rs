@@ -100,6 +100,49 @@ pub struct PlaybackPlan {
     pub base_url: String,
 }
 
+/// A media grant (ADR-0022): URLs that fetch one file with no session
+/// cookie, for a player Beam does not drive -- an AirPlay or Cast receiver,
+/// or an external player such as VLC.
+///
+/// Unlike [`PlaybackHttpConfig`], it carries no headers and no pins: the URL
+/// is the whole credential, so a platform hands it over and attaches nothing.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct MediaGrant {
+    /// Absolute URL streaming the file inline.
+    pub stream_url: String,
+    /// Absolute URL downloading the file as an attachment.
+    pub download_url: String,
+    /// When both URLs stop working, as a Unix timestamp. A player still
+    /// playing then is refused its next range, so restart from a fresh grant.
+    pub expires_at_unix: i64,
+}
+
+impl MediaGrant {
+    /// Normalise a generated grant, resolving both URLs against the server
+    /// that issued it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::InvalidServerUrl`] when a URL is off the server's
+    /// origin. Unlike artwork, a grant whose URL cannot be used is no grant,
+    /// so it fails rather than dropping the URL.
+    fn from_generated(
+        grant: crate::api::types::MediaGrantUrls,
+        record: &crate::servers::ServerRecord,
+    ) -> Result<Self, BeamError> {
+        let crate::api::types::MediaGrantUrls {
+            download_url,
+            expires_at,
+            stream_url,
+        } = grant;
+        Ok(Self {
+            stream_url: record.absolute_url(&stream_url)?,
+            download_url: record.absolute_url(&download_url)?,
+            expires_at_unix: expires_at.0.unix_timestamp(),
+        })
+    }
+}
+
 /// The sustained-rebuffer detector, as the platform player holds it.
 ///
 /// One per player. Every timestamp is the platform's monotonic clock in
@@ -185,6 +228,32 @@ impl BeamClient {
             .collect()
     }
 
+    /// A media grant for one file (ADR-0022): absolute URLs a player that
+    /// holds no session cookie -- an AirPlay or Cast receiver, an external
+    /// player -- fetches the file with, valid until `expires_at_unix`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::NoActiveServer`] when no server is selected,
+    /// [`BeamError::BadRequest`] when `file_id` is not a UUID,
+    /// [`BeamError::NotFound`] when the file is unknown or hidden from the
+    /// viewer, [`BeamError::InvalidServerUrl`] when a URL names another
+    /// origin, and the [request failures](BeamClient#request-failures).
+    pub async fn media_grant(&self, file_id: String) -> Result<MediaGrant, BeamError> {
+        let server_id = self.require_active()?;
+        let client = self.client_for(&server_id)?;
+        let record = self.record_for(&server_id)?;
+
+        let response = self
+            .send(
+                &server_id,
+                client.grant_file(parse_uuid("file_id", &file_id)?),
+            )
+            .await?;
+
+        MediaGrant::from_generated(response.into_inner(), &record)
+    }
+
     /// Choose a source for a title, given the device profile and a policy.
     ///
     /// # Errors
@@ -243,7 +312,8 @@ impl BeamClient {
     /// # Errors
     ///
     /// Returns [`BeamError::NoActiveServer`] when no server is selected,
-    /// [`BeamError::Unauthenticated`] when there is no session, and
+    /// [`BeamError::Unauthenticated`] when there is no session,
+    /// [`BeamError::BadRequest`] when `file_id` is not a UUID, and
     /// [`BeamError::InvalidServerUrl`] when the stream URL cannot be built on
     /// the server's origin.
     pub fn playback_config(&self, file_id: String) -> Result<PlaybackHttpConfig, BeamError> {
@@ -260,6 +330,11 @@ impl BeamClient {
         // -- so there is no URL accessor to name it with. Where the title's sources
         // are known, `playback_plan` takes each part's `stream_url` from them
         // instead.
+        //
+        // Validated first, like every other path identifier: interpolated
+        // unchecked, an id holding `/`, `?` or `..` would name some other
+        // resource on the server's origin and hand it the session cookie.
+        let file_id = parse_uuid("file_id", &file_id)?;
         let server_id = self.require_active()?;
         let url = self.with_context(&server_id, |context| {
             context
@@ -346,6 +421,22 @@ impl BeamClient {
     /// [`BeamError::Unauthenticated`] when there is no session.
     pub fn server_http_config(&self) -> Result<ServerHttpConfig, BeamError> {
         let server_id = self.require_active()?;
+        self.server_http_config_for(server_id)
+    }
+
+    /// The credential and trust decision for one known server, active or not.
+    ///
+    /// A download outlives the moment it was queued: the viewer can switch
+    /// to another server while it is still transferring, and its remaining
+    /// requests still go to the server it came from, so they need that
+    /// server's own session and pins rather than the active server's.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::UnknownServer`] when `server_id` is not
+    /// registered, and [`BeamError::Unauthenticated`] when that server has no
+    /// session.
+    pub fn server_http_config_for(&self, server_id: String) -> Result<ServerHttpConfig, BeamError> {
         let servers = self.servers.read().expect("servers lock");
         let context = servers.get(&server_id).ok_or(BeamError::UnknownServer {
             server_id: server_id.clone(),

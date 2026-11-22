@@ -1,11 +1,34 @@
-//! Database connection bootstrap: pool sizing and startup retry.
+//! Database connection bootstrap: pool sizing and startup retry, and the
+//! pool's metrics ([#458](https://github.com/justin13888/beam/issues/458)).
+//!
+//! Every ranged media request costs several database round trips, so a
+//! saturated pool shows up as player rebuffering. Two things make it visible:
+//!
+//! * **Failed queries.** [`connect`] hands the connection [`record_query`],
+//!   which counts every statement that failed as
+//!   `beam_db_errors_total{kind="query"}`.
+//! * **Pool samples.** [`spawn_pool_sampler`] reads the pool's open and idle
+//!   connections and its maximum every [`POOL_SAMPLE_INTERVAL`], and times
+//!   acquiring one connection. Neither sea-orm nor SQLx reports how long a
+//!   request waited for a connection, so the probe waits in the same queue
+//!   instead: when the pool is saturated the probe waits as long as a request
+//!   would, and when the wait exceeds the acquire timeout the probe's failure
+//!   is counted.
 
+use std::sync::Arc;
 use std::time::Duration;
 
+use beam_domain::services::Clock;
 use sea_orm::{ConnectOptions, Database, DatabaseConnection, DbErr};
 use tracing::warn;
 
 use crate::config::ServerConfig;
+
+/// How often [`spawn_pool_sampler`] samples the pool.
+///
+/// The interval `crate::metrics::spawn_upkeep` drains histograms at, so a
+/// scrape interval of 15 seconds or more always sees a fresh sample.
+pub const POOL_SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Retries beyond the first attempt. With [`backoff_delay`]'s schedule the
 /// last retry fires ~2.5 minutes in -- comfortably past a Postgres container
@@ -25,11 +48,130 @@ const MAX_LIFETIME: Duration = Duration::from_secs(1800);
 pub async fn connect(config: &ServerConfig) -> Result<DatabaseConnection, DbErr> {
     let options = connect_options(config);
     let clock = beam_domain::services::RealClock;
-    retrying(&clock, || {
+    let mut db = retrying(&clock, || {
         let options = options.clone();
         async move { Database::connect(options).await }
     })
-    .await
+    .await?;
+    db.set_metric_callback(record_query);
+    Ok(db)
+}
+
+/// Count a statement that failed as `beam_db_errors_total{kind="query"}`.
+///
+/// sea-orm calls this after every statement it runs on the pool. It sees only
+/// whether the statement failed, not why, so every failure is one kind. A
+/// connection that could not be acquired fails before the statement runs and
+/// never reaches here; the pool sampler counts that.
+pub fn record_query(info: &sea_orm::metric::Info<'_>) {
+    if info.failed {
+        metrics::counter!("beam_db_errors_total", "kind" => "query").increment(1);
+    }
+}
+
+/// The pool's connections at one instant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PoolConnections {
+    /// Connections open, idle or in use.
+    pub open: u32,
+    /// Open connections nobody holds.
+    pub idle: u32,
+    /// The most connections the pool may open.
+    pub max: u32,
+}
+
+/// Why a probe could not acquire a connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AcquireFailure {
+    /// No connection came free within the acquire timeout: the pool is
+    /// saturated.
+    TimedOut,
+    /// The pool was closed.
+    Closed,
+    /// A new connection was needed and could not be opened.
+    Connect,
+}
+
+impl AcquireFailure {
+    /// The `kind` label of `beam_db_errors_total`.
+    fn kind(self) -> &'static str {
+        match self {
+            Self::TimedOut => "acquire_timeout",
+            Self::Closed => "pool_closed",
+            Self::Connect => "connect",
+        }
+    }
+}
+
+/// A connection pool the sampler can read and probe.
+///
+/// The seam [`sample_pool`] runs against, so what it records is tested without
+/// a database; the implementation is SQLx's Postgres pool.
+pub trait SampledPool: Send + Sync + 'static {
+    /// The pool's connections now.
+    fn connections(&self) -> PoolConnections;
+
+    /// Acquire one connection and give it straight back.
+    fn probe_acquire(&self) -> impl Future<Output = Result<(), AcquireFailure>> + Send;
+}
+
+impl SampledPool for sea_orm::sqlx::PgPool {
+    fn connections(&self) -> PoolConnections {
+        PoolConnections {
+            open: self.size(),
+            idle: u32::try_from(self.num_idle()).unwrap_or(u32::MAX),
+            max: self.options().get_max_connections(),
+        }
+    }
+
+    async fn probe_acquire(&self) -> Result<(), AcquireFailure> {
+        match self.acquire().await {
+            Ok(connection) => {
+                drop(connection);
+                Ok(())
+            }
+            Err(sea_orm::sqlx::Error::PoolTimedOut) => Err(AcquireFailure::TimedOut),
+            Err(sea_orm::sqlx::Error::PoolClosed) => Err(AcquireFailure::Closed),
+            Err(_) => Err(AcquireFailure::Connect),
+        }
+    }
+}
+
+/// Record one sample of `pool`: its connections by state, its maximum, and
+/// how long acquiring a connection took, measured on `clock`.
+pub async fn sample_pool(pool: &impl SampledPool, clock: &dyn Clock) {
+    let PoolConnections { open, idle, max } = pool.connections();
+    metrics::gauge!("beam_db_pool_connections", "state" => "idle").set(f64::from(idle));
+    metrics::gauge!("beam_db_pool_connections", "state" => "in_use")
+        .set(f64::from(open.saturating_sub(idle)));
+    metrics::gauge!("beam_db_pool_max").set(f64::from(max));
+
+    let started = clock.monotonic();
+    let acquired = pool.probe_acquire().await;
+    let waited = clock.monotonic().saturating_duration_since(started);
+    metrics::histogram!("beam_db_acquire_duration_seconds").record(waited.as_secs_f64());
+
+    if let Err(failure) = acquired {
+        metrics::counter!("beam_db_errors_total", "kind" => failure.kind()).increment(1);
+    }
+}
+
+/// Sample `pool` every [`POOL_SAMPLE_INTERVAL`] for as long as the process
+/// runs, starting at once.
+pub fn spawn_pool_sampler(
+    pool: impl SampledPool,
+    clock: Arc<dyn Clock>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(POOL_SAMPLE_INTERVAL);
+        // A probe that waited out the acquire timeout must not be followed by
+        // a burst of catch-up probes into the same saturated pool.
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            sample_pool(&pool, clock.as_ref()).await;
+        }
+    })
 }
 
 /// Retry `attempt` with the module's backoff schedule until it succeeds or the
@@ -196,6 +338,137 @@ mod tests {
         assert_eq!(schedule, vec![1, 2, 4, 8, 16, 30, 30, 30, 30, 30]);
         // Absurdly high attempt numbers must not overflow the shift.
         assert_eq!(backoff_delay(u32::MAX).as_secs(), 30);
+    }
+
+    // ─── pool metrics ───────────────────────────────────────────────────────
+
+    use crate::routes::test_support::Recorded;
+    use beam_domain::services::TestClock;
+    use metrics_util::debugging::DebuggingRecorder;
+
+    /// A pool with fixed connections whose probe takes `wait` on `clock` and
+    /// then answers `outcome`.
+    struct ScriptedPool {
+        connections: PoolConnections,
+        clock: Arc<TestClock>,
+        wait: Duration,
+        outcome: Result<(), AcquireFailure>,
+    }
+
+    impl SampledPool for ScriptedPool {
+        fn connections(&self) -> PoolConnections {
+            self.connections
+        }
+
+        async fn probe_acquire(&self) -> Result<(), AcquireFailure> {
+            self.clock.advance(self.wait);
+            self.outcome
+        }
+    }
+
+    /// What one [`sample_pool`] of `pool` records.
+    async fn sampled(pool: ScriptedPool) -> Recorded {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        {
+            // Thread-local, and a `#[tokio::test]` runs on one thread.
+            let _local = metrics::set_default_local_recorder(&recorder);
+            sample_pool(&pool, pool.clock.as_ref()).await;
+        }
+        Recorded::of(&snapshotter)
+    }
+
+    #[tokio::test]
+    async fn a_pool_sample_splits_open_connections_into_idle_and_in_use() {
+        let recorded = sampled(ScriptedPool {
+            connections: PoolConnections {
+                open: 7,
+                idle: 2,
+                max: 10,
+            },
+            clock: Arc::new(TestClock::new()),
+            wait: Duration::from_millis(250),
+            outcome: Ok(()),
+        })
+        .await;
+
+        assert_eq!(
+            recorded.gauge("beam_db_pool_connections", &[("state", "idle")]),
+            Some(2.0)
+        );
+        assert_eq!(
+            recorded.gauge("beam_db_pool_connections", &[("state", "in_use")]),
+            Some(5.0),
+            "in use is the open connections nobody left idle"
+        );
+        assert_eq!(recorded.gauge("beam_db_pool_max", &[]), Some(10.0));
+        assert_eq!(
+            recorded.histogram("beam_db_acquire_duration_seconds", &[]),
+            Some(vec![0.25]),
+            "the probe's wait is measured on the injected clock"
+        );
+        for kind in ["acquire_timeout", "pool_closed", "connect", "query"] {
+            assert_eq!(
+                recorded.counter("beam_db_errors_total", &[("kind", kind)]),
+                None,
+                "a probe that acquired is no error"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_probe_that_cannot_acquire_is_counted_by_why_and_still_timed() {
+        for (failure, kind) in [
+            (AcquireFailure::TimedOut, "acquire_timeout"),
+            (AcquireFailure::Closed, "pool_closed"),
+            (AcquireFailure::Connect, "connect"),
+        ] {
+            let recorded = sampled(ScriptedPool {
+                connections: PoolConnections {
+                    open: 10,
+                    idle: 0,
+                    max: 10,
+                },
+                clock: Arc::new(TestClock::new()),
+                wait: ACQUIRE_TIMEOUT,
+                outcome: Err(failure),
+            })
+            .await;
+
+            assert_eq!(
+                recorded.counter("beam_db_errors_total", &[("kind", kind)]),
+                Some(1),
+                "{failure:?} is counted as {kind}"
+            );
+            assert_eq!(
+                recorded.histogram("beam_db_acquire_duration_seconds", &[]),
+                Some(vec![ACQUIRE_TIMEOUT.as_secs_f64()]),
+                "a saturated pool's wait is the very thing to see"
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_failed_statement_is_counted_as_a_query_error() {
+        let statement =
+            sea_orm::Statement::from_string(sea_orm::DbBackend::Postgres, "SELECT 1".to_owned());
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        metrics::with_local_recorder(&recorder, || {
+            for failed in [false, true, false] {
+                record_query(&sea_orm::metric::Info {
+                    elapsed: Duration::from_millis(3),
+                    statement: &statement,
+                    failed,
+                });
+            }
+        });
+
+        assert_eq!(
+            Recorded::of(&snapshotter).counter("beam_db_errors_total", &[("kind", "query")]),
+            Some(1)
+        );
     }
 
     #[test]

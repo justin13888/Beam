@@ -5,3 +5,5 @@ pub mod providers;
 pub mod repositories;
 pub mod runtime;
 pub mod services;
+#[cfg(test)]
+pub(crate) mod test_metrics;

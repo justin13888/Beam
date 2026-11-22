@@ -12,7 +12,9 @@
 //! it is exhaustively testable against hand-built generated values.
 
 mod admin;
+mod enrichment;
 mod library;
+mod library_report;
 mod media;
 mod preferences;
 mod watching;
@@ -21,15 +23,28 @@ pub use admin::{
     AdminCounts, AdminEvent, AdminLogEntry, AdminLogPage, AdminStatus, AdminUser, AdminUserPage,
     DeviceSession, EnrichmentCounts, EventCategory, LogLevel, RecentScan, ServerHealth,
 };
+pub use enrichment::{
+    EnrichmentStatus, MatchCandidate, MediaEnrichment, MediaEnrichmentPage, MetadataField,
+    PinSource,
+};
 pub use library::{
-    FileContentType, FileIndexStatus, LibraryFileSummary, LibrarySummary, ScanJob, ScanJobState,
+    FileContentType, FileIndexStatus, LibraryChanges, LibraryFileSummary, LibrarySummary, ScanJob,
+    ScanJobState,
+};
+#[cfg(test)]
+pub(crate) use library_report::PREVIEW_JSON;
+pub use library_report::{
+    CountRange, FileSizeCount, FileSizeRange, LibraryReport, LibraryTelemetryPreview, NamedCount,
+    TotalSizeRange,
 };
 pub use media::{
     BrowseQuery, EpisodeSummary, MediaDetail, MediaKind, MediaPage, MediaSortField, MediaSummary,
     MediaTypeFilter, SeasonSummary, SortOrder, browse_params,
 };
 pub use preferences::{LanguagePreferences, SubtitleMode};
-pub use watching::{ContinueWatchingEntry, HistoryEntry, HistoryPage, progress_fraction};
+pub use watching::{
+    ContinueWatchingEntry, HistoryEntry, HistoryPage, progress_fraction, start_position_secs,
+};
 
 use crate::servers::ServerRecord;
 

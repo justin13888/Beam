@@ -204,8 +204,7 @@ pub(super) mod tests {
         use beam_index::services::media_info::MockMediaInfoService;
         use beam_index::services::watcher::FsEventKind;
         use beam_index::services::{
-            IndexService, LocalHashService, LocalIndexService, NoOpAdminLogService,
-            ReconcileOutcome,
+            IndexService, LocalHashService, LocalIndexService, ReconcileOutcome,
         };
 
         let root = tempfile::TempDir::new().unwrap();
@@ -241,7 +240,7 @@ pub(super) mod tests {
             Arc::new(LocalHashService::default()),
             Arc::new(prober),
             Arc::new(InMemoryNotificationService::new()),
-            Arc::new(NoOpAdminLogService),
+            Arc::new(beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository::default()),
             Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
         ));
 
@@ -340,21 +339,63 @@ pub(super) mod tests {
     /// Registering a new library's watch can walk its whole tree, so the
     /// create request does not wait for it: it answers while the
     /// registration is still held, and the registration lands afterwards.
+    /// Its first scan (FR-213) is registered before the request answers, and
+    /// runs only once the watch is registered, so nothing written while it
+    /// walks is missed.
     #[tokio::test]
-    async fn creating_a_library_answers_before_its_watch_is_registered() {
+    async fn creating_a_library_answers_before_its_watch_is_registered_and_scans_after() {
         let video_dir = PathBuf::from("/media/videos");
         let (open_gate, gate) = std::sync::mpsc::channel();
         let watcher = Arc::new(GatedWatcher {
             inner: beam_index::services::watcher::InMemoryFsWatcher::new(),
             gate: std::sync::Mutex::new(gate),
         });
+        let coordinator = ScanCoordinator::new();
+        let clock: Arc<dyn beam_domain::services::Clock> = Arc::new(
+            beam_domain::services::TestClock::starting_at(chrono::Utc::now()),
+        );
+        let mut mock_index = MockIndexService::new();
+        let (begun_tx, begun) = std::sync::mpsc::channel();
+        mock_index
+            .expect_begin_scan()
+            .times(1)
+            .withf(|_, trigger| *trigger == ScanTrigger::Created)
+            .returning(move |library_id, trigger| {
+                begun_tx.send(library_id).unwrap();
+                let job = beam_index::services::scan::ScanJob {
+                    id: Uuid::new_v4(),
+                    library_id,
+                    trigger,
+                    state: beam_index::services::scan::ScanState::Queued,
+                    queued_at: clock.now(),
+                    started_at: None,
+                    finished_at: None,
+                    progress: beam_index::services::scan::ScanProgress::default(),
+                    failure: None,
+                };
+                Ok(coordinator.register(job, clock.clone()).unwrap())
+            });
+        let watched_by_then = watcher.clone();
+        let (ran_tx, mut ran) = tokio::sync::mpsc::unbounded_channel();
+        mock_index
+            .expect_run_scan()
+            .times(1)
+            .returning(move |ticket| {
+                ran_tx
+                    .send((
+                        ticket.library_id(),
+                        watched_by_then.inner.watched_libraries(),
+                    ))
+                    .unwrap();
+                Ok(beam_index::services::scan::ScanProgress::default())
+            });
         let service = LocalLibraryService::new(LibraryServiceDependencies {
             library_repo: Arc::new(InMemoryLibraryRepository::default()),
             file_repo: Arc::new(InMemoryFileRepository::default()),
             video_dir: video_dir.clone(),
             data_dir: PathBuf::from("/beam-data"),
             notification_service: Arc::new(InMemoryNotificationService::new()),
-            index_service: Arc::new(MockIndexService::new()),
+            index_service: Arc::new(mock_index),
             path_validator: Arc::new(InMemoryPathValidator::success(video_dir.clone())),
             watch_hook: Arc::new(beam_index::runtime::LibraryWatches::new(Some(
                 watcher.clone(),
@@ -366,14 +407,68 @@ pub(super) mod tests {
             .await
             .expect("the library is created while its registration is held");
         let id = created.id;
+        assert_eq!(
+            begun.try_recv(),
+            Ok(id),
+            "the first scan is registered before the request answers"
+        );
         assert!(
             watcher.inner.watched_libraries().is_empty(),
             "not registered yet"
         );
+        assert!(ran.try_recv().is_err(), "nor scanned before it is");
 
         open_gate.send(()).unwrap();
         watcher.inner.until_watched(id).await;
         assert_eq!(watcher.inner.watched_libraries(), vec![id]);
+        assert_eq!(
+            ran.recv().await,
+            Some((id, vec![id])),
+            "the first scan runs once the watch is registered"
+        );
+    }
+
+    /// A first scan that cannot start -- here one already holds the library
+    /// -- does not fail the creation: the library is stored and announced,
+    /// and no scan runs (NFR-205).
+    #[tokio::test]
+    async fn a_first_scan_that_cannot_start_does_not_fail_the_creation() {
+        let video_dir = PathBuf::from("/media/videos");
+        let lib_repo = Arc::new(InMemoryLibraryRepository::default());
+        let notif = Arc::new(InMemoryNotificationService::new());
+        let mut mock_index = MockIndexService::new();
+        mock_index
+            .expect_begin_scan()
+            .times(1)
+            .withf(|_, trigger| *trigger == ScanTrigger::Created)
+            .returning(|_, _| Err(IndexError::ScanInProgress));
+        mock_index.expect_run_scan().never();
+        let service = LocalLibraryService::new(LibraryServiceDependencies {
+            library_repo: lib_repo.clone(),
+            file_repo: Arc::new(InMemoryFileRepository::default()),
+            video_dir: video_dir.clone(),
+            data_dir: PathBuf::from("/beam-data"),
+            notification_service: notif.clone() as Arc<dyn NotificationService>,
+            index_service: Arc::new(mock_index),
+            path_validator: Arc::new(InMemoryPathValidator::success(video_dir.clone())),
+            watch_hook: Arc::new(beam_index::runtime::LibraryWatches::new(None)),
+        });
+
+        let created = service
+            .create_library("Movies".to_string(), "movies".to_string())
+            .await
+            .expect("a refused first scan does not fail the creation");
+
+        let stored = lib_repo.find_all().await.unwrap();
+        assert_eq!(
+            stored.iter().map(|library| library.id).collect::<Vec<_>>(),
+            vec![created.id]
+        );
+        assert_eq!(
+            notif.recent_events(10).len(),
+            1,
+            "the creation is announced"
+        );
     }
 
     #[tokio::test]
@@ -384,13 +479,20 @@ pub(super) mod tests {
         let lib_repo_ref = Arc::clone(&lib_repo);
         let notif = Arc::new(InMemoryNotificationService::new());
         let notif_ref = Arc::clone(&notif);
+        // The root is gone by the time the first scan would start: the
+        // creation stands regardless.
+        let mut mock_index = MockIndexService::new();
+        mock_index
+            .expect_begin_scan()
+            .times(1)
+            .returning(|_, _| Err(IndexError::PathNotFound("root unavailable".to_string())));
         let service = LocalLibraryService::new(LibraryServiceDependencies {
             library_repo: lib_repo,
             file_repo: Arc::new(InMemoryFileRepository::default()),
             video_dir: video_dir.clone(),
             data_dir: PathBuf::from("/beam-data"),
             notification_service: notif as Arc<dyn NotificationService>,
-            index_service: Arc::new(MockIndexService::new()),
+            index_service: Arc::new(mock_index),
             path_validator: Arc::new(InMemoryPathValidator::success(video_dir.clone())),
             watch_hook: Arc::new(beam_index::runtime::LibraryWatches::new(None)),
         });

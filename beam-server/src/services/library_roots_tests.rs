@@ -10,7 +10,7 @@ use crate::services::library::{
 use beam_domain::repositories::LibraryRepository;
 use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
 use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
-use beam_index::services::index::MockIndexService;
+use beam_index::services::index::{IndexError, MockIndexService};
 use beam_index::services::notification::InMemoryNotificationService;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -48,13 +48,19 @@ fn conflict_service(
     lib_repo: Arc<InMemoryLibraryRepository>,
     resolves_to: &str,
 ) -> LocalLibraryService {
+    // None of these roots exists, so a created library's first scan is
+    // refused as the indexer would refuse it; the creation stands.
+    let mut index = MockIndexService::new();
+    index
+        .expect_begin_scan()
+        .returning(|_, _| Err(IndexError::PathNotFound("root unavailable".to_string())));
     LocalLibraryService::new(LibraryServiceDependencies {
         library_repo: lib_repo,
         file_repo: Arc::new(InMemoryFileRepository::default()),
         video_dir: PathBuf::from("/media"),
         data_dir: PathBuf::from("/media/beam-data"),
         notification_service: Arc::new(InMemoryNotificationService::new()),
-        index_service: Arc::new(MockIndexService::new()),
+        index_service: Arc::new(index),
         path_validator: Arc::new(InMemoryPathValidator::success(PathBuf::from(resolves_to))),
         watch_hook: Arc::new(beam_index::runtime::LibraryWatches::new(None)),
     })

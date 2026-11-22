@@ -7,7 +7,6 @@ use std::sync::Mutex;
 use futures::FutureExt;
 
 use super::*;
-use crate::services::admin_log::LocalAdminLogService;
 use crate::services::enrichment::MetadataEnrichmentService;
 use crate::services::notification::InMemoryNotificationService;
 use beam_domain::models::catalog::TitleKind;
@@ -94,7 +93,7 @@ impl Harness {
             states: states.clone(),
             libraries: libraries.clone(),
             provider: provider.clone(),
-            admin_log: Arc::new(LocalAdminLogService::new(admin_log.clone())),
+            admin_log: admin_log.clone(),
             nfo_pins: nfo_pins.clone(),
             worker: worker.clone(),
         });
@@ -160,9 +159,7 @@ impl Harness {
             Arc::new(InMemoryPersonRepository::default()),
             Arc::new(InMemoryCollectionRepository::default()),
             self.provider.clone(),
-            Arc::new(LocalAdminLogService::new(Arc::new(
-                InMemoryAdminLogRepository::default(),
-            ))),
+            Arc::new(InMemoryAdminLogRepository::default()),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(TestClock::new()),
         )
@@ -535,9 +532,7 @@ async fn locks_are_set_whole_and_the_sweep_leaves_them_alone() {
         Arc::new(InMemoryPersonRepository::default()),
         Arc::new(InMemoryCollectionRepository::default()),
         h.provider.clone(),
-        Arc::new(LocalAdminLogService::new(Arc::new(
-            InMemoryAdminLogRepository::default(),
-        ))),
+        Arc::new(InMemoryAdminLogRepository::default()),
         Arc::new(InMemoryNotificationService::new()),
         Arc::new(TestClock::new()),
     );
@@ -596,9 +591,7 @@ async fn a_shows_locks_hold_through_the_sweep() {
         Arc::new(InMemoryPersonRepository::default()),
         Arc::new(InMemoryCollectionRepository::default()),
         h.provider.clone(),
-        Arc::new(LocalAdminLogService::new(Arc::new(
-            InMemoryAdminLogRepository::default(),
-        ))),
+        Arc::new(InMemoryAdminLogRepository::default()),
         Arc::new(InMemoryNotificationService::new()),
         Arc::new(TestClock::new()),
     );

@@ -1,6 +1,7 @@
 //! Titles as the catalog lists them: browse pages, a title's detail, and the
 //! query that browses them.
 
+use super::watching::start_position_secs;
 use super::{absolute, narrow_u32, rating_percent};
 use crate::api::types as wire;
 use crate::error::BeamError;
@@ -59,6 +60,11 @@ pub struct MediaSummary {
     /// finished, and a series.
     #[uniffi(default)]
     pub resume_position_secs: f64,
+    /// Where Play starts a film, in seconds: the resume point, or 0 for one
+    /// not started, one near its end, and a series ([`start_position_secs`]).
+    /// "Play from beginning" is the caller's own 0.
+    #[uniffi(default)]
+    pub start_position_secs: f64,
     /// How many of a series' episodes the viewer has watched; 0 for a film.
     #[uniffi(default)]
     pub watched_episode_count: u32,
@@ -103,6 +109,10 @@ pub struct EpisodeSummary {
     /// Where to resume it, in seconds; 0 for one not started or just finished.
     #[uniffi(default)]
     pub resume_position_secs: f64,
+    /// Where Play starts it, in seconds: the resume point, or 0 for one not
+    /// started or near its end ([`start_position_secs`]).
+    #[uniffi(default)]
+    pub start_position_secs: f64,
 }
 
 /// One season of a series.
@@ -222,6 +232,15 @@ pub struct BrowseQuery {
     pub query: Option<String>,
     /// Minimum rating percentage.
     pub min_rating: Option<u32>,
+    /// Restrict to the titles indexed in one library, by its id. A library
+    /// the viewer may not see lists nothing.
+    ///
+    /// Part of the query, so it is sent with every page a pager fetches: a
+    /// cursor only means something within the query that issued it. Defaults
+    /// to no library in the bindings, so a caller browsing the whole
+    /// catalogue need not name it.
+    #[uniffi(default)]
+    pub library_id: Option<String>,
 }
 
 impl MediaSummary {
@@ -260,6 +279,10 @@ impl MediaSummary {
             episode_count: 0,
             played: movie.user_state.played,
             resume_position_secs: movie.user_state.position_secs,
+            start_position_secs: start_position_secs(
+                movie.user_state.position_secs,
+                movie.duration_secs,
+            ),
             watched_episode_count: 0,
         }
     }
@@ -303,6 +326,7 @@ impl MediaSummary {
             episode_count: narrow_u32(Some(show.episode_count)).unwrap_or(0),
             played: show.user_state.as_ref().is_some_and(|state| state.played),
             resume_position_secs: 0.0,
+            start_position_secs: 0.0,
             watched_episode_count: show
                 .user_state
                 .as_ref()
@@ -325,6 +349,10 @@ impl EpisodeSummary {
             file_id: episode.file_id.map(|id| id.to_string()),
             played: episode.user_state.played,
             resume_position_secs: episode.user_state.position_secs,
+            start_position_secs: start_position_secs(
+                episode.user_state.position_secs,
+                episode.duration_secs,
+            ),
         }
     }
 }
@@ -406,6 +434,18 @@ pub fn browse_params(query: &BrowseQuery) -> Result<crate::api::BrowseMediaParam
         Some(value) => Some(i64::from(value)),
         None => None,
     };
+    // The record carries the id as the string the foreign bindings hold; the
+    // wire declares it `format: uuid`, so a malformed one is refused here
+    // rather than answered with the server's 400.
+    let library_id = query
+        .library_id
+        .as_deref()
+        .map(uuid::Uuid::parse_str)
+        .transpose()
+        .map_err(|_| BeamError::BadRequest {
+            detail: "library_id is not a valid identifier".to_owned(),
+            code: crate::transport::ABOUT_BLANK.to_owned(),
+        })?;
 
     Ok(crate::api::BrowseMediaParams {
         first,
@@ -438,6 +478,7 @@ pub fn browse_params(query: &BrowseQuery) -> Result<crate::api::BrowseMediaParam
         // The record keeps its percentage (issue #190 left the UniFFI surface
         // alone); the wire takes the rating on its own 0-10 scale.
         min_rating: query.min_rating.map(|percent| f64::from(percent) / 10.0),
+        library_id,
     })
 }
 
@@ -698,6 +739,46 @@ mod tests {
         assert_eq!(browsed.summary().watched_episode_count, 0);
     }
 
+    /// Play starts where the rule says, measured against the title's own
+    /// duration (issue #466): a film part-way through resumes, one within its
+    /// last stretch starts again, and an episode does the same against its
+    /// own duration. The fixture's movie runs 6300 s.
+    #[test]
+    fn a_detail_carries_where_play_starts_by_the_start_position_rule() {
+        let movie_at = |position: f64| {
+            let json = MOVIE.replace(
+                r#""position_secs":0.0"#,
+                &format!(r#""position_secs":{position:.1}"#),
+            );
+            MediaDetail::from_generated(node(&json), &record())
+                .summary()
+                .start_position_secs
+        };
+        assert!((movie_at(1200.0) - 1200.0).abs() < f64::EPSILON, "mid");
+        assert!(movie_at(6200.0).abs() < f64::EPSILON, "near the end");
+        assert!(movie_at(0.0).abs() < f64::EPSILON, "never started");
+
+        let show = SHOW.replace(
+            r#""title":"Return","source_count":1,"user_state":{"played":false,"position_secs":0.0"#,
+            r#""title":"Return","source_count":1,"user_state":{"played":false,"position_secs":3100.0"#,
+        );
+        let MediaDetail::Show { seasons, summary } =
+            MediaDetail::from_generated(node(&show), &record())
+        else {
+            panic!("a Show node must lower to a Show detail");
+        };
+        let ret = &seasons[1].episodes[0];
+        assert!((ret.resume_position_secs - 3100.0).abs() < f64::EPSILON);
+        assert!(
+            ret.start_position_secs.abs() < f64::EPSILON,
+            "3100 s of a 3120 s episode is its end"
+        );
+        assert!(
+            summary.start_position_secs.abs() < f64::EPSILON,
+            "a series plays through its episodes"
+        );
+    }
+
     #[test]
     fn movie_detail_lowers_to_the_movie_branch() {
         let detail = MediaDetail::from_generated(node(MOVIE), &record());
@@ -763,8 +844,14 @@ mod tests {
             year_to: Some(2000),
             query: Some("bureau".to_owned()),
             min_rating: Some(70),
+            library_id: Some("00000000-0000-0000-0000-00000000001d".to_owned()),
         };
         let params = browse_params(&query).expect("a valid query");
+        assert_eq!(
+            params.library_id,
+            Some(uuid::Uuid::from_u128(0x1d)),
+            "the library the record names"
+        );
         assert_eq!(params.first, Some(24));
         assert_eq!(params.after.as_deref(), Some("cursor"));
         assert!(matches!(
@@ -792,6 +879,7 @@ mod tests {
         assert_eq!(params.first, None);
         assert!(params.sort_by.is_none());
         assert!(params.genre.is_none());
+        assert!(params.library_id.is_none());
     }
 
     #[test]

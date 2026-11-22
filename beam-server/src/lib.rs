@@ -2,6 +2,7 @@ pub mod bootstrap;
 pub mod config;
 pub mod db;
 pub mod logging;
+pub mod metrics;
 pub mod models;
 pub mod routes;
 pub mod services;

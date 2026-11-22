@@ -53,8 +53,10 @@ queries, so a page still holds `first` items and every `total` counts only what 
 | `/v1/genres` | GET | Every genre a title the caller may see carries, for filter chips: a `GenreConnection`, never paged |
 | `/v1/artwork/{kind}/{id}/{variant}` | GET, HEAD | Poster, backdrop or thumbnail art, people's portraits and collections' art, fetched from the provider once and served from Beam's cache. `kind` is `movie`/`show`/`season`/`episode`/`person`/`collection`; `variant` is `poster`/`backdrop`/`thumbnail`/`profile` (a person has only `profile`, a collection `poster` and `backdrop`) |
 | `/v1/libraries`, `/v1/libraries/{id}`, `/v1/libraries/{id}/files` | GET | Library listing (a `LibraryConnection`, never paged) and contents: a `LibraryFileConnection` paged by `first` (1-500, default 100) and `after`, by stored path then id. File paths are relative to the library root, in the listing and inside its cursor (NFR-108); another library's cursor is `400 #invalid-cursor` |
+| `/v1/libraries/changes` | GET | The library change feed (issue #454; see [Library change feed](#library-change-feed)): `LibraryChanges` -- the `library_ids` the caller may see whose contents the filesystem watcher changed since the `since` cursor, the `cursor` to pass next, and `reset: true` (no ids) when `since` is absent, malformed or from before a restart |
 | `/v1/files/{fileId}/stream` | GET, HEAD | Direct-play byte-range streaming (see `streaming.md`) |
 | `/v1/files/{fileId}/download` | GET, HEAD | Full-file download (attachment) |
+| `/v1/files/{fileId}/grant` | POST | A media grant for a client without the session cookie: `stream_url` and `download_url` carrying a signed `grant` query parameter that the four operations above accept, and only they, until `expires_at` (four hours). `404` `file-not-found` for a file the caller may not see ([ADR-0022](decisions/ADR-0022-signed-media-grants.md)) |
 | `/v1/files/{fileId}/subtitles/{subtitleId}` | GET, HEAD | A subtitle file beside the video, as stored, Range-capable; `404` `subtitle-not-found` for an id this file's sources do not list ([ADR-0020](decisions/ADR-0020-text-subtitle-delivery.md)) |
 | `/v1/files/{fileId}/subtitles/{subtitleId}/webvtt` | GET, HEAD | The same SubRip or WebVTT file as WebVTT, for a browser's `<track>`; `404` `subtitle-rendition-unavailable` for ASS, SSA or a file over 8 MiB |
 | `/v1/files/{fileId}/trickplay/{sheet}` | GET, HEAD | One scrub-preview sheet of the file (`image/jpeg`, Range-capable), from Beam's data directory ([#265](https://github.com/justin13888/beam/issues/265)); `404` `trickplay-not-found` while the file has no sheets for its current content, when it gives none, or past its last sheet. The source's `trickplay.sheet_urls` names exactly the sheets this answers |
@@ -87,6 +89,8 @@ queries, so a page still holds `first` items and every `total` counts only what 
 | `/v1/admin/media/{id}/match-candidates` | GET | The configured providers' candidates for a title, best first, scored as the worker scores them (`query`, `year` override the title's own); `409` `provider-not-configured`, `502` `enrichment-provider-error` |
 | `/v1/admin/media/{id}/match` | POST, DELETE | Fix a title's match: `{"external_ref": "tmdb:603"}` pins it as the administrator's (outranks and is never replaced by an NFO, FR-312) and queues it: `202` with the title; `422` `validation-failed`, `409` `provider-not-configured` / `external-ref-taken`. `DELETE` clears an administrator's pin back to the NFO's pin or to a search and queues the title; on a title no administrator pinned it changes nothing (`204` either way) |
 | `/v1/admin/media/{id}/enrichment/locks` | PUT | Lock exactly the listed fields, so enrichment leaves them alone; `422` for a show's `release_date`/`runtime` |
+| `/v1/admin/files/{fileId}/markers` | GET | A file's skip markers -- the `markers` its sources carry -- each with its `origin`: `admin`, `detected` or `chapter` ([#332](https://github.com/justin13888/beam/issues/332)); `404` `file-not-found` |
+| `/v1/admin/files/{fileId}/markers/{kind}` | PUT, DELETE | Set or correct one kind (`recap`, `intro`, `credits`, `preview`): `{"start_ms", "end_ms"}` replaces a detected marker, overrides the chapter's, and is never replaced by detection; `422` `validation-failed` for a span that does not end after it starts or ends past the file. `DELETE` stops Beam keeping that kind, whoever set it, so the chapters decide it again. Both answer the file's markers after |
 | `/v1/admin/media/refresh`, `/v1/admin/libraries/{id}/refresh` | POST | Queue every title, or one library's -- a title with no enrichment row yet is given one -- for another pass (FR-308), keeping each match unless `?rematch=true`: `202` `{queued_count}` |
 | `/v1/admin/logs` | GET | The operational log, newest first: an `AdminLogConnection` paged by `first` (1-200, default 50) and `after`, with `total` |
 | `/v1/admin/events` | GET | The most recent admin events, oldest first: an `AdminEventConnection` of at most `first` (1-1000, default 100), with no cursors; `has_next_page` says older events were left out |
@@ -141,9 +145,11 @@ track the file marks default -- else what `forced_only` picks. A tie within one 
 the file's default, then not SDH, then text, then list order. Each part carries its own
 `default_subtitle_track_index` into its own `subtitle_tracks`, chosen beside the source's default
 audio. The choice is `beam_domain::utils::track_selection`, a pure function. Each source and
-part also carries its file's `chapters` (`start_ms`, `end_ms`, `title`), the `markers` read from
-the chapters titled for a skippable span (`recap`, `intro`, `credits`, `preview`; at most one of
-each, by start, `beam_domain::models::chapter::markers_from_chapters`), and -- once the background
+part also carries its file's `chapters` (`start_ms`, `end_ms`, `title`), its `markers` -- the
+skippable spans (`recap`, `intro`, `credits`, `preview`; at most one of each, by start), each the
+one an administrator set or Beam detected in the audio a season's episodes share
+([#332](https://github.com/justin13888/beam/issues/332)), else the one a chapter titled for it
+names (`beam_domain::models::chapter::resolve_markers`) -- and -- once the background
 worker has made them for the file's current content -- `trickplay`, the layout of its JPEG
 scrub-preview sheets and their `sheet_urls` ([#265](https://github.com/justin13888/beam/issues/265)).
 `chapters` and `markers` are `default`ed, so a client generated from this document still reads an
@@ -212,7 +218,10 @@ that does not apply to that kind of title (a season has no backdrop, an episode 
     range -- a year above 2147483647 (the `year` columns are signed) -- is `400 #invalid-filter`,
     never narrowed into a bound that matches everything; a `min_rating` outside 0-10, `NaN`
     included, is refused before the handler as `400 about:blank`. Only titles with a present
-    file are listed.
+    file are listed. `library_id` lists the titles indexed in one library by narrowing the
+    caller's access policy to it ([#465](https://github.com/justin13888/beam/issues/465)): a
+    library the caller is not granted, or one that does not exist, lists nothing, so the answer
+    never says which libraries exist.
   - One page is one catalogue statement plus a fixed number of reads by id to hydrate the page
     (titles, genres, season and episode counts), whatever the library's size (NFR-301). The
     statement is a `UNION ALL` over `movies` and `shows` in which each branch filters, seeks,
@@ -448,3 +457,36 @@ library would flush the snapshot, and where every title stands is `GET /v1/admin
 title the sweep never reached -- it stopped for a provider's rate limit -- sends nothing. SSE was
 chosen over WebSockets because the channel is strictly server-to-client — see
 [ADR-0010](decisions/ADR-0010-openapi-3-2-kynos.md).
+
+## Library change feed
+
+When the filesystem watcher adds, relinks or removes files, every client showing the library is to
+refetch it (issue #454). The watch consumer coalesces its reconciles into one `library_changed {
+library_id }` per library per debounce window -- a burst of files copied in is one event, and a
+reconcile deferred or failed is none until its retry finishes -- and records it in the process's
+change log. The event names the library and nothing else: no file path, so it tells a user nothing
+about content their access policy hides.
+
+Clients read it by **polling a cursor**, `GET /v1/libraries/changes?since=CURSOR`, not from a
+user-level event stream. Decided for these reasons:
+
+- **The clients poll anyway.** `beam-client-core` is the one client for Android, Apple and web, and
+  UniFFI has no async-iterator type: even the admin SSE stream is polled through
+  `GET /v1/admin/events` there. A stream would need a callback-interface subscription built first,
+  in every platform's binding, for an event that only says "refetch".
+- **A cursor loses nothing.** A mobile client is backgrounded, suspended and reconnected as a matter
+  of course, and SSE does not replay what it missed; a cursor answers with every library changed
+  since it, however long the client was away.
+- **It costs nothing to serve.** A poll is a read of an in-memory map bounded by the number of
+  libraries, filtered by the caller's access policy -- no held connection per open screen, and no
+  new access control: it is a library read, for any signed-in user, filtered as `GET /v1/libraries`
+  is.
+
+The cursor is opaque: a per-process epoch and a sequence number. Changes live in memory, so a
+restart forgets them; a cursor from before one -- or none, or a malformed one -- answers
+`reset: true` with no ids, meaning "refetch everything you show", and a cursor to continue from.
+Latency is the client's poll interval, which it picks for the screen on show; the watcher's own
+debounce window is the floor.
+
+The feed covers the watcher's reconciles. A scan's results reach clients as before -- through the
+admin `scan_progress` events for administrators, and on the next fetch for everyone else.

@@ -18,10 +18,13 @@ import androidx.media3.common.Player
 import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.cache.Cache
 import androidx.media3.exoplayer.ExoPlayer
 import dev.beam.android.core.ffi.repository.PlaybackRepository
 import dev.beam.android.core.ffi.repository.TelemetryRepository
 import dev.beam.android.core.ffi.toFailure
+import dev.beam.android.core.media.download.CompletedDownload
+import dev.beam.android.core.media.download.CompletedDownloads
 import dev.beam.android.core.media.http.BeamHttpClientFactory
 import dev.beam.android.core.media.http.beamDataSourceFactory
 import dev.beam.android.core.model.PlaybackRequest
@@ -59,6 +62,10 @@ internal class ExoBeamPlayer(
     private val repository: PlaybackRepository,
     telemetry: TelemetryRepository,
     private val clients: BeamHttpClientFactory,
+    /** Where downloads land; every file is read from here first. */
+    private val downloadCache: Cache,
+    /** Which files are downloaded in full, so they play without asking the server. */
+    private val completedDownloads: CompletedDownloads,
     private val scope: CoroutineScope,
     /**
      * Whether rebuffering on this file is sustained. The rule is the core's;
@@ -289,12 +296,16 @@ internal class ExoBeamPlayer(
         val titleId = request.episodeId ?: request.mediaId.takeIf { it.isNotEmpty() }
         val plan =
             try {
-                repository.playbackPlan(titleId, request.fileId)
+                withDownloads(repository.playbackPlan(titleId, request.fileId))
             } catch (failure: BeamException) {
-                mutableState.update {
-                    it.copy(request = request, error = failure.toFailure().asPlaybackFailure())
+                // Signed out, the session expired, or no server: a file
+                // downloaded in full still plays, from disk and alone.
+                completedDownloads.completed(request.fileId)?.let(::downloadedPlan) ?: run {
+                    mutableState.update {
+                        it.copy(request = request, error = failure.toFailure().asPlaybackFailure())
+                    }
+                    return false
                 }
-                return false
             }
         if (plan.parts.isEmpty()) return false
 
@@ -309,6 +320,7 @@ internal class ExoBeamPlayer(
                         trustedFingerprints = plan.trustedFingerprints,
                         host = plan.pinnedHost,
                     ),
+                    downloadCache,
                 ),
             )
         // One item per part (issue #233): the player moves to the next as one
@@ -355,6 +367,57 @@ internal class ExoBeamPlayer(
         startPositionTicker()
         return true
     }
+
+    /**
+     * The core's [plan], with each part downloaded in full played from its
+     * download.
+     *
+     * Every part, sidecar subtitle and the start part stay the core's, so a
+     * multi-part source whose first part alone is downloaded still plays its
+     * later parts. A downloaded part plays from the URL its download was
+     * fetched from, which is the key its bytes are cached under: the core's
+     * URL for it names the active server, which after a server switch is not
+     * the one the download came from. Offline, the core's lookup of the
+     * source's other parts fails and the plan is the one file, which then
+     * plays from disk.
+     */
+    private suspend fun withDownloads(plan: PlaybackPlan): PlaybackPlan =
+        plan.copy(
+            parts =
+                plan.parts.map { part ->
+                    completedDownloads.completed(part.fileId)?.let { download -> part.copy(url = download.uri) } ?: part
+                },
+        )
+
+    /**
+     * The plan for a file downloaded in full, built from its download alone,
+     * for when the core cannot plan it.
+     *
+     * The core's plan needs a session and a server, and a download is played
+     * exactly when there may be neither -- after the session has expired, or
+     * signed out. A download holds one file, so the plan is that file alone,
+     * with no sidecar subtitles, which are not downloaded; it plays from the
+     * URL the download was fetched from, which is the key its bytes are
+     * cached under. No session goes with it: every byte is on disk, and the
+     * server is never asked for one.
+     */
+    private fun downloadedPlan(download: CompletedDownload): PlaybackPlan =
+        PlaybackPlan(
+            parts =
+                listOf(
+                    PlaybackPart(
+                        fileId = download.fileId,
+                        url = download.uri,
+                        durationSecs = null,
+                        sidecarSubtitles = emptyList(),
+                    ),
+                ),
+            startPartIndex = 0u,
+            headers = emptyMap(),
+            trustedFingerprints = emptyList(),
+            pinnedHost = "",
+            baseUrl = "",
+        )
 
     private fun mediaItem(
         request: PlaybackRequest,
@@ -646,7 +709,47 @@ internal class ExoBeamPlayer(
         )
         reporter.stop()
         forceReport()
-        mutableState.update { it.copy(error = error.asPlaybackFailure(), isBuffering = false) }
+        val failure = error.asPlaybackFailure()
+        mutableState.update { it.copy(error = failure, isBuffering = false) }
+        if (failure.requiresSignIn) confirmSessionWithCore(failure)
+    }
+
+    /**
+     * Let the core see the refusal the player just got.
+     *
+     * The stream is fetched by Media3's own connection, so a `401` on it never
+     * reaches the core's session machine, which is what tells the app to send
+     * the viewer to sign in. One secured call through the core puts the same
+     * cookie in front of the server: if the server refuses it there too, the
+     * core moves the session to `Expired` and announces it, exactly as for any
+     * API call. The core decides, not this class -- a stray `401` from a proxy
+     * in front of the stream does not sign anyone out while the server still
+     * honours the session. The cheapest secured call the repository offers is
+     * one row of "continue watching"; its answer is only the side effect.
+     *
+     * Where the core does not confirm the expiry, [failure] stops claiming
+     * one: nothing would send the viewer to sign in, so a sign-in prompt with
+     * no retry would leave them stuck. It becomes the retryable refusal it
+     * was before the status was read.
+     */
+    private fun confirmSessionWithCore(failure: PlaybackFailure) {
+        scope.launch {
+            val confirmed =
+                try {
+                    repository.continueWatching(SESSION_PROBE_LIMIT)
+                    false
+                } catch (probeFailure: BeamException) {
+                    // The expiry, if that is what this was, is already announced.
+                    probeFailure.toFailure().requiresSignIn
+                }
+            if (!confirmed) {
+                mutableState.update { state ->
+                    // Only the failure this probe was for: a newer one, or a
+                    // new file, is not this probe's to rewrite.
+                    if (state.error === failure) state.copy(error = streamRefusedWithSessionHonoured()) else state
+                }
+            }
+        }
     }
 
     private fun publishTracks(tracks: Tracks) {
@@ -664,5 +767,8 @@ internal class ExoBeamPlayer(
          * to recompose the player chrome on every frame.
          */
         const val POSITION_POLL_MS: Long = 500L
+
+        /** One row: the call is asked for its session check, not its answer. */
+        const val SESSION_PROBE_LIMIT: UInt = 1u
     }
 }

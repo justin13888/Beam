@@ -6,6 +6,7 @@
 //! store, so it asserts what the failure left behind, not what the wrapper
 //! was told to say.
 
+use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
@@ -38,7 +39,6 @@ use beam_domain::services::TestClock;
 use beam_domain::utils::next_up::OutlineEpisode;
 
 use super::{MetadataEnrichmentService, SweepReport};
-use crate::services::admin_log::NoOpAdminLogService;
 use crate::services::notification::InMemoryNotificationService;
 
 fn database_down() -> DbErr {
@@ -172,6 +172,7 @@ wrap_store! {
             fn library_ids(&self, show_ids: &[Uuid]) -> Result<HashMap<Uuid, BTreeSet<Uuid>>, DbErr>;
             fn find_or_create_season(&self, show_id: Uuid, season_number: u32) -> Result<Season, DbErr>;
             fn find_or_create_episode(&self, create: CreateEpisode) -> Result<Episode, DbErr>;
+            fn rehome_episode(&self, episode_id: Uuid, season_number: u32, episode_number: u32) -> Result<Option<Episode>, DbErr>;
             fn find_episode_by_id(&self, episode_id: Uuid) -> Result<Option<Episode>, DbErr>;
             fn find_season_by_id(&self, season_id: Uuid) -> Result<Option<Season>, DbErr>;
             fn episode_outline(&self, show_id: Uuid) -> Result<Vec<OutlineEpisode>, DbErr>;
@@ -272,7 +273,7 @@ impl Stores {
             Arc::new(InMemoryPersonRepository::default()),
             Arc::new(InMemoryCollectionRepository::default()),
             provider,
-            Arc::new(NoOpAdminLogService),
+            Arc::new(InMemoryAdminLogRepository::default()),
             Arc::new(InMemoryNotificationService::new()),
             Arc::new(TestClock::new()),
         )

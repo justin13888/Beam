@@ -16,20 +16,21 @@ use crate::library_file::{
     EntryKind, FileMeta, LibraryFile, StatCursor, is_refusal, stat_regular_file,
 };
 use crate::probe::metadata::{StreamMetadata, VideoFileMetadata};
-use crate::services::admin_log::AdminLogService;
+use crate::services::enrichment::EnrichmentWake;
 use crate::services::filesystem_probe::{FilesystemKind, FilesystemProbe, StatfsFilesystemProbe};
 use crate::services::hash::HashService;
 use crate::services::media_info::MediaInfoService;
 use crate::services::mime::container_mime_type;
-use crate::services::notification::{AdminEvent, EventCategory, NotificationService};
+use crate::services::notification::{EventCategory, NewAdminEvent, NotificationService};
 use crate::services::scan::{
     CANCELLED, CatalogExclusive, ProgressThrottle, SCAN_STOP_TIMEOUT, ScanCoordinator, ScanEvent,
     ScanJob, ScanPhase, ScanProgress, ScanRefused, ScanState, ScanTicket, ScanTrigger, Settle,
     StoppedScan, settle_state,
 };
+use crate::services::scan_deferrals::ScanDeferrals;
 use crate::services::watcher::FsEventKind;
 use beam_domain::models::Library;
-use beam_domain::models::admin_log::{AdminLogCategory, AdminLogLevel};
+use beam_domain::models::admin_log::{AdminLogCategory, AdminLogLevel, CreateAdminLog};
 use beam_domain::models::chapter::Chapter;
 use beam_domain::models::enrichment::{EnrichmentTargetId, FieldLocks, MetadataField};
 use beam_domain::models::file::{
@@ -41,8 +42,8 @@ use beam_domain::models::show::{CreateEpisode, CreateShow, Episode, Show};
 use beam_domain::models::watch_state::{TitleRef, WatchTarget};
 use beam_domain::models::{PinSource, ProviderPin};
 use beam_domain::repositories::{
-    AppliedNfoRepository, ChapterRepository, EnrichmentStateRepository, FileRepository,
-    LibraryRepository, MediaStreamRepository, MovieRepository, ShowRepository,
+    AdminLogRepository, AppliedNfoRepository, ChapterRepository, EnrichmentStateRepository,
+    FileRepository, LibraryRepository, MediaStreamRepository, MovieRepository, ShowRepository,
     SidecarSubtitleRepository, UserListRepository, WatchStateRepository,
 };
 use beam_domain::services::{Clock, IdGenerator, RealClock, UuidGenerator};
@@ -378,9 +379,6 @@ pub trait IndexService: Send + Sync + std::fmt::Debug {
     /// The latest scan job of `library_id` in this process, if any.
     fn scan_job(&self, library_id: Uuid) -> Option<ScanJob>;
 
-    /// Follow `library_id`'s scan jobs.
-    fn subscribe_scan(&self, library_id: Uuid) -> tokio::sync::watch::Receiver<Option<ScanJob>>;
-
     /// Stop `library_id`'s scan before the library is deleted.
     ///
     /// The library is retired first: while the returned
@@ -409,12 +407,20 @@ pub struct LocalIndexService {
     hash_service: Arc<dyn HashService>,
     media_info_service: Arc<dyn MediaInfoService>,
     notification_service: Arc<dyn NotificationService>,
-    admin_log: Arc<dyn AdminLogService>,
+    admin_log: Arc<dyn AdminLogRepository>,
     /// Asked when each candidate row was last played, to break a tie
     /// between identical copies of a moved file (issue #180).
     progress_repo: Arc<dyn WatchStateRepository>,
     path_policy: PathPolicy,
     enrichment_repo: Option<Arc<dyn EnrichmentStateRepository>>,
+    /// Pokes the enrichment worker once a scan or reconcile has queued a
+    /// title (issue #449). Unset, queued titles wait for the next sweep.
+    enrichment_wake: Option<Arc<dyn EnrichmentWake>>,
+    /// Whether a title has been queued for enrichment since the worker was
+    /// last woken: set as classification queues one, taken when a scan or
+    /// reconcile ends, so a batch wakes the worker once however many titles
+    /// it queued, and not at all when it queued none.
+    enrichment_queued: AtomicBool,
     sidecar_repo: Option<Arc<dyn SidecarSubtitleRepository>>,
     /// Where each probed file's chapters go (issue #265). Unset, none are
     /// recorded.
@@ -429,6 +435,9 @@ pub struct LocalIndexService {
     missing_file_grace: Duration,
     /// How long a file must go unwritten before it is hashed (issue #181).
     settle_window: Duration,
+    /// Where a scan leaves the files it deferred, for the watch consumer to
+    /// retry (issue #453).
+    scan_deferrals: Arc<ScanDeferrals>,
     /// Which libraries' inode numbers are compared ([`Inodes`]).
     filesystem_probe: Arc<dyn FilesystemProbe>,
     /// Whether [`LocalIndexService::backfill_identity_keys`] and then
@@ -454,7 +463,7 @@ impl LocalIndexService {
         hash_service: Arc<dyn HashService>,
         media_info_service: Arc<dyn MediaInfoService>,
         notification_service: Arc<dyn NotificationService>,
-        admin_log: Arc<dyn AdminLogService>,
+        admin_log: Arc<dyn AdminLogRepository>,
         progress_repo: Arc<dyn WatchStateRepository>,
     ) -> Self {
         Self {
@@ -470,6 +479,8 @@ impl LocalIndexService {
             admin_log,
             path_policy: PathPolicy::default(),
             enrichment_repo: None,
+            enrichment_wake: None,
+            enrichment_queued: AtomicBool::new(false),
             sidecar_repo: None,
             chapter_repo: None,
             applied_nfo_repo: None,
@@ -479,6 +490,7 @@ impl LocalIndexService {
             id_generator: Arc::new(UuidGenerator),
             missing_file_grace: DEFAULT_MISSING_FILE_GRACE,
             settle_window: Duration::ZERO,
+            scan_deferrals: Arc::default(),
             filesystem_probe: Arc::new(StatfsFilesystemProbe),
             identity_passes_succeeded: AtomicBool::new(false),
             scans: ScanCoordinator::new(),
@@ -501,7 +513,9 @@ impl LocalIndexService {
     /// Hash a file only once it has gone `window` without a write, measured
     /// from its modification time against the injected clock (issue #181):
     /// a file still being copied in is left alone -- a scan counts it as
-    /// deferred, a watcher event retries it once the window has passed --
+    /// deferred and hands it to the watch consumer ([`Self::scan_deferrals`]),
+    /// which retries it, as it retries a watcher event, once the window has
+    /// passed --
     /// rather than hashed and probed while partial. A file that changes
     /// while it is hashed is deferred the same way. Zero, the default, hashes
     /// every file on sight.
@@ -543,6 +557,28 @@ impl LocalIndexService {
     pub fn with_enrichment_repo(mut self, repo: Arc<dyn EnrichmentStateRepository>) -> Self {
         self.enrichment_repo = Some(repo);
         self
+    }
+
+    /// Wake the enrichment worker -- in `beam-server`, the handle
+    /// [`MetadataEnrichmentService::notify_handle`](crate::services::enrichment::MetadataEnrichmentService::notify_handle)
+    /// gives -- at the end of each scan or reconcile that queued at least one
+    /// title for enrichment, so a new title is enriched within seconds rather
+    /// than at the next periodic sweep (issue #449). Defaults to `None`,
+    /// which leaves queued titles to that sweep.
+    pub fn with_enrichment_wake(mut self, wake: Arc<dyn EnrichmentWake>) -> Self {
+        self.enrichment_wake = Some(wake);
+        self
+    }
+
+    /// Wake the enrichment worker if a title was queued since it was last
+    /// woken. Called once as each scan or reconcile ends, whether or not it
+    /// succeeded: what it queued before failing is still queued.
+    fn wake_enrichment_if_queued(&self) {
+        if self.enrichment_queued.swap(false, Ordering::AcqRel)
+            && let Some(wake) = &self.enrichment_wake
+        {
+            wake.wake();
+        }
     }
 
     /// Wire up sidecar subtitles (issue #184): when set, every text subtitle
@@ -598,11 +634,32 @@ impl LocalIndexService {
         self
     }
 
-    /// The repository backing this service's library lookups, exposed so
-    /// callers (e.g. background maintenance tasks) can list/query libraries
-    /// without needing their own separate handle to the same repository.
-    pub fn library_repo(&self) -> &Arc<dyn LibraryRepository> {
-        &self.library_repo
+    /// Follow `library_id`'s scan jobs: the receiver holds the latest job
+    /// and sees every change to it, and each job that replaces it.
+    ///
+    /// Not on [`IndexService`]: nothing serving a request follows a job, it
+    /// reads [`IndexService::scan_job`]. This is how a test waits on a job's
+    /// state without a clock. [`NotificationService`] cannot stand in for
+    /// it: scan progress is live-only, so a subscriber that arrives after a
+    /// transition never sees it, and its events carry a phase rather than
+    /// the job's state, so a queued job is not observable there.
+    pub fn subscribe_scan(
+        &self,
+        library_id: Uuid,
+    ) -> tokio::sync::watch::Receiver<Option<ScanJob>> {
+        self.scans.subscribe(library_id)
+    }
+
+    /// The files this service's scans deferred as still being written, for
+    /// the watch consumer to retry (issue #453).
+    pub fn scan_deferrals(&self) -> &Arc<ScanDeferrals> {
+        &self.scan_deferrals
+    }
+
+    /// Where this service publishes its events, for the watch consumer to
+    /// announce the libraries its reconciles changed (issue #454).
+    pub fn notification_service(&self) -> &Arc<dyn NotificationService> {
+        &self.notification_service
     }
 
     /// Helper to extract and insert media streams for a file, and to replace
@@ -743,7 +800,7 @@ impl LocalIndexService {
                 last_episode,
                 air_date,
                 episode_title,
-                numbering: _,
+                numbering,
                 contradicted_season_folder,
             }) => {
                 if let Some(folder) = contradicted_season_folder {
@@ -793,6 +850,7 @@ impl LocalIndexService {
                     title: episode_title.unwrap_or_else(|| format!("Episode {first_episode}")),
                     runtime: if spans_episodes { None } else { runtime },
                     air_date,
+                    numbering,
                 };
                 let episode = self
                     .show_repo
@@ -1079,12 +1137,12 @@ impl LocalIndexService {
         }
         let _ = self
             .admin_log
-            .log(
-                AdminLogLevel::Warning,
-                AdminLogCategory::LibraryScan,
+            .create(CreateAdminLog {
+                level: AdminLogLevel::Warning,
+                category: AdminLogCategory::LibraryScan,
                 message,
-                Some(metadata),
-            )
+                details: Some(metadata),
+            })
             .await;
     }
 
@@ -1305,10 +1363,44 @@ impl LocalIndexService {
             })
             .await?;
 
-        self.insert_media_streams(file.id, &metadata).await?;
+        if let Err(err) = self.insert_media_streams(file.id, &metadata).await {
+            self.forget_hash_to_reprobe(&file).await;
+            return Err(err);
+        }
         self.check_and_report_duplicate(&file).await;
         self.check_and_report_runtime_divergence(&file).await;
         Ok(FileOutcome::Added)
+    }
+
+    /// Leave `file`, a row just recorded from a probe whose streams or
+    /// chapters could not be stored, to be probed again by the next scan
+    /// (issue #438). Its probe results, status and classification stand; only
+    /// its hash is forgotten -- the unhashed sentinel `0` -- since an
+    /// unchanged file with a hash is never probed again, and one without is
+    /// hashed and probed again on its next visit (see
+    /// `reconcile_existing_file`). A failure to forget it is logged and
+    /// otherwise left: the scan already reports the file as failed.
+    async fn forget_hash_to_reprobe(&self, file: &MediaFile) {
+        let forgotten = self
+            .file_repo
+            .update(UpdateMediaFile {
+                id: file.id,
+                hash: Some(0),
+                size_bytes: None,
+                mtime: None,
+                identity: None,
+                probe: ProbeUpdate::Keep,
+                content: None,
+                status: None,
+            })
+            .await;
+        if let Err(e) = forgotten {
+            warn!(
+                path = %file.path.display(),
+                error = %e,
+                "could not leave a file whose streams were not stored to be probed again"
+            );
+        }
     }
 
     /// Hash `opened`, a file beneath the library `root` whose handle a stat
@@ -1440,9 +1532,11 @@ impl LocalIndexService {
         let unprobed = existing.duration.is_none();
 
         // Cheap gate: only a size, mtime or identity change warrants a
-        // rehash, and only an unprobed file a re-probe. Neither opens the
-        // file.
-        if listed.is_recorded_by(existing) && !unprobed {
+        // rehash, and only an unprobed or unhashed file a re-probe. Neither
+        // opens the file. An unhashed row is one an older build stored so, or
+        // one whose probe's streams or chapters could not be stored (issue
+        // #438): rehashed, it reads as changed and is probed again.
+        if listed.is_recorded_by(existing) && !unprobed && existing.hash != 0 {
             let FileStat {
                 size: _,
                 mtime: _,
@@ -1597,7 +1691,10 @@ impl LocalIndexService {
     /// content, and a row with no duration is probed again on every visit. A
     /// failed probe of a file whose content did not change writes only the
     /// size, modification time and identity it was found with, so the next
-    /// visit -- which tries the probe again -- does not rehash it.
+    /// visit -- which tries the probe again -- does not rehash it. A row with
+    /// no hash (`0`) counts as one whose content did not change: it keeps its
+    /// probe results, streams, chapters and status, and stays unhashed, so
+    /// the next visit hashes and probes it again.
     ///
     /// The probe reads `opened`, the handle the file was stat'ed and hashed
     /// from (issue #238).
@@ -1617,7 +1714,11 @@ impl LocalIndexService {
             identity,
             inodes: _,
         } = stat;
-        let content_changed = new_hash != existing.hash;
+        // An unhashed row (the sentinel `0`: stored by an older build, or
+        // left so because its streams or chapters were not stored, issue
+        // #438) has no hash to compare against: its content is unknown, not
+        // changed, so a failed probe must not clear what it holds.
+        let content_changed = existing.hash != 0 && new_hash != existing.hash;
         if content_changed {
             info!("File content changed, reconciling: {}", path.display());
         }
@@ -1755,7 +1856,7 @@ impl LocalIndexService {
     ) {
         error!("Failed to process file {}: {}", path.display(), err);
         record_file_outcome("failed");
-        self.notification_service.publish(AdminEvent::warning(
+        self.notification_service.publish(NewAdminEvent::warning(
             EventCategory::LibraryScan,
             format!("Failed to process file '{}': {}", path.display(), err),
             Some(lib_uuid),
@@ -1763,16 +1864,16 @@ impl LocalIndexService {
         ));
         let _ = self
             .admin_log
-            .log(
-                AdminLogLevel::Warning,
-                AdminLogCategory::LibraryScan,
-                format!("Failed to process file: {}", path.display()),
-                Some(serde_json::json!({
+            .create(CreateAdminLog {
+                level: AdminLogLevel::Warning,
+                category: AdminLogCategory::LibraryScan,
+                message: format!("Failed to process file: {}", path.display()),
+                details: Some(serde_json::json!({
                     "library_id": lib_uuid.to_string(),
                     "path": path.display().to_string(),
                     "error": err.to_string(),
                 })),
-            )
+            })
             .await;
     }
 
@@ -1793,7 +1894,7 @@ impl LocalIndexService {
             shielded,
             "library walk could not read part of the root; rows beneath were left untouched"
         );
-        self.notification_service.publish(AdminEvent::warning(
+        self.notification_service.publish(NewAdminEvent::warning(
             EventCategory::LibraryScan,
             format!(
                 "Library '{}': {} path(s) could not be read during the scan; {} indexed file(s) \
@@ -1812,23 +1913,23 @@ impl LocalIndexService {
             .collect();
         let _ = self
             .admin_log
-            .log(
-                AdminLogLevel::Warning,
-                AdminLogCategory::LibraryScan,
-                format!(
+            .create(CreateAdminLog {
+                level: AdminLogLevel::Warning,
+                category: AdminLogCategory::LibraryScan,
+                message: format!(
                     "Library scan could not read {} path(s) in \"{}\"; {} indexed file(s) left untouched",
                     failed_subtrees.len(),
                     library_name,
                     shielded
                 ),
-                Some(serde_json::json!({
+                details: Some(serde_json::json!({
                     "library_id": lib_uuid.to_string(),
                     "failed_path_count": failed_subtrees.len(),
                     "failed_paths": reported,
                     "unscoped_failure": unscoped_failure,
                     "shielded": shielded,
                 })),
-            )
+            })
             .await;
     }
 
@@ -1920,7 +2021,22 @@ impl LocalIndexService {
     /// A path at or inside a DVD or Blu-ray disc structure stands for its
     /// whole disc (issue #234): the disc is walked again as a directory is,
     /// or, when it is gone, its rows are marked missing.
+    ///
+    /// An event that queued a title for enrichment wakes the enrichment
+    /// worker once (see [`Self::with_enrichment_wake`]).
     pub async fn reconcile_path(
+        &self,
+        library_id: Uuid,
+        path: PathBuf,
+        kind: FsEventKind,
+    ) -> Result<ReconcileOutcome, IndexError> {
+        let outcome = self.reconcile_path_unwoken(library_id, path, kind).await;
+        self.wake_enrichment_if_queued();
+        outcome
+    }
+
+    /// [`Self::reconcile_path`], short of waking the enrichment worker.
+    async fn reconcile_path_unwoken(
         &self,
         library_id: Uuid,
         path: PathBuf,
@@ -2418,7 +2534,7 @@ impl LocalIndexService {
             library_id = %library.id,
             "library root is not a directory"
         );
-        self.notification_service.publish(AdminEvent::error(
+        self.notification_service.publish(NewAdminEvent::error(
             EventCategory::LibraryScan,
             format!(
                 "Library '{}' root path does not exist or is not a directory: {}",
@@ -2430,18 +2546,18 @@ impl LocalIndexService {
         ));
         let _ = self
             .admin_log
-            .log(
-                AdminLogLevel::Error,
-                AdminLogCategory::LibraryScan,
-                format!(
+            .create(CreateAdminLog {
+                level: AdminLogLevel::Error,
+                category: AdminLogCategory::LibraryScan,
+                message: format!(
                     "Library scan failed: root path does not exist or is not a directory for \"{}\"",
                     library.name
                 ),
-                Some(serde_json::json!({
+                details: Some(serde_json::json!({
                     "library_id": library.id.to_string(),
                     "path": library.root_path
                 })),
-            )
+            })
             .await;
     }
 
@@ -2468,13 +2584,13 @@ impl LocalIndexService {
         let library_id = Some(library.id);
         let library_name = Some(name.clone());
         let event = match phase {
-            ScanPhase::Failed => AdminEvent::error(
+            ScanPhase::Failed => NewAdminEvent::error(
                 EventCategory::ScanProgress,
                 message,
                 library_id,
                 library_name,
             ),
-            ScanPhase::Started | ScanPhase::Progress | ScanPhase::Completed => AdminEvent::info(
+            ScanPhase::Started | ScanPhase::Progress | ScanPhase::Completed => NewAdminEvent::info(
                 EventCategory::ScanProgress,
                 message,
                 library_id,
@@ -2519,6 +2635,8 @@ impl LocalIndexService {
             Ok(None) => (None, Err(IndexError::LibraryNotFound)),
             Err(e) => (None, Err(IndexError::from(e))),
         };
+        // Once per scan, however many titles it queued (issue #449).
+        self.wake_enrichment_if_queued();
 
         match result {
             Ok(progress) => {
@@ -2593,10 +2711,6 @@ impl IndexService for LocalIndexService {
 
     fn scan_job(&self, library_id: Uuid) -> Option<ScanJob> {
         self.scans.job(library_id)
-    }
-
-    fn subscribe_scan(&self, library_id: Uuid) -> tokio::sync::watch::Receiver<Option<ScanJob>> {
-        self.scans.subscribe(library_id)
     }
 
     async fn stop_scan(&self, library_id: Uuid) -> StoppedScan {
@@ -2725,7 +2839,7 @@ impl LocalIndexService {
             library.name, library.root_path
         );
 
-        self.notification_service.publish(AdminEvent::info(
+        self.notification_service.publish(NewAdminEvent::info(
             EventCategory::LibraryScan,
             format!("Library scan started for '{}'", library.name),
             Some(lib_uuid),
@@ -2733,12 +2847,14 @@ impl LocalIndexService {
         ));
         let _ = self
             .admin_log
-            .log(
-                AdminLogLevel::Info,
-                AdminLogCategory::LibraryScan,
-                format!("Library scan started: \"{}\"", library.name),
-                Some(serde_json::json!({ "library_id": library_id, "path": library.root_path })),
-            )
+            .create(CreateAdminLog {
+                level: AdminLogLevel::Info,
+                category: AdminLogCategory::LibraryScan,
+                message: format!("Library scan started: \"{}\"", library.name),
+                details: Some(
+                    serde_json::json!({ "library_id": library_id, "path": library.root_path }),
+                ),
+            })
             .await;
 
         // A refused scan never stamps `last_scan_started_at`: the start time is
@@ -2801,7 +2917,7 @@ impl LocalIndexService {
                 indexed_video_files,
                 "library root contains no video files but video files are indexed; refusing to reconcile"
             );
-            self.notification_service.publish(AdminEvent::error(
+            self.notification_service.publish(NewAdminEvent::error(
                 EventCategory::LibraryScan,
                 format!(
                     "Library '{}' root contains no video files but {} are indexed; refusing to \
@@ -2815,19 +2931,19 @@ impl LocalIndexService {
             ));
             let _ = self
                 .admin_log
-                .log(
-                    AdminLogLevel::Error,
-                    AdminLogCategory::LibraryScan,
-                    format!(
+                .create(CreateAdminLog {
+                    level: AdminLogLevel::Error,
+                    category: AdminLogCategory::LibraryScan,
+                    message: format!(
                         "Library scan refused: root contains no video files but {} are indexed for \"{}\"",
                         indexed_video_files, library.name
                     ),
-                    Some(serde_json::json!({
+                    details: Some(serde_json::json!({
                         "library_id": library_id,
                         "path": library.root_path,
                         "indexed_video_files": indexed_video_files,
                     })),
-                )
+                })
                 .await;
             return Err(IndexError::PathNotFound(
                 "Library root contains no video files but video files are indexed; refusing to \
@@ -2966,10 +3082,16 @@ impl LocalIndexService {
                 FileOutcome::Changed => progress.changed += 1,
                 FileOutcome::Unchanged => progress.unchanged += 1,
                 // Seen, so never marked missing: a file still being copied in
-                // is on disk. The watcher, or the next scan, comes back to it.
+                // is on disk. The watch consumer retries it once the delay
+                // has passed (issue #453), or the next scan comes back to it.
+                FileOutcome::Deferred(retry_after) => {
+                    progress.deferred += 1;
+                    self.scan_deferrals
+                        .record(lib_uuid, path.clone(), retry_after);
+                }
                 // A scan never leaves a file to itself; were it to, it would
-                // be the same wait.
-                FileOutcome::Deferred(_) | FileOutcome::LeftToScan => progress.deferred += 1,
+                // be the same wait as the next scan.
+                FileOutcome::LeftToScan => progress.deferred += 1,
                 FileOutcome::Failed => progress.failed += 1,
             }
             progress.processed += 1;
@@ -3061,19 +3183,19 @@ impl LocalIndexService {
             );
             let _ = self
                 .admin_log
-                .log(
-                    AdminLogLevel::Info,
-                    AdminLogCategory::LibraryScan,
-                    format!(
+                .create(CreateAdminLog {
+                    level: AdminLogLevel::Info,
+                    category: AdminLogCategory::LibraryScan,
+                    message: format!(
                         "Purged {} files from \"{}\" that were missing for longer than the grace period",
                         purged_count, library.name
                     ),
-                    Some(serde_json::json!({
+                    details: Some(serde_json::json!({
                         "library_id": library_id,
                         "purged": purged_count,
                         "grace_secs": self.missing_file_grace.as_secs(),
                     })),
-                )
+                })
                 .await;
         }
 
@@ -3101,6 +3223,13 @@ impl LocalIndexService {
         // Update scan finish time
         let end_time = self.clock.now();
         let total_files = self.library_repo.count_files(lib_uuid).await?;
+        // Refreshed after every completed scan (issue #457), unless the
+        // library was deleted while this scan ran on past its stop timeout.
+        ticket.record_file_count(total_files);
+        // Read after Phase 5 retired orphaned titles, so the gauge is what a
+        // user can browse now (issue #494).
+        let titles = self.library_repo.count_titles(lib_uuid).await?;
+        ticket.record_title_counts(titles);
 
         self.library_repo
             .update_scan_progress(lib_uuid, None, Some(end_time), Some(total_files as i32))
@@ -3130,7 +3259,7 @@ impl LocalIndexService {
             total_files
         );
 
-        self.notification_service.publish(AdminEvent::info(
+        self.notification_service.publish(NewAdminEvent::info(
             EventCategory::LibraryScan,
             format!(
                 "Library scan complete for '{}': added {}, moved {}, missing {}, restored {}, purged {}, total {}",
@@ -3147,10 +3276,10 @@ impl LocalIndexService {
         ));
         let _ = self
             .admin_log
-            .log(
-                AdminLogLevel::Info,
-                AdminLogCategory::LibraryScan,
-                format!(
+            .create(CreateAdminLog {
+                level: AdminLogLevel::Info,
+                category: AdminLogCategory::LibraryScan,
+                message: format!(
                     "Library scan completed: \"{}\" — {} added, {} moved, {} marked missing, {} restored, {} purged, {} total",
                     library.name,
                     added_count,
@@ -3160,7 +3289,7 @@ impl LocalIndexService {
                     purged_count,
                     total_files
                 ),
-                Some(serde_json::json!({
+                details: Some(serde_json::json!({
                     "library_id": library_id,
                     "added": added_count,
                     "relinked": relinked_count,
@@ -3172,7 +3301,7 @@ impl LocalIndexService {
                     "titles_removed": titles_removed,
                     "total": total_files,
                 })),
-            )
+            })
             .await;
 
         Ok(progress)
@@ -3236,7 +3365,7 @@ mod disc_tests;
 
 #[cfg(test)]
 #[path = "index_test_harness.rs"]
-mod test_harness;
+pub(crate) mod test_harness;
 
 #[cfg(test)]
 #[path = "index_streams_tests.rs"]
@@ -3253,3 +3382,7 @@ mod process_tests;
 #[cfg(test)]
 #[path = "index_divergence_tests.rs"]
 mod divergence_tests;
+
+#[cfg(test)]
+#[path = "index_enrichment_wake_tests.rs"]
+mod enrichment_wake_tests;

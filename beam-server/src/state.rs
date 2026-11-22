@@ -13,7 +13,7 @@ use beam_auth::utils::{
 };
 use beam_domain::providers::artwork::ArtworkFetcher;
 use beam_domain::providers::enrichment::{EnrichmentProvider, NoopEnrichmentProvider};
-use beam_domain::repositories::LanguagePreferenceRepository;
+use beam_domain::repositories::{AdminLogRepository, LanguagePreferenceRepository};
 use beam_domain::services::{Clock, RealClock};
 use beam_index::providers::artwork::{ArtworkFetchLimits, ReqwestArtworkFetcher};
 use beam_index::providers::cameo::{CameoEnrichmentProvider, CameoWiringConfig};
@@ -21,7 +21,6 @@ use beam_index::providers::composite::CompositeEnrichmentProvider;
 use beam_index::providers::telemetry::ReqwestTelemetrySink;
 use beam_index::providers::tvdb::{TvdbEnrichmentProvider, TvdbWiringConfig};
 use beam_index::runtime::LibraryWatches;
-use beam_index::services::admin_log::{AdminLogService, LocalAdminLogService};
 use beam_index::services::enrichment::control::{EnrichmentControl, EnrichmentControlDeps};
 use beam_index::services::enrichment::{EnrichmentPolicy, MetadataEnrichmentService};
 use beam_index::services::hash::{HashConfig, LocalHashService};
@@ -47,11 +46,14 @@ use crate::{
             audit_existing_roots,
         },
         lists::{ListDependencies, ListService},
+        markers::{MarkerDependencies, MarkerService},
+        media_grant::MediaGrantSigner,
         metadata::{DbMetadataService, MetadataRepositories, MetadataService},
         people::PeopleService,
         playback::{DbPlaybackService, PlaybackRepositories, PlaybackService},
         playback_telemetry::PlaybackTelemetryService,
         sources::{SourceCatalog, SourceRepositories},
+        stream_cache::BoundedStreamGrantCache,
         subtitle::{DbSubtitleService, SubtitleService},
         telemetry::LibraryReportService,
         trickplay::{TrickplayDependencies, TrickplayService},
@@ -83,6 +85,10 @@ pub struct AppStateInner {
     /// and therefore the exported description -- does not depend on
     /// configuration.
     metrics: Option<PrometheusHandle>,
+    /// Signs and verifies the file-scoped media grants (ADR-0022) under a key
+    /// drawn when the state is built and never persisted, so a restart voids
+    /// every grant outstanding.
+    media_grants: MediaGrantSigner,
 }
 
 impl AppState {
@@ -110,6 +116,7 @@ impl AppState {
                 start_instant: clock.monotonic(),
                 clock,
                 metrics,
+                media_grants: MediaGrantSigner::random(),
             }),
         }
     }
@@ -121,6 +128,11 @@ impl AppState {
     /// its constructor. The seam is unchanged; only where it is read from moved.
     pub fn clock(&self) -> &Arc<dyn Clock> {
         &self.inner.clock
+    }
+
+    /// The signer of this process's media grants (ADR-0022).
+    pub fn media_grants(&self) -> &MediaGrantSigner {
+        &self.inner.media_grants
     }
 
     /// The Prometheus handle, or `None` when no recorder was installed.
@@ -187,14 +199,16 @@ impl kynos::di::Provides<OidcRuntimeConfig> for AppState {
 #[derive(Debug, Clone)]
 pub struct AppServices {
     /// Which libraries and content ratings each user may see (issue #263),
-    /// applied by every route that reads or delivers a title.
+    /// applied by every route that reads or delivers a title. Built with a
+    /// short-lived cache of file-delivery grants (issue #462); see
+    /// [`crate::services::stream_cache`].
     pub access: Arc<AccessService>,
     pub library: Arc<dyn LibraryService>,
     pub metadata: Arc<dyn MetadataService>,
     /// Sidecar subtitle delivery, as stored and as WebVTT (issue #189).
     pub subtitles: Arc<dyn SubtitleService>,
     pub notification: Arc<dyn NotificationService>,
-    pub admin_log: Arc<dyn AdminLogService>,
+    pub admin_log: Arc<dyn AdminLogRepository>,
     pub user_repo: Arc<dyn UserRepository>,
     /// Each user's audio and subtitle languages (issue #264), read by the
     /// sources route to name each source's default tracks.
@@ -256,6 +270,10 @@ pub struct AppServices {
     /// pass loop `main` always runs, located by
     /// `GET /v1/files/{file_id}/trickplay/{sheet}`.
     pub trickplay: Arc<TrickplayService>,
+    /// Skip markers Beam keeps for each file (issue #332): set and cleared
+    /// by `/v1/admin/files/{file_id}/markers`, and detected in the
+    /// background by the pass loop `main` always runs.
+    pub markers: Arc<MarkerService>,
 }
 
 /// What [`AppServices::build`] builds: the services, and what the process
@@ -335,9 +353,9 @@ impl AppServices {
             beam_index::repositories::SqlMediaStreamRepository::new(db.clone()),
         );
         let user_repo: Arc<dyn UserRepository> = Arc::new(SqlUserRepository::new(db.clone()));
-        let admin_log_repo = Arc::new(beam_index::repositories::SqlAdminLogRepository::new(
-            db.clone(),
-        ));
+        let admin_log_repo: Arc<dyn AdminLogRepository> = Arc::new(
+            beam_index::repositories::SqlAdminLogRepository::new(db.clone()),
+        );
         let enrichment_repo: Arc<dyn beam_domain::repositories::EnrichmentStateRepository> =
             Arc::new(
                 beam_index::repositories::SqlEnrichmentStateRepository::with_seams(
@@ -372,7 +390,10 @@ impl AppServices {
                 db.clone(),
             ));
 
-        let notification_service = Arc::new(LocalNotificationService::new());
+        let notification_service = Arc::new(LocalNotificationService::with_seams(
+            clock.clone(),
+            Arc::new(beam_domain::services::UuidGenerator),
+        ));
         let hash_service = Arc::new(LocalHashService::new(hash_config));
         let media_info_service = Arc::new(LocalMediaInfoService::default());
 
@@ -425,9 +446,6 @@ impl AppServices {
             session_max_days: config.session_max_days,
         };
 
-        let admin_log_service: Arc<dyn AdminLogService> =
-            Arc::new(LocalAdminLogService::new(admin_log_repo.clone()));
-
         // Written by the indexer, read by the sources and subtitle routes.
         let sidecar_repo: Arc<dyn beam_domain::repositories::SidecarSubtitleRepository> = Arc::new(
             beam_index::repositories::SqlSidecarSubtitleRepository::new(db.clone()),
@@ -441,8 +459,36 @@ impl AppServices {
         let trickplay_repo: Arc<dyn beam_domain::repositories::TrickplayRepository> = Arc::new(
             beam_index::repositories::SqlTrickplayRepository::new(db.clone()),
         );
+        // Written by an administrator and the marker worker, read by the
+        // sources route.
+        let marker_repo: Arc<dyn beam_domain::repositories::MarkerRepository> = Arc::new(
+            beam_index::repositories::SqlMarkerRepository::new(db.clone()),
+        );
 
-        let index_service = Arc::new(
+        let enrichment_provider = build_enrichment_provider(config, clock.clone())?;
+
+        // Built before the indexer, which wakes it when it queues a title.
+        let enrichment_service = Arc::new(
+            MetadataEnrichmentService::new(
+                enrichment_repo.clone(),
+                movie_repo.clone(),
+                show_repo.clone(),
+                genre_repo.clone(),
+                person_repo.clone(),
+                collection_repo.clone(),
+                enrichment_provider.clone(),
+                admin_log_repo.clone(),
+                notification_service.clone(),
+                clock.clone(),
+            )
+            .with_policy(EnrichmentPolicy {
+                batch_size: config.enrich_batch_size,
+                min_confidence: config.enrich_min_confidence,
+                ..EnrichmentPolicy::default()
+            }),
+        );
+
+        let index_service = Arc::new(wake_enrichment_from_indexer(
             LocalIndexService::new(
                 library_repo.clone(),
                 file_repo.clone(),
@@ -452,7 +498,7 @@ impl AppServices {
                 hash_service.clone(),
                 media_info_service.clone(),
                 notification_service.clone(),
-                admin_log_service.clone(),
+                admin_log_repo.clone(),
                 watch_state_repo.clone(),
             )
             .with_clock(clock.clone())
@@ -466,36 +512,15 @@ impl AppServices {
                 beam_index::repositories::SqlAppliedNfoRepository::new(db.clone()),
             ))
             .with_user_list_repo(user_list_repo.clone()),
-        );
-
-        let enrichment_provider = build_enrichment_provider(config, clock.clone())?;
-
-        let enrichment_service = Arc::new(
-            MetadataEnrichmentService::new(
-                enrichment_repo.clone(),
-                movie_repo.clone(),
-                show_repo.clone(),
-                genre_repo.clone(),
-                person_repo.clone(),
-                collection_repo.clone(),
-                enrichment_provider.clone(),
-                admin_log_service.clone(),
-                notification_service.clone(),
-                clock.clone(),
-            )
-            .with_policy(EnrichmentPolicy {
-                batch_size: config.enrich_batch_size,
-                min_confidence: config.enrich_min_confidence,
-                ..EnrichmentPolicy::default()
-            }),
-        );
+            &enrichment_service,
+        ));
         let enrichment_control = Arc::new(EnrichmentControl::new(EnrichmentControlDeps {
             movies: movie_repo.clone(),
             shows: show_repo.clone(),
             states: enrichment_repo.clone(),
             libraries: library_repo.clone(),
             provider: enrichment_provider,
-            admin_log: admin_log_service.clone(),
+            admin_log: admin_log_repo.clone(),
             nfo_pins: index_service.clone(),
             worker: enrichment_service.notify_handle(),
         }));
@@ -507,8 +532,9 @@ impl AppServices {
             files: file_repo.clone(),
             streams: stream_repo.clone(),
             sidecars: sidecar_repo.clone(),
-            chapters: chapter_repo,
+            chapters: chapter_repo.clone(),
             trickplay: trickplay_repo.clone(),
+            markers: marker_repo.clone(),
         }));
         let playback_service = Arc::new(DbPlaybackService::new(PlaybackRepositories {
             watch_state: watch_state_repo,
@@ -578,6 +604,17 @@ impl AppServices {
                 clock: clock.clone(),
             },
         ));
+        // Writes only to the database: a file's audio is read through its
+        // open handle, and nothing is kept on disk (FR-202).
+        let markers = Arc::new(MarkerService::new(MarkerDependencies {
+            libraries: library_repo.clone(),
+            files: file_repo.clone(),
+            shows: show_repo.clone(),
+            chapters: chapter_repo,
+            markers: marker_repo,
+            fingerprinter: Arc::new(beam_index::services::LocalAudioFingerprinter),
+            clock: clock.clone(),
+        }));
 
         let telemetry = Arc::new(LibraryReportService::new(
             config.library_report_config(),
@@ -603,17 +640,20 @@ impl AppServices {
             watch_status.clone(),
         ));
 
-        let access = Arc::new(AccessService::new(AccessRepositories {
-            policies: Arc::new(
-                beam_index::repositories::SqlAccessPolicyRepository::with_clock(
-                    db.clone(),
-                    clock.clone(),
+        let access = Arc::new(
+            AccessService::new(AccessRepositories {
+                policies: Arc::new(
+                    beam_index::repositories::SqlAccessPolicyRepository::with_clock(
+                        db.clone(),
+                        clock.clone(),
+                    ),
                 ),
-            ),
-            movies: movie_repo.clone(),
-            shows: show_repo.clone(),
-            files: file_repo.clone(),
-        }));
+                movies: movie_repo.clone(),
+                shows: show_repo.clone(),
+                files: file_repo.clone(),
+            })
+            .with_stream_grants(Arc::new(BoundedStreamGrantCache::new(clock.clone()))),
+        );
 
         let services = Self {
             access,
@@ -634,7 +674,7 @@ impl AppServices {
                 sidecar_repo,
             )),
             notification: notification_service,
-            admin_log: admin_log_service,
+            admin_log: admin_log_repo,
             user_repo,
             language_preferences: Arc::new(
                 beam_index::repositories::SqlLanguagePreferenceRepository::with_clock(
@@ -667,6 +707,7 @@ impl AppServices {
             telemetry,
             playback_telemetry,
             trickplay,
+            markers,
         };
 
         Ok(BuiltServices {
@@ -676,6 +717,17 @@ impl AppServices {
             library_watches,
         })
     }
+}
+
+/// The indexer, waking `enrichment`'s worker at the end of each scan or
+/// watcher reconcile that queued a title, so a new title is enriched within
+/// seconds rather than at the next `BEAM_ENRICH_INTERVAL_SECS` sweep (issue
+/// #449). Its own function so a test can hold `build` to it.
+pub(crate) fn wake_enrichment_from_indexer(
+    index: LocalIndexService,
+    enrichment: &MetadataEnrichmentService,
+) -> LocalIndexService {
+    index.with_enrichment_wake(enrichment.notify_handle())
 }
 
 /// Decide which [`EnrichmentProvider`] the configuration asks for.
@@ -702,11 +754,14 @@ pub(crate) fn build_enrichment_provider(
     config: &ServerConfig,
     clock: Arc<dyn Clock>,
 ) -> eyre::Result<Arc<dyn EnrichmentProvider>> {
-    let built = beam_index::providers::cameo::build_client(CameoWiringConfig {
-        tmdb_api_token: config.tmdb_api_token.clone(),
-        anilist_enabled: config.anilist_enabled,
-        metadata_language: config.metadata_language.clone(),
-    });
+    let built = beam_index::providers::cameo::build_client(
+        CameoWiringConfig {
+            tmdb_api_token: config.tmdb_api_token.clone(),
+            anilist_enabled: config.anilist_enabled,
+            metadata_language: config.metadata_language.clone(),
+        },
+        clock.clone(),
+    );
     let cameo = provider_from_build(built, config.metadata_language.as_deref())?;
     let tvdb = match beam_index::providers::tvdb::build_client(
         TvdbWiringConfig {

@@ -5,19 +5,26 @@
 //! activity. Taking [`SessionAuth`] in a handler signature is what puts the
 //! requirement in the OpenAPI document: there is no second place to declare it,
 //! so the enforcement and the description cannot disagree.
+//!
+//! The four delivery operations also accept a [`MediaGrant`] (ADR-0022), a
+//! signed URL for one file that a cast receiver or external player can fetch
+//! without the cookie. They take [`DeliveryAuth`]; nothing else does.
 
 use beam_auth::utils::session_store::get_and_touch;
 use kynos::error::rejection::AuthRejection;
 use kynos::prelude::*;
 use kynos::security::{
-    Authenticates, Authenticator, Scope,
+    Authenticates, Authenticator, Scope, Unscoped,
     auth::{Auth, Scoped, Scopes},
+    requirement::{AnyOf, Either2},
 };
 use uuid::Uuid;
 
+use crate::metrics::session_store_failed;
 use crate::state::AppState;
 
-/// The cookie the OIDC login flow sets. The only credential Beam issues.
+/// The cookie the OIDC login flow sets. The only session credential Beam
+/// issues; a [`MediaGrant`] is a capability for one file, not a session.
 pub const SESSION_COOKIE: &str = "beam_session";
 
 /// The caller's identity, resolved from the `beam_session` cookie.
@@ -88,6 +95,80 @@ pub type AdminAuth = Scoped<SessionCookie, Admin>;
 /// Convenience alias for an operation that needs any signed-in caller.
 pub type SessionAuth = Auth<SessionCookie>;
 
+/// What a media grant authenticates: one file, on behalf of one user.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GrantedFile {
+    /// The user the grant was issued to, whose access policy still applies.
+    pub user_id: Uuid,
+    /// The one file the grant may fetch.
+    pub file_id: Uuid,
+}
+
+/// A signed, file-scoped media grant in the `grant` query parameter
+/// (ADR-0022), for a client that holds no session cookie -- a cast receiver
+/// or an external player handed a URL.
+///
+/// Accepted by the four delivery operations alone, through [`DeliveryAuth`];
+/// every other operation names only [`SessionCookie`], so a grant opens no
+/// part of the API. Its signature reads no store, but its user's `disabled`
+/// flag is read on every use, so it declares the 503 that read can fail with.
+#[derive(SecurityScheme)]
+#[security(
+    api_key(in = "query", name = "grant"),
+    name = "MediaGrant",
+    credential = GrantedFile,
+    unavailable,
+    description = "Short-lived signature over one file and one user, issued by \
+                   `POST /v1/files/{file_id}/grant` (ADR-0022). Fetches that \
+                   file's bytes and nothing else, under the user's access policy."
+)]
+pub struct MediaGrant;
+
+/// The four delivery operations' requirement: the session cookie, or a media
+/// grant for the file the path names.
+///
+/// The cookie is tried first, so a browser that has both is the session it
+/// signed in as. Which file a grant names is checked by the operation, which
+/// alone knows the path.
+pub type DeliveryAuth = Auth<AnyOf<(SessionCookie, MediaGrant)>>;
+
+/// The caller of a delivery operation, whichever scheme admitted it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliveryCaller {
+    /// A signed-in session, which may fetch any file its policy shows.
+    Session(Uuid),
+    /// A media grant, which may fetch only the file it names.
+    Grant(GrantedFile),
+}
+
+impl DeliveryCaller {
+    /// Who the caller acts for: whose access policy applies.
+    pub fn user_id(self) -> Uuid {
+        match self {
+            Self::Session(user_id) => user_id,
+            Self::Grant(GrantedFile { user_id, .. }) => user_id,
+        }
+    }
+
+    /// Whether the caller may ask for `file_id` at all, before any policy: a
+    /// grant names one file and is no credential for another.
+    pub fn may_request(self, file_id: Uuid) -> bool {
+        match self {
+            Self::Session(_) => true,
+            Self::Grant(granted) => granted.file_id == file_id,
+        }
+    }
+}
+
+impl From<&DeliveryAuth> for DeliveryCaller {
+    fn from(auth: &DeliveryAuth) -> Self {
+        match &auth.0 {
+            Either2::First(session) => Self::Session(session.user_id),
+            Either2::Second(granted) => Self::Grant(*granted),
+        }
+    }
+}
+
 /// Verifies the session cookie against the store, and the admin scope against
 /// the user row.
 ///
@@ -136,6 +217,7 @@ impl Authenticator<SessionCookie, AppState> for SessionAuthenticator {
         )
         .await
         .map_err(|e| {
+            session_store_failed();
             tracing::error!(error = %e, "session store failed while authenticating");
             AuthRejection::unavailable::<SessionCookie>()
         })?
@@ -180,6 +262,91 @@ impl Authenticator<SessionCookie, AppState> for SessionAuthenticator {
             Ok(())
         } else {
             Err(AuthRejection::forbidden_as(ADMIN_REQUIRED))
+        }
+    }
+}
+
+/// Verifies a media grant's signature and expiry against the process's key
+/// and clock.
+///
+/// Zero-sized for the reason [`SessionAuthenticator`] is.
+pub struct MediaGrantAuthenticator;
+
+static MEDIA_GRANT_AUTHENTICATOR: MediaGrantAuthenticator = MediaGrantAuthenticator;
+
+impl Authenticates<MediaGrant> for AppState {
+    type Authenticator = MediaGrantAuthenticator;
+
+    fn authenticator(&self) -> &Self::Authenticator {
+        &MEDIA_GRANT_AUTHENTICATOR
+    }
+}
+
+impl Authenticator<MediaGrant, AppState> for MediaGrantAuthenticator {
+    /// A grant this process signed, whose expiry has not passed on the
+    /// injected clock, and whose user exists and is not disabled; anything
+    /// else is a 401, whichever check refused it.
+    ///
+    /// The user row is read on every use because disabling an account
+    /// revokes its sessions so that it cannot act again until re-enabled
+    /// (`PATCH /v1/admin/users/{id}`), and a grant minted before the disable
+    /// would otherwise keep fetching for the rest of its lifetime. A grant of
+    /// a re-enabled user works again until it expires, as the account does.
+    /// A *user store failure* is a 503, for the reason a session store
+    /// failure is one in [`SessionAuthenticator`].
+    ///
+    /// The reason is logged at `debug`, never the grant: a grant read from a
+    /// log can be presented again until it expires.
+    async fn authenticate(
+        &self,
+        presented: kynos::security::carrier::ApiKey,
+        context: &AppState,
+    ) -> Result<GrantedFile, AuthRejection> {
+        let claims = context
+            .media_grants()
+            .verify(presented.as_str(), context.clock().now())
+            .map_err(|refused| {
+                tracing::debug!(%refused, "media grant refused");
+                AuthRejection::unauthenticated()
+            })?;
+
+        let user = context
+            .services
+            .user_repo
+            .find_by_id(claims.user_id)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "user lookup failed while verifying a media grant");
+                AuthRejection::unavailable::<MediaGrant>()
+            })?;
+        match user {
+            Some(user) if !user.disabled => {}
+            Some(_) => {
+                tracing::debug!(user_id = %claims.user_id, "media grant of a disabled user refused");
+                return Err(AuthRejection::unauthenticated());
+            }
+            None => {
+                tracing::debug!(user_id = %claims.user_id, "media grant of an unknown user refused");
+                return Err(AuthRejection::unauthenticated());
+            }
+        }
+
+        Ok(GrantedFile {
+            user_id: claims.user_id,
+            file_id: claims.file_id,
+        })
+    }
+
+    /// A grant carries no scope, and no operation demands one of it.
+    async fn authorize(
+        &self,
+        _credential: &GrantedFile,
+        scopes: &[Unscoped],
+        _context: &AppState,
+    ) -> Result<(), AuthRejection> {
+        match scopes.first() {
+            None => Ok(()),
+            Some(never) => match *never {},
         }
     }
 }

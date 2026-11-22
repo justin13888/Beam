@@ -5,8 +5,21 @@ use chrono::{DateTime, Utc};
 use sea_orm::{DatabaseConnection, DbErr};
 use uuid::Uuid;
 
-use beam_domain::models::{CreateLibrary, Library};
+use beam_domain::models::{CreateLibrary, Library, LibraryTitleCounts};
 use beam_domain::repositories::LibraryRepository;
+
+use super::library_shape::{PRESENT, count, live_title_columns};
+
+/// Live titles of one library (`$1`), by kind: the live titles
+/// `SqlLibraryShapeRepository` counts across every library, from the same
+/// [`live_title_columns`], narrowed to the library's own present files. A
+/// missing file (issue #179) keeps nothing live.
+fn count_titles_sql() -> String {
+    format!(
+        "SELECT {}",
+        live_title_columns(&format!("{PRESENT} AND f.library_id = $1"))
+    )
+}
 
 /// SQL-based implementation of the LibraryRepository trait.
 #[derive(Debug, Clone)]
@@ -72,6 +85,26 @@ impl LibraryRepository for SqlLibraryRepository {
             .filter(files::Column::MissingSince.is_null())
             .count(self.db.as_ref())
             .await
+    }
+
+    async fn count_titles(&self, library_id: Uuid) -> Result<LibraryTitleCounts, DbErr> {
+        use sea_orm::{ConnectionTrait, DbBackend, Statement};
+
+        let row = self
+            .db
+            .query_one_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                count_titles_sql(),
+                [library_id.into()],
+            ))
+            .await?
+            .ok_or_else(|| DbErr::RecordNotFound("an aggregate returned no row".to_string()))?;
+        Ok(LibraryTitleCounts {
+            movies: count(&row, "movies")?,
+            shows: count(&row, "shows")?,
+            seasons: count(&row, "seasons")?,
+            episodes: count(&row, "episodes")?,
+        })
     }
 
     async fn update_scan_progress(

@@ -281,6 +281,102 @@ async fn a_browse_sends_its_query_and_resolves_the_page() {
     assert_eq!(query.get("after").map(String::as_str), Some("m1"));
 }
 
+/// One library's titles page like the whole catalogue's (issue #465): the
+/// library goes out on every page a pager fetches, beside the cursor the
+/// page before it issued, so the second page continues the same listing.
+#[tokio::test]
+async fn a_library_browse_sends_its_library_on_every_page_a_pager_fetches() {
+    const LIBRARY_ID: &str = "00000000-0000-0000-0000-00000000000a";
+    let page = |id: u8, end_cursor: &str, has_next_page: bool| -> &'static str {
+        Box::leak(
+            format!(
+                r#"{{"items":[{{"media_type":"movie","id":"00000000-0000-0000-0000-0000000000{id:02x}",
+                "title":{{"original":"Title {id}"}},"genres":[],"ratings":{{}},"identifiers":{{}},
+                "user_state":{{"played":false,"position_secs":0.0,"play_count":0}}}}],
+                "page_info":{{"has_next_page":{has_next_page},"has_previous_page":false,"end_cursor":"{end_cursor}"}}}}"#
+            )
+            .into_boxed_str(),
+        )
+    };
+    let (client, id, _storage, _clock) = clocked_client().await;
+    let backend = answer_with(
+        &client,
+        &id,
+        vec![
+            crate::transport::CannedAnswer::respond(200, JSON, page(1, "c1", true)),
+            crate::transport::CannedAnswer::respond(200, JSON, page(2, "c2", false)),
+        ],
+    );
+    let pager = crate::paging::CursorPager::new();
+
+    let mut listed = Vec::new();
+    while pager.begin_request() {
+        let page = client
+            .browse_media(BrowseQuery {
+                first: Some(1),
+                after: pager.cursor(),
+                library_id: Some(LIBRARY_ID.to_owned()),
+                ..BrowseQuery::default()
+            })
+            .await
+            .expect("answered");
+        let advance = pager.complete_request(
+            page.items.iter().map(|item| item.id.clone()).collect(),
+            page.end_cursor,
+            page.has_next_page,
+        );
+        listed.extend(advance.new_ids);
+    }
+
+    assert_eq!(
+        listed,
+        [
+            "00000000-0000-0000-0000-000000000001",
+            "00000000-0000-0000-0000-000000000002",
+        ]
+    );
+    let recorded = backend.recorded();
+    assert_eq!(recorded.len(), 2, "one request per page: {recorded:?}");
+    let queries: Vec<_> = recorded.iter().map(query_of).collect();
+    for query in &queries {
+        assert_eq!(
+            query.get("library_id").map(String::as_str),
+            Some(LIBRARY_ID),
+            "{queries:?}"
+        );
+    }
+    assert_eq!(
+        queries[0].get("after"),
+        None,
+        "the first page has no cursor"
+    );
+    assert_eq!(
+        queries[1].get("after").map(String::as_str),
+        Some("c1"),
+        "the second continues from the first's cursor"
+    );
+}
+
+/// A library id that is not an identifier is refused before the wire, as a
+/// malformed id is on every other call naming one.
+#[tokio::test]
+async fn a_library_browse_with_a_malformed_library_id_sends_nothing() {
+    let (client, backend) = one_answer(200, "{}").await;
+
+    let refused = client
+        .browse_media(BrowseQuery {
+            library_id: Some("not-a-uuid".to_owned()),
+            ..BrowseQuery::default()
+        })
+        .await;
+
+    assert!(
+        matches!(refused, Err(BeamError::BadRequest { .. })),
+        "{refused:?}"
+    );
+    assert!(backend.recorded().is_empty(), "nothing was sent");
+}
+
 #[tokio::test]
 async fn libraries_are_every_library_on_the_server() {
     let body: &'static str =
@@ -297,6 +393,47 @@ async fn libraries_are_every_library_on_the_server() {
     let request = the_request(&backend);
     assert_eq!(request.method, reqwest::Method::GET);
     assert_eq!(request.url.path(), "/v1/libraries");
+}
+
+/// The change feed (issue #454) is polled with the cursor the last answer
+/// gave, and answers the libraries to refetch.
+#[tokio::test]
+async fn library_changes_are_polled_from_the_cursor_passed() {
+    let body =
+        r#"{"cursor":"e.7","reset":false,"library_ids":["00000000-0000-0000-0000-0000000000a1"]}"#;
+    let (client, backend) = one_answer(200, body).await;
+
+    let changes = client
+        .library_changes(Some("e.5".to_owned()))
+        .await
+        .expect("answered");
+
+    assert_eq!(changes.cursor, "e.7");
+    assert!(!changes.reset);
+    assert_eq!(
+        changes.library_ids,
+        vec!["00000000-0000-0000-0000-0000000000a1".to_owned()]
+    );
+    let request = the_request(&backend);
+    assert_eq!(request.method, reqwest::Method::GET);
+    assert_eq!(request.url.path(), "/v1/libraries/changes");
+    assert_eq!(
+        query_of(&request).get("since").map(String::as_str),
+        Some("e.5")
+    );
+}
+
+/// A first poll sends no cursor, and a reset says to refetch everything.
+#[tokio::test]
+async fn a_first_library_changes_poll_sends_no_cursor() {
+    let (client, backend) =
+        one_answer(200, r#"{"cursor":"e.0","reset":true,"library_ids":[]}"#).await;
+
+    let changes = client.library_changes(None).await.expect("answered");
+
+    assert!(changes.reset);
+    assert!(changes.library_ids.is_empty());
+    assert!(!query_of(&the_request(&backend)).contains_key("since"));
 }
 
 #[tokio::test]

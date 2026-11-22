@@ -7,6 +7,7 @@ use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use beam_domain::models::enrichment::{EnrichmentStatus, EnrichmentTargetId};
+use beam_domain::services::{Clock, IdGenerator, RealClock, UuidGenerator};
 
 use crate::services::scan::ScanEvent;
 
@@ -63,6 +64,9 @@ pub struct EnrichmentEvent {
     pub error: Option<String>,
 }
 
+/// An event as published: what [`NewAdminEvent`] describes, stamped by the
+/// publisher with an id from its [`IdGenerator`] and a timestamp from its
+/// [`Clock`].
 #[derive(Clone, Debug)]
 pub struct AdminEvent {
     pub id: Uuid,
@@ -78,7 +82,23 @@ pub struct AdminEvent {
     pub enrichment: Option<EnrichmentEvent>,
 }
 
-impl AdminEvent {
+/// An event to publish, not yet stamped: the publisher gives it its id and
+/// timestamp, from the seams it was built with, as it becomes an
+/// [`AdminEvent`].
+#[derive(Clone, Debug)]
+pub struct NewAdminEvent {
+    pub level: EventLevel,
+    pub category: EventCategory,
+    pub message: String,
+    pub library_id: Option<Uuid>,
+    pub library_name: Option<String>,
+    /// The scan job an [`EventCategory::ScanProgress`] event reports on.
+    pub scan: Option<ScanEvent>,
+    /// The title an [`EventCategory::Enrichment`] event reports on.
+    pub enrichment: Option<EnrichmentEvent>,
+}
+
+impl NewAdminEvent {
     pub fn new(
         level: EventLevel,
         category: EventCategory,
@@ -87,8 +107,6 @@ impl AdminEvent {
         library_name: Option<String>,
     ) -> Self {
         Self {
-            id: Uuid::new_v4(),
-            timestamp: Utc::now(),
             level,
             category,
             message: message.into(),
@@ -96,6 +114,31 @@ impl AdminEvent {
             library_name,
             scan: None,
             enrichment: None,
+        }
+    }
+
+    /// This event as published under `id` at `timestamp`.
+    #[must_use]
+    pub fn stamp(self, id: Uuid, timestamp: DateTime<Utc>) -> AdminEvent {
+        let Self {
+            level,
+            category,
+            message,
+            library_id,
+            library_name,
+            scan,
+            enrichment,
+        } = self;
+        AdminEvent {
+            id,
+            timestamp,
+            level,
+            category,
+            message,
+            library_id,
+            library_name,
+            scan,
+            enrichment,
         }
     }
 
@@ -157,10 +200,111 @@ impl AdminEvent {
     }
 }
 
+/// A position in a process's [`LibraryChangeLog`] (issue #454): every
+/// `library_changed` event after it is news to whoever holds it.
+///
+/// `epoch` names the process that issued it. A cursor from another process
+/// -- the server restarted, and its sequence started again from zero --
+/// cannot be compared with this one's, so it reads as a reset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LibraryChangeCursor {
+    pub epoch: Uuid,
+    pub sequence: u64,
+}
+
+/// What changed since a [`LibraryChangeCursor`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LibraryChanges {
+    /// Where the next read continues from.
+    pub cursor: LibraryChangeCursor,
+    /// What the holder of the old cursor is to refetch.
+    pub changed: ChangedLibraries,
+}
+
+/// The libraries a [`LibraryChanges`] says changed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ChangedLibraries {
+    /// These libraries, each once, in no particular order. Empty when
+    /// nothing changed.
+    Only(Vec<Uuid>),
+    /// Anything may have changed: there was no cursor, or it was issued by
+    /// another process, or it is ahead of this one's sequence.
+    All,
+}
+
+/// The coalesced `library_changed { library_id }` events of one process
+/// (issue #454): for each library, the sequence number of the latest change
+/// to it. A reader learns which libraries changed since its cursor, not how
+/// often or how -- no file path, so nothing leaks past a user's access.
+///
+/// Bounded by the number of libraries ever changed in this process, not by
+/// the number of changes.
+#[derive(Debug)]
+pub struct LibraryChangeLog {
+    epoch: Uuid,
+    state: RwLock<LibraryChangeState>,
+}
+
+#[derive(Debug, Default)]
+struct LibraryChangeState {
+    sequence: u64,
+    latest: std::collections::HashMap<Uuid, u64>,
+}
+
+impl LibraryChangeLog {
+    /// An empty log for a process named `epoch`.
+    #[must_use]
+    pub fn new(epoch: Uuid) -> Self {
+        Self {
+            epoch,
+            state: RwLock::new(LibraryChangeState::default()),
+        }
+    }
+
+    /// Record a change to `library_id`.
+    pub fn record(&self, library_id: Uuid) {
+        let mut state = self.state.write();
+        state.sequence += 1;
+        let sequence = state.sequence;
+        state.latest.insert(library_id, sequence);
+    }
+
+    /// The libraries changed after `since`.
+    #[must_use]
+    pub fn since(&self, since: Option<LibraryChangeCursor>) -> LibraryChanges {
+        let state = self.state.read();
+        let cursor = LibraryChangeCursor {
+            epoch: self.epoch,
+            sequence: state.sequence,
+        };
+        let changed = match since {
+            Some(since) if since.epoch == self.epoch && since.sequence <= state.sequence => {
+                ChangedLibraries::Only(
+                    state
+                        .latest
+                        .iter()
+                        .filter(|(_, sequence)| **sequence > since.sequence)
+                        .map(|(library_id, _)| *library_id)
+                        .collect(),
+                )
+            }
+            Some(_) | None => ChangedLibraries::All,
+        };
+        LibraryChanges { cursor, changed }
+    }
+}
+
 pub trait NotificationService: Send + Sync + std::fmt::Debug {
-    fn publish(&self, event: AdminEvent);
+    /// Stamps `event` with an id and the current time, and publishes it.
+    fn publish(&self, event: NewAdminEvent);
     fn subscribe(&self) -> broadcast::Receiver<AdminEvent>;
     fn recent_events(&self, limit: usize) -> Vec<AdminEvent>;
+    /// Publish `library_changed { library_id }` (issue #454): what the
+    /// library holds changed, so a client showing it is to refetch. Unlike
+    /// an [`AdminEvent`] it is for every user who can see the library.
+    fn library_changed(&self, library_id: Uuid);
+    /// The libraries changed since `since`.
+    fn library_changes(&self, since: Option<LibraryChangeCursor>) -> LibraryChanges;
 }
 
 #[derive(Debug, Clone)]
@@ -168,15 +312,30 @@ pub struct LocalNotificationService {
     sender: broadcast::Sender<AdminEvent>,
     event_log: Arc<RwLock<VecDeque<AdminEvent>>>,
     max_log_size: usize,
+    /// Source of each published event's timestamp.
+    clock: Arc<dyn Clock>,
+    /// Source of each published event's id.
+    ids: Arc<dyn IdGenerator>,
+    library_changes: Arc<LibraryChangeLog>,
 }
 
 impl LocalNotificationService {
+    /// A publisher stamping events from the wall clock with random ids.
     pub fn new() -> Self {
+        Self::with_seams(Arc::new(RealClock), Arc::new(UuidGenerator))
+    }
+
+    /// A publisher stamping each event's timestamp from `clock` and its id
+    /// from `ids`.
+    pub fn with_seams(clock: Arc<dyn Clock>, ids: Arc<dyn IdGenerator>) -> Self {
         let (sender, _) = broadcast::channel(BROADCAST_CAPACITY);
         Self {
             sender,
             event_log: Arc::new(RwLock::new(VecDeque::new())),
             max_log_size: DEFAULT_LOG_SIZE,
+            clock,
+            ids,
+            library_changes: Arc::new(LibraryChangeLog::new(Uuid::new_v4())),
         }
     }
 }
@@ -188,7 +347,8 @@ impl Default for LocalNotificationService {
 }
 
 impl NotificationService for LocalNotificationService {
-    fn publish(&self, event: AdminEvent) {
+    fn publish(&self, event: NewAdminEvent) {
+        let event = event.stamp(self.ids.new_id(), self.clock.now());
         // Progress is live state, not history: a subscriber sees it as it
         // happens, and the log keeps what an administrator reads later.
         if !event.category.is_live_only() {
@@ -209,6 +369,14 @@ impl NotificationService for LocalNotificationService {
         let log = self.event_log.read();
         let events: Vec<_> = log.iter().rev().take(limit).cloned().collect();
         events.into_iter().rev().collect()
+    }
+
+    fn library_changed(&self, library_id: Uuid) {
+        self.library_changes.record(library_id);
+    }
+
+    fn library_changes(&self, since: Option<LibraryChangeCursor>) -> LibraryChanges {
+        self.library_changes.since(since)
     }
 }
 
@@ -231,6 +399,7 @@ pub mod in_memory {
     pub struct InMemoryNotificationService {
         sender: broadcast::Sender<AdminEvent>,
         event_log: Arc<RwLock<VecDeque<AdminEvent>>>,
+        library_changes: Arc<LibraryChangeLog>,
     }
 
     impl InMemoryNotificationService {
@@ -239,6 +408,7 @@ pub mod in_memory {
             Self {
                 sender,
                 event_log: Arc::new(RwLock::new(VecDeque::new())),
+                library_changes: Arc::new(LibraryChangeLog::new(Uuid::new_v4())),
             }
         }
 
@@ -254,7 +424,8 @@ pub mod in_memory {
     }
 
     impl NotificationService for InMemoryNotificationService {
-        fn publish(&self, event: AdminEvent) {
+        fn publish(&self, event: NewAdminEvent) {
+            let event = event.stamp(Uuid::new_v4(), Utc::now());
             self.event_log.write().push_back(event.clone());
             let _ = self.sender.send(event);
         }
@@ -267,6 +438,14 @@ pub mod in_memory {
             let log = self.event_log.read();
             let events: Vec<_> = log.iter().rev().take(limit).cloned().collect();
             events.into_iter().rev().collect()
+        }
+
+        fn library_changed(&self, library_id: Uuid) {
+            self.library_changes.record(library_id);
+        }
+
+        fn library_changes(&self, since: Option<LibraryChangeCursor>) -> LibraryChanges {
+            self.library_changes.since(since)
         }
     }
 }
@@ -283,19 +462,19 @@ mod tests {
     #[test]
     fn test_publish_and_recent_events() {
         let svc = LocalNotificationService::new();
-        svc.publish(AdminEvent::info(
+        svc.publish(NewAdminEvent::info(
             EventCategory::LibraryScan,
             "Scan started",
             Some(Uuid::from_u128(1)),
             Some("Movies".to_string()),
         ));
-        svc.publish(AdminEvent::warning(
+        svc.publish(NewAdminEvent::warning(
             EventCategory::LibraryScan,
             "File skipped",
             Some(Uuid::from_u128(1)),
             Some("Movies".to_string()),
         ));
-        svc.publish(AdminEvent::error(
+        svc.publish(NewAdminEvent::error(
             EventCategory::System,
             "Disk full",
             None,
@@ -309,6 +488,55 @@ mod tests {
         assert_eq!(events[2].level, EventLevel::Error);
     }
 
+    /// A published event takes its id from the publisher's generator and its
+    /// timestamp from the publisher's clock, the same stamp on the live feed
+    /// and in the log.
+    #[tokio::test]
+    async fn the_publisher_stamps_each_event_from_its_seams() {
+        use beam_domain::services::{SequentialIdGenerator, TestClock};
+
+        let start = DateTime::parse_from_rfc3339("2026-01-02T03:04:05Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let clock = Arc::new(TestClock::starting_at(start));
+        let svc = LocalNotificationService::with_seams(
+            clock.clone(),
+            Arc::new(SequentialIdGenerator::new()),
+        );
+        let mut live = svc.subscribe();
+
+        svc.publish(NewAdminEvent::info(
+            EventCategory::System,
+            "first",
+            None,
+            None,
+        ));
+        clock.advance(std::time::Duration::from_secs(90));
+        svc.publish(NewAdminEvent::info(
+            EventCategory::System,
+            "second",
+            None,
+            None,
+        ));
+
+        let stamps = |events: Vec<AdminEvent>| -> Vec<(Uuid, DateTime<Utc>)> {
+            events
+                .into_iter()
+                .map(|event| (event.id, event.timestamp))
+                .collect()
+        };
+        let expected = vec![
+            (SequentialIdGenerator::nth(0), start),
+            (
+                SequentialIdGenerator::nth(1),
+                start + chrono::Duration::seconds(90),
+            ),
+        ];
+        assert_eq!(stamps(svc.recent_events(10)), expected);
+        let broadcast = vec![live.recv().await.unwrap(), live.recv().await.unwrap()];
+        assert_eq!(stamps(broadcast), expected);
+    }
+
     /// Scan progress reaches a live subscriber but not the recent-event log:
     /// one scan of a large library would otherwise push every other event out
     /// of it.
@@ -319,7 +547,7 @@ mod tests {
         let svc = LocalNotificationService::new();
         let mut live = svc.subscribe();
         svc.publish(
-            AdminEvent::info(EventCategory::ScanProgress, "Scanning", None, None).with_scan(
+            NewAdminEvent::info(EventCategory::ScanProgress, "Scanning", None, None).with_scan(
                 ScanEvent {
                     job_id: Uuid::nil(),
                     phase: ScanPhase::Progress,
@@ -327,7 +555,7 @@ mod tests {
                 },
             ),
         );
-        svc.publish(AdminEvent::info(
+        svc.publish(NewAdminEvent::info(
             EventCategory::LibraryScan,
             "Scan complete",
             None,
@@ -360,10 +588,10 @@ mod tests {
             error: None,
         };
         svc.publish(
-            AdminEvent::info(EventCategory::Enrichment, "Enriched \"Heat\"", None, None)
+            NewAdminEvent::info(EventCategory::Enrichment, "Enriched \"Heat\"", None, None)
                 .with_enrichment(title.clone()),
         );
-        svc.publish(AdminEvent::info(
+        svc.publish(NewAdminEvent::info(
             EventCategory::System,
             "Started",
             None,
@@ -380,6 +608,85 @@ mod tests {
         assert_eq!(kept, vec![EventCategory::System]);
     }
 
+    fn only(changes: &LibraryChanges) -> Vec<Uuid> {
+        match &changes.changed {
+            ChangedLibraries::Only(ids) => {
+                let mut ids = ids.clone();
+                ids.sort();
+                ids
+            }
+            ChangedLibraries::All => panic!("expected the changed libraries, got a reset"),
+        }
+    }
+
+    /// A reader learns each library changed after its cursor once, however
+    /// many times it changed, and nothing it already read.
+    #[test]
+    fn library_changes_since_a_cursor_are_each_library_changed_after_it_once() {
+        let svc = LocalNotificationService::new();
+        let (films, shows) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        let start = svc.library_changes(None);
+        assert_eq!(start.changed, ChangedLibraries::All, "no cursor is a reset");
+
+        svc.library_changed(films);
+        svc.library_changed(shows);
+        svc.library_changed(films);
+        let first = svc.library_changes(Some(start.cursor));
+        assert_eq!(only(&first), vec![films, shows]);
+        assert_eq!(first.cursor.epoch, start.cursor.epoch);
+
+        let nothing = svc.library_changes(Some(first.cursor));
+        assert_eq!(only(&nothing), Vec::<Uuid>::new());
+        assert_eq!(nothing.cursor, first.cursor, "no change, no new position");
+
+        svc.library_changed(shows);
+        assert_eq!(only(&svc.library_changes(Some(first.cursor))), vec![shows]);
+        // An older cursor still sees everything after it.
+        assert_eq!(
+            only(&svc.library_changes(Some(start.cursor))),
+            vec![films, shows]
+        );
+    }
+
+    /// A cursor this process did not issue -- another process's, or one past
+    /// its sequence -- cannot say what the reader missed, so it is a reset.
+    #[test]
+    fn a_cursor_from_another_process_or_ahead_of_this_one_is_a_reset() {
+        let svc = LocalNotificationService::new();
+        svc.library_changed(Uuid::from_u128(1));
+        let now = svc.library_changes(None).cursor;
+
+        let foreign = LibraryChangeCursor {
+            epoch: Uuid::from_u128(99),
+            sequence: now.sequence,
+        };
+        assert_eq!(
+            svc.library_changes(Some(foreign)).changed,
+            ChangedLibraries::All
+        );
+        let ahead = LibraryChangeCursor {
+            sequence: now.sequence + 1,
+            ..now
+        };
+        assert_eq!(
+            svc.library_changes(Some(ahead)).changed,
+            ChangedLibraries::All
+        );
+        assert_eq!(
+            svc.library_changes(Some(now)).changed,
+            ChangedLibraries::Only(Vec::new()),
+            "the cursor at the head is not ahead of it"
+        );
+    }
+
+    /// Two processes never issue the same epoch, so a restart is a reset.
+    #[test]
+    fn each_service_names_its_own_epoch() {
+        let first = LocalNotificationService::new().library_changes(None).cursor;
+        let second = LocalNotificationService::new().library_changes(None).cursor;
+        assert_ne!(first.epoch, second.epoch);
+    }
+
     /// The log is bounded: past its size the oldest event is evicted, and a
     /// limited read is the newest `limit` events, oldest of them first.
     #[test]
@@ -387,7 +694,7 @@ mod tests {
         let svc = LocalNotificationService::new();
         let published = DEFAULT_LOG_SIZE + 3;
         for n in 0..published {
-            svc.publish(AdminEvent::info(
+            svc.publish(NewAdminEvent::info(
                 EventCategory::LibraryScan,
                 n.to_string(),
                 None,
