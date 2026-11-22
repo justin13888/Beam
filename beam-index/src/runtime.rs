@@ -62,6 +62,10 @@ pub trait BackgroundIndexer: Send + Sync + std::fmt::Debug {
     /// Where scans leave the files they deferred as still being written, for
     /// the watch consumer to retry (issue #453).
     fn scan_deferrals(&self) -> Arc<ScanDeferrals>;
+
+    /// Publish `library_changed { library_id }` (issue #454): a reconcile
+    /// changed what the library holds.
+    fn library_changed(&self, library_id: Uuid);
 }
 
 #[async_trait::async_trait]
@@ -90,6 +94,10 @@ impl BackgroundIndexer for LocalIndexService {
 
     fn scan_deferrals(&self) -> Arc<ScanDeferrals> {
         LocalIndexService::scan_deferrals(self).clone()
+    }
+
+    fn library_changed(&self, library_id: Uuid) {
+        self.notification_service().library_changed(library_id);
     }
 }
 
@@ -317,6 +325,10 @@ pub fn spawn_background_indexing_with(
 /// set, as a [`FsEventKind::Modified`] event due once the scan's delay has
 /// passed: nothing else would come back to it before the next periodic
 /// rescan. An event already kept for the path stays as it was.
+///
+/// Each pass ends by publishing `library_changed` once for every library a
+/// reconcile in it finished (issue #454) -- not for a deferred one, which
+/// changed nothing yet, nor a failed one.
 async fn run_watch_consumer(
     watcher: Arc<dyn FsWatcher>,
     indexer: Arc<dyn BackgroundIndexer>,
@@ -414,6 +426,7 @@ async fn run_watch_consumer(
 
         // Reconcile the coalesced events.
         let mut remaining = batch.len();
+        let mut changed: HashSet<Uuid> = HashSet::new();
         for event in batch {
             let FsEvent {
                 library_id,
@@ -421,7 +434,9 @@ async fn run_watch_consumer(
                 kind,
             } = event;
             match indexer.reconcile_path(library_id, path.clone(), kind).await {
-                Ok(ReconcileOutcome::Done) => {}
+                Ok(ReconcileOutcome::Done) => {
+                    changed.insert(library_id);
+                }
                 Ok(ReconcileOutcome::Deferred { retry_after }) => {
                     let due = clock.monotonic() + retry_after;
                     deferred.insert((library_id, path), (kind, due));
@@ -431,6 +446,13 @@ async fn run_watch_consumer(
             }
             remaining -= 1;
             record_pending(remaining);
+        }
+
+        // One `library_changed` per library per batch, so per debounce
+        // window (issue #454): a burst of files copied into a library is one
+        // refetch for the clients showing it, not one per file.
+        for library_id in changed {
+            indexer.library_changed(library_id);
         }
     }
 }

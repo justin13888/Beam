@@ -9,6 +9,7 @@ pub mod collections;
 pub mod enrichment;
 pub mod genres;
 pub mod health;
+pub mod library_changes;
 pub mod lists;
 pub mod me;
 pub mod media;
@@ -152,6 +153,7 @@ pub fn rest_routes() -> Router<AppState, Propagate, (), RestScopes> {
             admin::refresh_media_metadata,
             admin::delete_library,
         ])
+        .mount(kynos::routes![library_changes::get_library_changes])
         .mount(kynos::routes![
             admin::get_admin_logs,
             admin::get_admin_events,

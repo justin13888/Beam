@@ -3,8 +3,8 @@
 
 use super::{BeamClient, parse_uuid};
 use crate::catalog::{
-    BrowseQuery, ContinueWatchingEntry, EpisodeSummary, HistoryPage, LibraryFileSummary,
-    LibrarySummary, MediaDetail, MediaPage, browse_params,
+    BrowseQuery, ContinueWatchingEntry, EpisodeSummary, HistoryPage, LibraryChanges,
+    LibraryFileSummary, LibrarySummary, MediaDetail, MediaPage, browse_params,
 };
 use crate::error::BeamError;
 
@@ -154,6 +154,32 @@ impl BeamClient {
             .into_iter()
             .map(LibrarySummary::from_generated)
             .collect())
+    }
+
+    /// The libraries whose contents the server's filesystem watcher changed
+    /// since `since` (issue #454): poll it while a browse or home screen is
+    /// shown, keep the answer's `cursor` for the next poll, and refetch each
+    /// library in `library_ids` -- every library shown when `reset` is set.
+    /// Pass `None` on the first poll.
+    ///
+    /// A polled cursor rather than a subscription: UniFFI has no
+    /// async-iterator type, and a cursor misses nothing while the app is
+    /// backgrounded (see `docs/architecture/api.md`, "Library change feed").
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BeamError::NoActiveServer`] when no server is selected, and
+    /// the [request failures](BeamClient#request-failures).
+    pub async fn library_changes(
+        &self,
+        since: Option<String>,
+    ) -> Result<LibraryChanges, BeamError> {
+        let (server_id, client, _) = self.active_context()?;
+        let params = crate::api::GetLibraryChangesParams { since };
+        let response = self
+            .send(&server_id, client.get_library_changes(params))
+            .await?;
+        Ok(LibraryChanges::from_generated(response.into_inner()))
     }
 
     /// One library.

@@ -73,8 +73,9 @@ pub use capability::{
 pub use catalog::{
     AdminEvent, AdminLogEntry, AdminLogPage, AdminStatus, AdminUser, AdminUserPage, BrowseQuery,
     ContinueWatchingEntry, DeviceSession, EpisodeSummary, HistoryEntry, HistoryPage,
-    LibraryFileSummary, LibrarySummary, MediaDetail, MediaKind, MediaPage, MediaSortField,
-    MediaSummary, MediaTypeFilter, ScanJob, ScanJobState, SeasonSummary, ServerHealth, SortOrder,
+    LibraryChanges, LibraryFileSummary, LibrarySummary, MediaDetail, MediaKind, MediaPage,
+    MediaSortField, MediaSummary, MediaTypeFilter, ScanJob, ScanJobState, SeasonSummary,
+    ServerHealth, SortOrder,
 };
 pub use clock::{Clock, SystemClock};
 pub use download::{
