@@ -228,12 +228,10 @@ impl TrickplayService {
         }
 
         let mut report = PassReport::default();
-        let mut remaining = work.len();
-        record_pending(remaining);
+        let mut pending = PendingGauge::start(work.len());
         for (library, file) in work {
             let made = self.make(library, &file).await;
-            remaining -= 1;
-            record_pending(remaining);
+            pending.one_done();
             match made? {
                 Made::Sheets => report.made += 1,
                 Made::None => report.without_sheets += 1,
@@ -379,6 +377,37 @@ impl TrickplayService {
 /// has still to make sheets for.
 fn record_pending(files: usize) {
     metrics::gauge!("beam_trickplay_pending").set(files as f64);
+}
+
+/// A pass's backlog on `beam_trickplay_pending`, read empty however the
+/// pass ends (issue #496): a pass that returns early -- a `make` that fails
+/// on the database -- or is cancelled leaves no files to do, so the gauge
+/// must not go on reporting the ones it never reached.
+struct PendingGauge {
+    remaining: usize,
+}
+
+impl PendingGauge {
+    /// Record a backlog of `files`.
+    fn start(files: usize) -> Self {
+        record_pending(files);
+        Self { remaining: files }
+    }
+
+    /// One file is done, however it went.
+    fn one_done(&mut self) {
+        self.remaining -= 1;
+        record_pending(self.remaining);
+    }
+}
+
+impl Drop for PendingGauge {
+    fn drop(&mut self) {
+        // A pass that finished has already recorded its last 0.
+        if self.remaining > 0 {
+            record_pending(0);
+        }
+    }
 }
 
 /// Count one file whose sheets could not be made
