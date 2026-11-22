@@ -11,6 +11,7 @@ pub mod genres;
 pub mod health;
 pub mod library_changes;
 pub mod lists;
+pub mod markers;
 pub mod me;
 pub mod media;
 pub mod metrics_mw;
@@ -155,6 +156,11 @@ pub fn rest_routes() -> Router<AppState, Propagate, (), RestScopes> {
             admin::delete_library,
         ])
         .mount(kynos::routes![library_changes::get_library_changes])
+        .mount(kynos::routes![
+            markers::get_file_markers,
+            markers::set_file_marker,
+            markers::clear_file_marker,
+        ])
         .mount(kynos::routes![
             admin::get_admin_logs,
             admin::get_admin_events,

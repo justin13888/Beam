@@ -9,7 +9,9 @@
 use std::sync::OnceLock;
 
 pub mod color;
+pub mod fingerprint;
 pub mod format;
+pub mod markers;
 pub mod media;
 pub mod metadata;
 pub mod trickplay;

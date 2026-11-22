@@ -67,7 +67,7 @@ pub(super) fn fixture() -> Fixture {
     let clock = Arc::new(TestClock::new());
     let sources = Arc::new(SourceCatalog::new(crate::services::sources::SourceRepositories {movies: movies.clone(), files: files.clone(), streams: Arc::new(InMemoryMediaStreamRepository::default()), sidecars: Arc::new(
             beam_domain::repositories::sidecar_subtitle::in_memory::InMemorySidecarSubtitleRepository::default(),
-        ), chapters: Arc::new(beam_domain::repositories::chapter::in_memory::InMemoryChapterRepository::default()), trickplay: Arc::new(beam_domain::repositories::trickplay::in_memory::InMemoryTrickplayRepository::default()),}));
+        ), chapters: Arc::new(beam_domain::repositories::chapter::in_memory::InMemoryChapterRepository::default()), trickplay: Arc::new(beam_domain::repositories::trickplay::in_memory::InMemoryTrickplayRepository::default()), markers: Arc::new(beam_domain::repositories::markers::in_memory::InMemoryMarkerRepository::default()),}));
     let playback = Arc::new(DbPlaybackService::new(PlaybackRepositories {
         watch_state: Arc::new(
             beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::new(
@@ -407,6 +407,9 @@ async fn a_watch_state_store_failure_is_a_500_never_an_empty_shelf_or_history() 
             ),
             trickplay: Arc::new(
                 beam_domain::repositories::trickplay::in_memory::InMemoryTrickplayRepository::default(),
+            ),
+            markers: Arc::new(
+                beam_domain::repositories::markers::in_memory::InMemoryMarkerRepository::default(),
             ),
         },
     ));

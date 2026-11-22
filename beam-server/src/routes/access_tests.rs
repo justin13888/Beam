@@ -233,6 +233,9 @@ fn fixture() -> Fixture {
                 beam_domain::repositories::chapter::in_memory::InMemoryChapterRepository::default(),
             ),
             trickplay: trickplay_records.clone(),
+            markers: Arc::new(
+                beam_domain::repositories::markers::in_memory::InMemoryMarkerRepository::default(),
+            ),
         },
     ));
     let playback = Arc::new(DbPlaybackService::new(PlaybackRepositories {

@@ -32,6 +32,7 @@ mod genre;
 mod language_preference;
 mod library;
 mod library_shape;
+mod markers;
 mod media_stream;
 mod movie;
 mod person;
@@ -382,6 +383,18 @@ pub mod fixture {
     pub trait TrickplayFixture: Send + Sync {
         /// The repository under contract.
         fn repo(&self) -> &dyn crate::repositories::TrickplayRepository;
+
+        /// A video file that exists as far as the backing store is concerned.
+        async fn new_file(&self) -> Uuid;
+    }
+
+    /// Everything the [`crate::marker_repository_contract`] suite needs: the
+    /// repository under contract and the files a marker belongs to, which a
+    /// real Postgres holds to a foreign key.
+    #[async_trait::async_trait]
+    pub trait MarkerFixture: Send + Sync {
+        /// The repository under contract.
+        fn repo(&self) -> &dyn crate::repositories::MarkerRepository;
 
         /// A video file that exists as far as the backing store is concerned.
         async fn new_file(&self) -> Uuid;

@@ -89,6 +89,8 @@ queries, so a page still holds `first` items and every `total` counts only what 
 | `/v1/admin/media/{id}/match-candidates` | GET | The configured providers' candidates for a title, best first, scored as the worker scores them (`query`, `year` override the title's own); `409` `provider-not-configured`, `502` `enrichment-provider-error` |
 | `/v1/admin/media/{id}/match` | POST, DELETE | Fix a title's match: `{"external_ref": "tmdb:603"}` pins it as the administrator's (outranks and is never replaced by an NFO, FR-312) and queues it: `202` with the title; `422` `validation-failed`, `409` `provider-not-configured` / `external-ref-taken`. `DELETE` clears an administrator's pin back to the NFO's pin or to a search and queues the title; on a title no administrator pinned it changes nothing (`204` either way) |
 | `/v1/admin/media/{id}/enrichment/locks` | PUT | Lock exactly the listed fields, so enrichment leaves them alone; `422` for a show's `release_date`/`runtime` |
+| `/v1/admin/files/{fileId}/markers` | GET | A file's skip markers -- the `markers` its sources carry -- each with its `origin`: `admin`, `detected` or `chapter` ([#332](https://github.com/justin13888/beam/issues/332)); `404` `file-not-found` |
+| `/v1/admin/files/{fileId}/markers/{kind}` | PUT, DELETE | Set or correct one kind (`recap`, `intro`, `credits`, `preview`): `{"start_ms", "end_ms"}` replaces a detected marker, overrides the chapter's, and is never replaced by detection; `422` `validation-failed` for a span that does not end after it starts or ends past the file. `DELETE` stops Beam keeping that kind, whoever set it, so the chapters decide it again. Both answer the file's markers after |
 | `/v1/admin/media/refresh`, `/v1/admin/libraries/{id}/refresh` | POST | Queue every title, or one library's -- a title with no enrichment row yet is given one -- for another pass (FR-308), keeping each match unless `?rematch=true`: `202` `{queued_count}` |
 | `/v1/admin/logs` | GET | The operational log, newest first: an `AdminLogConnection` paged by `first` (1-200, default 50) and `after`, with `total` |
 | `/v1/admin/events` | GET | The most recent admin events, oldest first: an `AdminEventConnection` of at most `first` (1-1000, default 100), with no cursors; `has_next_page` says older events were left out |
@@ -143,9 +145,11 @@ track the file marks default -- else what `forced_only` picks. A tie within one 
 the file's default, then not SDH, then text, then list order. Each part carries its own
 `default_subtitle_track_index` into its own `subtitle_tracks`, chosen beside the source's default
 audio. The choice is `beam_domain::utils::track_selection`, a pure function. Each source and
-part also carries its file's `chapters` (`start_ms`, `end_ms`, `title`), the `markers` read from
-the chapters titled for a skippable span (`recap`, `intro`, `credits`, `preview`; at most one of
-each, by start, `beam_domain::models::chapter::markers_from_chapters`), and -- once the background
+part also carries its file's `chapters` (`start_ms`, `end_ms`, `title`), its `markers` -- the
+skippable spans (`recap`, `intro`, `credits`, `preview`; at most one of each, by start), each the
+one an administrator set or Beam detected in the audio a season's episodes share
+([#332](https://github.com/justin13888/beam/issues/332)), else the one a chapter titled for it
+names (`beam_domain::models::chapter::resolve_markers`) -- and -- once the background
 worker has made them for the file's current content -- `trickplay`, the layout of its JPEG
 scrub-preview sheets and their `sheet_urls` ([#265](https://github.com/justin13888/beam/issues/265)).
 `chapters` and `markers` are `default`ed, so a client generated from this document still reads an
