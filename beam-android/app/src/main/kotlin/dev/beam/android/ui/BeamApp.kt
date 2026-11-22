@@ -45,7 +45,6 @@ import dev.beam.android.feature.explore.ExploreRoute
 import dev.beam.android.feature.history.HistoryRoute
 import dev.beam.android.feature.home.HomeRoute
 import dev.beam.android.feature.libraries.LibrariesRoute
-import dev.beam.android.feature.libraries.LibraryDetailRoute
 import dev.beam.android.feature.player.PlayerRoute
 import dev.beam.android.feature.settings.SettingsRoute
 import dev.beam.android.navigation.Admin
@@ -218,8 +217,11 @@ private fun BeamNavDisplay(
                 entry<LibraryDetail> {
                     // The library's contents are the catalog filtered to it, so
                     // the explore screen renders them rather than a near-duplicate
-                    // screen existing solely to show a different query.
-                    ExploreRoute(onOpenMedia = { mediaId -> backStack.add(MediaDetail(mediaId)) })
+                    // screen existing solely to show a different query. Its view
+                    // model reads `libraryId` from the arguments provided here.
+                    ProvideArguments(it, LibraryDetail.serializer()) {
+                        ExploreRoute(onOpenMedia = { mediaId -> backStack.add(MediaDetail(mediaId)) })
+                    }
                 }
 
                 entry<History> {

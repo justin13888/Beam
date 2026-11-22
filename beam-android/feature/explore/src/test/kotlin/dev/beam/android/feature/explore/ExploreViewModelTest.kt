@@ -1,5 +1,6 @@
 package dev.beam.android.feature.explore
 
+import androidx.lifecycle.SavedStateHandle
 import dev.beam.android.core.testing.FakeCatalogRepository
 import dev.beam.android.core.testing.Fixtures
 import kotlinx.coroutines.Dispatchers
@@ -42,7 +43,7 @@ class ExploreViewModelTest {
             // explicit first load, so without dropping it the screen fetches page
             // one twice -- doubling the cost of every cold start.
             val catalog = FakeCatalogRepository()
-            ExploreViewModel(catalog)
+            ExploreViewModel(catalog, SavedStateHandle())
             testScheduler.advanceUntilIdle()
 
             assertEquals(1, catalog.browseCalls.size)
@@ -52,7 +53,7 @@ class ExploreViewModelTest {
     fun `typing does not query on every keystroke`() =
         runTest {
             val catalog = FakeCatalogRepository()
-            val viewModel = ExploreViewModel(catalog)
+            val viewModel = ExploreViewModel(catalog, SavedStateHandle())
             testScheduler.advanceUntilIdle()
             val before = catalog.browseCalls.size
 
@@ -83,7 +84,7 @@ class ExploreViewModelTest {
             // Reusing one across a filter change returns a page from the middle of
             // a different result set.
             val catalog = FakeCatalogRepository().apply { nextCursor = "cursor-1" }
-            val viewModel = ExploreViewModel(catalog)
+            val viewModel = ExploreViewModel(catalog, SavedStateHandle())
             testScheduler.advanceUntilIdle()
 
             viewModel.loadMore()
@@ -101,6 +102,39 @@ class ExploreViewModelTest {
         }
 
     @Test
+    fun `a library's explore sends its library with every page and every filter`() =
+        runTest {
+            // A cursor belongs to the query that issued it, the library
+            // included: a page fetched without it would continue a different
+            // listing from the library's position.
+            val catalog = FakeCatalogRepository().apply { nextCursor = "cursor-1" }
+            val viewModel = ExploreViewModel(catalog, SavedStateHandle(mapOf("libraryId" to "library-1")))
+            testScheduler.advanceUntilIdle()
+
+            viewModel.loadMore()
+            testScheduler.advanceUntilIdle()
+            viewModel.onGenreChange("Drama")
+            testScheduler.advanceUntilIdle()
+
+            assertEquals(3, catalog.browseCalls.size)
+            assertEquals(
+                listOf("library-1", "library-1", "library-1"),
+                catalog.browseCalls.map { it.libraryId },
+            )
+            assertEquals("cursor-1", catalog.browseCalls[1].after)
+        }
+
+    @Test
+    fun `the explore tab browses the whole catalog`() =
+        runTest {
+            val catalog = FakeCatalogRepository()
+            ExploreViewModel(catalog, SavedStateHandle())
+            testScheduler.advanceUntilIdle()
+
+            assertNull(catalog.browseCalls.single().libraryId)
+        }
+
+    @Test
     fun `a further page is appended rather than replacing what is shown`() =
         runTest {
             val catalog =
@@ -108,7 +142,7 @@ class ExploreViewModelTest {
                     nextCursor = "cursor-1"
                     pages = listOf(pageOf("a", "b"), pageOf("c", "d"))
                 }
-            val viewModel = ExploreViewModel(catalog)
+            val viewModel = ExploreViewModel(catalog, SavedStateHandle())
             testScheduler.advanceUntilIdle()
 
             viewModel.loadMore()
@@ -132,7 +166,7 @@ class ExploreViewModelTest {
                     nextCursor = "cursor-1"
                     pages = listOf(pageOf("a", "b"), pageOf("b", "c"))
                 }
-            val viewModel = ExploreViewModel(catalog)
+            val viewModel = ExploreViewModel(catalog, SavedStateHandle())
             testScheduler.advanceUntilIdle()
 
             viewModel.loadMore()
@@ -159,7 +193,7 @@ class ExploreViewModelTest {
                             pageOf("c"),
                         )
                 }
-            val viewModel = ExploreViewModel(catalog)
+            val viewModel = ExploreViewModel(catalog, SavedStateHandle())
             testScheduler.advanceUntilIdle()
 
             viewModel.loadMore()
@@ -179,7 +213,7 @@ class ExploreViewModelTest {
     fun `load more does nothing when there is no next page`() =
         runTest {
             val catalog = FakeCatalogRepository().apply { nextCursor = null }
-            val viewModel = ExploreViewModel(catalog)
+            val viewModel = ExploreViewModel(catalog, SavedStateHandle())
             testScheduler.advanceUntilIdle()
             val before = catalog.browseCalls.size
 
@@ -193,7 +227,7 @@ class ExploreViewModelTest {
     fun `clearing filters removes every restriction at once`() =
         runTest {
             val catalog = FakeCatalogRepository()
-            val viewModel = ExploreViewModel(catalog)
+            val viewModel = ExploreViewModel(catalog, SavedStateHandle())
             testScheduler.advanceUntilIdle()
 
             viewModel.onQueryChange("arrival")
@@ -219,7 +253,7 @@ class ExploreViewModelTest {
             // An empty `query` parameter is a filter that matches nothing on some
             // servers; omitting it is the only safe encoding of "no search".
             val catalog = FakeCatalogRepository()
-            val viewModel = ExploreViewModel(catalog)
+            val viewModel = ExploreViewModel(catalog, SavedStateHandle())
             testScheduler.advanceUntilIdle()
 
             viewModel.onQueryChange("   ")
@@ -232,7 +266,7 @@ class ExploreViewModelTest {
     fun `a failure is reported without discarding what is already shown`() =
         runTest {
             val catalog = FakeCatalogRepository().apply { nextCursor = "cursor-1" }
-            val viewModel = ExploreViewModel(catalog)
+            val viewModel = ExploreViewModel(catalog, SavedStateHandle())
             testScheduler.advanceUntilIdle()
             val loaded = viewModel.state.value.items
 
@@ -256,7 +290,7 @@ class ExploreViewModelTest {
             // later one, and the grid could never page on; one that advanced
             // past it would skip every title on that page.
             val catalog = FakeCatalogRepository().apply { nextCursor = "cursor-1" }
-            val viewModel = ExploreViewModel(catalog)
+            val viewModel = ExploreViewModel(catalog, SavedStateHandle())
             testScheduler.advanceUntilIdle()
 
             catalog.failWith = BeamException.Network("offline", retryable = true)
@@ -275,7 +309,7 @@ class ExploreViewModelTest {
     fun `selecting the sort field already in use reverses it`() =
         runTest {
             val catalog = FakeCatalogRepository()
-            val viewModel = ExploreViewModel(catalog)
+            val viewModel = ExploreViewModel(catalog, SavedStateHandle())
             testScheduler.advanceUntilIdle()
 
             viewModel.onSortChange(MediaSortField.TITLE, SortOrder.DESCENDING)
@@ -288,7 +322,7 @@ class ExploreViewModelTest {
     fun `genres are loaded for the filter chips`() =
         runTest {
             val catalog = FakeCatalogRepository()
-            val viewModel = ExploreViewModel(catalog)
+            val viewModel = ExploreViewModel(catalog, SavedStateHandle())
             testScheduler.advanceUntilIdle()
 
             assertTrue(
@@ -303,7 +337,7 @@ class ExploreViewModelTest {
             // The chips are a convenience; the grid is the screen. One failing must
             // not take the other with it.
             val catalog = FakeCatalogRepository().apply { genresFailWith = BeamException.Network("x", true) }
-            val viewModel = ExploreViewModel(catalog)
+            val viewModel = ExploreViewModel(catalog, SavedStateHandle())
             testScheduler.advanceUntilIdle()
 
             assertTrue(

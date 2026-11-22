@@ -8,7 +8,6 @@ import uniffi.beam_client_core.BrowseQuery
 import uniffi.beam_client_core.DeviceLoginPrompt
 import uniffi.beam_client_core.DeviceSession
 import uniffi.beam_client_core.EpisodeSummary
-import uniffi.beam_client_core.LibraryFileSummary
 import uniffi.beam_client_core.LibrarySummary
 import uniffi.beam_client_core.MediaDetail
 import uniffi.beam_client_core.MediaPage
@@ -133,10 +132,6 @@ internal class BeamCatalogRepository
         override suspend fun genres(): List<String> = client.genres()
 
         override suspend fun libraries(): List<LibrarySummary> = client.libraries()
-
-        override suspend fun library(libraryId: String): LibrarySummary = client.library(libraryId)
-
-        override suspend fun libraryFiles(libraryId: String): List<LibraryFileSummary> = client.libraryFiles(libraryId)
 
         override suspend fun upNext(
             showId: String,

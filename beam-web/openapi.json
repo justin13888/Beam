@@ -2693,6 +2693,16 @@
               "minimum": 0.0,
               "format": "double"
             }
+          },
+          {
+            "name": "library_id",
+            "in": "query",
+            "description": "Filter to the titles indexed in this library. A library the caller\nmay not see, or one that does not exist, lists nothing: the answer is\nthe same either way, so it does not say which libraries exist.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
           }
         ],
         "responses": {

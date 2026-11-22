@@ -2,6 +2,9 @@ plugins {
     id("beam.android.application")
     id("beam.android.compose")
     id("beam.android.hilt")
+    // The explore screen a library opens pages through the core's
+    // `CursorPager`, so a test navigating to it reaches the core.
+    id("beam.android.nativecore")
     alias(libs.plugins.kotlin.serialization)
     id("beam.android.pitest")
 }
