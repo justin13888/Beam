@@ -20,6 +20,7 @@ use crate::models::{
     FieldError, FileMarker, FileMarkerList, PlaybackMarkerKind, PlaybackMarkerOrigin,
     SetFileMarkerRequest,
 };
+use crate::routes::admin::record_change;
 use crate::routes::api_error::{ERROR_BASE, INTERNAL_DETAIL, ServerFault};
 use crate::routes::session_auth::AdminAuth;
 use crate::routes::tags::Admin;
@@ -89,6 +90,16 @@ fn domain_kind(kind: PlaybackMarkerKind) -> MarkerKind {
     }
 }
 
+/// The kind as the wire spells it, for a record's message.
+fn kind_name(kind: PlaybackMarkerKind) -> &'static str {
+    match kind {
+        PlaybackMarkerKind::Recap => "recap",
+        PlaybackMarkerKind::Intro => "intro",
+        PlaybackMarkerKind::Credits => "credits",
+        PlaybackMarkerKind::Preview => "preview",
+    }
+}
+
 fn list(file_id: Uuid, markers: Vec<ResolvedMarker>) -> FileMarkerList {
     FileMarkerList {
         file_id,
@@ -139,25 +150,38 @@ pub async fn get_file_markers(
     operation_id = "setFileMarker"
 )]
 pub async fn set_file_marker(
-    _auth: AdminAuth,
+    auth: AdminAuth,
     Path(path): Path<FileMarkerPath>,
     Inject(state): Inject<AppState>,
     Json(body): Json<SetFileMarkerRequest>,
 ) -> Result<Json<FileMarkerList>, FileMarkerError> {
+    let FileMarkerPath { file_id, kind } = path;
     let SetFileMarkerRequest { start_ms, end_ms } = body;
     let markers = state
         .services
         .markers
         .set(
-            path.file_id,
+            file_id,
             DomainMarker {
-                kind: domain_kind(path.kind),
+                kind: domain_kind(kind),
                 start_ms,
                 end_ms,
             },
         )
         .await?;
-    Ok(Json(list(path.file_id, markers)))
+    record_change(
+        &state,
+        &auth,
+        format!("Set the {} marker of file {file_id}", kind_name(kind)),
+        serde_json::json!({
+            "file_id": file_id,
+            "kind": kind,
+            "start_ms": start_ms,
+            "end_ms": end_ms,
+        }),
+    )
+    .await;
+    Ok(Json(list(file_id, markers)))
 }
 
 /// Clear one of a file's markers, whether an administrator set it or Beam
@@ -169,16 +193,26 @@ pub async fn set_file_marker(
     operation_id = "clearFileMarker"
 )]
 pub async fn clear_file_marker(
-    _auth: AdminAuth,
+    auth: AdminAuth,
     Path(path): Path<FileMarkerPath>,
     Inject(state): Inject<AppState>,
 ) -> Result<Json<FileMarkerList>, FileMarkerError> {
+    let FileMarkerPath { file_id, kind } = path;
     let markers = state
         .services
         .markers
-        .clear(path.file_id, domain_kind(path.kind))
+        .clear(file_id, domain_kind(kind))
         .await?;
-    Ok(Json(list(path.file_id, markers)))
+    // Recorded even where Beam kept no marker of the kind: the store does not
+    // say whether the clear removed one, and the request is what was made.
+    record_change(
+        &state,
+        &auth,
+        format!("Cleared the {} marker of file {file_id}", kind_name(kind)),
+        serde_json::json!({ "file_id": file_id, "kind": kind }),
+    )
+    .await;
+    Ok(Json(list(file_id, markers)))
 }
 
 #[cfg(test)]

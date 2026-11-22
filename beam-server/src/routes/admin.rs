@@ -202,7 +202,9 @@ impl From<LibraryError> for LibraryScanReadError {
 /// Called only once a change has been made, so the log never claims one that
 /// a validation failure or a missing target stopped. Enrichment changes are
 /// recorded by the enrichment control service itself, as `Enrichment`.
-async fn record_change(
+/// Shared with the other admin route families (`markers`) so every admin
+/// mutation is recorded the one way.
+pub(crate) async fn record_change(
     state: &AppState,
     auth: &AdminAuth,
     message: String,

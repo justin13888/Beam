@@ -241,6 +241,60 @@ async fn an_administrator_sets_corrects_and_clears_a_files_markers() {
         f.markers.find_by_file_id(f.file.id).await.unwrap(),
         vec![admin(MarkerKind::Credits, 1_250_000, 1_320_000)]
     );
+
+    // NFR-403: each change is recorded, naming the administrator, the file
+    // and the kind.
+    let admin_id = f
+        .state
+        .services
+        .user_repo
+        .find_by_oidc_identity("https://test.example", "subject-true")
+        .await
+        .unwrap()
+        .expect("the admin was seeded")
+        .id
+        .to_string();
+    let file_id = f.file.id.to_string();
+    assert_eq!(
+        change_records(&f).await,
+        vec![
+            (
+                format!("Set the credits marker of file {file_id}"),
+                json!({"file_id": file_id, "kind": "credits", "start_ms": 1_250_000,
+                       "end_ms": 1_320_000, "admin_user_id": admin_id}),
+            ),
+            (
+                format!("Set the intro marker of file {file_id}"),
+                json!({"file_id": file_id, "kind": "intro", "start_ms": 30_000,
+                       "end_ms": 110_000, "admin_user_id": admin_id}),
+            ),
+            (
+                format!("Cleared the intro marker of file {file_id}"),
+                json!({"file_id": file_id, "kind": "intro", "admin_user_id": admin_id}),
+            ),
+            (
+                format!("Cleared the recap marker of file {file_id}"),
+                json!({"file_id": file_id, "kind": "recap", "admin_user_id": admin_id}),
+            ),
+        ]
+    );
+}
+
+/// Every `System` entry in the fixture's admin log, oldest first, as its
+/// message and details.
+async fn change_records(f: &Fixture) -> Vec<(String, Value)> {
+    let mut entries = f
+        .state
+        .services
+        .admin_log
+        .get_logs_by_category(beam_domain::models::AdminLogCategory::System, 100, 0)
+        .await
+        .unwrap();
+    entries.reverse();
+    entries
+        .into_iter()
+        .map(|entry| (entry.message, entry.details.unwrap_or(Value::Null)))
+        .collect()
 }
 
 #[tokio::test]
@@ -260,6 +314,10 @@ async fn a_span_that_does_not_end_after_it_starts_or_ends_past_the_file_is_refus
         assert_eq!(problem["type"], VALIDATION_FAILED, "{body}");
         assert_eq!(problem["errors"][0]["pointer"], "/end_ms", "{body}");
     }
+    assert!(
+        change_records(&f).await.is_empty(),
+        "a refused span is no change, and is not recorded"
+    );
     f.put("intro", json!({"start_ms": 1_300_000, "end_ms": 1_320_000}))
         .await
         .assert_status(StatusCode::OK);
@@ -292,6 +350,7 @@ async fn a_file_nobody_indexed_is_not_found_and_an_unknown_kind_is_a_bad_request
         assert_eq!(problem["type"], FILE_NOT_FOUND, "{method} {path}");
     }
     assert!(f.markers.find_by_file_id(unknown).await.unwrap().is_empty());
+    assert!(change_records(&f).await.is_empty());
 
     f.put("opening", json!({"start_ms": 0, "end_ms": 1_000}))
         .await
@@ -339,6 +398,7 @@ async fn every_marker_route_is_for_administrators_only() {
             .unwrap()
             .is_empty()
     );
+    assert!(change_records(&f).await.is_empty());
 }
 
 /// A store that cannot be read is a 500 that names no cause (NFR-205).
