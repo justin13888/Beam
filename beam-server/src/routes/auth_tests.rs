@@ -77,7 +77,7 @@ pub(super) mod tests {
 
     /// A `(issuer, subject)` = `(https://dex.test, subj-1)` identity whose
     /// released claim set is fully caller-supplied, for admin-evaluation tests.
-    fn identity_with_claims(claims: Value) -> OidcIdentity {
+    pub(crate) fn identity_with_claims(claims: Value) -> OidcIdentity {
         OidcIdentity {
             claims,
             ..identity("user@example.com", true)
@@ -126,7 +126,7 @@ pub(super) mod tests {
     /// Builds a harness around a caller-supplied user repository, so several
     /// harnesses (e.g. two different issuers) can provision into the *same*
     /// store and assertions can span both logins.
-    fn make_harness_with_repo(
+    pub(crate) fn make_harness_with_repo(
         oidc_client: FakeOidcClient,
         user_repo: Arc<InMemoryUserRepository>,
     ) -> Harness {
@@ -1607,7 +1607,7 @@ pub(super) mod tests {
 
     /// Process log output, captured for one test.
     #[derive(Clone, Default)]
-    struct CapturedLogs(Arc<std::sync::Mutex<Vec<u8>>>);
+    pub(crate) struct CapturedLogs(Arc<std::sync::Mutex<Vec<u8>>>);
 
     impl std::io::Write for CapturedLogs {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -1622,7 +1622,7 @@ pub(super) mod tests {
 
     impl CapturedLogs {
         /// Captures every event on this thread until the guard drops.
-        fn install(&self) -> tracing::subscriber::DefaultGuard {
+        pub(crate) fn install(&self) -> tracing::subscriber::DefaultGuard {
             Self::keep_every_callsite_live();
             let logs = self.clone();
             tracing::subscriber::set_default(
@@ -1690,7 +1690,7 @@ pub(super) mod tests {
             });
         }
 
-        fn text(&self) -> String {
+        pub(crate) fn text(&self) -> String {
             String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
         }
     }

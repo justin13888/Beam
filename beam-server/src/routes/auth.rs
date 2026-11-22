@@ -1297,6 +1297,10 @@ mod session_tests;
 mod device_login_tests;
 
 #[cfg(test)]
+#[path = "session_records_tests.rs"]
+mod session_records_tests;
+
+#[cfg(test)]
 mod helper_tests {
     use super::*;
 
