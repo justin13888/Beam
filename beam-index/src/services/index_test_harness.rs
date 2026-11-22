@@ -37,8 +37,8 @@ use tempfile::TempDir;
 
 /// The one place a test builds a [`LocalIndexService`]: every dependency a
 /// test does not name is a fresh in-memory store, a strict mock with no
-/// expectations (the hasher and prober -- reaching one is a failure), a
-/// no-op admin log, or an empty notification sink. A test names only the
+/// expectations (the hasher and prober -- reaching one is a failure), an
+/// in-memory admin log, or an empty notification sink. A test names only the
 /// doubles it scripts or asserts through, and chains the service's own
 /// `with_*` options onto [`Self::build`]'s result.
 #[derive(Default)]
