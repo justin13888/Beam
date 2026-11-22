@@ -8,7 +8,6 @@ import uniffi.beam_client_core.DeviceProfile
 import uniffi.beam_client_core.DeviceSession
 import uniffi.beam_client_core.EpisodeSummary
 import uniffi.beam_client_core.HistoryPage
-import uniffi.beam_client_core.LibraryFileSummary
 import uniffi.beam_client_core.LibrarySummary
 import uniffi.beam_client_core.MediaDetail
 import uniffi.beam_client_core.MediaPage
@@ -117,12 +116,6 @@ public interface CatalogRepository {
 
     /** Every library on the server. */
     public suspend fun libraries(): List<LibrarySummary>
-
-    /** One library. */
-    public suspend fun library(libraryId: String): LibrarySummary
-
-    /** The files indexed into one library. */
-    public suspend fun libraryFiles(libraryId: String): List<LibraryFileSummary>
 
     /** The next playable episode after this one, across season boundaries. */
     public suspend fun upNext(

@@ -1,5 +1,6 @@
 package dev.beam.android.feature.explore
 
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -65,6 +66,10 @@ public data class ExploreUiState(
  * is reset whenever a filter changes, because a cursor is only meaningful
  * within the query that produced it -- reusing one across a filter change
  * returns a page from the middle of a different result set.
+ *
+ * Opened from a library, it is that library's titles: the destination's
+ * `libraryId` goes out with every page, and the filters narrow within it. A
+ * library is fixed for the screen's lifetime, so it never resets the cursor.
  */
 @OptIn(FlowPreview::class)
 @HiltViewModel
@@ -72,7 +77,13 @@ public class ExploreViewModel
     @Inject
     constructor(
         private val catalog: CatalogRepository,
+        // Hilt always supplies one, empty on the explore tab. Defaulted so a
+        // test of the whole catalog need not build one.
+        savedStateHandle: SavedStateHandle = SavedStateHandle(),
     ) : ViewModel() {
+        /** The library this screen lists, or null for the whole catalog. */
+        private val libraryId: String? = savedStateHandle["libraryId"]
+
         private val mutableState = MutableStateFlow(ExploreUiState())
         public val state: StateFlow<ExploreUiState> = mutableState.asStateFlow()
 
@@ -180,6 +191,7 @@ public class ExploreViewModel
                             yearTo = null,
                             query = current.query.trim().takeIf(String::isNotEmpty),
                             minRating = null,
+                            libraryId = libraryId,
                         ),
                     )
                 val advance = pager.completeRequest(page.items.map { it.id }, page.endCursor, page.hasNextPage)

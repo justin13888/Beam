@@ -1,5 +1,6 @@
 package dev.beam.android.feature.explore
 
+import androidx.lifecycle.SavedStateHandle
 import dev.beam.android.core.testing.FakeCatalogRepository
 import dev.beam.android.core.testing.Fixtures
 import kotlinx.coroutines.Dispatchers
@@ -98,6 +99,39 @@ class ExploreViewModelTest {
                 catalog.browseCalls.last().after,
             )
             assertEquals("Science Fiction", catalog.browseCalls.last().genre)
+        }
+
+    @Test
+    fun `a library's explore sends its library with every page and every filter`() =
+        runTest {
+            // A cursor belongs to the query that issued it, the library
+            // included: a page fetched without it would continue a different
+            // listing from the library's position.
+            val catalog = FakeCatalogRepository().apply { nextCursor = "cursor-1" }
+            val viewModel = ExploreViewModel(catalog, SavedStateHandle(mapOf("libraryId" to "library-1")))
+            testScheduler.advanceUntilIdle()
+
+            viewModel.loadMore()
+            testScheduler.advanceUntilIdle()
+            viewModel.onGenreChange("Drama")
+            testScheduler.advanceUntilIdle()
+
+            assertEquals(3, catalog.browseCalls.size)
+            assertEquals(
+                listOf("library-1", "library-1", "library-1"),
+                catalog.browseCalls.map { it.libraryId },
+            )
+            assertEquals("cursor-1", catalog.browseCalls[1].after)
+        }
+
+    @Test
+    fun `the explore tab browses the whole catalog`() =
+        runTest {
+            val catalog = FakeCatalogRepository()
+            ExploreViewModel(catalog)
+            testScheduler.advanceUntilIdle()
+
+            assertNull(catalog.browseCalls.single().libraryId)
         }
 
     @Test
