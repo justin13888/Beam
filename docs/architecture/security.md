@@ -34,10 +34,27 @@ against the IdP itself, and holds the same opaque credential (see
    below. The IdP tokens are discarded — `beam-server` never talks to the IdP again mid-session.
 6. **Subsequent requests.** Middleware hashes the presented cookie value, looks it up by
    `token_hash`, checks expiry, slides the idle expiry forward, and attaches the resolved user to
-   the request. No token ever appears in a URL, query string, or `<video>` `src`.
+   the request. No session token ever appears in a URL, query string, or `<video>` `src`.
 7. **Logout.** `POST /v1/logout` deletes the session row server-side (so a stolen cookie value is
    useless after logout) and clears the cookie; `POST /v1/logout-all` and
    `DELETE /v1/sessions/{id}` revoke other sessions.
+
+## Media grants
+
+A client Beam does not drive -- an AirPlay or Cast receiver, an external player such as VLC -- is
+handed a URL and fetches it itself, with no cookie. For it, a signed-in session asks
+`POST /v1/files/{file_id}/grant` and receives `stream_url`, `download_url` and `expires_at`
+([ADR-0022](decisions/ADR-0022-signed-media-grants.md)):
+
+- The URLs carry a `grant` query parameter: an HMAC-SHA256 signature over the file, the user and an
+  expiry four hours out, under a 32-byte key drawn at startup and never persisted. Nothing is
+  stored; a restart voids every grant outstanding.
+- `MediaGrant` is its own Kynos security scheme, and only the four delivery operations
+  (`GET`/`HEAD` of `/stream` and `/download`) accept it, as an alternative to the cookie. Any other
+  operation answers a grant with 401, so a leaked grant opens one file's bytes and nothing else.
+- A grant presented for a different file is 404. Every request made with a grant is held to the
+  issuing user's access policy, so a title hidden after the grant was issued is hidden from it too.
+- An expired or altered grant is 401; the reason is logged at `debug`, and the grant itself never.
 
 ## Device authorization grant
 

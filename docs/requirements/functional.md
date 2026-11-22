@@ -507,8 +507,14 @@ strength. Each requirement is independently testable. See `product.md` for narra
   argument and for the client-side work that answers the compatibility and bandwidth problems
   instead.
 - **FR-504**: Streaming and download endpoints MUST authenticate the request using the session
-  cookie established per FR-103. The server MUST NOT accept a bearer or stream token supplied via URL
-  query string.
+  cookie established per FR-103, or a media grant for the file the path names. A media grant is
+  issued to a signed-in session by `POST /v1/files/{file_id}/grant` for a client that holds no
+  cookie (an AirPlay or Cast receiver, an external player); it is a signature over one file, one
+  user and an expiry, it MUST be accepted by the streaming and download endpoints and by no other,
+  and the requests made with it MUST be held to that user's access policy. The server MUST NOT
+  accept a session or bearer token supplied via URL query string. (Amended for
+  [#461](https://github.com/justin13888/beam/issues/461); see
+  [ADR-0022](../architecture/decisions/ADR-0022-signed-media-grants.md).)
 - **FR-505**: For a title with multiple indexed file versions, the server MUST expose an endpoint
   (`/media/{id}/sources`) enumerating the available versions — container, size, edition, and each
   version's video, audio and subtitle tracks, every track tied to its file by its stream index and
