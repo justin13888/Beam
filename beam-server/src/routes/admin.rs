@@ -530,20 +530,19 @@ pub async fn get_admin_logs(
     Query(query): Query<LogsQuery>,
     Inject(state): Inject<AppState>,
 ) -> Result<Json<AdminLogConnection>, AdminListError> {
-    let internal = |e: beam_index::services::admin_log::AdminLogError| {
-        AdminListError::Internal(ServerFault::new(e))
-    };
+    let internal = |e: sea_orm::DbErr| AdminListError::Internal(ServerFault::new(e));
     let LogsQuery { first, after } = query;
     let first = page_size(first, LOGS_DEFAULT, LOGS_MAX, "items")
         .map_err(AdminListError::InvalidPagination)?;
     let offset = cursor::offset::start_after(OffsetList::AdminLogs, after.as_deref())
         .map_err(|err| AdminListError::InvalidCursor(err.to_string()))?;
-    // The log service pages by a `u32` offset; one past it has no rows.
+    // An offset past `u32::MAX` has no rows: the log is never that long, and
+    // the guard keeps an out-of-range cursor from reaching the store.
     let logs = match u32::try_from(offset) {
         Ok(offset) => state
             .services
             .admin_log
-            .get_logs(first.get(), offset)
+            .list(u64::from(first.get()), u64::from(offset))
             .await
             .map_err(internal)?,
         Err(_) => Vec::new(),
@@ -774,7 +773,7 @@ pub async fn set_admin_user_access(
 
 /// How many of the newest `library_scan` admin log entries the status
 /// endpoint returns as recent scan history.
-const RECENT_SCANS_LIMIT: u32 = 10;
+const RECENT_SCANS_LIMIT: u64 = 10;
 
 /// Operational snapshot for the admin system-status tab: process uptime and
 /// version, entity counts, the metadata-enrichment queue state, recent
@@ -808,7 +807,7 @@ pub async fn get_admin_status(
     let recent_scans = state
         .services
         .admin_log
-        .get_logs_by_category(
+        .list_by_category(
             beam_domain::models::AdminLogCategory::LibraryScan,
             RECENT_SCANS_LIMIT,
             0,

@@ -1417,8 +1417,6 @@ mod library_scans {
 
     use crate::probe::metadata::MetadataError;
 
-    use crate::services::admin_log::LocalAdminLogService;
-
     use crate::services::hash::MockHashService;
     use crate::services::media_info::MockMediaInfoService;
     use crate::services::notification::EventLevel;
@@ -1962,14 +1960,12 @@ mod library_scans {
             .unwrap();
 
         let admin_log_repo = Arc::new(InMemoryAdminLogRepository::default());
-        let admin_log_svc = Arc::new(LocalAdminLogService::new(
-            admin_log_repo.clone() as Arc<dyn AdminLogRepository>
-        ));
+        let admin_log_svc = admin_log_repo.clone() as Arc<dyn AdminLogRepository>;
 
         let service = IndexServiceBuilder::new()
             .library_repo(lib_repo.clone())
             .notifications(notification_svc.clone())
-            .admin_log(admin_log_svc)
+            .admin_log_repo(admin_log_svc)
             .build();
 
         let result = service.scan_library(library.id).await;
@@ -2160,9 +2156,7 @@ mod library_scans {
             .returning(|_| Err(std::io::Error::other("hash io error")));
 
         let admin_log_repo = Arc::new(InMemoryAdminLogRepository::default());
-        let admin_log_svc = Arc::new(LocalAdminLogService::new(
-            admin_log_repo.clone() as Arc<dyn AdminLogRepository>
-        ));
+        let admin_log_svc = admin_log_repo.clone() as Arc<dyn AdminLogRepository>;
 
         let service = IndexServiceBuilder::new()
             .library_repo(lib_repo.clone())
@@ -2170,7 +2164,7 @@ mod library_scans {
             .hash_service(Arc::new(mock_hash))
             .media_info(Arc::new(mock_media_info))
             .notifications(notification_svc.clone())
-            .admin_log(admin_log_svc)
+            .admin_log_repo(admin_log_svc)
             .build();
 
         // Scan should succeed overall; the failing file is not counted
@@ -2223,16 +2217,14 @@ mod library_scans {
         let lib_repo = Arc::new(InMemoryLibraryRepository::default());
         let notification_svc = Arc::new(InMemoryNotificationService::new());
         let admin_log_repo = Arc::new(InMemoryAdminLogRepository::default());
-        let admin_log_svc = Arc::new(LocalAdminLogService::new(
-            admin_log_repo.clone() as Arc<dyn AdminLogRepository>
-        ));
+        let admin_log_svc = admin_log_repo.clone() as Arc<dyn AdminLogRepository>;
         let dir = TempDir::new().unwrap();
         let library = make_library_in_tempdir(&lib_repo, &dir).await;
 
         let service = IndexServiceBuilder::new()
             .library_repo(lib_repo.clone())
             .notifications(notification_svc.clone())
-            .admin_log(admin_log_svc)
+            .admin_log_repo(admin_log_svc)
             .build();
 
         service.scan_library(library.id).await.unwrap();
@@ -2270,9 +2262,7 @@ mod library_scans {
         let lib_repo = Arc::new(InMemoryLibraryRepository::default());
         let file_repo = Arc::new(InMemoryFileRepository::default());
         let admin_log_repo = Arc::new(InMemoryAdminLogRepository::default());
-        let admin_log_svc = Arc::new(LocalAdminLogService::new(
-            admin_log_repo.clone() as Arc<dyn AdminLogRepository>
-        ));
+        let admin_log_svc = admin_log_repo.clone() as Arc<dyn AdminLogRepository>;
         let dir = TempDir::new().unwrap();
         let library = make_library_in_tempdir(&lib_repo, &dir).await;
 
@@ -2322,7 +2312,7 @@ mod library_scans {
             .file_repo(file_repo.clone())
             .hash_service(Arc::new(unchanged_hash))
             .media_info(Arc::new(failing_probe))
-            .admin_log(admin_log_svc)
+            .admin_log_repo(admin_log_svc)
             .build();
 
         let added = service.scan_library(library.id).await.unwrap();
@@ -2617,9 +2607,7 @@ mod library_scans {
         let lib_repo = Arc::new(InMemoryLibraryRepository::default());
         let file_repo = Arc::new(InMemoryFileRepository::default());
         let admin_log_repo = Arc::new(InMemoryAdminLogRepository::default());
-        let admin_log_svc = Arc::new(LocalAdminLogService::new(
-            admin_log_repo.clone() as Arc<dyn AdminLogRepository>
-        ));
+        let admin_log_svc = admin_log_repo.clone() as Arc<dyn AdminLogRepository>;
         let dir = TempDir::new().unwrap();
         let library = make_library_in_tempdir(&lib_repo, &dir).await;
 
@@ -2644,7 +2632,7 @@ mod library_scans {
             .file_repo(file_repo.clone())
             .hash_service(Arc::new(mock_hash))
             .media_info(Arc::new(mock_media_info))
-            .admin_log(admin_log_svc)
+            .admin_log_repo(admin_log_svc)
             .build();
 
         service.scan_library(library.id).await.unwrap();

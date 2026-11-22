@@ -371,9 +371,7 @@ async fn a_scan_that_queues_a_title_wakes_the_enrichment_worker_build_wires() {
     let movie_repo = Arc::new(InMemoryMovieRepository::with_files(file_repo.clone()));
     let show_repo = Arc::new(InMemoryShowRepository::with_files(file_repo.clone()));
     let enrichment_repo = Arc::new(InMemoryEnrichmentStateRepository::default());
-    let admin_log: Arc<dyn AdminLogService> = Arc::new(LocalAdminLogService::new(Arc::new(
-        InMemoryAdminLogRepository::default(),
-    )));
+    let admin_log: Arc<dyn AdminLogRepository> = Arc::new(InMemoryAdminLogRepository::default());
     let notifications = Arc::new(InMemoryNotificationService::new());
     let library = library_repo
         .create(CreateLibrary {
