@@ -627,6 +627,56 @@ async fn the_pending_gauge_counts_down_the_pass() {
     );
 }
 
+/// Trickplay records that cannot be written: every upsert fails as the
+/// database would.
+#[derive(Debug, Default)]
+struct UnwritableRecords(InMemoryTrickplayRepository);
+
+#[async_trait::async_trait]
+impl TrickplayRepository for UnwritableRecords {
+    async fn upsert(&self, _record: TrickplayRecord) -> Result<(), DbErr> {
+        Err(DbErr::Custom("connection lost".into()))
+    }
+
+    async fn find(&self, file_id: Uuid) -> Result<Option<TrickplayRecord>, DbErr> {
+        self.0.find(file_id).await
+    }
+
+    async fn find_by_file_ids(&self, file_ids: &[Uuid]) -> Result<Vec<TrickplayRecord>, DbErr> {
+        self.0.find_by_file_ids(file_ids).await
+    }
+}
+
+/// A pass that fails part-way leaves no backlog behind: the gauge reads 0,
+/// not the files the pass never reached (issue #496).
+#[tokio::test]
+async fn a_pass_that_fails_leaves_the_pending_gauge_at_zero() {
+    let log = Arc::new(MetricLog::default());
+    let recorder = LoggingRecorder(log.clone());
+    let _recorder = metrics::set_default_local_recorder(&recorder);
+    let h = Harness::new(Outcome::Sheets(1)).await;
+    h.file("One (2001).mkv", 1).await;
+    h.file("Two (2002).mkv", 2).await;
+    let data_dir = TempDir::new().unwrap();
+    let service = TrickplayService::new(
+        data_dir.path().join("trickplay"),
+        TrickplayDependencies {
+            libraries: h.service.libraries.clone(),
+            files: h.files.clone(),
+            records: Arc::new(UnwritableRecords::default()),
+            generator: h.generator.clone(),
+            clock: h.clock.clone(),
+        },
+    );
+
+    assert!(service.run_pass().await.is_err());
+    assert_eq!(h.generator.calls(), 1, "the pass ends at the first file");
+    assert_eq!(
+        log.gauge_history("beam_trickplay_pending").last(),
+        Some(&0.0)
+    );
+}
+
 /// A file whose sheets could not be made counts as a failure, whether it is
 /// left for a later pass or its content does not decode; one with no video
 /// to make sheets of does not.
