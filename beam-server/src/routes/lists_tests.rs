@@ -69,7 +69,7 @@ fn fixture_over(lists: Arc<dyn UserListRepository>, clock: Arc<TestClock>) -> Fi
     let genres = Arc::new(InMemoryGenreRepository::default());
     let sources = Arc::new(SourceCatalog::new(crate::services::sources::SourceRepositories {movies: movies.clone(), files: files.clone(), streams: Arc::new(InMemoryMediaStreamRepository::default()), sidecars: Arc::new(
             beam_domain::repositories::sidecar_subtitle::in_memory::InMemorySidecarSubtitleRepository::default(),
-        ), chapters: Arc::new(beam_domain::repositories::chapter::in_memory::InMemoryChapterRepository::default()), trickplay: Arc::new(beam_domain::repositories::trickplay::in_memory::InMemoryTrickplayRepository::default()),}));
+        ), chapters: Arc::new(beam_domain::repositories::chapter::in_memory::InMemoryChapterRepository::default()), trickplay: Arc::new(beam_domain::repositories::trickplay::in_memory::InMemoryTrickplayRepository::default()), markers: Arc::new(beam_domain::repositories::markers::in_memory::InMemoryMarkerRepository::default()),}));
     let playback: Arc<dyn PlaybackService> =
         Arc::new(DbPlaybackService::new(PlaybackRepositories {
             watch_state: Arc::new(

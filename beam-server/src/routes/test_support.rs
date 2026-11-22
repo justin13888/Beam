@@ -169,7 +169,7 @@ pub(crate) fn in_memory_playback(
 ) -> Arc<dyn PlaybackService> {
     let sources = Arc::new(SourceCatalog::new(crate::services::sources::SourceRepositories {movies: movies.clone(), files: files.clone(), streams: Arc::new(InMemoryMediaStreamRepository::default()), sidecars: Arc::new(
             beam_domain::repositories::sidecar_subtitle::in_memory::InMemorySidecarSubtitleRepository::default(),
-        ), chapters: Arc::new(beam_domain::repositories::chapter::in_memory::InMemoryChapterRepository::default()), trickplay: Arc::new(beam_domain::repositories::trickplay::in_memory::InMemoryTrickplayRepository::default()),}));
+        ), chapters: Arc::new(beam_domain::repositories::chapter::in_memory::InMemoryChapterRepository::default()), trickplay: Arc::new(beam_domain::repositories::trickplay::in_memory::InMemoryTrickplayRepository::default()), markers: Arc::new(beam_domain::repositories::markers::in_memory::InMemoryMarkerRepository::default()),}));
     Arc::new(DbPlaybackService::new(PlaybackRepositories {
         watch_state: Arc::new(InMemoryWatchStateRepository::new(clock)),
         files,
@@ -334,6 +334,28 @@ pub(crate) fn idle_trickplay() -> Arc<crate::services::trickplay::TrickplayServi
                 beam_domain::repositories::trickplay::in_memory::InMemoryTrickplayRepository::default(),
             ),
             generator: Arc::new(beam_index::services::trickplay::MockTrickplayGenerator::new()),
+            clock: Arc::new(beam_domain::services::RealClock),
+        },
+    ))
+}
+
+/// Skip markers over empty in-memory stores: every file is unknown, and no
+/// detection pass is ever run.
+pub(crate) fn idle_markers() -> Arc<crate::services::markers::MarkerService> {
+    Arc::new(crate::services::markers::MarkerService::new(
+        crate::services::markers::MarkerDependencies {
+            libraries: Arc::new(
+                beam_domain::repositories::library::in_memory::InMemoryLibraryRepository::default(),
+            ),
+            files: Arc::new(InMemoryFileRepository::default()),
+            shows: Arc::new(InMemoryShowRepository::default()),
+            chapters: Arc::new(
+                beam_domain::repositories::chapter::in_memory::InMemoryChapterRepository::default(),
+            ),
+            markers: Arc::new(
+                beam_domain::repositories::markers::in_memory::InMemoryMarkerRepository::default(),
+            ),
+            fingerprinter: Arc::new(beam_index::services::FakeAudioFingerprinter::default()),
             clock: Arc::new(beam_domain::services::RealClock),
         },
     ))
@@ -719,6 +741,7 @@ fn services_over(
         telemetry,
         playback_telemetry,
         trickplay: idle_trickplay(),
+        markers: idle_markers(),
     }
 }
 
