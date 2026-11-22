@@ -35,7 +35,7 @@ class LanguagePreferencesTest {
 
     private fun viewModel(
         servers: FakeServerRepository = FakeServerRepository(listOf(Fixtures.server()), restored = true),
-    ) = SettingsViewModel(FakePreferencesRepository(), servers, sessions)
+    ) = SettingsViewModel(FakePreferencesRepository(), servers, sessions, FakeDownloadRepository())
 
     @Test
     fun `the stored preferences are read with the account`() =

@@ -25,6 +25,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -45,6 +46,8 @@ class ExoBeamPlayerStartTracksTest {
     private val exoPlayer: ExoPlayer = TestExoPlayerBuilder(RuntimeEnvironment.getApplication()).build()
     private val playback = FakePlaybackRepository()
 
+    @get:Rule val downloads = DownloadCacheRule()
+
     private val english = group("1", MimeTypes.AUDIO_AAC, "eng")
     private val french = group("2", MimeTypes.AUDIO_AAC, "fre")
     private val signs = group("3", MimeTypes.APPLICATION_SUBRIP, "eng")
@@ -62,6 +65,8 @@ class ExoBeamPlayerStartTracksTest {
             repository = playback,
             telemetry = FakeTelemetryRepository(),
             clients = BeamHttpClientFactory(BeamHttpClientFactory.shared()),
+            downloadCache = downloads.cache,
+            completedDownloads = { null },
             scope = scope,
             rebuffers = NeverSustained,
         )
