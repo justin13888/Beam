@@ -486,9 +486,7 @@ async fn an_unprobed_row_without_an_identity_is_given_one_without_a_hash() {
     h.prober.fails.store(true, Ordering::SeqCst);
     let path = h.write("Heat (1995).mkv", "heat");
     h.scan().await;
-    for row in h.file_repo.files.lock().unwrap().values_mut() {
-        row.identity = None;
-    }
+    h.rerecord_identities(|_| None).await;
     let before = h.present(&path).await;
     assert_eq!(before.duration, None, "the probe failed");
     let hashes = h.hashes();
@@ -616,8 +614,6 @@ async fn a_removed_directory_under_a_root_with_no_video_is_left_to_the_scan() {
 /// and the rows of the library are not read to look beneath it.
 #[tokio::test]
 async fn a_removed_path_the_policy_never_indexes_is_not_looked_beneath() {
-    use crate::services::hash::MockHashService;
-    use crate::services::media_info::MockMediaInfoService;
     use beam_domain::repositories::file::MockFileRepository;
 
     let dir = TempDir::new().unwrap();
@@ -633,20 +629,11 @@ async fn a_removed_path_the_policy_never_indexes_is_not_looked_beneath() {
     let mut files = MockFileRepository::new();
     files.expect_find_by_path().returning(|_| Ok(None));
     files.expect_find_beneath_including_missing().never();
-    let service = LocalIndexService::new(
-        library_repo,
-        Arc::new(files),
-        Arc::new(InMemoryMovieRepository::default()),
-        Arc::new(InMemoryShowRepository::default()),
-        Arc::new(InMemoryMediaStreamRepository::default()),
-        Arc::new(MockHashService::new()),
-        Arc::new(MockMediaInfoService::new()),
-        Arc::new(InMemoryNotificationService::new()),
-        Arc::new(
-            InMemoryAdminLogRepository::default(),
-        ),
-        Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-    );
+    let service = IndexServiceBuilder::new()
+        .library_repo(library_repo)
+        .file_repo(Arc::new(files))
+        .admin_log_repo(Arc::new(InMemoryAdminLogRepository::default()))
+        .build();
 
     for removed in [
         ".Heat (1995).mkv.part",

@@ -91,6 +91,12 @@ RUN cargo chef cook --release --recipe-path recipe.json --bin beam-server
 
 # Build application
 COPY . .
+# The commit `beam_build_info` reports, read by `option_env!` at compile time.
+# Declared after every cached layer so a new commit invalidates only this
+# build; a build that passes no `--build-arg` reports `unknown`, as a local
+# `cargo build` does.
+ARG BEAM_GIT_COMMIT=unknown
+ENV BEAM_GIT_COMMIT=${BEAM_GIT_COMMIT}
 RUN cargo build --release --package beam-server
 
 # ----------------------------------------------------

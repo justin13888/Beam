@@ -367,6 +367,18 @@ pub struct ServerConfig {
     /// (1 to 3650). Pruned daily whether or not collection is enabled.
     #[config(env = "BEAM_PLAYBACK_TELEMETRY_RETENTION_DAYS", default = 365)]
     pub playback_telemetry_retention_days: u32,
+
+    /// Libraries the deployment declares (issue #455), as a JSON array of
+    /// `{"name", "path"}` objects; a path is absolute or relative to
+    /// `video_dir`. Each one not stored yet is created at boot, with the same
+    /// validation as an administrator's; a stored library is never renamed,
+    /// moved or deleted. Empty -- the default -- declares none.
+    #[config(
+        env = "BEAM_LIBRARIES",
+        parse_env = crate::bootstrap::parse_library_declarations,
+        default = []
+    )]
+    pub libraries: Vec<crate::bootstrap::LibraryDeclaration>,
 }
 
 /// Hand-written so the startup "Configuration loaded" log line can never
@@ -426,6 +438,7 @@ impl fmt::Debug for ServerConfig {
             telemetry_url,
             playback_telemetry_enabled,
             playback_telemetry_retention_days,
+            libraries,
         } = self;
         f.debug_struct("ServerConfig")
             .field("bind_address", bind_address)
@@ -494,6 +507,7 @@ impl fmt::Debug for ServerConfig {
                 "playback_telemetry_retention_days",
                 playback_telemetry_retention_days,
             )
+            .field("libraries", libraries)
             .finish()
     }
 }

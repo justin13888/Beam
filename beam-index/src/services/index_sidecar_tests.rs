@@ -186,7 +186,9 @@ async fn a_rescan_writes_nothing_for_a_subtitle_with_a_sub_microsecond_mtime() {
     );
     h.scan().await;
 
-    // Mark the row, so a rewrite -- which stamps it afresh -- shows.
+    // Mark the row, so a rewrite -- which stamps it afresh -- shows. Through
+    // the double's map: `upsert_by_path` stamps `updated_at` with the time it
+    // writes, so no trait method can leave a row with a chosen stamp.
     let marker = DateTime::<Utc>::UNIX_EPOCH;
     h.sidecar_repo
         .rows

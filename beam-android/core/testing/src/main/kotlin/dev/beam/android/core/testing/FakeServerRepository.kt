@@ -1,12 +1,13 @@
 package dev.beam.android.core.testing
 
 import dev.beam.android.core.ffi.repository.ServerRepository
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import uniffi.beam_client_core.BeamException
 import uniffi.beam_client_core.DeviceLoginPrompt
-import uniffi.beam_client_core.DeviceLoginStep
 import uniffi.beam_client_core.ServerSummary
 import uniffi.beam_client_core.SessionState
 import uniffi.beam_client_core.UserSummary
@@ -41,10 +42,11 @@ public class FakeServerRepository(
 
     /**
      * What the repository re-publishes. A replaying shared flow, as the real
-     * `ServerChanges` is: it replays nothing before [restore], and it emits
-     * every re-publication, an unchanged list included -- which a state flow
-     * would drop. Unbounded rather than suspending, so [expire] can publish
-     * without a coroutine; every subscriber still sees every list.
+     * `ServerChanges` is: it replays nothing before [restore], and is
+     * unbounded rather than suspending, so [expire] can publish without a
+     * coroutine; every subscriber still sees every list. It also re-publishes
+     * an unchanged list, which the core never announces, so a subscriber
+     * tested here is one that tolerates a repeat.
      */
     private val published =
         MutableSharedFlow<List<ServerSummary>>(replay = 1, extraBufferCapacity = Int.MAX_VALUE).apply {
@@ -116,23 +118,18 @@ public class FakeServerRepository(
     }
 
     /**
-     * What successive device-login polls answer, front first; the last one
-     * repeats. `null` models an identity provider without the device grant:
-     * starting answers the server's 501.
+     * How a device login ends once awaited. `null` models an identity
+     * provider without the device grant: starting answers the server's 501.
+     * The pacing between polls is the core's, and tested there; this fake
+     * only says where the wait ends.
      */
-    public var deviceLogin: List<DeviceLoginStep>? = null
+    public var deviceLogin: DeviceLoginEnding? = null
 
-    /** How many times a device login was polled, failed polls included. */
-    public var devicePolls: Int = 0
+    /** How many device logins were awaited. */
+    public var deviceLoginsAwaited: Int = 0
 
-    /**
-     * Failures the next polls throw, front first, before the [deviceLogin]
-     * script resumes. Each one counts as a poll.
-     */
-    public val devicePollFailures: ArrayDeque<BeamException> = ArrayDeque()
-
-    /** How many polls the [deviceLogin] script has answered. */
-    private var scriptedPolls: Int = 0
+    /** How many awaited device logins were cancelled before they ended. */
+    public var deviceLoginsCancelled: Int = 0
 
     override suspend fun startDeviceLogin(serverId: String): DeviceLoginPrompt {
         failOnce?.let {
@@ -158,24 +155,33 @@ public class FakeServerRepository(
         )
     }
 
-    override suspend fun pollDeviceLogin(
+    override suspend fun awaitDeviceLogin(
         serverId: String,
-        deviceHandle: String,
-    ): DeviceLoginStep {
+        prompt: DeviceLoginPrompt,
+    ): UserSummary {
         failWith?.let { throw it }
-        val script = checkNotNull(deviceLogin) { "no device login was started" }
-        devicePollFailures.removeFirstOrNull()?.let {
-            devicePolls += 1
-            throw it
+        val ending = checkNotNull(deviceLogin) { "no device login was started" }
+        deviceLoginsAwaited += 1
+        when (ending) {
+            is DeviceLoginEnding.Approved -> {
+                setState(serverId, SessionState.Authenticated(ending.user))
+                republish()
+                return ending.user
+            }
+
+            is DeviceLoginEnding.Fails -> {
+                throw ending.failure
+            }
+
+            DeviceLoginEnding.Unanswered -> {
+                try {
+                    awaitCancellation()
+                } catch (cancelled: CancellationException) {
+                    deviceLoginsCancelled += 1
+                    throw cancelled
+                }
+            }
         }
-        val step = script[minOf(scriptedPolls, script.lastIndex)]
-        scriptedPolls += 1
-        devicePolls += 1
-        if (step is DeviceLoginStep.SignedIn) {
-            setState(serverId, SessionState.Authenticated(step.user))
-            republish()
-        }
-        return step
     }
 
     /**

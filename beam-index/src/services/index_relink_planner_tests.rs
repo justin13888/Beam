@@ -5,22 +5,10 @@ use super::*;
 fn candidate(id: u128, path: &str, missing_since: Option<DateTime<Utc>>) -> MediaFile {
     MediaFile {
         id: Uuid::from_u128(id),
-        library_id: Uuid::nil(),
-        path: PathBuf::from(path),
         hash: 77,
         size_bytes: 1000,
-        mtime: None,
-        identity: None,
-        mime_type: None,
-        duration: None,
-        container_format: None,
-        content: None,
-        status: FileStatus::Unknown,
-        classifier_version: 0,
-        container_tags: None,
-        scanned_at: instant(0),
-        updated_at: instant(0),
         missing_since,
+        ..media_file(Uuid::nil(), path)
     }
 }
 

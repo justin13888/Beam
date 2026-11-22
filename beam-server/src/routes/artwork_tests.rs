@@ -515,6 +515,7 @@ mod tests {
                 title: "Good News About Hell".to_string(),
                 runtime: None,
                 air_date: None,
+                numbering: beam_domain::utils::media_path::EpisodeNumbering::Standard,
             })
             .await
             .expect("episode is created");
@@ -593,7 +594,7 @@ mod tests {
             shows: fixture.shows.clone(),
             sources: Arc::new(crate::services::sources::SourceCatalog::new(crate::services::sources::SourceRepositories {movies: fixture.movies.clone(), files: Arc::new(InMemoryFileRepository::default()), streams: Arc::new(InMemoryMediaStreamRepository::default()), sidecars: Arc::new(
                     beam_domain::repositories::sidecar_subtitle::in_memory::InMemorySidecarSubtitleRepository::default(),
-                ), chapters: Arc::new(beam_domain::repositories::chapter::in_memory::InMemoryChapterRepository::default()), trickplay: Arc::new(beam_domain::repositories::trickplay::in_memory::InMemoryTrickplayRepository::default()),})),
+                ), chapters: Arc::new(beam_domain::repositories::chapter::in_memory::InMemoryChapterRepository::default()), trickplay: Arc::new(beam_domain::repositories::trickplay::in_memory::InMemoryTrickplayRepository::default()), markers: Arc::new(beam_domain::repositories::markers::in_memory::InMemoryMarkerRepository::default()),})),
             catalog: Arc::new(
                 beam_domain::repositories::catalog::in_memory::InMemoryCatalogRepository::new(
                     fixture.movies.clone(),

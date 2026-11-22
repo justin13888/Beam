@@ -74,8 +74,10 @@ pub struct MediaSource {
     #[serde(default)]
     pub chapters: Vec<Chapter>,
     /// The spans of the file a client offers to skip -- its intro, its
-    /// credits, a recap, a preview -- read from the chapters titled for
-    /// them, in the order they start; empty when no chapter is.
+    /// credits, a recap, a preview -- in the order they start: for each
+    /// kind, the one an administrator set or Beam detected in the audio a
+    /// season's episodes share (issue #332), else the one a chapter titled
+    /// for it names; empty when there is none.
     #[serde(default)]
     pub markers: Vec<PlaybackMarker>,
     /// The file's scrub-preview sheets; absent until Beam has made them for
@@ -279,8 +281,9 @@ pub enum PlaybackMarkerKind {
     Preview,
 }
 
-/// A span of a file a client offers to skip (issue #265), read from the
-/// file's chapter titled for it (`Previously On`, `Opening`, `Intro`,
+/// A span of a file a client offers to skip (issue #265): the one an
+/// administrator set, or Beam detected (issue #332), else the one read from
+/// the file's chapter titled for it (`Previously On`, `Opening`, `Intro`,
 /// `Ending`, `End Credits`, `Next Episode`). At most one of each kind per
 /// file.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize, Schema)]
@@ -289,6 +292,91 @@ pub struct PlaybackMarker {
     /// Where the span starts, in milliseconds from the file's start.
     pub start_ms: u64,
     /// Where it ends; always after `start_ms`.
+    pub end_ms: u64,
+}
+
+impl PlaybackMarkerKind {
+    /// Every kind, in the order a file usually plays them.
+    pub const ALL: [Self; 4] = [Self::Recap, Self::Intro, Self::Credits, Self::Preview];
+
+    /// The kind's one spelling, on the wire and in a path.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Recap => "recap",
+            Self::Intro => "intro",
+            Self::Credits => "credits",
+            Self::Preview => "preview",
+        }
+    }
+}
+
+/// A path segment that names no marker kind.
+#[derive(Debug, Clone, Copy, thiserror::Error)]
+#[error("unrecognised marker kind")]
+pub struct UnknownMarkerKind;
+
+// `Display` and `FromStr` because Kynos parses and renders a path parameter
+// through those (`/v1/admin/files/{file_id}/markers/{kind}`, issue #332),
+// both read from the one spelling `as_str` gives.
+impl std::fmt::Display for PlaybackMarkerKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for PlaybackMarkerKind {
+    type Err = UnknownMarkerKind;
+
+    fn from_str(segment: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|kind| kind.as_str() == segment)
+            .ok_or(UnknownMarkerKind)
+    }
+}
+
+impl kynos::schema::ParamValue for PlaybackMarkerKind {}
+
+/// Where one of a file's markers comes from (issue #332).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize, Schema)]
+#[serde(rename_all = "snake_case")]
+pub enum PlaybackMarkerOrigin {
+    /// A chapter of the file titled for it.
+    Chapter,
+    /// Beam found it in the audio the file shares with other episodes of
+    /// its season.
+    Detected,
+    /// An administrator set it.
+    Admin,
+}
+
+/// One of a file's markers, as an administrator manages it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize, Schema)]
+pub struct FileMarker {
+    pub kind: PlaybackMarkerKind,
+    /// Where the span starts, in milliseconds from the file's start.
+    pub start_ms: u64,
+    /// Where it ends; always after `start_ms`.
+    pub end_ms: u64,
+    /// Where it comes from: a set or detected marker overrides the
+    /// chapter-named one of its kind.
+    pub origin: PlaybackMarkerOrigin,
+}
+
+/// A file's markers, as every `/v1/admin/files/{file_id}/markers` operation
+/// answers: at most one of each kind, in the order they start -- the
+/// `markers` its sources carry, with where each comes from.
+#[derive(Clone, Debug, Serialize, serde::Deserialize, Schema)]
+pub struct FileMarkerList {
+    pub file_id: Uuid,
+    pub items: Vec<FileMarker>,
+}
+
+/// The span to mark, in milliseconds from the file's start.
+#[derive(Clone, Debug, Serialize, serde::Deserialize, Schema)]
+pub struct SetFileMarkerRequest {
+    pub start_ms: u64,
+    /// After `start_ms`, and no later than the file's end.
     pub end_ms: u64,
 }
 

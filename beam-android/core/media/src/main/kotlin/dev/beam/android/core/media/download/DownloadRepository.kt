@@ -10,25 +10,25 @@ package dev.beam.android.core.media.download
 import android.content.Context
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.cache.Cache
+import androidx.media3.exoplayer.offline.Download
+import androidx.media3.exoplayer.offline.DownloadIndex
 import androidx.media3.exoplayer.offline.DownloadManager
 import dagger.hilt.android.qualifiers.ApplicationContext
 import dev.beam.android.core.ffi.preferences.PreferencesRepository
-import dev.beam.android.core.ffi.repository.PlaybackRepository
-import dev.beam.android.core.media.http.BeamHttpClientFactory
-import dev.beam.android.core.model.DownloadRecord
+import dev.beam.android.core.media.http.ServerCallFactory
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.emptyFlow
-import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import uniffi.beam_client_core.BeamClient
+import uniffi.beam_client_core.DownloadRecord
+import java.io.IOException
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -37,20 +37,23 @@ public interface DownloadRepository {
     /** Every download, re-emitted whenever any of them changes. */
     public val downloads: Flow<List<DownloadRecord>>
 
-    /** Queue a file for offline playback. */
+    /**
+     * Queue a file for offline playback, from the active server: the core
+     * plans every part and subtitle file of its source.
+     */
     public suspend fun enqueue(
         fileId: String,
-        serverId: String,
         mediaId: String,
         title: String,
         subtitle: String? = null,
         posterUrl: String? = null,
+        episodeId: String? = null,
     )
 
     /** Stop a download, keeping the bytes already fetched. */
     public suspend fun pause(fileId: String)
 
-    /** Resume a paused download from where it stopped. */
+    /** Resume a paused download from where it stopped, or retry a failed one. */
     public suspend fun resume(fileId: String)
 
     /** Delete a download and its bytes. */
@@ -59,20 +62,56 @@ public interface DownloadRepository {
     /** Delete every download. */
     public suspend fun removeAll()
 
+    /** Delete every download that came from [serverId], leaving other servers' alone. */
+    public suspend fun removeServer(serverId: String)
+
     /** Only download over an unmetered connection. */
     public suspend fun setRequiresUnmeteredNetwork(required: Boolean)
 
-    /** Whether a file is already downloaded and playable offline. */
+    /**
+     * Whether a file is downloaded in full, and so plays offline. A download
+     * still in progress, paused, or failed is not, whatever it has fetched.
+     */
     public suspend fun isDownloaded(fileId: String): Boolean
+}
+
+/** A file downloaded in full: what the player needs to play it with no network. */
+public data class CompletedDownload(
+    val fileId: String,
+    /**
+     * The URL it was fetched from. The download cache keys its bytes by it,
+     * so playing from this URL reads them from disk.
+     */
+    val uri: String,
+)
+
+/**
+ * The completed downloads, as the player looks them up.
+ *
+ * Narrower than [DownloadRepository] because the player needs only this, and
+ * a player test then supplies one completed download without a download
+ * manager behind it.
+ */
+public fun interface CompletedDownloads {
+    /** [fileId]'s download, where it has completed; `null` otherwise. */
+    public suspend fun completed(fileId: String): CompletedDownload?
 }
 
 /**
  * A [DownloadRepository] whose manager is built on first use.
  *
- * Construction is deferred because a [DownloadManager] needs the session
- * credential, which does not exist until the viewer has signed in. Building it
- * eagerly at app start would either fail or bake in an empty credential, and
- * every download would then 401 with no obvious cause.
+ * The manager holds no credential: its requests go out through [calls], which
+ * asks the core on each one for the session of the server it goes to. So it can
+ * be built signed out -- the downloads list renders offline and signed out
+ * alike -- a download queued under one session carries on under the next after
+ * a sign-in, and a download from one server keeps that server's session after
+ * the viewer switches to another, all without the manager being rebuilt. Every
+ * change goes
+ * through [commands], which reach [BeamDownloadService], so the transfer runs in
+ * a foreground service rather than dying with the app's process.
+ *
+ * Construction is still deferred to first use, so an app start that never
+ * touches downloads does not open the download index.
  *
  * The network requirement follows the stored cellular preference from the
  * moment this is constructed, rather than waiting for a screen to send it:
@@ -84,14 +123,14 @@ internal class MediaDownloadRepository
     @Inject
     constructor(
         @ApplicationContext private val context: Context,
-        private val client: BeamClient,
-        private val playback: PlaybackRepository,
-        private val clients: BeamHttpClientFactory,
+        private val core: BeamClient,
+        private val calls: ServerCallFactory,
+        private val commands: DownloadCommands,
         private val cache: Cache,
-        private val titles: DownloadTitleStore,
         private val artwork: DownloadArtwork,
         preferences: PreferencesRepository,
     ) : DownloadRepository,
+        CompletedDownloads,
         DownloadManagerHolder {
         private var delegate: BeamDownloadManager? = null
 
@@ -111,20 +150,18 @@ internal class MediaDownloadRepository
             }
         }
 
-        @OptIn(ExperimentalCoroutinesApi::class)
         override val downloads: Flow<List<DownloadRecord>> =
-            flow { emit(runCatching { beamManager() }.getOrNull()) }
-                .flatMapLatest { built -> built?.downloads ?: flowOf(emptyList()) }
+            flow { emitAll(beamManager().downloads) }
 
         override suspend fun enqueue(
             fileId: String,
-            serverId: String,
             mediaId: String,
             title: String,
             subtitle: String?,
             posterUrl: String?,
+            episodeId: String?,
         ) {
-            beamManager().enqueue(fileId, serverId, mediaId, title, subtitle, posterUrl, playback)
+            beamManager().enqueue(fileId, mediaId, episodeId, title, subtitle, posterUrl)
         }
 
         override suspend fun pause(fileId: String) {
@@ -143,12 +180,19 @@ internal class MediaDownloadRepository
             beamManager().removeAll()
         }
 
+        override suspend fun removeServer(serverId: String) {
+            beamManager().removeServer(serverId)
+        }
+
         /**
          * Held here rather than handed straight to the manager, because the
-         * stored preference is read at construction -- possibly before
-         * sign-in, when building the manager would bake in an empty
-         * credential. The manager takes it when it is built, and every change
-         * after that.
+         * stored preference is read at construction, and building the manager
+         * then would open the download index on every app start. The manager
+         * takes it when it is built, and every change after that.
+         *
+         * Set on the manager directly rather than sent to the service: the
+         * preference is followed from app start, when the app may not be in
+         * front, and a service start from the background is refused.
          */
         override suspend fun setRequiresUnmeteredNetwork(required: Boolean) {
             synchronized(this) {
@@ -157,8 +201,26 @@ internal class MediaDownloadRepository
             }
         }
 
-        override suspend fun isDownloaded(fileId: String): Boolean =
-            titles.get(fileId) != null && cache.getCachedSpans(fileId).isNotEmpty()
+        /**
+         * From the download index, as [completed] is, so the detail page says
+         * "Play offline" exactly when the player would read the file from disk.
+         * The core's record catches up only while something collects
+         * [downloads], so it can lag a download that finished meanwhile.
+         */
+        override suspend fun isDownloaded(fileId: String): Boolean = completed(fileId) != null
+
+        /**
+         * From the download index; see [completedDownload].
+         *
+         * The manager is taken on the caller's thread, which builds it on
+         * first use where Media3 needs it built, and the index is read on
+         * [Dispatchers.IO]: each read is a SQLite query, which Media3's index
+         * documents must not run on the main thread.
+         */
+        override suspend fun completed(fileId: String): CompletedDownload? {
+            val index = beamManager().raw.downloadIndex
+            return withContext(Dispatchers.IO) { index.completedDownload(fileId) }
+        }
 
         /**
          * The raw manager the download service drives.
@@ -174,17 +236,36 @@ internal class MediaDownloadRepository
                 delegate ?: BeamDownloadManager
                     .create(
                         context = context,
-                        clients = clients,
+                        calls = calls,
+                        commands = commands,
                         cache = cache,
-                        titles = titles,
+                        core = core,
                         artwork = artwork,
-                        server = client.serverHttpConfig(),
                     ).also {
                         it.setRequiresUnmeteredNetwork(requiresUnmetered)
                         delegate = it
                     }
             }
     }
+
+/**
+ * [fileId]'s download, where this index records it as completed.
+ *
+ * The index, not the cache: a partial download has spans in the cache too,
+ * and the cache keys them by URL, not by file. An index that cannot be read
+ * is treated as holding no completed download, so playback falls back to the
+ * core's plan rather than failing.
+ */
+internal fun DownloadIndex.completedDownload(fileId: String): CompletedDownload? {
+    val download =
+        try {
+            getDownload(fileId)
+        } catch (_: IOException) {
+            null
+        }
+    if (download == null || download.state != Download.STATE_COMPLETED) return null
+    return CompletedDownload(fileId = fileId, uri = download.request.uri.toString())
+}
 
 /**
  * Apply the stored cellular preference to [downloads]: the value stored now,

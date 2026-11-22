@@ -166,6 +166,64 @@ async fn a_network_library_is_polled_and_a_poll_finds_a_new_file() {
     assert_eq!(event.kind, FsEventKind::Created);
 }
 
+fn mounted_watcher(mounts: Vec<(PathBuf, FilesystemKind)>) -> (NotifyFsWatcher, Arc<WatchStatus>) {
+    use crate::services::filesystem_probe::MountedFilesystemProbe;
+
+    let status = Arc::new(WatchStatus::new());
+    let watcher = NotifyFsWatcher::new(Arc::new(MountedFilesystemProbe { mounts }), status.clone());
+    (watcher, status)
+}
+
+/// A share mounted inside a local root is changed by other hosts without
+/// a native event, so the library is polled, and a poll finds a file
+/// written into the share.
+#[tokio::test]
+async fn a_local_library_with_a_network_share_beneath_it_is_polled() {
+    let (_dir, root) = canonical_tempdir();
+    let share = root.join("tv").join("nas");
+    std::fs::create_dir_all(&share).unwrap();
+    let (watcher, status) = mounted_watcher(vec![(share.clone(), FilesystemKind::Network)]);
+    let lib = Uuid::new_v4();
+
+    let mode = watcher.watch_library(lib, &root).unwrap();
+    assert_eq!(mode, WatchMode::Polling(PollReason::NetworkFilesystem));
+    assert_eq!(status.snapshot().libraries.get(&lib), Some(&mode));
+
+    let file = share.join("episode.mkv");
+    std::fs::write(&file, b"x").unwrap();
+    watcher.poll_once();
+    let event = next_event_for(&watcher, &file).await;
+    assert_eq!(event.library_id, lib);
+    assert_eq!(event.kind, FsEventKind::Created);
+}
+
+/// Another local filesystem beneath the root, a network share beside
+/// the root rather than beneath it, and a network share beneath only a
+/// sibling library: none of them makes the library polled.
+#[tokio::test]
+async fn only_a_network_share_beneath_the_root_makes_a_library_polled() {
+    let (_dir, parent) = canonical_tempdir();
+    let root = parent.join("movies");
+    let sibling = parent.join("movies-nas");
+    let usb = root.join("usb");
+    std::fs::create_dir_all(&usb).unwrap();
+    std::fs::create_dir_all(&sibling).unwrap();
+    let (watcher, status) = mounted_watcher(vec![
+        (usb, FilesystemKind::Local),
+        (sibling, FilesystemKind::Network),
+    ]);
+    let lib = Uuid::new_v4();
+
+    assert_eq!(
+        watcher.watch_library(lib, &root).unwrap(),
+        WatchMode::Native
+    );
+    assert_eq!(
+        status.snapshot().libraries.get(&lib),
+        Some(&WatchMode::Native)
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn the_poller_does_not_follow_a_symlinked_directory() {
@@ -288,6 +346,99 @@ async fn a_watch_limit_error_without_a_path_demotes_every_native_library() {
     }
 }
 
+// ── Metrics (issue #457) ────────────────────────────────────────────────
+//
+// The callback is driven directly, on the test's thread, so the local
+// recorder sees what it emits; a real backend calls it from its own.
+
+/// An event is counted against the library that owns its path, by
+/// kind; an event under no library, or of a kind that is dropped, is not.
+#[tokio::test]
+async fn events_are_counted_by_library_and_kind() {
+    use crate::test_metrics::MetricsCapture;
+    use notify::EventKind;
+    use notify::event::{AccessKind, CreateKind, ModifyKind, RemoveKind};
+
+    let capture = MetricsCapture::new();
+    let _recorder = capture.install();
+    let (_dir, root) = canonical_tempdir();
+    let (watcher, _status) = notify_watcher(FilesystemKind::Local);
+    let lib = Uuid::new_v4();
+    watcher.watch_library(lib, &root).unwrap();
+
+    let event = |kind: EventKind, path: PathBuf| {
+        handle_notify_result(Ok(notify::Event::new(kind).add_path(path)), &watcher.shared);
+    };
+    event(EventKind::Create(CreateKind::File), root.join("a.mkv"));
+    event(EventKind::Create(CreateKind::File), root.join("b.mkv"));
+    event(EventKind::Modify(ModifyKind::Any), root.join("a.mkv"));
+    event(EventKind::Remove(RemoveKind::File), root.join("b.mkv"));
+    event(EventKind::Access(AccessKind::Any), root.join("a.mkv"));
+    event(
+        EventKind::Create(CreateKind::File),
+        PathBuf::from("/elsewhere/c.mkv"),
+    );
+
+    let recorded = capture.snapshot();
+    let library = lib.to_string();
+    let count = |kind| {
+        recorded.counter(
+            "beam_watcher_events_total",
+            &[("library", &library), ("kind", kind)],
+        )
+    };
+    assert_eq!(count("created"), Some(2));
+    assert_eq!(count("modified"), Some(1));
+    assert_eq!(count("removed"), Some(1));
+}
+
+/// A backend error is charged to the library whose root holds its path,
+/// one naming no path to every library, and a watch that cannot be added
+/// to the library being watched.
+#[tokio::test]
+async fn watcher_errors_are_counted_against_the_libraries_they_touch() {
+    use crate::test_metrics::MetricsCapture;
+
+    let capture = MetricsCapture::new();
+    let _recorder = capture.install();
+    let (_dir, root) = canonical_tempdir();
+    let (_other_dir, other_root) = canonical_tempdir();
+    let (watcher, _status) = notify_watcher(FilesystemKind::Local);
+    let lib = Uuid::new_v4();
+    let other = Uuid::new_v4();
+    watcher.watch_library(lib, &root).unwrap();
+    watcher.watch_library(other, &other_root).unwrap();
+    let errors = |id: Uuid| {
+        capture
+            .snapshot()
+            .counter("beam_watcher_errors_total", &[("library", &id.to_string())])
+            .unwrap_or(0)
+    };
+
+    handle_notify_result(
+        Err(notify::Error::generic("read failed").add_path(root.join("a.mkv"))),
+        &watcher.shared,
+    );
+    assert_eq!((errors(lib), errors(other)), (1, 0));
+
+    handle_notify_result(Err(notify::Error::generic("lost")), &watcher.shared);
+    assert_eq!((errors(lib), errors(other)), (2, 1));
+
+    handle_notify_result(
+        Err(notify::Error::new(notify::ErrorKind::MaxFilesWatch).add_path(other_root.join("d"))),
+        &watcher.shared,
+    );
+    assert_eq!((errors(lib), errors(other)), (2, 2));
+
+    let missing = Uuid::new_v4();
+    assert!(
+        watcher
+            .watch_library(missing, &root.join("not-there"))
+            .is_err()
+    );
+    assert_eq!(errors(missing), 1);
+}
+
 #[tokio::test]
 async fn unwatching_drops_the_library_from_the_status_and_its_queued_demotion() {
     let (_dir, root) = canonical_tempdir();
@@ -388,11 +539,13 @@ fn an_event_under_nested_roots_belongs_to_the_innermost() {
             id: outer,
             root: PathBuf::from("/m"),
             backend: Backend::Native,
+            identity: None,
         },
         WatchedLibrary {
             id: inner,
             root: PathBuf::from("/m/movies"),
             backend: Backend::Native,
+            identity: None,
         },
     ];
     let cases = [
@@ -476,6 +629,7 @@ mod properties {
                     id: Uuid::from_u128(n as u128),
                     root: root.clone(),
                     backend: Backend::Native,
+                    identity: None,
                 })
                 .collect();
             let holding: Vec<&WatchedLibrary> = libraries
@@ -575,6 +729,227 @@ async fn hitting_the_watch_limit_while_registering_polls_the_library_instead() {
         "registered as polled, so no demotion to report"
     );
     assert_eq!(next_event_for(&watcher, &file).await.library_id, lib);
+}
+
+// ── A native watch that stops covering its library (issue #452) ─────────
+
+/// The real backend: removing the root ends its watch, and the poll
+/// that follows cannot watch it again, so the library is no longer
+/// registered and the status no longer lists it -- the runtime's watch
+/// refresh re-registers whatever this omits. Once the root is back, that
+/// registration watches it natively again.
+#[tokio::test]
+async fn a_removed_root_is_deregistered_and_watched_again_once_it_is_back() {
+    let (_dir, parent) = canonical_tempdir();
+    let root = parent.join("library");
+    std::fs::create_dir(&root).unwrap();
+    let (watcher, status) = notify_watcher(FilesystemKind::Local);
+    let lib = Uuid::new_v4();
+    watcher.watch_library(lib, &root).unwrap();
+
+    std::fs::remove_dir(&root).unwrap();
+    // The callback queues the library before it forwards the event.
+    next_event_for(&watcher, &root).await;
+    assert!(
+        watcher.poll_once().is_empty(),
+        "nothing was moved to the poller"
+    );
+    assert!(watcher.registered_libraries().is_empty());
+    assert!(!status.snapshot().libraries.contains_key(&lib));
+
+    std::fs::create_dir(&root).unwrap();
+    assert_eq!(
+        watcher.watch_library(lib, &root).unwrap(),
+        WatchMode::Native
+    );
+    let file = root.join("movie.mkv");
+    std::fs::write(&file, b"x").unwrap();
+    assert_eq!(next_event_for(&watcher, &file).await.library_id, lib);
+}
+
+/// Removed and re-created before the next poll: the poll watches the
+/// new directory at once, rather than leaving the library unwatched
+/// until the next refresh.
+#[tokio::test]
+async fn a_root_recreated_before_the_poll_is_watched_again_by_the_poll() {
+    let (_dir, parent) = canonical_tempdir();
+    let root = parent.join("library");
+    std::fs::create_dir(&root).unwrap();
+    let (watcher, status) = notify_watcher(FilesystemKind::Local);
+    let lib = Uuid::new_v4();
+    watcher.watch_library(lib, &root).unwrap();
+
+    std::fs::remove_dir(&root).unwrap();
+    next_event_for(&watcher, &root).await;
+    std::fs::create_dir(&root).unwrap();
+    watcher.poll_once();
+
+    assert_eq!(watcher.registered_libraries(), vec![lib]);
+    assert_eq!(
+        status.snapshot().libraries.get(&lib),
+        Some(&WatchMode::Native)
+    );
+    let file = root.join("movie.mkv");
+    std::fs::write(&file, b"x").unwrap();
+    assert_eq!(next_event_for(&watcher, &file).await.library_id, lib);
+}
+
+fn silent_watcher() -> (NotifyFsWatcher, Arc<WatchStatus>, Arc<Mutex<Vec<PathBuf>>>) {
+    use in_memory::SilentNativeWatcherFactory;
+
+    let status = Arc::new(WatchStatus::new());
+    let factory = SilentNativeWatcherFactory::default();
+    let watcher = NotifyFsWatcher::with_native_factory(
+        Arc::new(FixedFilesystemProbe(FilesystemKind::Local)),
+        status.clone(),
+        &factory,
+    );
+    (watcher, status, factory.watched)
+}
+
+/// An unmount reaches `notify` 8 as nothing at all, so the poll compares
+/// what stands at each root with what was watched. A different directory
+/// now at the root is watched in its place; a root that is gone leaves
+/// the library unregistered and out of the status.
+#[tokio::test]
+async fn a_root_replaced_without_any_event_is_found_by_the_poll() {
+    let (_dir, parent) = canonical_tempdir();
+    let replaced = parent.join("replaced");
+    let removed = parent.join("removed");
+    let untouched = parent.join("untouched");
+    for root in [&replaced, &removed, &untouched] {
+        std::fs::create_dir(root).unwrap();
+    }
+    let (watcher, status, watched) = silent_watcher();
+    let (replaced_lib, removed_lib, untouched_lib) =
+        (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    watcher.watch_library(replaced_lib, &replaced).unwrap();
+    watcher.watch_library(removed_lib, &removed).unwrap();
+    watcher.watch_library(untouched_lib, &untouched).unwrap();
+
+    // The replacement exists while the original does, so it cannot have
+    // been given the original's inode.
+    let replacement = parent.join("replacement");
+    std::fs::create_dir(&replacement).unwrap();
+    std::fs::remove_dir(&replaced).unwrap();
+    std::fs::rename(&replacement, &replaced).unwrap();
+    std::fs::remove_dir(&removed).unwrap();
+
+    assert!(watcher.poll_once().is_empty());
+    assert_eq!(
+        *watched.lock().unwrap(),
+        vec![
+            replaced.clone(),
+            removed.clone(),
+            untouched.clone(),
+            replaced.clone()
+        ],
+        "only the replaced root was watched again"
+    );
+    let mut registered = watcher.registered_libraries();
+    registered.sort();
+    let mut expected = vec![replaced_lib, untouched_lib];
+    expected.sort();
+    assert_eq!(registered, expected);
+    let libraries = status.snapshot().libraries;
+    assert_eq!(libraries.get(&replaced_lib), Some(&WatchMode::Native));
+    assert!(!libraries.contains_key(&removed_lib));
+
+    // Watched again, the replaced root is not found replaced again.
+    watcher.poll_once();
+    assert_eq!(watched.lock().unwrap().len(), 4);
+}
+
+/// Which events invalidate a native watch: the root itself removed or
+/// renamed, and a rescan notice for every native library it covers.
+/// A change beneath a root, an event for another root, and a polled
+/// library's root leave the watch alone.
+#[tokio::test]
+async fn only_events_that_end_a_native_watch_watch_it_again() {
+    use notify::event::{Flag, ModifyKind, RemoveKind, RenameMode};
+    use notify::{Event, EventKind};
+
+    let (_dir, parent) = canonical_tempdir();
+    let (_polled_dir, polled_root) = canonical_tempdir();
+    let a = parent.join("a");
+    let b = parent.join("b");
+    std::fs::create_dir(&a).unwrap();
+    std::fs::create_dir(&b).unwrap();
+
+    let remove_root = Event::new(EventKind::Remove(RemoveKind::Folder)).add_path(a.clone());
+    let rename_root =
+        Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::From))).add_path(a.clone());
+    let remove_beneath =
+        Event::new(EventKind::Remove(RemoveKind::Folder)).add_path(a.join("season-1"));
+    let rename_beneath = Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::From)))
+        .add_path(a.join("season-1"));
+    let create_root =
+        Event::new(EventKind::Create(notify::event::CreateKind::Folder)).add_path(a.clone());
+    let rescan_all = Event::new(EventKind::Other).set_flag(Flag::Rescan);
+    let rescan_a = Event::new(EventKind::Other)
+        .set_flag(Flag::Rescan)
+        .add_path(a.join("season-1"));
+    let remove_polled_root =
+        Event::new(EventKind::Remove(RemoveKind::Folder)).add_path(polled_root.clone());
+
+    let cases: [(&str, Event, &[&Path]); 8] = [
+        ("root removed", remove_root, &[a.as_path()]),
+        ("root renamed", rename_root, &[a.as_path()]),
+        ("directory beneath removed", remove_beneath, &[]),
+        ("directory beneath renamed", rename_beneath, &[]),
+        ("root created", create_root, &[]),
+        (
+            "rescan naming no path",
+            rescan_all,
+            &[a.as_path(), b.as_path()],
+        ),
+        ("rescan beneath one root", rescan_a, &[a.as_path()]),
+        ("polled root removed", remove_polled_root, &[]),
+    ];
+    for (case, event, expected) in cases {
+        let (watcher, _status, watched) = silent_watcher();
+        let (lib_a, lib_b, polled) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        watcher.watch_library(lib_a, &a).unwrap();
+        watcher.watch_library(lib_b, &b).unwrap();
+        watcher
+            .watch_polled(polled, &polled_root, PollReason::NetworkFilesystem)
+            .unwrap();
+        watched.lock().unwrap().clear();
+
+        handle_notify_result(Ok(event), &watcher.shared);
+        watcher.poll_once();
+
+        let mut rewatched = watched.lock().unwrap().clone();
+        rewatched.sort();
+        assert_eq!(rewatched, expected, "{case}");
+        assert_eq!(watcher.registered_libraries().len(), 3, "{case}");
+    }
+}
+
+/// A library unwatched, or superseded at its root, after its watch was
+/// queued to be renewed is not watched again by the poll.
+#[tokio::test]
+async fn a_renewal_queued_for_a_library_since_unwatched_is_dropped() {
+    use notify::event::{Event, EventKind, Flag};
+
+    let (_dir, root) = canonical_tempdir();
+    let (_other_dir, other_root) = canonical_tempdir();
+    let (watcher, _status, watched) = silent_watcher();
+    let (unwatched, superseded, successor) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    watcher.watch_library(unwatched, &root).unwrap();
+    watcher.watch_library(superseded, &other_root).unwrap();
+    handle_notify_result(
+        Ok(Event::new(EventKind::Other).set_flag(Flag::Rescan)),
+        &watcher.shared,
+    );
+
+    watcher.unwatch_library(unwatched).unwrap();
+    watcher.watch_library(successor, &other_root).unwrap();
+    watched.lock().unwrap().clear();
+    watcher.poll_once();
+
+    assert!(watched.lock().unwrap().is_empty());
+    assert_eq!(watcher.registered_libraries(), vec![successor]);
 }
 
 #[test]

@@ -37,10 +37,10 @@ async fn a_key_from_before_the_apostrophe_fold_is_rederived_in_place() {
     h.remove("Grey's Anatomy/Season 1/Greys.Anatomy.S01E02.mkv");
     let missing: Vec<Uuid> = h
         .file_repo
-        .files
-        .lock()
+        .find_all_by_library(h.library.id)
+        .await
         .unwrap()
-        .values()
+        .into_iter()
         .filter(|f| f.path.ends_with("Greys.Anatomy.S01E02.mkv"))
         .map(|f| f.id)
         .collect();
@@ -59,7 +59,7 @@ async fn a_key_from_before_the_apostrophe_fold_is_rederived_in_place() {
     assert_eq!(after.tmdb_id, Some(1416), "with its enrichment");
     assert_eq!(after.identity_key.as_deref(), Some("greys anatomy|"));
     assert_eq!(
-        h.season_one(show),
+        h.season_one(show).await,
         vec![
             (
                 1,
@@ -157,7 +157,7 @@ async fn titles_the_current_fold_reads_as_one_are_merged_into_the_matched_one() 
     assert_eq!(show.tmdb_id, Some(1416));
     assert_eq!(show.identity_key.as_deref(), Some("greys anatomy|"));
     assert_eq!(
-        h.season_one(folder),
+        h.season_one(folder).await,
         vec![
             (
                 1,
@@ -182,10 +182,10 @@ async fn titles_the_current_fold_reads_as_one_are_merged_into_the_matched_one() 
     assert_eq!(entries.len(), 1, "one default-edition entry");
     let on_entry = h
         .file_repo
-        .files
-        .lock()
+        .find_all_by_library_including_missing(h.library.id)
+        .await
         .unwrap()
-        .values()
+        .into_iter()
         .filter(|f| matches!(f.content, Some(MediaFileContent::Movie { movie_entry_id, .. }) if movie_entry_id == entries[0].id))
         .count();
     assert_eq!(on_entry, 2, "with both copies");
@@ -222,7 +222,7 @@ async fn titles_the_current_fold_reads_as_one_are_merged_into_the_matched_one() 
     h.scan().await;
     assert_eq!(h.only_show().id, folder);
     assert_eq!(h.only_movie().id, older);
-    assert_eq!(h.season_one(folder).len(), 2);
+    assert_eq!(h.season_one(folder).await.len(), 2);
 }
 
 /// A library indexed before part tokens were read (issue #233): each part of
@@ -453,12 +453,18 @@ async fn a_rekey_does_not_retitle_a_matched_title_older_rules_spelled() {
     );
     // Matched without renaming it: only the provider id says so.
     h.movie_repo
-        .movies
-        .lock()
-        .unwrap()
-        .get_mut(&id)
-        .unwrap()
-        .tmdb_id = Some(949);
+        .apply_enrichment(
+            id,
+            &MovieEnrichment {
+                title: "Heat - CD1".to_string(),
+                year: Some(1995),
+                tmdb_id: Some(949),
+                ..Default::default()
+            },
+            &beam_domain::models::enrichment::FieldLocks::none(),
+        )
+        .await
+        .unwrap();
 
     h.service
         .scan_all_libraries(ScanTrigger::Periodic)
@@ -727,9 +733,12 @@ async fn a_rekey_never_merges_shows_matched_to_different_entries() {
         (Some("grey s anatomy|".to_string()), Some(9999)),
         "the stale show keeps its key and its match"
     );
-    assert_eq!(h.season_one(scene), vec![(1, vec![scene_file.to_string()])]);
     assert_eq!(
-        h.season_one(folder),
+        h.season_one(scene).await,
+        vec![(1, vec![scene_file.to_string()])]
+    );
+    assert_eq!(
+        h.season_one(folder).await,
         vec![(1, vec![folder_file.to_string()])]
     );
     let warning = h

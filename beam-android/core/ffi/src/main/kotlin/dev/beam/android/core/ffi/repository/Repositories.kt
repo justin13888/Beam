@@ -1,30 +1,22 @@
 package dev.beam.android.core.ffi.repository
 
 import kotlinx.coroutines.flow.Flow
-import uniffi.beam_client_core.AdminEvent
-import uniffi.beam_client_core.AdminLogPage
-import uniffi.beam_client_core.AdminStatus
-import uniffi.beam_client_core.AdminUserPage
 import uniffi.beam_client_core.BrowseQuery
 import uniffi.beam_client_core.ContinueWatchingEntry
 import uniffi.beam_client_core.DeviceLoginPrompt
-import uniffi.beam_client_core.DeviceLoginStep
 import uniffi.beam_client_core.DeviceProfile
 import uniffi.beam_client_core.DeviceSession
 import uniffi.beam_client_core.EpisodeSummary
 import uniffi.beam_client_core.HistoryPage
-import uniffi.beam_client_core.LibraryFileSummary
 import uniffi.beam_client_core.LibrarySummary
 import uniffi.beam_client_core.MediaDetail
 import uniffi.beam_client_core.MediaPage
 import uniffi.beam_client_core.MediaSourceView
 import uniffi.beam_client_core.PlaybackHttpConfig
 import uniffi.beam_client_core.PlaybackPlan
-import uniffi.beam_client_core.PlaybackTelemetrySummary
+import uniffi.beam_client_core.ProgressDrain
 import uniffi.beam_client_core.ProgressOutcome
 import uniffi.beam_client_core.QualityPolicy
-import uniffi.beam_client_core.ScanJob
-import uniffi.beam_client_core.ServerHealth
 import uniffi.beam_client_core.ServerSummary
 import uniffi.beam_client_core.SourceSelection
 import uniffi.beam_client_core.StartFailureCause
@@ -71,11 +63,15 @@ public interface ServerRepository {
      */
     public suspend fun startDeviceLogin(serverId: String): DeviceLoginPrompt
 
-    /** Poll a device login once; signs in on approval. */
-    public suspend fun pollDeviceLogin(
+    /**
+     * Poll the device login [prompt] began until it signs in, at the pace RFC
+     * 8628 sets; the core owns the loop. Throws whatever ends the flow -- a
+     * refusal, an expiry, an unknown flow. Cancelling the coroutine stops it.
+     */
+    public suspend fun awaitDeviceLogin(
         serverId: String,
-        deviceHandle: String,
-    ): DeviceLoginStep
+        prompt: DeviceLoginPrompt,
+    ): UserSummary
 
     /** Hand over a cookie lifted from the browser, and verify it. */
     public suspend fun completeLogin(
@@ -120,12 +116,6 @@ public interface CatalogRepository {
 
     /** Every library on the server. */
     public suspend fun libraries(): List<LibrarySummary>
-
-    /** One library. */
-    public suspend fun library(libraryId: String): LibrarySummary
-
-    /** The files indexed into one library. */
-    public suspend fun libraryFiles(libraryId: String): List<LibraryFileSummary>
 
     /** The next playable episode after this one, across season boundaries. */
     public suspend fun upNext(
@@ -201,17 +191,27 @@ public interface PlaybackRepository {
     ): ProgressOutcome
 
     /**
-     * Send every queued position that is due, to the active server. Returns
-     * how many landed.
+     * Send every queued position that is due, each to the server that owns
+     * it, and answer when another drain is worth running
+     * ([ProgressDrain.retryInSecs], `null` once nothing a drain could send
+     * is left). Throws only when a queue could not be read.
      */
-    public suspend fun flushProgress(): UInt
+    public suspend fun drainProgress(): ProgressDrain
 
     /**
-     * How many positions are still queued for the active server. A drain
-     * stops at the first failed send, so this -- not [flushProgress]'s count
-     * -- is what says whether anything is left to retry.
+     * Seconds to wait before retrying a drain that threw for the [attempt]th
+     * time in a row: the core's own back-off, since a drain that threw
+     * backed nothing off and so named no wait.
      */
-    public suspend fun pendingProgressCount(): UInt
+    public fun progressRetryDelaySecs(attempt: UInt): ULong
+
+    /**
+     * Where Play starts [fileId] from the last position this device recorded
+     * for it, by the core's start rule: 0 where it recorded none, or one near
+     * the end. Asks nothing of the network -- it is what an offline Play
+     * resumes from. Throws only when the device's record could not be read.
+     */
+    public suspend fun localStartPositionSecs(fileId: String): Double
 }
 
 /**
@@ -269,70 +269,4 @@ public interface SessionRepository {
 
     /** End every session everywhere, including this one. */
     public suspend fun logoutEverywhere()
-}
-
-/** The administrative surface, available only to administrators. */
-public interface AdminRepository {
-    /** The dashboard snapshot. */
-    public suspend fun status(): AdminStatus
-
-    /** The server's own health report. */
-    public suspend fun health(): ServerHealth
-
-    /** One page of user accounts: [first] of them, after the page whose `endCursor` is [after]. */
-    public suspend fun users(
-        first: UInt?,
-        after: String?,
-    ): AdminUserPage
-
-    /** Block or unblock an account. */
-    public suspend fun setUserDisabled(
-        userId: String,
-        disabled: Boolean,
-    )
-
-    /**
-     * One page of the operational log, newest first: [first] lines, after the page whose
-     * `endCursor` is [after]. Its `total` is how many lines the server holds.
-     */
-    public suspend fun logs(
-        first: UInt?,
-        after: String?,
-    ): AdminLogPage
-
-    /** Recent server events, newest first. */
-    public suspend fun events(limit: UInt?): List<AdminEvent>
-
-    /** Create a library from a path on the server. */
-    public suspend fun createLibrary(
-        name: String,
-        rootPath: String,
-    ): LibrarySummary
-
-    /** Delete a library and everything indexed into it. */
-    public suspend fun deleteLibrary(libraryId: String)
-
-    /**
-     * Start a rescan of a library. Returns once the server has accepted it; the
-     * scan itself runs on the server afterwards.
-     */
-    public suspend fun scanLibrary(libraryId: String)
-
-    /**
-     * The latest scan of a library since the server started, running or
-     * finished; null when it has not been scanned since.
-     */
-    public suspend fun scanJob(libraryId: String): ScanJob?
-
-    /** Re-fetch metadata for one title. */
-    public suspend fun refreshMetadata(mediaId: String)
-
-    /**
-     * Playback telemetry from [from] to [to], inclusive UTC days as
-     * `YYYY-MM-DD`; null for the server's default of the last thirty days.
-     */
-    public suspend fun playbackTelemetry(
-        from: String?,
-        to: String?,
-    ): PlaybackTelemetrySummary
 }

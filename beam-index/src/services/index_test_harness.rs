@@ -28,9 +28,155 @@ use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
 use beam_domain::repositories::show::MockShowRepository;
 use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
 use beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository;
+use beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository;
 use num::rational::Ratio;
 use std::path::PathBuf;
 use tempfile::TempDir;
+
+// ─── the service ──────────────────────────────────────────────────────────
+
+/// The one place a test builds a [`LocalIndexService`]: every dependency a
+/// test does not name is a fresh in-memory store, a strict mock with no
+/// expectations (the hasher and prober -- reaching one is a failure), a
+/// no-op admin log, or an empty notification sink. A test names only the
+/// doubles it scripts or asserts through, and chains the service's own
+/// `with_*` options onto [`Self::build`]'s result.
+#[derive(Default)]
+pub(crate) struct IndexServiceBuilder {
+    library_repo: Option<Arc<dyn LibraryRepository>>,
+    file_repo: Option<Arc<dyn FileRepository>>,
+    movie_repo: Option<Arc<dyn MovieRepository>>,
+    show_repo: Option<Arc<dyn ShowRepository>>,
+    stream_repo: Option<Arc<dyn MediaStreamRepository>>,
+    hash_service: Option<Arc<dyn HashService>>,
+    media_info: Option<Arc<dyn MediaInfoService>>,
+    notifications: Option<Arc<dyn NotificationService>>,
+    admin_log: Option<Arc<dyn AdminLogRepository>>,
+    progress_repo: Option<Arc<dyn WatchStateRepository>>,
+}
+
+impl IndexServiceBuilder {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// The library, file, movie and show stores of `stores`, wired to each
+    /// other as [`IndexStores::wired`] wires them.
+    pub(crate) fn stores(self, stores: &IndexStores) -> Self {
+        self.library_repo(stores.library_repo.clone())
+            .file_repo(stores.file_repo.clone())
+            .movie_repo(stores.movie_repo.clone())
+            .show_repo(stores.show_repo.clone())
+    }
+
+    pub(crate) fn library_repo(mut self, repo: Arc<dyn LibraryRepository>) -> Self {
+        self.library_repo = Some(repo);
+        self
+    }
+
+    pub(crate) fn file_repo(mut self, repo: Arc<dyn FileRepository>) -> Self {
+        self.file_repo = Some(repo);
+        self
+    }
+
+    pub(crate) fn movie_repo(mut self, repo: Arc<dyn MovieRepository>) -> Self {
+        self.movie_repo = Some(repo);
+        self
+    }
+
+    pub(crate) fn show_repo(mut self, repo: Arc<dyn ShowRepository>) -> Self {
+        self.show_repo = Some(repo);
+        self
+    }
+
+    pub(crate) fn stream_repo(mut self, repo: Arc<dyn MediaStreamRepository>) -> Self {
+        self.stream_repo = Some(repo);
+        self
+    }
+
+    pub(crate) fn hash_service(mut self, hasher: Arc<dyn HashService>) -> Self {
+        self.hash_service = Some(hasher);
+        self
+    }
+
+    pub(crate) fn media_info(mut self, prober: Arc<dyn MediaInfoService>) -> Self {
+        self.media_info = Some(prober);
+        self
+    }
+
+    pub(crate) fn notifications(mut self, notifications: Arc<dyn NotificationService>) -> Self {
+        self.notifications = Some(notifications);
+        self
+    }
+
+    /// An admin log that records into `repo`, for a test that reads what was
+    /// logged.
+    pub(crate) fn admin_log_repo(mut self, repo: Arc<dyn AdminLogRepository>) -> Self {
+        self.admin_log = Some(repo);
+        self
+    }
+
+    pub(crate) fn progress_repo(mut self, repo: Arc<dyn WatchStateRepository>) -> Self {
+        self.progress_repo = Some(repo);
+        self
+    }
+
+    pub(crate) fn build(self) -> LocalIndexService {
+        let Self {
+            library_repo,
+            file_repo,
+            movie_repo,
+            show_repo,
+            stream_repo,
+            hash_service,
+            media_info,
+            notifications,
+            admin_log,
+            progress_repo,
+        } = self;
+        LocalIndexService::new(
+            library_repo.unwrap_or_else(|| Arc::new(InMemoryLibraryRepository::default())),
+            file_repo.unwrap_or_else(|| Arc::new(InMemoryFileRepository::default())),
+            movie_repo.unwrap_or_else(|| Arc::new(InMemoryMovieRepository::default())),
+            show_repo.unwrap_or_else(|| Arc::new(InMemoryShowRepository::default())),
+            stream_repo.unwrap_or_else(|| Arc::new(InMemoryMediaStreamRepository::default())),
+            hash_service.unwrap_or_else(|| Arc::new(MockHashService::new())),
+            media_info.unwrap_or_else(|| Arc::new(MockMediaInfoService::new())),
+            notifications.unwrap_or_else(|| Arc::new(InMemoryNotificationService::new())),
+            admin_log.unwrap_or_else(|| Arc::new(InMemoryAdminLogRepository::default())),
+            progress_repo.unwrap_or_else(|| Arc::new(InMemoryWatchStateRepository::default())),
+        )
+    }
+}
+
+/// The in-memory catalogue stores, wired to each other as the SQL stores
+/// are joined: the library, movie and show stores read the file store, so a
+/// library's file count, and a title's files, are the files actually held;
+/// and the library store reads the movie and show stores, so its title count
+/// is of the titles actually held.
+pub(crate) struct IndexStores {
+    pub(crate) library_repo: Arc<InMemoryLibraryRepository>,
+    pub(crate) file_repo: Arc<InMemoryFileRepository>,
+    pub(crate) movie_repo: Arc<InMemoryMovieRepository>,
+    pub(crate) show_repo: Arc<InMemoryShowRepository>,
+}
+
+impl IndexStores {
+    pub(crate) fn wired() -> Self {
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+        let movie_repo = Arc::new(InMemoryMovieRepository::with_files(file_repo.clone()));
+        let show_repo = Arc::new(InMemoryShowRepository::with_files(file_repo.clone()));
+        Self {
+            library_repo: Arc::new(
+                InMemoryLibraryRepository::with_files(file_repo.clone())
+                    .linking_titles(movie_repo.clone(), show_repo.clone()),
+            ),
+            movie_repo,
+            show_repo,
+            file_repo,
+        }
+    }
+}
 
 // ─── helpers ─────────────────────────────────────────────────────────────
 
@@ -105,36 +251,23 @@ pub(super) fn make_classify_service() -> (
 ) {
     let movie_repo = Arc::new(InMemoryMovieRepository::default());
     let show_repo = Arc::new(InMemoryShowRepository::default());
-    let service = LocalIndexService::new(
-        Arc::new(InMemoryLibraryRepository::default()),
-        Arc::new(InMemoryFileRepository::default()),
-        movie_repo.clone(),
-        show_repo.clone(),
-        Arc::new(InMemoryMediaStreamRepository::default()),
-        Arc::new(MockHashService::new()),
-        Arc::new(MockMediaInfoService::new()),
-        Arc::new(InMemoryNotificationService::new()),
-        Arc::new(InMemoryAdminLogRepository::default()),
-        Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-    );
+    let service = IndexServiceBuilder::new()
+        .movie_repo(movie_repo.clone())
+        .show_repo(show_repo.clone())
+        .build();
     (service, movie_repo, show_repo)
 }
 
 pub(super) fn make_service_with_stream_repo(
     stream_repo: Arc<InMemoryMediaStreamRepository>,
 ) -> LocalIndexService {
-    LocalIndexService::new(
-        Arc::new(MockLibraryRepository::new()),
-        Arc::new(MockFileRepository::new()),
-        Arc::new(MockMovieRepository::new()),
-        Arc::new(MockShowRepository::new()),
-        stream_repo,
-        Arc::new(MockHashService::new()),
-        Arc::new(MockMediaInfoService::new()),
-        Arc::new(InMemoryNotificationService::new()),
-        Arc::new(InMemoryAdminLogRepository::default()),
-        Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-    )
+    IndexServiceBuilder::new()
+        .library_repo(Arc::new(MockLibraryRepository::new()))
+        .file_repo(Arc::new(MockFileRepository::new()))
+        .movie_repo(Arc::new(MockMovieRepository::new()))
+        .show_repo(Arc::new(MockShowRepository::new()))
+        .stream_repo(stream_repo)
+        .build()
 }
 
 pub(super) fn make_video_stream(

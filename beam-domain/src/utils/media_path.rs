@@ -75,6 +75,24 @@ pub enum EpisodeNumbering {
     Absolute,
 }
 
+impl EpisodeNumbering {
+    /// The value `episodes.numbering` stores it as (issue #334).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::Daily => "daily",
+            Self::Absolute => "absolute",
+        }
+    }
+
+    /// The numbering `episodes.numbering` stores as `stored`, if any.
+    pub fn parse(stored: &str) -> Option<Self> {
+        [Self::Standard, Self::Daily, Self::Absolute]
+            .into_iter()
+            .find(|numbering| numbering.as_str() == stored)
+    }
+}
+
 /// An episode, and the show it belongs to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EpisodeInference {
@@ -797,3 +815,31 @@ fn season_folder_episode(stem: &str, season: u32) -> Option<(u32, Option<String>
 #[cfg(test)]
 #[path = "media_path_corpus.rs"]
 mod corpus;
+
+#[cfg(test)]
+mod numbering_tests {
+    use super::EpisodeNumbering;
+
+    /// What a row stores reads back as the numbering that stored it, and
+    /// each numbering stores a value of its own.
+    #[test]
+    fn every_numbering_reads_back_from_what_it_stores() {
+        let all = [
+            EpisodeNumbering::Standard,
+            EpisodeNumbering::Daily,
+            EpisodeNumbering::Absolute,
+        ];
+        for numbering in all {
+            assert_eq!(EpisodeNumbering::parse(numbering.as_str()), Some(numbering));
+        }
+        let stored: std::collections::HashSet<_> = all.iter().map(|n| n.as_str()).collect();
+        assert_eq!(stored.len(), all.len());
+    }
+
+    #[test]
+    fn a_value_no_numbering_stores_reads_as_none() {
+        for stored in ["", "Standard", "ABSOLUTE", "anime"] {
+            assert_eq!(EpisodeNumbering::parse(stored), None, "{stored:?}");
+        }
+    }
+}

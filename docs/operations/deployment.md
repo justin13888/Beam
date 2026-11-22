@@ -43,16 +43,16 @@ supported way to get a working login locally, and is for development only.
 
 | Service | Role |
 |---|---|
-| `postgres` | Postgres 18, the sole datastore: catalog, sessions, enrichment state, admin logs. Healthchecked via `pg_isready`; data in the `postgres` named volume. |
+| `postgres` | Postgres 18, the sole datastore: catalog, sessions, enrichment state, admin logs. Healthchecked via `pg_isready`; data in the `postgres` named volume. Publishes its port (`POSTGRES_HOST_PORT`) on `127.0.0.1` only, for local tooling: the server reaches it over the compose network as `postgres:5432`. `check:compose-invariants` fails if the address is dropped. |
 | `dex` | Dev-only OIDC IdP with static test users (`admin@beam.localhost` / `user@beam.localhost`, password `password`; see `dex/config.yaml`). Only `admin@` is in the `beam-admin` group, which `mise run dev:up` maps to admin via `BEAM_OIDC_ADMIN_CLAIM=groups`, so `user@` is a non-admin. **Opt-in**: it is gated behind the `dev-idp` compose profile and does not start with a bare `compose up`. Use `mise run dev:up`, which enables the profile and sets the matching `BEAM_OIDC_*`. Production deployments point `BEAM_OIDC_ISSUER` at a real IdP (Keycloak, Authentik, Authelia, or a hosted provider) instead. Listens on `5556` on both the host and the container; that port is part of the issuer string, which the browser reaches via the host mapping and the server via the compose alias, so it has no `*_HOST_PORT` override. |
-| `traefik` | TLS termination and `Host()`-rule routing (`server.beam.localhost` → server, `beam.localhost` → web), HTTP→HTTPS redirect, HTTP/3, dashboard bound to loopback. The server router disables response buffering (`flushInterval: "-1"`) for low-latency media delivery. The bundled setup uses self-signed certs for `*.beam.localhost`; bring your own domain/certificate configuration for production. |
+| `traefik` | TLS termination and `Host()`-rule routing (`server.beam.localhost` under `/v1` → server, `beam.localhost` → web; the server's `/metrics` and `/openapi` are never routed, and `check:compose-invariants` fails if the path restriction is dropped), HTTP→HTTPS redirect, HTTP/3, dashboard bound to loopback. The server router disables response buffering (`flushInterval: "-1"`) for low-latency media delivery. The bundled setup uses self-signed certs for `*.beam.localhost`; bring your own domain/certificate configuration for production. |
 
 ### Application services (`compose.beam.yaml`)
 
 | Service | Role |
 |---|---|
-| `server` | The `beam-server` binary (built from `beam-server/Containerfile`): HTTP API, OIDC auth, in-process indexing/enrichment, direct-play streaming. Mounts the media library read-only (`:ro`, FR-202; `check:compose-invariants` fails if it is dropped) at `BEAM_VIDEO_DIR` and server-writable state at `BEAM_DATA_DIR` (host paths via `HOST_VIDEO_DIR`/`HOST_DATA_DIR`, or the `server_videos`/`server_data` named volumes by default). Healthchecked via `GET /v1/health`. Depends only on `postgres` — deliberately not on `dex`, because a `depends_on` naming a profile-gated service makes the profile-less project invalid outright; `mise run dev:up` sequences Dex first instead. |
-| `web` | The `beam-web` SPA (built from `beam-web/Containerfile`, which generates the typed client from the `beam-web/openapi.json` supplied in the build context), served as static files by Caddy. Depends on a healthy `server`. |
+| `server` | The `beam-server` binary (built from `beam-server/Containerfile`): HTTP API, OIDC auth, in-process indexing/enrichment, direct-play streaming. Mounts the media library read-only (`:ro`, FR-202; `check:compose-invariants` fails if it is dropped) at `BEAM_VIDEO_DIR` and server-writable state at `BEAM_DATA_DIR` (host paths via `HOST_VIDEO_DIR`/`HOST_DATA_DIR`, or the `server_videos`/`server_data` named volumes by default). Publishes its port (`BEAM_SERVER_HOST_PORT`) on `127.0.0.1` only, so off-host clients reach it through Traefik's `/v1` router; `check:compose-invariants` fails if the address is dropped. Healthchecked via `GET /v1/health`. Depends only on `postgres` — deliberately not on `dex`, because a `depends_on` naming a profile-gated service makes the profile-less project invalid outright; `mise run dev:up` sequences Dex first instead. |
+| `web` | The `beam-web` SPA (built from `beam-web/Containerfile`, which generates the typed client from the `beam-web/openapi.json` supplied in the build context), served as static files by Caddy. Publishes its port (`WEB_HOST_PORT`) on `127.0.0.1` only, so off-host browsers reach it through Traefik's TLS router; `check:compose-invariants` fails if the address is dropped. Depends on a healthy `server`. |
 
 ## Database migrations
 
@@ -95,6 +95,8 @@ rolling back to the previous image is safe after a failed upgrade. Only `up` is 
      `C_STREAM_SERVER_URL` is what the *browser* uses to reach the API and should match
      `BEAM_SERVER_URL` from that perspective.
    - Terminate TLS in Traefik (or your own reverse proxy); never expose `beam-server` directly.
+     The bundled compose files already keep to this: the server's, the web app's and Postgres's
+     host ports are bound to `127.0.0.1`, and Traefik forwards only `/v1` to the server. A proxy of your own should route only `/v1` too.
      If TLS terminates in front of a plain-HTTP `BEAM_SERVER_URL`, the server refuses to start
      until you either use the public HTTPS URL or set `BEAM_COOKIE_SECURE` explicitly (see
      [`configuration.md`](configuration.md)).
@@ -121,8 +123,9 @@ rolling back to the previous image is safe after a failed upgrade. Only `up` is 
    `BEAM_TVDB_API_KEY` (and `BEAM_TVDB_PIN` for a user-supported key) for TheTVDB-sourced
    enrichment, asked after TMDB and AniList; without it TheTVDB is not asked.
 5. **Operations** — set `BEAM_ENABLE_METRICS=true` for monitoring (Prometheus text exposition at
-   `GET /metrics`, top-level and unauthenticated — scrape it over the internal network and do not
-   forward it through the reverse proxy) and keep `RUST_LOG` at `info` or `warn`; structured logs
+   `GET /metrics`, top-level and unauthenticated — scrape it over the internal network, e.g. as
+   `server:8000` from a container on the compose network, and do not forward it through the
+   reverse proxy; the bundled Traefik router forwards only `/v1`) and keep `RUST_LOG` at `info` or `warn`; structured logs
    back the admin log viewer.
 
    With `BEAM_ENABLE_METRICS=false` the route does **not** disappear: no recorder is installed, and
@@ -177,7 +180,8 @@ reconciliation) first so it does not scale the Deployment straight back to one. 
 afterwards.
 
 **Libraries.** Each entry in `libraries` names a Kubernetes volume source and is mounted read-only
-at `/videos/<name>`; create the library in the admin UI with that path. Every source kind with a
+at `/videos/<name>`, and the chart declares it to the server in `BEAM_LIBRARIES`, so Beam creates
+the library `<name>` at that path at boot unless one is already stored there. Every source kind with a
 `readOnly` field (`persistentVolumeClaim`, `nfs`, `csi`, `iscsi`, `rbd`, `cephfs`, ...) is forced to
 `readOnly: true` as well, which also keeps the kubelet from applying the pod's `fsGroup` -- a
 recursive `chgrp` -- to the media. `hostPath` and `image` sources, which have no such field and
@@ -189,13 +193,62 @@ and on by default from 1.35, GA in 1.36, and a container runtime that supports i
 kind (`emptyDir`,
 `ephemeral`, `gitRepo`, `configMap`, `secret`, `projected`, `downwardAPI`, and the in-tree
 `flocker`, `photonPersistentDisk` and `vsphereVolume`) is refused by the schema. `BEAM_VIDEO_DIR` (`/videos`) and `BEAM_DATA_DIR` (`/data`)
-are fixed by the chart and cannot be overridden through `server.env`.
+are fixed by the chart and cannot be overridden through `server.env`; nor can the watcher settings
+the chart sets from `watch` and `scan` (below).
 
 The pod reads media as uid 1000 and gid 1000 (the image's user, which owns `/data`; fixed by the
 chart), plus any gids in `server.podSecurityContext.supplementalGroups`. Library media must be
 readable by one of those or by everyone. A NAS export readable by a `media` group with gid 1500
 needs `supplementalGroups: [1500]`; the chart never changes ownership on a library, so nothing
 else can grant access.
+
+A `hostPath` library may set `mountPropagation: HostToContainer`. Without it, a disk the host
+mounts or remounts under the path after the pod started -- a USB drive, a NAS automount -- is
+invisible to the pod, which keeps seeing the empty directory beneath it until it is restarted. It is
+opt-in, accepted only on a `hostPath` library, and only in that mode: the schema refuses
+`Bidirectional`, which would let the pod propagate mounts back onto the host.
+
+**How quickly new files appear.** Between full rescans the indexer learns of library changes from
+a filesystem watcher, and which kind depends on the filesystem behind each library:
+
+- A local filesystem (a `hostPath` on the node's disk, a local or block-device PV such as `rbd`,
+  `iscsi` or a cloud disk) gets native inotify events. A new file is picked up within
+  `watch.debounceMs` (`BEAM_WATCH_DEBOUNCE_MS`, default 2000) of its last write, plus
+  `scan.settleSeconds` (`BEAM_SCAN_SETTLE_SECS`, default 30) -- the window a file must go
+  unwritten before it is hashed, so a file still being copied in is not read while partial.
+- A network filesystem cannot deliver change events to a client: writes made by another machine
+  never raise inotify in the pod. The volumes Kubernetes usually provides for an existing library
+  are exactly these -- `nfs`, `cephfs`, SMB through a CSI driver, and anything FUSE-backed
+  (rclone, s3fs, mergerfs) -- so Beam detects them and **polls** them instead, walking every polled
+  library each `watch.pollIntervalSeconds` (`BEAM_WATCH_POLL_INTERVAL_SECS`, default 300). With the
+  defaults a new file on network storage takes up to about five and a half minutes to appear.
+  Lowering the interval makes it appear sooner at the cost of walking the whole library that often
+  -- every directory listed and every file stat'ed over the network -- so for a large library keep
+  it in minutes rather than seconds.
+
+```yaml
+watch:
+  pollIntervalSeconds: 60   # network-storage libraries: new files within about 1.5 minutes
+  debounceMs: 2000
+scan:
+  settleSeconds: 30
+```
+
+The `watcher` object in the admin status response (`GET /v1/admin/status`; the admin UI does not
+display it yet) shows which mode each library is in: `native`, `polling` with a `poll_reason` of `network_filesystem`,
+`watch_limit_reached` or `native_unavailable`, or `unwatched` when `BEAM_WATCH_ENABLED` is false.
+
+**inotify limits.** A native watch costs one inotify watch per directory in the library, counted
+against `fs.inotify.max_user_watches` -- a node-level kernel setting shared by every container on
+that node running as the same uid (Beam runs as 1000, a common uid). When a library would exceed
+it, Beam polls that library instead (`poll_reason: watch_limit_reached`, with
+`watch_limit_reached` and the limit itself as `watch_limit_count` in the status). The setting is not
+namespaced, so a pod's `securityContext.sysctls` cannot raise it; raise it on the nodes that may run
+Beam -- in the node image or provisioning config (a file under `/etc/sysctl.d/`), through your
+platform's node-tuning mechanism, or with a privileged DaemonSet that runs `sysctl -w` -- for example
+`fs.inotify.max_user_watches=524288`. Each watch costs roughly 1 KiB of unswappable kernel memory.
+Restart the Beam pod afterwards so it watches the library natively again. Libraries on network
+storage are polled whatever the limit, so raising it only helps large local libraries.
 
 **Probes.** Startup and readiness use `GET /v1/health`, which answers 503 while the database is
 unreachable -- the pod leaves the Service until it recovers. Liveness is a TCP check, so a database
@@ -227,7 +280,17 @@ require it; a browser client served elsewhere needs `server.webUrl` set to its o
 `NOTES.txt` says so on install.
 
 **Metrics.** `metrics.enabled` sets `BEAM_ENABLE_METRICS` and adds `prometheus.io/*` annotations to
-the pod for an in-cluster scraper.
+the pod for an in-cluster scraper. The Prometheus Operator (kube-prometheus-stack) ignores those
+annotations; for it, three objects each sit behind their own flag, and the chart refuses any of them
+without `metrics.enabled`:
+
+| Flag | Object |
+|---|---|
+| `metrics.serviceMonitor.enabled` | A `ServiceMonitor` scraping `/metrics` through the server Service (`interval`, `scrapeTimeout`, `relabelings`, `metricRelabelings`). kube-prometheus-stack selects ServiceMonitors by its `release` label unless configured otherwise: set it in `metrics.serviceMonitor.labels`. |
+| `metrics.prometheusRule.enabled` | A `PrometheusRule`: `BeamTargetDown` and `BeamDependencyDown` (critical); `BeamHighErrorRatio`, `BeamHighApiLatency`, `BeamDatabasePoolSaturated`, `BeamLibraryScanStale`, `BeamLibraryScanFailing`, `BeamWatcherErrors` and `BeamProviderFailing` (warning); `BeamWatcherPolling` (info). Thresholds are values beside the flag; `alertLabels` adds labels to every alert. Expressions select series by the `namespace` and `service` labels the ServiceMonitor gives them, so a Prometheus scraping Beam another way must attach the same two. |
+| `metrics.grafanaDashboard.enabled` | A `ConfigMap` holding `charts/beam/dashboards/beam.json` (HTTP, streaming, database, indexing and watcher, enrichment, sign-in, process), labelled `grafana_dashboard: "1"` for the Grafana sidecar by default. |
+
+The metric families these rely on are [NFR-408](../requirements/non-functional.md#nfr-4xx--operability).
 
 **Images.** `image.tag` defaults to `v<appVersion>`, the tag the release that carries the chart
 publishes. No release has been cut yet, so until one is, build and push `beam-server/Containerfile`
@@ -239,6 +302,11 @@ The chart is gated by `mise run helm:lint`, `helm:template` (kubeconform against
 source is read-only (or a `hostPath`/`image` source), `/data` is never a library, every container
 is hardened, liveness does not probe `/v1/health`, the ingress routes the server only under `/v1`,
 `X-Forwarded-For` is trusted by default only behind an ingress with a `ClusterIP` Service, and the
-grace period outlasts `BEAM_SHUTDOWN_TIMEOUT_SECS` -- and that the chart refuses to render a library
-on a source it cannot make read-only. All three run in
+grace period outlasts `BEAM_SHUTDOWN_TIMEOUT_SECS`, the `watch` and `scan` values reach the env vars
+they name, and only a `hostPath` library that opts in carries `mountPropagation` -- and that the
+chart refuses to render a library on a source it cannot make read-only, or with mount propagation
+off a `hostPath` or in any mode but `HostToContainer`. It also asserts the `ServiceMonitor`,
+`PrometheusRule` and dashboard each render only when enabled, and first runs `check:chart-rules`,
+which checks the rendered rule with `promtool check rules` and runs the alert unit tests in
+`charts/beam/ci/prometheusrule-test.yaml` with `promtool test rules`. All three run in
 `mise run ci`, CI's `helm-chart` job, and the pre-push hook.

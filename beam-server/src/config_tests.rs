@@ -1122,3 +1122,80 @@ fn the_indexer_defaults_are_the_documented_defaults() {
         beam_index::services::index::DEFAULT_MISSING_FILE_GRACE
     );
 }
+
+/// Re-execute this test binary for the one ignored child test `name`, with
+/// every inherited `BEAM_*` variable removed and only `BEAM_LIBRARIES` set to
+/// `libraries`, and require it to pass.
+fn run_library_child(name: &str, libraries: &str) {
+    let mut child =
+        std::process::Command::new(std::env::current_exe().expect("the test binary's own path"));
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("BEAM_") {
+            child.env_remove(key);
+        }
+    }
+    let output = child
+        .env("BEAM_LIBRARIES", libraries)
+        .args(["--exact", name, "--ignored", "--test-threads=1"])
+        .output()
+        .expect("the test binary re-executes");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "stdout: {stdout}\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // An exact filter that matched nothing would also exit 0.
+    assert!(stdout.contains("1 passed"), "stdout: {stdout}");
+}
+
+/// `BEAM_LIBRARIES` reaches the configuration through the real env source,
+/// parsed into declarations (issue #455), and a declaration it cannot apply
+/// unambiguously stops the configuration loading at all.
+#[test]
+fn declared_libraries_are_read_from_the_environment() {
+    run_library_child(
+        "config::tests::libraries_loaded_from_the_environment",
+        r#"[{"name":"Movies","path":"/videos/movies"},{"name":"Shows","path":"shows"}]"#,
+    );
+    run_library_child(
+        "config::tests::a_duplicated_library_fails_loading",
+        r#"[{"name":"Movies","path":"/videos/a"},{"name":"Movies","path":"/videos/b"}]"#,
+    );
+}
+
+/// A child half of [`declared_libraries_are_read_from_the_environment`].
+#[test]
+#[ignore = "run by declared_libraries_are_read_from_the_environment in a child process"]
+fn libraries_loaded_from_the_environment() {
+    use crate::bootstrap::LibraryDeclaration;
+    let config = ServerConfig::builder()
+        .env()
+        .load()
+        .expect("declared libraries load");
+    assert_eq!(
+        config.libraries,
+        vec![
+            LibraryDeclaration {
+                name: "Movies".to_string(),
+                path: "/videos/movies".to_string(),
+            },
+            LibraryDeclaration {
+                name: "Shows".to_string(),
+                path: "shows".to_string(),
+            },
+        ]
+    );
+}
+
+/// A child half of [`declared_libraries_are_read_from_the_environment`].
+#[test]
+#[ignore = "run by declared_libraries_are_read_from_the_environment in a child process"]
+fn a_duplicated_library_fails_loading() {
+    assert!(std::env::var("BEAM_LIBRARIES").is_ok_and(|raw| raw.contains("Movies")));
+    let err = ServerConfig::builder()
+        .env()
+        .load()
+        .expect_err("a library declared twice is refused");
+    assert!(err.to_string().contains("BEAM_LIBRARIES"), "{err}");
+}

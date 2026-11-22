@@ -841,8 +841,24 @@ impl LocalIndexService {
                         air_date,
                         runtime,
                         thumbnail_url: _,
+                        numbering,
+                        absolute_number,
+                        absolute_season_number,
                         created_at: _,
                     } = episode;
+                    // An absolutely numbered episode joins the survivor's by
+                    // its running number while it is still where it was
+                    // indexed; one enrichment has re-homed is carried to the
+                    // place it now has, where the survivor's enrichment
+                    // re-homes it again (issue #334).
+                    let as_indexed = absolute_number == Some(episode_number)
+                        && absolute_season_number == Some(season.season_number);
+                    let numbering = match absolute_number {
+                        Some(_) if !as_indexed => {
+                            beam_domain::utils::media_path::EpisodeNumbering::Standard
+                        }
+                        _ => numbering,
+                    };
                     // Found or created on the survivor: one episode per
                     // `(season, number)`, so a number both shows have
                     // becomes one episode with both shows' files.
@@ -854,6 +870,7 @@ impl LocalIndexService {
                             title,
                             runtime,
                             air_date,
+                            numbering,
                         })
                         .await?;
                     // Carried before the episode's files move, as for a

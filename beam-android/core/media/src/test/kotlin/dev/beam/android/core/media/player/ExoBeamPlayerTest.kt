@@ -3,7 +3,11 @@
 
 package dev.beam.android.core.media.player
 
+import android.net.Uri
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DataSpec
+import androidx.media3.datasource.HttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.test.utils.TestExoPlayerBuilder
 import dev.beam.android.core.media.http.BeamHttpClientFactory
@@ -20,6 +24,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -41,6 +46,8 @@ class ExoBeamPlayerTest {
     private val playback = FakePlaybackRepository()
     private val telemetry = FakeTelemetryRepository()
 
+    @get:Rule val downloads = DownloadCacheRule()
+
     @After
     fun tearDown() {
         exoPlayer.release()
@@ -53,6 +60,8 @@ class ExoBeamPlayerTest {
             repository = playback,
             telemetry = telemetry,
             clients = BeamHttpClientFactory(BeamHttpClientFactory.shared()),
+            downloadCache = downloads.cache,
+            completedDownloads = { null },
             scope = scope,
             rebuffers = NeverSustained,
         )
@@ -99,6 +108,89 @@ class ExoBeamPlayerTest {
             player.pause()
             scope.runCurrent()
             assertTrue("no position is reported for a file that never started", playback.reportedProgress.isEmpty())
+        }
+
+    @Test
+    fun `a stream refused for its session has the core check the session`() =
+        runTest {
+            val scope = TestScope(testScheduler)
+            val player = player(scope)
+            player.play(REQUEST)
+            scope.runCurrent()
+            // The server refuses the same cookie through the core too, which
+            // is what moves the session to Expired and announces it.
+            playback.failWith = BeamException.SessionExpired()
+
+            player.onPlayerError(badStatus(401))
+            scope.runCurrent()
+
+            assertEquals(
+                "one secured call puts the cookie to the server",
+                listOf<UInt?>(1u),
+                playback.continueWatchingLimits,
+            )
+            val error = player.state.value.error
+            assertNotNull(error)
+            assertTrue("the failure says to sign in", error!!.requiresSignIn)
+            player.stop()
+        }
+
+    @Test
+    fun `a stream refused with 401 while the core still honours the session is offered as a retry`() =
+        runTest {
+            val scope = TestScope(testScheduler)
+            val player = player(scope)
+            player.play(REQUEST)
+            scope.runCurrent()
+
+            player.onPlayerError(badStatus(401))
+            scope.runCurrent()
+
+            assertEquals(listOf<UInt?>(1u), playback.continueWatchingLimits)
+            val error = player.state.value.error
+            assertNotNull(error)
+            assertFalse("nothing will send the viewer to sign in", error!!.requiresSignIn)
+            assertTrue("the refusal came from in front of the server", error.isRetryable)
+            assertEquals("The server refused to send this file.", error.message)
+            player.stop()
+        }
+
+    @Test
+    fun `a session check that fails for another reason does not leave the viewer at a sign-in prompt`() =
+        runTest {
+            val scope = TestScope(testScheduler)
+            val player = player(scope)
+            player.play(REQUEST)
+            scope.runCurrent()
+            playback.failWith = BeamException.Network("connection reset", retryable = true)
+
+            player.onPlayerError(badStatus(401))
+            scope.runCurrent()
+
+            val error = player.state.value.error
+            assertNotNull(error)
+            assertFalse(error!!.requiresSignIn)
+            assertTrue(error.isRetryable)
+            player.stop()
+        }
+
+    @Test
+    fun `a stream refused for access does not question the session`() =
+        runTest {
+            val scope = TestScope(testScheduler)
+            val player = player(scope)
+            player.play(REQUEST)
+            scope.runCurrent()
+
+            player.onPlayerError(badStatus(403))
+            scope.runCurrent()
+
+            assertTrue("an accepted session is not re-checked", playback.continueWatchingLimits.isEmpty())
+            assertFalse(
+                player.state.value.error!!
+                    .requiresSignIn,
+            )
+            player.stop()
         }
 
     @Test
@@ -175,6 +267,21 @@ class ExoBeamPlayerTest {
                     Fixtures.part("part-2", durationSecs = 2_800.0),
                 ),
             startIndex = startIndex,
+        )
+
+    /** What Media3 reports when the stream's server answers [status]. */
+    private fun badStatus(status: Int) =
+        PlaybackException(
+            "bad status",
+            HttpDataSource.InvalidResponseCodeException(
+                status,
+                null,
+                null,
+                emptyMap(),
+                DataSpec(Uri.parse("https://beam.test/v1/files/$FILE_ID/stream")),
+                ByteArray(0),
+            ),
+            PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS,
         )
 
     /** A monitor that never judges rebuffering sustained; the rule is the core's, tested there. */

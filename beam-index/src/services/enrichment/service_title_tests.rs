@@ -54,13 +54,18 @@ async fn successful_show_match_applies_show_and_season_enrichment() {
     );
 }
 
-/// Issue #267: a file numbered absolutely (`Show - 013`) is indexed as
-/// that episode of season 1, or of its season folder's season, and takes
-/// the metadata of the episode the provider's absolute order puts there.
+/// Issues #267 and #334: a file numbered absolutely (`Show - 013`) is
+/// indexed as that episode of season 1, or of its season folder's
+/// season, and enrichment moves it to the episode the provider's
+/// absolute order puts there -- merging it into an episode already
+/// there -- where it takes that episode's metadata, and where enriching
+/// again leaves it. An episode numbered as its season's that the
+/// provider does not list is not read as a running number.
 #[tokio::test]
-async fn an_absolutely_numbered_episode_takes_the_metadata_its_place_in_the_order_names() {
+async fn an_absolutely_numbered_episode_moves_to_its_place_in_the_order() {
     use beam_domain::models::CreateEpisode;
     use beam_domain::providers::enrichment::{EpisodeEnrichment, SeasonEnrichment};
+    use beam_domain::utils::media_path::EpisodeNumbering::{Absolute, Standard};
 
     let show_ref = ExternalMediaRef::new("tvdb", "81797");
     let provider_season = |season_number: u32, count: u32| SeasonEnrichment {
@@ -107,9 +112,18 @@ async fn an_absolutely_numbered_episode_takes_the_metadata_its_place_in_the_orde
         .await
         .unwrap();
     let mut local = Vec::new();
-    for (season_number, episode_number) in
-        [(0, 1), (1, 1), (1, 13), (1, 15), (1, 16), (2, 14), (3, 2)]
-    {
+    for (season_number, episode_number, numbering) in [
+        (0, 1, Standard),
+        (1, 3, Absolute),
+        (1, 13, Absolute),
+        (1, 15, Absolute),
+        (1, 16, Absolute),
+        (1, 17, Standard),
+        (2, 1, Absolute),
+        (2, 3, Standard),
+        (2, 14, Absolute),
+        (3, 2, Absolute),
+    ] {
         let season = show_repo
             .find_or_create_season(show.id, season_number)
             .await
@@ -121,6 +135,7 @@ async fn an_absolutely_numbered_episode_takes_the_metadata_its_place_in_the_orde
                 title: format!("local {season_number}x{episode_number}"),
                 runtime: None,
                 air_date: None,
+                numbering,
             })
             .await
             .unwrap();
@@ -133,34 +148,66 @@ async fn an_absolutely_numbered_episode_takes_the_metadata_its_place_in_the_orde
 
     assert_eq!(service.sweep_once().await.enriched, 1);
 
-    let mut titles = Vec::new();
-    for (position, episode_id) in local {
-        let episode = show_repo
-            .find_episode_by_id(episode_id)
-            .await
-            .unwrap()
-            .unwrap();
-        titles.push((position, episode.title));
-    }
+    // Where each indexed row is now, and its title; `None` once merged.
+    let placed = || async {
+        let mut placed = Vec::new();
+        for (indexed, episode_id) in &local {
+            let now = match show_repo.find_episode_by_id(*episode_id).await.unwrap() {
+                Some(episode) => {
+                    let season = show_repo
+                        .find_season_by_id(episode.season_id)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    Some((season.season_number, episode.episode_number, episode.title))
+                }
+                None => None,
+            };
+            placed.push((*indexed, now));
+        }
+        placed
+    };
     let expected = [
         // A special keeps its own number: the order counts none.
-        ((0, 1), "S00E01"),
-        ((1, 1), "S01E01"),
-        // Past season 1's twelve: the order runs on into season 2.
-        ((1, 13), "S02E01"),
-        ((1, 15), "S02E03"),
+        ((0, 1), Some((0, 1, "S00E01"))),
+        ((1, 3), Some((1, 3, "S01E03"))),
+        // Past season 1's twelve the order runs on into season 2, but
+        // S02E01 holds another running number -- season 2's folder's 1,
+        // which the order puts in season 1 -- so 13 is not merged into
+        // it, and takes S02E01's metadata where it stands.
+        ((1, 13), Some((1, 13, "S02E01"))),
+        // S02E03 already has a row: 15 merges into it.
+        ((1, 15), None),
         // Past the order's end: left as indexed.
-        ((1, 16), "local 1x16"),
+        ((1, 16), Some((1, 16, "local 1x16"))),
+        // Numbered as season 1's: not a running number.
+        ((1, 17), Some((1, 17, "local 1x17"))),
+        ((2, 1), Some((2, 1, "S02E01"))),
+        ((2, 3), Some((2, 3, "S02E03"))),
         // In a season folder, and the order agrees it is that season's.
-        ((2, 14), "S02E02"),
+        ((2, 14), Some((2, 2, "S02E02"))),
         // The order puts 2 in season 1, not the folder's season 3.
-        ((3, 2), "local 3x2"),
+        ((3, 2), Some((3, 2, "local 3x2"))),
     ];
-    let expected: Vec<((u32, u32), String)> = expected
+    let expected: Vec<_> = expected
         .into_iter()
-        .map(|(position, title)| (position, title.to_string()))
+        .map(|(indexed, now)| {
+            (
+                indexed,
+                now.map(|(season, number, title)| (season, number, title.to_string())),
+            )
+        })
         .collect();
-    assert_eq!(titles, expected);
+    assert_eq!(placed().await, expected);
+    let merged = show_repo
+        .find_episode_by_id(local[7].1)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(merged.absolute_number, Some(15));
+
+    service.enrich_seasons(show.id, &show_ref).await;
+    assert_eq!(placed().await, expected, "enriching again moves nothing");
 
     // Season 3 has nothing from the provider, so its row is left alone.
     let seasons = show_repo.find_seasons_by_show_id(show.id).await.unwrap();
@@ -296,6 +343,65 @@ fn sweep_outcomes_are_counted_as_metrics() {
     // Zero tallies must not mint a series at all.
     assert_eq!(outcome_count("unmatched"), None);
     assert_eq!(outcome_count("rate_limited"), None);
+}
+
+/// Every sweep gauges the queue it leaves behind (issue #457): with no
+/// provider configured nothing drains it, so the gauge shows every
+/// queued title; a sweep that enriches a title takes it off.
+#[tokio::test]
+async fn every_sweep_gauges_the_titles_still_pending() {
+    use crate::test_metrics::MetricsCapture;
+
+    let capture = MetricsCapture::new();
+    let _recorder = capture.install();
+    let pending = || capture.snapshot().gauge("beam_enrichment_pending", &[]);
+
+    let (idle, movie_repo, _shows, state_repo, _genres, _clock) =
+        harness(InMemoryEnrichmentProvider::new(&[]));
+    for title in ["The Matrix", "Ghost"] {
+        queue_movie(&movie_repo, &state_repo, title).await;
+    }
+    assert!(idle.sweep_once().await.skipped_no_providers);
+    assert_eq!(pending(), Some(2.0));
+
+    let provider = InMemoryEnrichmentProvider::new(&["tmdb"])
+        .with_movie_search(
+            "The Matrix",
+            vec![MovieSearchHit {
+                external_ref: ExternalMediaRef::new("tmdb", "603"),
+                title: "The Matrix".to_string(),
+                original_title: None,
+                year: Some(1999),
+                popularity: Some(80.0),
+                vote_average: Some(8.7),
+            }],
+        )
+        .with_movie_enrichment(MovieEnrichment {
+            tmdb_id: Some(603),
+            title: "The Matrix".to_string(),
+            year: Some(1999),
+            ..Default::default()
+        });
+    let (service, movie_repo, _shows, state_repo, _genres, _clock) = harness(provider);
+    queue_movie(&movie_repo, &state_repo, "The Matrix").await;
+    assert_eq!(service.sweep_once().await.enriched, 1);
+    assert_eq!(pending(), Some(0.0));
+}
+
+/// Queue the 1999 movie `title` for enrichment.
+async fn queue_movie(
+    movie_repo: &InMemoryMovieRepository,
+    state_repo: &InMemoryEnrichmentStateRepository,
+    title: &str,
+) {
+    let movie = movie_repo
+        .find_or_create_by_identity(CreateMovie::new(title.to_string(), Some(1999), None))
+        .await
+        .unwrap();
+    state_repo
+        .ensure_pending(EnrichmentTargetId::Movie(movie.id))
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

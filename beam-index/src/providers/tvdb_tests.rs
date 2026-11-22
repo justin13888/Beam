@@ -518,6 +518,8 @@ async fn a_refused_api_key_is_an_auth_error() {
 
 #[tokio::test]
 async fn a_rate_limit_carries_its_retry_after_and_a_missing_title_is_not_found() {
+    let capture = crate::test_metrics::MetricsCapture::new();
+    let _recorder = capture.install();
     let (base, _received) = stand_in(Arc::new(|request: &Received| {
         match request.target.as_str() {
             "/v4/login" => login("token"),
@@ -552,6 +554,32 @@ async fn a_rate_limit_carries_its_retry_after_and_a_missing_title_is_not_found()
             .await,
         Err(EnrichmentError::NotConfigured)
     ));
+
+    // Each request that reached TheTVDB is counted by how it ended, and the
+    // one never sent is not counted (issue #457).
+    let recorded = capture.snapshot();
+    let requests = |result| {
+        recorded.counter(
+            "beam_provider_requests_total",
+            &[("provider", "tvdb"), ("result", result)],
+        )
+    };
+    assert_eq!(requests("rate_limited"), Some(1));
+    assert_eq!(requests("not_found"), Some(1));
+    assert_eq!(requests("not_configured"), None);
+    assert_eq!(
+        recorded.counter("beam_provider_rate_limited_total", &[("provider", "tvdb")]),
+        Some(1)
+    );
+    assert_eq!(
+        recorded
+            .histogram(
+                "beam_provider_request_duration_seconds",
+                &[("provider", "tvdb")]
+            )
+            .map(|samples| samples.len()),
+        Some(2)
+    );
 }
 
 #[tokio::test]

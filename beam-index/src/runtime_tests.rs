@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-use beam_domain::models::Library;
+use beam_domain::models::{CreateLibrary, Library};
 use beam_domain::repositories::LibraryRepository;
 use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
 use beam_domain::services::TestClock;
@@ -49,6 +49,10 @@ struct RecordingIndexer {
     fail_once: std::sync::Mutex<HashSet<PathBuf>>,
     /// How many of the next library listings fail.
     failing_listings: Arc<AtomicU32>,
+    /// Where a test records the files a scan deferred.
+    scan_deferrals: Arc<ScanDeferrals>,
+    /// Every `library_changed` published, in order.
+    changed_libraries: std::sync::Mutex<Vec<Uuid>>,
 }
 
 /// The library store, whose next `failing` listings fail (NFR-205).
@@ -84,6 +88,12 @@ impl LibraryRepository for FlakyListings {
     async fn count_files(&self, library_id: Uuid) -> Result<u64, sea_orm::DbErr> {
         self.inner.count_files(library_id).await
     }
+    async fn count_titles(
+        &self,
+        library_id: Uuid,
+    ) -> Result<beam_domain::models::LibraryTitleCounts, sea_orm::DbErr> {
+        self.inner.count_titles(library_id).await
+    }
     async fn update_scan_progress(
         &self,
         library_id: Uuid,
@@ -116,6 +126,10 @@ impl RecordingIndexer {
         self.library_scans.lock().unwrap().clone()
     }
 
+    fn changed_libraries(&self) -> Vec<Uuid> {
+        self.changed_libraries.lock().unwrap().clone()
+    }
+
     fn overlapping_library_scans(&self) -> Vec<Uuid> {
         self.overlapping_library_scans.lock().unwrap().clone()
     }
@@ -141,20 +155,21 @@ impl RecordingIndexer {
             .insert(PathBuf::from(path), delay);
     }
 
-    fn store(&self, library: &Library) {
+    /// Store a library called `name` rooted at `root`, as an administrator
+    /// creating it would.
+    async fn store(&self, name: &str, root: &str) -> Library {
         self.library_repo
-            .libraries
-            .lock()
+            .create(CreateLibrary {
+                name: name.to_string(),
+                root_path: PathBuf::from(root),
+                description: None,
+            })
+            .await
             .unwrap()
-            .insert(library.id, library.clone());
     }
 
-    fn delete(&self, library_id: Uuid) {
-        self.library_repo
-            .libraries
-            .lock()
-            .unwrap()
-            .remove(&library_id);
+    async fn delete(&self, library_id: Uuid) {
+        self.library_repo.delete(library_id).await.unwrap();
     }
 }
 
@@ -211,6 +226,14 @@ impl BackgroundIndexer for RecordingIndexer {
             Some(retry_after) => ReconcileOutcome::Deferred { retry_after },
             None => ReconcileOutcome::Done,
         })
+    }
+
+    fn scan_deferrals(&self) -> Arc<ScanDeferrals> {
+        self.scan_deferrals.clone()
+    }
+
+    fn library_changed(&self, library_id: Uuid) {
+        self.changed_libraries.lock().unwrap().push(library_id);
     }
 }
 
@@ -382,13 +405,7 @@ async fn libraries_are_watched_once_each_and_new_ones_picked_up_next_cycle() {
     let clock = Arc::new(TestClock::new());
     let watcher = Arc::new(InMemoryFsWatcher::new());
 
-    let first = library("first", "/videos/first");
-    indexer
-        .library_repo
-        .libraries
-        .lock()
-        .unwrap()
-        .insert(first.id, first.clone());
+    let first = indexer.store("first", "/videos/first").await;
 
     let tasks = spawn_background_indexing_with(
         indexer.clone(),
@@ -404,13 +421,7 @@ async fn libraries_are_watched_once_each_and_new_ones_picked_up_next_cycle() {
 
     // A library created after startup is registered on the next cycle, and the
     // already-watched one is not registered twice.
-    let second = library("second", "/videos/second");
-    indexer
-        .library_repo
-        .libraries
-        .lock()
-        .unwrap()
-        .insert(second.id, second.clone());
+    let second = indexer.store("second", "/videos/second").await;
     until("the maintenance loop and the poller to sleep", || {
         clock.waiter_count() == 2
     })
@@ -688,6 +699,7 @@ async fn the_consumer_stops_when_the_watcher_closes() {
             run_watch_consumer(
                 watcher,
                 indexer.clone(),
+                indexer.scan_deferrals.attach(),
                 clock.clone(),
                 Duration::from_millis(2000),
             ),
@@ -764,6 +776,356 @@ async fn a_deferred_event_is_retried_once_its_delay_has_passed() {
             FsEventKind::Created
         ),
         "the retry is the event that was deferred"
+    );
+
+    tasks.abort();
+}
+
+/// A burst of reconciles in one library is one `library_changed` per
+/// debounce window (issue #454); a library whose only reconcile was deferred
+/// or failed changed nothing, so it is not announced until a retry finishes.
+#[tokio::test]
+async fn a_burst_of_reconciles_announces_each_changed_library_once_per_window() {
+    let indexer = Arc::new(RecordingIndexer::default());
+    let clock = Arc::new(TestClock::new());
+    let watcher = Arc::new(InMemoryFsWatcher::new());
+    let (films, shows, music) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    indexer.defer_next("/shows/a.mkv", Duration::from_secs(30));
+    indexer.fail_next("/music/a.mkv");
+
+    let tasks = spawn_background_indexing_with(
+        indexer.clone(),
+        indexer.libraries(),
+        Some(watcher.clone()),
+        clock.clone(),
+        config(3600, 2000),
+    );
+    let emit = |library_id: Uuid, path: &str| {
+        watcher.emit(FsEvent {
+            library_id,
+            path: PathBuf::from(path),
+            kind: FsEventKind::Created,
+        });
+    };
+    for path in ["/films/a.mkv", "/films/b.mkv", "/films/c.mkv"] {
+        emit(films, path);
+    }
+    emit(shows, "/shows/a.mkv");
+    emit(music, "/music/a.mkv");
+    until("the debounce window to open", || clock.waiter_count() >= 3).await;
+    assert!(indexer.changed_libraries().is_empty());
+
+    clock.advance(Duration::from_millis(2000));
+    until("the window's reconciles", || {
+        indexer.reconciled().len() == 5
+    })
+    .await;
+    until("the window's announcement", || {
+        !indexer.changed_libraries().is_empty()
+    })
+    .await;
+    assert_eq!(
+        indexer.changed_libraries(),
+        vec![films],
+        "three reconciles in one library are one announcement, and the \
+         deferred and failed libraries changed nothing"
+    );
+
+    // A second window is a second announcement for the same library.
+    emit(films, "/films/d.mkv");
+    until("the next debounce window to open", || {
+        clock.waiter_count() >= 4
+    })
+    .await;
+    clock.advance(Duration::from_millis(2000));
+    until("the second announcement", || {
+        indexer.changed_libraries().len() == 2
+    })
+    .await;
+    assert_eq!(indexer.changed_libraries(), vec![films, films]);
+
+    // The deferred reconcile finishing is what announces its library.
+    clock.advance(Duration::from_secs(30));
+    until("the retry's announcement", || {
+        indexer.changed_libraries().len() == 3
+    })
+    .await;
+    assert_eq!(indexer.changed_libraries()[2], shows);
+
+    tasks.abort();
+}
+
+/// End to end over the real indexer (issue #454): a file copied into a
+/// `TempDir` library is reconciled by the watch consumer through a real
+/// `LocalIndexService`, and the library is then read as changed through the
+/// notification service that service publishes to -- the one the server's
+/// change feed reads.
+#[tokio::test]
+async fn a_reconcile_on_the_real_indexer_is_read_through_its_notification_service() {
+    use crate::services::hash::{HashConfig, LocalHashService};
+    use crate::services::index::test_harness::{IndexServiceBuilder, IndexStores};
+    use crate::services::media_info::LocalMediaInfoService;
+    use crate::services::notification::{
+        ChangedLibraries, InMemoryNotificationService, NotificationService,
+    };
+    use beam_domain::repositories::FileRepository;
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let stores = IndexStores::wired();
+    let library = stores
+        .library_repo
+        .create(CreateLibrary {
+            name: "Films".to_string(),
+            root_path: dir.path().to_path_buf(),
+            description: None,
+        })
+        .await
+        .unwrap();
+    let notifications = Arc::new(InMemoryNotificationService::new());
+    let indexer = Arc::new(
+        IndexServiceBuilder::new()
+            .stores(&stores)
+            .hash_service(Arc::new(LocalHashService::new(HashConfig::default())))
+            .media_info(Arc::new(LocalMediaInfoService::default()))
+            .notifications(notifications.clone())
+            .build(),
+    );
+    let before = notifications.library_changes(None).cursor;
+
+    let clock = Arc::new(TestClock::new());
+    let watcher = Arc::new(InMemoryFsWatcher::new());
+    let tasks = spawn_background_indexing_with(
+        indexer.clone(),
+        stores.library_repo.clone(),
+        Some(watcher.clone()),
+        clock.clone(),
+        config(3600, 2000),
+    );
+    // The startup scan holds the library; an event reconciled under it would
+    // be deferred, so the file is copied in only once the scan has finished
+    // and the maintenance loop and the poller both sleep on the clock.
+    until("the startup scan to finish", || clock.waiter_count() >= 2).await;
+    assert!(
+        stores
+            .library_repo
+            .find_by_id(library.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .last_scan_finished_at
+            .is_some(),
+        "the startup scan of the empty library finished"
+    );
+
+    let path = dir.path().join("Heat.1995.mkv");
+    std::fs::write(&path, b"not really a movie").unwrap();
+    watcher.emit(FsEvent {
+        library_id: library.id,
+        path: path.clone(),
+        kind: FsEventKind::Created,
+    });
+    until("the debounce window to open", || clock.waiter_count() >= 3).await;
+    assert_eq!(
+        notifications.library_changes(Some(before)).changed,
+        ChangedLibraries::Only(vec![]),
+        "nothing is announced before the window's reconcile"
+    );
+
+    clock.advance(Duration::from_millis(2000));
+    until("the reconcile's announcement", || {
+        notifications.library_changes(Some(before)).changed != ChangedLibraries::Only(vec![])
+    })
+    .await;
+    assert_eq!(
+        notifications.library_changes(Some(before)).changed,
+        ChangedLibraries::Only(vec![library.id])
+    );
+    assert!(
+        stores
+            .file_repo
+            .find_by_path(&path.to_string_lossy())
+            .await
+            .unwrap()
+            .is_some(),
+        "the announced reconcile indexed the copied file"
+    );
+
+    tasks.abort();
+}
+
+/// The consumer's queue is visible as gauges (issue #457): a path is
+/// pending while it is debounced, and deferred once the indexer defers it
+/// until its retry reconciles it. The spawned tasks run on this
+/// current-thread runtime, so the local recorder sees what they emit.
+#[tokio::test]
+async fn the_pending_and_deferred_paths_are_gauged() {
+    use crate::test_metrics::MetricsCapture;
+
+    let capture = MetricsCapture::new();
+    let _recorder = capture.install();
+    let gauge = |name| capture.snapshot().gauge(name, &[]);
+    let indexer = Arc::new(RecordingIndexer::default());
+    let clock = Arc::new(TestClock::new());
+    let watcher = Arc::new(InMemoryFsWatcher::new());
+    let library_id = Uuid::new_v4();
+    indexer.defer_next("/videos/a.mkv", Duration::from_secs(30));
+
+    let tasks = spawn_background_indexing_with(
+        indexer.clone(),
+        indexer.libraries(),
+        Some(watcher.clone()),
+        clock.clone(),
+        config(3600, 2000),
+    );
+    for path in ["/videos/a.mkv", "/videos/b.mkv"] {
+        watcher.emit(FsEvent {
+            library_id,
+            path: PathBuf::from(path),
+            kind: FsEventKind::Created,
+        });
+    }
+    until("both paths to be debounced", || {
+        gauge("beam_watcher_pending_paths") == Some(2.0)
+    })
+    .await;
+
+    clock.advance(Duration::from_millis(2000));
+    until("the batch to be reconciled, one path deferred", || {
+        indexer.reconciled().len() == 2
+            && gauge("beam_watcher_pending_paths") == Some(0.0)
+            && gauge("beam_watcher_deferred_paths") == Some(1.0)
+    })
+    .await;
+
+    until("the consumer to wait for the retry", || {
+        clock.waiter_count() >= 3
+    })
+    .await;
+    clock.advance(Duration::from_secs(30));
+    until("the retry to empty the deferred paths", || {
+        indexer.reconciled().len() == 3 && gauge("beam_watcher_deferred_paths") == Some(0.0)
+    })
+    .await;
+
+    tasks.abort();
+}
+
+/// A file a scan deferred as still being written is reconciled once the
+/// scan's delay has passed on the injected clock, with no watcher event and
+/// no second scan (issue #453).
+#[tokio::test]
+async fn a_file_a_scan_deferred_is_reconciled_once_its_delay_has_passed() {
+    let indexer = Arc::new(RecordingIndexer::default());
+    let clock = Arc::new(TestClock::new());
+    let watcher = Arc::new(InMemoryFsWatcher::new());
+    let library_id = Uuid::new_v4();
+
+    let tasks = spawn_background_indexing_with(
+        indexer.clone(),
+        indexer.libraries(),
+        Some(watcher.clone()),
+        clock.clone(),
+        config(3600, 2000),
+    );
+    // The maintenance interval and the poll interval.
+    until("both loops to sleep", || clock.waiter_count() == 2).await;
+    indexer.scan_deferrals.record(
+        library_id,
+        PathBuf::from("/videos/a.mkv"),
+        Duration::from_secs(30),
+    );
+    until("the consumer to wait for the retry", || {
+        clock.waiter_count() == 3
+    })
+    .await;
+
+    clock.advance(Duration::from_secs(29));
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        indexer.reconciled().is_empty(),
+        "a second short of the delay, the file is still held"
+    );
+
+    clock.advance(Duration::from_secs(1));
+    until("the retry", || indexer.reconciled().len() == 1).await;
+    assert_eq!(
+        indexer.reconciled(),
+        vec![(
+            library_id,
+            PathBuf::from("/videos/a.mkv"),
+            FsEventKind::Modified
+        )],
+    );
+    assert_eq!(indexer.scan_count(), 1, "only the startup scan ran");
+
+    tasks.abort();
+}
+
+/// A watcher event already kept for a path a scan then defers stays as it
+/// was: its own kind, at its own time.
+#[tokio::test]
+async fn a_scan_deferral_leaves_a_kept_event_for_the_same_path_alone() {
+    let indexer = Arc::new(RecordingIndexer::default());
+    let clock = Arc::new(TestClock::new());
+    let watcher = Arc::new(InMemoryFsWatcher::new());
+    let library_id = Uuid::new_v4();
+    indexer.defer_next("/videos/a.mkv", Duration::from_secs(60));
+
+    let tasks = spawn_background_indexing_with(
+        indexer.clone(),
+        indexer.libraries(),
+        Some(watcher.clone()),
+        clock.clone(),
+        config(3600, 2000),
+    );
+    until("both loops to sleep", || clock.waiter_count() == 2).await;
+    watcher.emit(FsEvent {
+        library_id,
+        path: PathBuf::from("/videos/a.mkv"),
+        kind: FsEventKind::Created,
+    });
+    until("the debounce window to open", || clock.waiter_count() == 3).await;
+    clock.advance(Duration::from_millis(2000));
+    until("the first, deferred reconcile", || {
+        indexer.reconciled().len() == 1
+    })
+    .await;
+    until("the consumer to wait for the retry", || {
+        clock.waiter_count() == 3
+    })
+    .await;
+
+    indexer.scan_deferrals.record(
+        library_id,
+        PathBuf::from("/videos/a.mkv"),
+        Duration::from_secs(5),
+    );
+    // Taking the deferral wakes the consumer, which parks on the same retry
+    // again. `TestClock` keeps the abandoned wait registered until the clock
+    // passes it, so parking again makes four waiters.
+    until("the consumer to park again", || clock.waiter_count() == 4).await;
+    clock.advance(Duration::from_secs(5));
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        indexer.reconciled().len(),
+        1,
+        "the kept event's delay, not the scan's, decides"
+    );
+
+    clock.advance(Duration::from_secs(55));
+    until("the retry", || indexer.reconciled().len() == 2).await;
+    assert_eq!(
+        indexer.reconciled()[1],
+        (
+            library_id,
+            PathBuf::from("/videos/a.mkv"),
+            FsEventKind::Created
+        ),
+        "the retry is the watcher's event"
     );
 
     tasks.abort();
@@ -905,8 +1267,7 @@ async fn a_library_the_hook_registered_is_not_registered_again_by_the_refresh() 
     })
     .await;
 
-    let created = library("created", "/videos/created");
-    indexer.store(&created);
+    let created = indexer.store("created", "/videos/created").await;
     watches.library_created(&created).await;
     clock.advance(Duration::from_secs(60));
     until("the next cycle to finish", || clock.waiter_count() == 2).await;
@@ -920,10 +1281,8 @@ async fn deleted_libraries_are_unwatched_on_the_next_cycle() {
     let indexer = Arc::new(RecordingIndexer::default());
     let clock = Arc::new(TestClock::new());
     let watcher = Arc::new(InMemoryFsWatcher::new());
-    let kept = library("kept", "/videos/kept");
-    let deleted = library("deleted", "/videos/deleted");
-    indexer.store(&kept);
-    indexer.store(&deleted);
+    let kept = indexer.store("kept", "/videos/kept").await;
+    let deleted = indexer.store("deleted", "/videos/deleted").await;
 
     let tasks = spawn_background_indexing_with(
         indexer.clone(),
@@ -941,7 +1300,7 @@ async fn deleted_libraries_are_unwatched_on_the_next_cycle() {
     })
     .await;
 
-    indexer.delete(deleted.id);
+    indexer.delete(deleted.id).await;
     until("the maintenance loop and the poller to sleep", || {
         clock.waiter_count() == 2
     })
@@ -961,8 +1320,7 @@ async fn a_library_recreated_at_a_deleted_ones_root_is_watched_under_its_new_id(
     let indexer = Arc::new(RecordingIndexer::default());
     let clock = Arc::new(TestClock::new());
     let watcher = Arc::new(InMemoryFsWatcher::new());
-    let original = library("Movies", "/videos/movies");
-    indexer.store(&original);
+    let original = indexer.store("Movies", "/videos/movies").await;
 
     let tasks = spawn_background_indexing_with(
         indexer.clone(),
@@ -977,9 +1335,8 @@ async fn a_library_recreated_at_a_deleted_ones_root_is_watched_under_its_new_id(
     .await;
 
     // Deleted and registered again at the same path between two cycles.
-    indexer.delete(original.id);
-    let recreated = library("Movies", "/videos/movies");
-    indexer.store(&recreated);
+    indexer.delete(original.id).await;
+    let recreated = indexer.store("Movies", "/videos/movies").await;
     until("the maintenance loop and the poller to sleep", || {
         clock.waiter_count() == 2
     })
@@ -1013,10 +1370,8 @@ async fn the_startup_scan_starts_after_the_watches_and_no_library_scan_overlaps_
         watcher: Some(watcher.clone()),
         ..Default::default()
     });
-    let native = library("local", "/videos/local");
-    let polled = library("share", "/mnt/share");
-    indexer.store(&native);
-    indexer.store(&polled);
+    let native = indexer.store("local", "/videos/local").await;
+    let polled = indexer.store("share", "/mnt/share").await;
     watcher.register_as(polled.id, WatchMode::Polling(PollReason::NetworkFilesystem));
 
     let tasks = spawn_background_indexing_with(
@@ -1098,8 +1453,7 @@ async fn a_library_registered_as_polled_after_startup_is_scanned_once() {
     })
     .await;
 
-    let polled = library("share", "/mnt/share");
-    indexer.store(&polled);
+    let polled = indexer.store("share", "/mnt/share").await;
     watcher.register_as(polled.id, WatchMode::Polling(PollReason::NetworkFilesystem));
     clock.advance(Duration::from_secs(60));
     until("the polled library's scan", || {
@@ -1135,8 +1489,7 @@ async fn a_library_whose_demotion_failed_is_watched_again_next_cycle() {
     let indexer = Arc::new(RecordingIndexer::default());
     let clock = Arc::new(TestClock::new());
     let watcher = Arc::new(InMemoryFsWatcher::new());
-    let lost = library("big", "/videos/big");
-    indexer.store(&lost);
+    let lost = indexer.store("big", "/videos/big").await;
 
     let tasks = spawn_background_indexing_with(
         indexer.clone(),
@@ -1173,8 +1526,7 @@ async fn a_refresh_that_cannot_list_the_libraries_is_retried_next_cycle() {
     let indexer = Arc::new(RecordingIndexer::default());
     let clock = Arc::new(TestClock::new());
     let watcher = Arc::new(InMemoryFsWatcher::new());
-    let first = library("first", "/videos/first");
-    indexer.store(&first);
+    let first = indexer.store("first", "/videos/first").await;
     indexer.failing_listings.store(1, Ordering::SeqCst);
 
     let tasks = spawn_background_indexing_with(
@@ -1218,10 +1570,8 @@ async fn a_library_that_could_not_be_watched_is_tried_again_next_cycle() {
     let indexer = Arc::new(RecordingIndexer::default());
     let clock = Arc::new(TestClock::new());
     let watcher = Arc::new(InMemoryFsWatcher::new());
-    let refused = library("refused", "/videos/refused");
-    let fine = library("fine", "/videos/fine");
-    indexer.store(&refused);
-    indexer.store(&fine);
+    let refused = indexer.store("refused", "/videos/refused").await;
+    let fine = indexer.store("fine", "/videos/fine").await;
     watcher.fail_next_watch(refused.id);
 
     let tasks = spawn_background_indexing_with(
@@ -1255,8 +1605,7 @@ async fn a_library_the_poll_moves_to_polling_is_scanned_once() {
     let indexer = Arc::new(RecordingIndexer::default());
     let clock = Arc::new(TestClock::new());
     let watcher = Arc::new(InMemoryFsWatcher::new());
-    let demoted = library("big", "/videos/big");
-    indexer.store(&demoted);
+    let demoted = indexer.store("big", "/videos/big").await;
 
     let tasks = spawn_background_indexing_with(
         indexer.clone(),
@@ -1317,32 +1666,23 @@ mod local_index_service_adapter {
 
     use beam_domain::models::CreateLibrary;
     use beam_domain::repositories::LibraryRepository;
-    use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
     use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
     use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
-    use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
-    use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
-    use beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository;
 
     use super::*;
     use crate::services::hash::{HashConfig, LocalHashService};
     use crate::services::index::LocalIndexService;
+    use crate::services::index::test_harness::IndexServiceBuilder;
     use crate::services::media_info::LocalMediaInfoService;
-    use crate::services::notification::InMemoryNotificationService;
 
     fn service(library_repo: Arc<InMemoryLibraryRepository>) -> Arc<LocalIndexService> {
-        Arc::new(LocalIndexService::new(
-            library_repo,
-            Arc::new(InMemoryFileRepository::default()),
-            Arc::new(InMemoryMovieRepository::default()),
-            Arc::new(InMemoryShowRepository::default()),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-            Arc::new(LocalHashService::new(HashConfig::default())),
-            Arc::new(LocalMediaInfoService::default()),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(InMemoryAdminLogRepository::default()),
-            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-        ))
+        Arc::new(
+            IndexServiceBuilder::new()
+                .library_repo(library_repo)
+                .hash_service(Arc::new(LocalHashService::new(HashConfig::default())))
+                .media_info(Arc::new(LocalMediaInfoService::default()))
+                .build(),
+        )
     }
 
     /// The admin status reads `enabled` from the status the watches are
@@ -1438,18 +1778,14 @@ mod local_index_service_adapter {
             .await
             .unwrap();
         let file_repo = Arc::new(InMemoryFileRepository::default());
-        let indexer: Arc<dyn BackgroundIndexer> = Arc::new(LocalIndexService::new(
-            library_repo.clone(),
-            file_repo.clone(),
-            Arc::new(InMemoryMovieRepository::default()),
-            Arc::new(InMemoryShowRepository::default()),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-            Arc::new(LocalHashService::new(HashConfig::default())),
-            Arc::new(LocalMediaInfoService::default()),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(InMemoryAdminLogRepository::default()),
-            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-        ));
+        let indexer: Arc<dyn BackgroundIndexer> = Arc::new(
+            IndexServiceBuilder::new()
+                .library_repo(library_repo.clone())
+                .file_repo(file_repo.clone())
+                .hash_service(Arc::new(LocalHashService::new(HashConfig::default())))
+                .media_info(Arc::new(LocalMediaInfoService::default()))
+                .build(),
+        );
         let watcher = Arc::new(InMemoryFsWatcher::new());
         let clock = Arc::new(TestClock::new());
 
@@ -1516,18 +1852,16 @@ mod local_index_service_adapter {
             .await
             .unwrap();
         let file_repo = Arc::new(InMemoryFileRepository::default());
-        let index_service = Arc::new(LocalIndexService::new(
-            library_repo.clone(),
-            file_repo.clone(),
-            Arc::new(InMemoryMovieRepository::default()),
-            Arc::new(InMemoryShowRepository::default()),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-            Arc::new(LocalHashService::new(HashConfig { num_threads: 1 })),
-            Arc::new(LocalMediaInfoService::default()),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(InMemoryAdminLogRepository::default()),
-            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-        ));
+        let index_service = Arc::new(
+            IndexServiceBuilder::new()
+                .library_repo(library_repo.clone())
+                .file_repo(file_repo.clone())
+                .hash_service(Arc::new(LocalHashService::new(HashConfig {
+                    num_threads: 1,
+                })))
+                .media_info(Arc::new(LocalMediaInfoService::default()))
+                .build(),
+        );
         let old = temp.path().join("Movie.2019.mkv");
         std::fs::write(&old, b"not really a movie").unwrap();
         index_service
@@ -1606,6 +1940,81 @@ mod local_index_service_adapter {
         tasks.abort();
     }
 
+    /// A copy that finished just before boot: the startup scan defers the
+    /// file, no watcher event follows, and it is indexed once the settle
+    /// window passes on the injected clock -- with no second scan (issue
+    /// #453).
+    #[tokio::test]
+    async fn a_file_the_startup_scan_deferred_is_indexed_once_it_settles() {
+        use beam_domain::repositories::FileRepository;
+
+        let settle = Duration::from_secs(30);
+        let written_at = chrono::DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let library_repo = Arc::new(InMemoryLibraryRepository::default());
+        library_repo
+            .create(CreateLibrary {
+                name: "Movies".to_string(),
+                description: None,
+                root_path: temp.path().to_path_buf(),
+            })
+            .await
+            .unwrap();
+        let path = temp.path().join("Movie.2019.mkv");
+        std::fs::write(&path, b"not really a movie").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(written_at.into())
+            .unwrap();
+
+        let clock = Arc::new(TestClock::starting_at(written_at));
+        let file_repo = Arc::new(InMemoryFileRepository::default());
+        let indexer: Arc<dyn BackgroundIndexer> = Arc::new(
+            IndexServiceBuilder::new()
+                .library_repo(library_repo.clone())
+                .file_repo(file_repo.clone())
+                .hash_service(Arc::new(LocalHashService::new(HashConfig::default())))
+                .media_info(Arc::new(LocalMediaInfoService::default()))
+                .build()
+                .with_clock(clock.clone())
+                .with_settle_window(settle),
+        );
+        let watcher = Arc::new(InMemoryFsWatcher::new());
+
+        let tasks = spawn_background_indexing_with(
+            indexer,
+            library_repo,
+            Some(watcher.clone()),
+            clock.clone(),
+            config(3600, 2000),
+        );
+        // The maintenance interval, the poll interval, and the retry the
+        // startup scan's deferral set the consumer waiting on.
+        until("the consumer to wait for the retry", || {
+            clock.waiter_count() == 3
+        })
+        .await;
+        let key = path.to_string_lossy().to_string();
+        assert!(
+            file_repo.find_by_path(&key).await.unwrap().is_none(),
+            "the startup scan left the file being written alone"
+        );
+
+        clock.advance(settle);
+        // Bounded like `until`; the reconcile runs on the consumer task.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while file_repo.find_by_path(&key).await.unwrap().is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the deferred file was never indexed"
+            );
+            tokio::task::yield_now().await;
+        }
+        tasks.abort();
+    }
+
     #[tokio::test]
     async fn reconciling_a_created_file_through_the_trait_indexes_it() {
         // A watcher event has to reach the indexer and change something. An
@@ -1625,18 +2034,14 @@ mod local_index_service_adapter {
             .unwrap();
 
         let file_repo = Arc::new(InMemoryFileRepository::default());
-        let index_service = Arc::new(LocalIndexService::new(
-            library_repo,
-            file_repo.clone(),
-            Arc::new(InMemoryMovieRepository::default()),
-            Arc::new(InMemoryShowRepository::default()),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-            Arc::new(LocalHashService::new(HashConfig::default())),
-            Arc::new(LocalMediaInfoService::default()),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(InMemoryAdminLogRepository::default()),
-            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-        ));
+        let index_service = Arc::new(
+            IndexServiceBuilder::new()
+                .library_repo(library_repo)
+                .file_repo(file_repo.clone())
+                .hash_service(Arc::new(LocalHashService::new(HashConfig::default())))
+                .media_info(Arc::new(LocalMediaInfoService::default()))
+                .build(),
+        );
         let indexer: Arc<dyn BackgroundIndexer> = index_service;
 
         let path = temp.path().join("Movie.2019.mkv");

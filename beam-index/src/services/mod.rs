@@ -2,19 +2,24 @@ pub mod enrichment;
 pub mod filesystem_probe;
 pub mod hash;
 pub mod index;
+pub mod markers;
 pub mod media_info;
 pub mod mime;
 pub mod notification;
 pub mod scan;
+pub mod scan_deferrals;
 pub mod trickplay;
 pub mod watch_status;
 pub mod watcher;
 
-pub use enrichment::{EnrichmentPolicy, MetadataEnrichmentService};
+pub use enrichment::{EnrichmentPolicy, EnrichmentWake, MetadataEnrichmentService};
 pub use hash::{HashConfig, HashService, LocalHashService};
 #[cfg(any(test, feature = "test-utils"))]
 pub use index::MockIndexService;
 pub use index::{IndexError, IndexService, LocalIndexService, ReconcileOutcome};
+#[cfg(any(test, feature = "test-utils"))]
+pub use markers::fake::{FakeAudioFingerprinter, FakeListen};
+pub use markers::{AudioFingerprinter, LocalAudioFingerprinter};
 pub use media_info::{LocalMediaInfoService, MediaInfoService};
 #[cfg(any(test, feature = "test-utils"))]
 pub use notification::InMemoryNotificationService;

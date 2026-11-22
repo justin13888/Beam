@@ -100,7 +100,9 @@ helm install beam ./charts/beam -n beam -f beam-values.yaml
 kubectl -n beam rollout status deployment/beam
 ```
 
-Then sign in and add each library in the admin UI with its path: `/videos/movies`, `/videos/shows`.
+Beam creates each library under `libraries` when it starts, named as listed and rooted at its
+mount (`/videos/movies`, `/videos/shows`), unless a library is already stored at that path. It
+never renames, moves or deletes a stored library.
 
 Every value is documented in
 [`values.yaml`](https://github.com/justin13888/beam/blob/master/charts/beam/values.yaml), and the

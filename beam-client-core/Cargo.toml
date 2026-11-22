@@ -56,8 +56,9 @@ tracing = { workspace = true }
 # response's problem document to the request that read it (`transport.rs`),
 # and `time::timeout`, which bounds the source lookup before playback
 # (`BeamClient::playback_plan`) -- reqwest already compiles tokio's timer in. `full` would put a multi-threaded scheduler, process and signal
-# handling into an Android `.so` that already runs on the platform's runtime.
-tokio = { version = "1.54.1", default-features = false, features = ["rt", "time"] }
+# handling into an Android `.so` that already runs on the platform's runtime. `sync` is the async mutex that
+# serializes the download store's read-modify-write of a server's list (`download/store.rs`).
+tokio = { version = "1.54.1", default-features = false, features = ["rt", "sync", "time"] }
 uniffi = { version = "0.32", features = ["tokio"] }
 url = "2.5.8"
 

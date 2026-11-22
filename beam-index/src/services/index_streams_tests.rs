@@ -6,10 +6,6 @@ use crate::probe::color::ColorTransferCharacteristic;
 use crate::probe::format::Disposition;
 use crate::probe::media::CodecId;
 use crate::probe::metadata::StreamMetadata as UtilStreamMetadata;
-use crate::services::hash::MockHashService;
-use crate::services::media_info::MockMediaInfoService;
-use crate::services::notification::InMemoryNotificationService;
-use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
 use beam_domain::repositories::file::MockFileRepository;
 use beam_domain::repositories::library::MockLibraryRepository;
 use beam_domain::repositories::movie::MockMovieRepository;
@@ -419,18 +415,13 @@ async fn test_insert_streams_db_error_propagates() {
         .times(1)
         .returning(|_| Err(sea_orm::DbErr::Custom("simulated DB failure".to_string())));
 
-    let service = LocalIndexService::new(
-        Arc::new(MockLibraryRepository::new()),
-        Arc::new(MockFileRepository::new()),
-        Arc::new(MockMovieRepository::new()),
-        Arc::new(MockShowRepository::new()),
-        Arc::new(mock_stream_repo),
-        Arc::new(MockHashService::new()),
-        Arc::new(MockMediaInfoService::new()),
-        Arc::new(InMemoryNotificationService::new()),
-        Arc::new(InMemoryAdminLogRepository::default()),
-        Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-    );
+    let service = IndexServiceBuilder::new()
+        .library_repo(Arc::new(MockLibraryRepository::new()))
+        .file_repo(Arc::new(MockFileRepository::new()))
+        .movie_repo(Arc::new(MockMovieRepository::new()))
+        .show_repo(Arc::new(MockShowRepository::new()))
+        .stream_repo(Arc::new(mock_stream_repo))
+        .build();
 
     let file_id = Uuid::new_v4();
     let metadata = make_stream_file_metadata(vec![make_video_stream(

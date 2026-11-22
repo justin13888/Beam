@@ -134,6 +134,24 @@ macro_rules! key_value_store_contract {
             );
         }
 
+        /// A value is stored as given: download records are JSON holding
+        /// titles in any script, and a store that re-encoded or trimmed them
+        /// would hand back a list that no longer parses.
+        #[tokio::test]
+        async fn a_json_value_with_any_text_reads_back_unchanged() {
+            let store = $make;
+            let value =
+                key("[{\"title\":\"Amélie \\\"Le fabuleux\\\" 千と千尋 \u{1d11e}\",\n\"n\":1}]\n");
+            store
+                .put(key("downloads/a"), value.clone())
+                .await
+                .expect("put");
+            assert_eq!(
+                store.get(key("downloads/a")).await.expect("get"),
+                Some(value)
+            );
+        }
+
         #[tokio::test]
         async fn list_keys_is_every_live_plaintext_key_with_the_prefix() {
             let store = $make;

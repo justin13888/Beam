@@ -22,12 +22,13 @@ import dagger.hilt.components.SingletonComponent
 import dev.beam.android.core.ffi.repository.PlaybackRepository
 import dev.beam.android.core.ffi.repository.TelemetryRepository
 import dev.beam.android.core.media.download.BeamDownloadManager
+import dev.beam.android.core.media.download.CompletedDownloads
 import dev.beam.android.core.media.download.DownloadArtwork
+import dev.beam.android.core.media.download.DownloadCommands
 import dev.beam.android.core.media.download.DownloadManagerHolder
 import dev.beam.android.core.media.download.DownloadRepository
-import dev.beam.android.core.media.download.DownloadTitleStore
-import dev.beam.android.core.media.download.FileDownloadTitleStore
 import dev.beam.android.core.media.download.MediaDownloadRepository
+import dev.beam.android.core.media.download.ServiceDownloadCommands
 import dev.beam.android.core.media.http.BeamHttpClientFactory
 import dev.beam.android.core.media.http.ServerCallFactory
 import dev.beam.android.core.media.player.BeamPlayer
@@ -52,9 +53,11 @@ internal object MediaModule {
     fun httpClientFactory(client: OkHttpClient): BeamHttpClientFactory = BeamHttpClientFactory(client)
 
     /**
-     * The image loader's network path. Asks the core for the active server on
-     * every call, so signing out or switching servers takes effect on the
-     * next fetch rather than on the next launch.
+     * The image loader's and the download manager's network path. Asks the
+     * core on every call for the session of the server the request goes to,
+     * active or not, so signing out or signing in again takes effect on the
+     * next fetch rather than on the next launch, and a download from one
+     * server keeps its session after the viewer switches to another.
      */
     @Provides
     @Singleton
@@ -62,12 +65,23 @@ internal object MediaModule {
         clients: BeamHttpClientFactory,
         client: BeamClient,
     ): ServerCallFactory =
-        ServerCallFactory(clients) {
-            // No active server, or not signed in to it: artwork is fetched
-            // unauthenticated, and the server answers 401 exactly as it would
-            // for any other signed-out request.
+        ServerCallFactory.signedInServers(
+            clients,
+            servers = {
+                // The core reads the list from memory and never refuses it;
+                // this keeps a refusal from failing the fetch all the same.
+                try {
+                    client.listServers()
+                } catch (_: BeamException) {
+                    emptyList()
+                }
+            },
+        ) { serverId ->
+            // Not signed in to that server, or forgotten since: the request
+            // goes out unauthenticated, and the server answers 401 exactly as
+            // it would for any other signed-out request.
             try {
-                client.serverHttpConfig()
+                client.serverHttpConfigFor(serverId)
             } catch (_: BeamException) {
                 null
             }
@@ -113,8 +127,20 @@ internal object MediaModule {
         repository: PlaybackRepository,
         telemetry: TelemetryRepository,
         clients: BeamHttpClientFactory,
+        downloadCache: Cache,
+        completedDownloads: CompletedDownloads,
         scope: CoroutineScope,
-    ): BeamPlayer = ExoBeamPlayer(context, player, repository, telemetry, clients, scope)
+    ): BeamPlayer =
+        ExoBeamPlayer(
+            context = context,
+            exoPlayer = player,
+            repository = repository,
+            telemetry = telemetry,
+            clients = clients,
+            downloadCache = downloadCache,
+            completedDownloads = completedDownloads,
+            scope = scope,
+        )
 
     @Provides
     @Singleton
@@ -122,11 +148,12 @@ internal object MediaModule {
         @ApplicationContext context: Context,
     ): Cache = BeamDownloadManager.cache(context)
 
+    /** Every change to a download goes to the foreground download service. */
     @Provides
     @Singleton
-    fun downloadTitles(
+    fun downloadCommands(
         @ApplicationContext context: Context,
-    ): DownloadTitleStore = FileDownloadTitleStore(context)
+    ): DownloadCommands = ServiceDownloadCommands(context)
 
     /**
      * Fetched through the app's own image loader, so a poster kept for a
@@ -165,4 +192,9 @@ public abstract class MediaBindsModule {
     @Binds
     @Singleton
     internal abstract fun downloadManagerHolder(impl: MediaDownloadRepository): DownloadManagerHolder
+
+    /** The player's view of the same manager: which downloads have completed. */
+    @Binds
+    @Singleton
+    internal abstract fun completedDownloads(impl: MediaDownloadRepository): CompletedDownloads
 }

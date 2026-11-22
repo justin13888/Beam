@@ -255,7 +255,11 @@ async fn a_merge_whose_survivor_loses_the_key_moves_no_file() {
     let stale_row = h.movie_repo.find_by_id(stale).await.unwrap().unwrap();
     let holder_row = h.movie_repo.find_by_id(holder).await.unwrap().unwrap();
     let stale_entries = h.movie_repo.find_entries_by_movie_id(stale).await.unwrap();
-    let files_before = h.file_repo.files.lock().unwrap().clone();
+    let files_before = h
+        .file_repo
+        .find_all_by_library_including_missing(h.library.id)
+        .await
+        .unwrap();
 
     // The movie repository as the pass sees it when a concurrent writer
     // takes `oceans eleven|2001` after the loser is released.
@@ -294,26 +298,29 @@ async fn a_merge_whose_survivor_loses_the_key_moves_no_file() {
         .returning(|_, _, _| Ok(false));
     movies.expect_find_or_create_entry().never();
     movies.expect_ensure_library_association().never();
-    let service = LocalIndexService::new(
-        h.library_repo.clone(),
-        h.file_repo.clone(),
-        Arc::new(movies),
-        h.show_repo.clone(),
-        Arc::new(InMemoryMediaStreamRepository::default()),
-        Arc::new(MockHashService::new()),
-        Arc::new(MockMediaInfoService::new()),
-        Arc::new(InMemoryNotificationService::new()),
-        h.admin_log_repo.clone() as Arc<dyn AdminLogRepository>,
-        Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-    );
+    let service = IndexServiceBuilder::new()
+        .library_repo(h.library_repo.clone())
+        .file_repo(h.file_repo.clone())
+        .movie_repo(Arc::new(movies))
+        .show_repo(h.show_repo.clone())
+        .admin_log_repo(h.admin_log_repo.clone())
+        .build();
 
     let report = service.rekey_stale_titles().await.unwrap();
 
     assert!(report.merged_movies.is_empty(), "{report:?}");
-    let files_after = h.file_repo.files.lock().unwrap().clone();
-    for (id, before) in &files_before {
+    let files_after = h
+        .file_repo
+        .find_all_by_library_including_missing(h.library.id)
+        .await
+        .unwrap();
+    for before in &files_before {
+        let after = files_after
+            .iter()
+            .find(|after| after.id == before.id)
+            .expect("the file is still indexed");
         assert_eq!(
-            format!("{:?}", files_after[id].content),
+            format!("{:?}", after.content),
             format!("{:?}", before.content),
             "{}",
             before.path.display()
@@ -450,13 +457,13 @@ async fn stale_enriched_greys(h: &Harness) -> Uuid {
 }
 
 /// The stale show is untouched: reclassification was held.
-fn assert_held(h: &Harness, show: Uuid) {
+async fn assert_held(h: &Harness, show: Uuid) {
     let after = h.only_show();
     assert_eq!(after.id, show, "the stale show is not retired");
     assert_eq!(after.tmdb_id, Some(1416), "it keeps its enrichment");
     assert_eq!(after.identity_key.as_deref(), Some("grey s anatomy|"));
     assert_eq!(
-        h.season_one(show),
+        h.season_one(show).await,
         vec![(1, vec![GREYS.to_string()])],
         "it keeps its file"
     );
@@ -494,14 +501,14 @@ async fn a_failed_rekey_pass_holds_reclassification_until_a_pass_succeeds() {
         .scan_all_libraries(ScanTrigger::Periodic)
         .await
         .unwrap();
-    assert_held(&h, show);
+    assert_held(&h, show).await;
     h.scan().await;
-    assert_held(&h, show);
+    assert_held(&h, show).await;
     h.service
         .reconcile_path(h.library.id, h.root.join(GREYS), FsEventKind::Modified)
         .await
         .unwrap();
-    assert_held(&h, show);
+    assert_held(&h, show).await;
     let warning = h
         .admin_log_details("current naming rules")
         .await
@@ -517,7 +524,7 @@ async fn a_failed_rekey_pass_holds_reclassification_until_a_pass_succeeds() {
     assert_eq!(after.id, show, "the same show");
     assert_eq!(after.tmdb_id, Some(1416), "with its enrichment");
     assert_eq!(after.identity_key.as_deref(), Some("greys anatomy|"));
-    assert_eq!(h.season_one(show), vec![(1, vec![GREYS.to_string()])]);
+    assert_eq!(h.season_one(show).await, vec![(1, vec![GREYS.to_string()])]);
     assert_eq!(
         h.file_version(GREYS),
         CLASSIFIER_VERSION,
@@ -548,19 +555,11 @@ async fn a_watcher_event_with_nothing_to_reclassify_does_not_retry_the_passes() 
     let (size_bytes, mtime) = read_fs_meta(unprobed.parent().unwrap(), &unprobed).unwrap();
     h.file_repo
         .create(CreateMediaFile {
-            library_id: h.library.id,
-            path: unprobed,
             hash: u64::MAX,
             size_bytes,
             mtime,
-            identity: None,
-            mime_type: Some("video/x-matroska".to_string()),
-            duration: None,
             container_format: None,
-            content: None,
-            status: FileStatus::Unknown,
-            classifier_version: 0,
-            container_tags: None,
+            ..create_media_file(h.library.id, unprobed)
         })
         .await
         .unwrap();
@@ -601,7 +600,7 @@ async fn a_scan_of_one_library_rekeys_before_it_reclassifies() {
     assert_eq!(after.id, show, "the same show");
     assert_eq!(after.tmdb_id, Some(1416), "with its enrichment");
     assert_eq!(after.identity_key.as_deref(), Some("greys anatomy|"));
-    assert_eq!(h.season_one(show), vec![(1, vec![GREYS.to_string()])]);
+    assert_eq!(h.season_one(show).await, vec![(1, vec![GREYS.to_string()])]);
     assert_eq!(h.file_version(GREYS), CLASSIFIER_VERSION);
 
     h.service

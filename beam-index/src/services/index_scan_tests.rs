@@ -8,6 +8,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 
+use super::test_harness::{IndexServiceBuilder, IndexStores};
 use super::*;
 use crate::services::notification::InMemoryNotificationService;
 use crate::services::scan::{INTERRUPTED, ScanGuard};
@@ -15,12 +16,9 @@ use beam_domain::models::CreateLibrary;
 use beam_domain::models::stream::{
     AudioStreamMetadata, CreateMediaStream, StreamMetadata, StreamType,
 };
-use beam_domain::repositories::AdminLogRepository;
 use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
 use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
 use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
-use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
-use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
 use beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository;
 use beam_domain::services::{SequentialIdGenerator, TestClock};
 use tempfile::TempDir;
@@ -129,10 +127,11 @@ impl Harness {
         let root = dir.path().join("library");
         std::fs::create_dir_all(&root).unwrap();
 
-        let file_repo = Arc::new(InMemoryFileRepository::default());
         // The library counts the files the file store holds, as the SQL
         // store counts the `files` table, so a scan's recorded count is real.
-        let library_repo = Arc::new(InMemoryLibraryRepository::with_files(file_repo.clone()));
+        let stores = IndexStores::wired();
+        let file_repo = stores.file_repo.clone();
+        let library_repo = stores.library_repo.clone();
         let stream_repo = Arc::new(InMemoryMediaStreamRepository::default());
         let notifications = Arc::new(InMemoryNotificationService::new());
         let clock = Arc::new(TestClock::starting_at(now));
@@ -155,21 +154,17 @@ impl Harness {
         });
         let prober = Arc::new(ScriptedProber::default());
         let service = Arc::new(
-            LocalIndexService::new(
-                library_repo.clone(),
-                file_repo.clone(),
-                Arc::new(InMemoryMovieRepository::with_files(file_repo.clone())),
-                Arc::new(InMemoryShowRepository::with_files(file_repo.clone())),
-                stream_repo.clone(),
-                hasher.clone(),
-                prober.clone(),
-                notifications.clone(),
-                Arc::new(InMemoryAdminLogRepository::default()) as Arc<dyn AdminLogRepository>,
-                Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-            )
-            .with_clock(clock.clone())
-            .with_id_generator(Arc::new(SequentialIdGenerator::new()))
-            .with_settle_window(SETTLE),
+            IndexServiceBuilder::new()
+                .stores(&stores)
+                .stream_repo(stream_repo.clone())
+                .hash_service(hasher.clone())
+                .media_info(prober.clone())
+                .notifications(notifications.clone())
+                .admin_log_repo(Arc::new(InMemoryAdminLogRepository::default()))
+                .build()
+                .with_clock(clock.clone())
+                .with_id_generator(Arc::new(SequentialIdGenerator::new()))
+                .with_settle_window(SETTLE),
         );
         Self {
             _dir: dir,
@@ -656,7 +651,15 @@ async fn a_rescan_of_every_library_skips_one_already_being_scanned() {
 /// and is not counted.
 #[tokio::test]
 async fn a_scan_records_the_present_file_count_and_its_start_and_finish() {
+    let capture = crate::test_metrics::MetricsCapture::new();
+    let _recorder = capture.install();
     let h = Harness::settled().await;
+    let library_label = h.library.id.to_string();
+    let files_gauge = || {
+        capture
+            .snapshot()
+            .gauge("beam_library_files", &[("library", &library_label)])
+    };
     h.write("Heat (1995).mkv");
     let alien = h.write("Alien (1979).mkv");
     *h.hasher.advance_per_hash.lock() = Duration::from_secs(1);
@@ -677,6 +680,7 @@ async fn a_scan_records_the_present_file_count_and_its_start_and_finish() {
         "finished once both files were hashed"
     );
     assert_eq!(stored.last_scan_file_count, Some(2));
+    assert_eq!(files_gauge(), Some(2.0), "the gauge follows the count");
 
     std::fs::remove_file(&alien).unwrap();
     h.clock.advance(Duration::from_secs(60));
@@ -705,6 +709,174 @@ async fn a_scan_records_the_present_file_count_and_its_start_and_finish() {
         Some(1),
         "the missing file is not counted"
     );
+    assert_eq!(files_gauge(), Some(1.0));
+}
+
+/// A completed scan sets `beam_library_titles{library,kind}` to the live
+/// titles it left the library holding, and the next scan refreshes it: a
+/// movie whose file is gone leaves the count (issue #494).
+#[tokio::test]
+async fn a_scan_records_the_live_title_count_of_each_kind() {
+    let capture = crate::test_metrics::MetricsCapture::new();
+    let _recorder = capture.install();
+    let h = Harness::settled().await;
+    let library_label = h.library.id.to_string();
+    let titles_gauge = |kind: &str| {
+        capture.snapshot().gauge(
+            "beam_library_titles",
+            &[("library", &library_label), ("kind", kind)],
+        )
+    };
+    let heat = h.write("Heat (1995).mkv");
+    h.write("The Office/Season 1/The Office S01E01.mkv");
+    h.write("The Office/Season 1/The Office S01E02.mkv");
+
+    h.scan().await;
+
+    for (kind, count) in [
+        ("movie", 1.0),
+        ("show", 1.0),
+        ("season", 1.0),
+        ("episode", 2.0),
+    ] {
+        assert_eq!(
+            titles_gauge(kind),
+            Some(count),
+            "{kind} after the first scan"
+        );
+    }
+
+    std::fs::remove_file(&heat).unwrap();
+    h.clock.advance(Duration::from_secs(60));
+
+    h.scan().await;
+
+    for (kind, count) in [
+        ("movie", 0.0),
+        ("show", 1.0),
+        ("season", 1.0),
+        ("episode", 2.0),
+    ] {
+        assert_eq!(
+            titles_gauge(kind),
+            Some(count),
+            "{kind} once the movie is gone"
+        );
+    }
+}
+
+/// The library store, whose title count fails (NFR-205); every other read
+/// and write goes to the wired in-memory store.
+#[derive(Debug)]
+struct TitleCountFails {
+    inner: Arc<InMemoryLibraryRepository>,
+}
+
+#[async_trait::async_trait]
+impl LibraryRepository for TitleCountFails {
+    async fn find_all(&self) -> Result<Vec<Library>, DbErr> {
+        self.inner.find_all().await
+    }
+    async fn find_by_id(&self, id: Uuid) -> Result<Option<Library>, DbErr> {
+        self.inner.find_by_id(id).await
+    }
+    async fn create(&self, create: CreateLibrary) -> Result<Library, DbErr> {
+        self.inner.create(create).await
+    }
+    async fn count_files(&self, library_id: Uuid) -> Result<u64, DbErr> {
+        self.inner.count_files(library_id).await
+    }
+    async fn count_titles(
+        &self,
+        _library_id: Uuid,
+    ) -> Result<beam_domain::models::LibraryTitleCounts, DbErr> {
+        Err(DbErr::Custom("the database is down".to_string()))
+    }
+    async fn update_scan_progress(
+        &self,
+        library_id: Uuid,
+        started_at: Option<DateTime<Utc>>,
+        finished_at: Option<DateTime<Utc>>,
+        file_count: Option<i32>,
+    ) -> Result<(), DbErr> {
+        self.inner
+            .update_scan_progress(library_id, started_at, finished_at, file_count)
+            .await
+    }
+    async fn delete(&self, id: Uuid) -> Result<(), DbErr> {
+        self.inner.delete(id).await
+    }
+    async fn count(&self) -> Result<u64, DbErr> {
+        self.inner.count().await
+    }
+}
+
+/// A scan whose title count fails fails as a whole, as any other store
+/// failure at its tail does: the job reads failed, the error reaches the
+/// caller, no title gauge is set, and the library is not stamped finished --
+/// a scan that could not read what it left is not recorded as complete
+/// (issue #494).
+#[tokio::test]
+async fn a_scan_whose_title_count_fails_fails_and_records_no_finish() {
+    let capture = crate::test_metrics::MetricsCapture::new();
+    let _recorder = capture.install();
+    let dir = TempDir::new().unwrap();
+    let stores = IndexStores::wired();
+    let library = stores
+        .library_repo
+        .create(CreateLibrary {
+            name: "Unreadable".to_string(),
+            root_path: dir.path().to_path_buf(),
+            description: None,
+        })
+        .await
+        .unwrap();
+    let clock = Arc::new(TestClock::starting_at(written_at()));
+    let service = IndexServiceBuilder::new()
+        .stores(&stores)
+        .library_repo(Arc::new(TitleCountFails {
+            inner: stores.library_repo.clone(),
+        }))
+        .build()
+        .with_clock(clock.clone());
+
+    let scanned = service.scan_now(library.id, ScanTrigger::Manual).await;
+
+    assert!(
+        matches!(scanned, Err(IndexError::Db(DbErr::Custom(_)))),
+        "the store's failure reaches the caller: {scanned:?}"
+    );
+    assert_eq!(
+        service.scan_job(library.id).map(|job| job.state),
+        Some(ScanState::Failed)
+    );
+    let stored = stores
+        .library_repo
+        .find_by_id(library.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        stored.last_scan_started_at,
+        Some(clock.now()),
+        "the scan did start"
+    );
+    assert_eq!(
+        stored.last_scan_finished_at, None,
+        "but is not stamped finished"
+    );
+    assert_eq!(stored.last_scan_file_count, None);
+    let library_label = library.id.to_string();
+    for kind in ["movie", "show", "season", "episode"] {
+        assert_eq!(
+            capture.snapshot().gauge(
+                "beam_library_titles",
+                &[("library", &library_label), ("kind", kind)],
+            ),
+            None,
+            "no {kind} count was read, so none is exported"
+        );
+    }
 }
 
 mod rescan_properties {
@@ -1249,19 +1421,14 @@ mod library_scans {
     use crate::services::media_info::MockMediaInfoService;
     use crate::services::notification::EventLevel;
     use crate::services::notification::InMemoryNotificationService;
-    use beam_domain::models::{CreateLibrary, Library, MediaFile};
+    use beam_domain::models::{CreateLibrary, Library};
     use beam_domain::repositories::AdminLogRepository;
     use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
+    use beam_domain::test_utils::create_media_file;
 
     use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
 
     use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
-
-    use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
-
-    use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
-
-    use beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository;
 
     use std::path::PathBuf;
     use tempfile::TempDir;
@@ -1273,18 +1440,10 @@ mod library_scans {
         let dir = TempDir::new().unwrap();
         let library = make_library_in_tempdir(&lib_repo, &dir).await;
 
-        let service = LocalIndexService::new(
-            lib_repo.clone(),
-            file_repo.clone(),
-            Arc::new(InMemoryMovieRepository::default()),
-            Arc::new(InMemoryShowRepository::default()),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-            Arc::new(MockHashService::new()),
-            Arc::new(MockMediaInfoService::new()),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(InMemoryAdminLogRepository::default()),
-            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-        );
+        let service = IndexServiceBuilder::new()
+            .library_repo(lib_repo.clone())
+            .file_repo(file_repo.clone())
+            .build();
 
         let result = service.scan_library(library.id).await;
         assert_eq!(result.unwrap(), 0);
@@ -1321,18 +1480,12 @@ mod library_scans {
             .times(1)
             .returning(|_| Ok(make_video_metadata()));
 
-        let service = LocalIndexService::new(
-            lib_repo.clone(),
-            file_repo.clone(),
-            Arc::new(InMemoryMovieRepository::default()),
-            Arc::new(InMemoryShowRepository::default()),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-            Arc::new(mock_hash),
-            Arc::new(mock_media_info),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(InMemoryAdminLogRepository::default()),
-            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-        );
+        let service = IndexServiceBuilder::new()
+            .library_repo(lib_repo.clone())
+            .file_repo(file_repo.clone())
+            .hash_service(Arc::new(mock_hash))
+            .media_info(Arc::new(mock_media_info))
+            .build();
 
         let result = service.scan_library(library.id).await;
         assert_eq!(result.unwrap(), 1);
@@ -1363,18 +1516,10 @@ mod library_scans {
             std::fs::write(movie.join(name), b"not media").unwrap();
         }
 
-        let service = LocalIndexService::new(
-            lib_repo.clone(),
-            file_repo.clone(),
-            Arc::new(InMemoryMovieRepository::default()),
-            Arc::new(InMemoryShowRepository::default()),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-            Arc::new(MockHashService::new()),
-            Arc::new(MockMediaInfoService::new()),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(InMemoryAdminLogRepository::default()),
-            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-        );
+        let service = IndexServiceBuilder::new()
+            .library_repo(lib_repo.clone())
+            .file_repo(file_repo.clone())
+            .build();
 
         let result = service.scan_library(library.id).await;
         assert_eq!(result.unwrap(), 0);
@@ -1410,18 +1555,12 @@ mod library_scans {
             .times(3)
             .returning(|_| Ok(make_video_metadata()));
 
-        let service = LocalIndexService::new(
-            lib_repo.clone(),
-            file_repo.clone(),
-            Arc::new(InMemoryMovieRepository::default()),
-            Arc::new(InMemoryShowRepository::default()),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-            Arc::new(mock_hash),
-            Arc::new(mock_media_info),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(InMemoryAdminLogRepository::default()),
-            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-        );
+        let service = IndexServiceBuilder::new()
+            .library_repo(lib_repo.clone())
+            .file_repo(file_repo.clone())
+            .hash_service(Arc::new(mock_hash))
+            .media_info(Arc::new(mock_media_info))
+            .build();
 
         let result = service.scan_library(library.id).await;
         assert_eq!(result.unwrap(), 3);
@@ -1443,31 +1582,20 @@ mod library_scans {
 
         // Seed the DB with the same path but a stale hash/size, so the scan
         // detects the content change and reconciles it.
-        let existing = MediaFile {
-            id: Uuid::new_v4(),
-            library_id: library.id,
-            path: file_path.clone(),
-            hash: 12345,
-            size_bytes: 999,
-            mtime: None,
-            identity: None,
-            mime_type: Some("video/mp4".to_string()),
-            duration: None,
-            container_format: None,
-            // A Known row is a movie's or an episode's file (the `files` CHECK).
-            content: Some(MediaFileContent::movie(Uuid::new_v4())),
-            status: FileStatus::Known,
-            classifier_version: CLASSIFIER_VERSION,
-            container_tags: None,
-            scanned_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-            missing_since: None,
-        };
         file_repo
-            .files
-            .lock()
-            .unwrap()
-            .insert(existing.id, existing.clone());
+            .create(CreateMediaFile {
+                hash: 12345,
+                size_bytes: 999,
+                mime_type: Some("video/mp4".to_string()),
+                container_format: None,
+                // A Known row is a movie's or an episode's file (the `files` CHECK).
+                content: Some(MediaFileContent::movie(Uuid::new_v4())),
+                status: FileStatus::Known,
+                classifier_version: CLASSIFIER_VERSION,
+                ..create_media_file(library.id, file_path.clone())
+            })
+            .await
+            .unwrap();
 
         let mut mock_hash = MockHashService::new();
         mock_hash
@@ -1480,18 +1608,12 @@ mod library_scans {
             .times(1)
             .returning(|_| Ok(make_video_metadata()));
 
-        let service = LocalIndexService::new(
-            lib_repo.clone(),
-            file_repo.clone(),
-            Arc::new(InMemoryMovieRepository::default()),
-            Arc::new(InMemoryShowRepository::default()),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-            Arc::new(mock_hash),
-            Arc::new(mock_media_info),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(InMemoryAdminLogRepository::default()),
-            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-        );
+        let service = IndexServiceBuilder::new()
+            .library_repo(lib_repo.clone())
+            .file_repo(file_repo.clone())
+            .hash_service(Arc::new(mock_hash))
+            .media_info(Arc::new(mock_media_info))
+            .build();
 
         let result = service.scan_library(library.id).await;
         assert_eq!(result.unwrap(), 0); // no new files added
@@ -1508,50 +1630,28 @@ mod library_scans {
     /// and unchanged, so reconciling it takes the size-and-mtime fast path and
     /// touches neither the hasher nor the prober: hashed, and probed (a row
     /// whose probe never succeeded is probed again on every visit).
-    fn indexed_file_matching_disk(library_id: Uuid, path: &Path) -> MediaFile {
+    fn indexed_file_matching_disk(library_id: Uuid, path: &Path) -> CreateMediaFile {
         let (size_bytes, mtime) = read_fs_meta(path.parent().unwrap(), path).unwrap();
-        MediaFile {
-            id: Uuid::new_v4(),
-            library_id,
-            path: path.to_path_buf(),
+        CreateMediaFile {
             hash: 7,
             size_bytes,
             mtime,
-            identity: None,
             mime_type: None,
             duration: Some(Duration::from_secs(60)),
             container_format: None,
-            content: None,
-            status: FileStatus::Known,
-            classifier_version: 0,
-            container_tags: None,
-            scanned_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-            missing_since: None,
+            ..create_media_file(library_id, path)
         }
     }
 
     /// A row for a file indexed under `root` by an earlier scan and not on
     /// disk now.
-    fn indexed_file_under(library_id: Uuid, root: &Path, name: &str) -> MediaFile {
-        MediaFile {
-            id: Uuid::new_v4(),
-            library_id,
-            path: root.join(name),
+    fn indexed_file_under(library_id: Uuid, root: &Path, name: &str) -> CreateMediaFile {
+        CreateMediaFile {
             hash: 42,
             size_bytes: 1024,
-            mtime: None,
-            identity: None,
             mime_type: Some("video/mp4".to_string()),
-            duration: None,
             container_format: None,
-            content: None,
-            status: FileStatus::Known,
-            classifier_version: 0,
-            container_tags: None,
-            scanned_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-            missing_since: None,
+            ..create_media_file(library_id, root.join(name))
         }
     }
 
@@ -1580,22 +1680,18 @@ mod library_scans {
             .await
             .unwrap();
         for name in indexed {
-            let row = indexed_file_under(library.id, root, name);
-            file_repo.files.lock().unwrap().insert(row.id, row);
+            file_repo
+                .create(indexed_file_under(library.id, root, name))
+                .await
+                .unwrap();
         }
         // No expectations: reaching the hasher or the prober would be a bug.
-        let service = LocalIndexService::new(
-            lib_repo.clone(),
-            file_repo.clone(),
-            Arc::new(InMemoryMovieRepository::default()),
-            Arc::new(InMemoryShowRepository::default()),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-            Arc::new(MockHashService::new()),
-            Arc::new(MockMediaInfoService::new()),
-            notification_svc.clone(),
-            admin_log_repo.clone() as Arc<dyn AdminLogRepository>,
-            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-        );
+        let service = IndexServiceBuilder::new()
+            .library_repo(lib_repo.clone())
+            .file_repo(file_repo.clone())
+            .notifications(notification_svc.clone())
+            .admin_log_repo(admin_log_repo.clone())
+            .build();
         IndexedLibraryHarness {
             library,
             lib_repo,
@@ -1797,12 +1893,10 @@ mod library_scans {
             service,
             ..
         } = indexed_library_harness(root, &["gone.txt"]).await;
-        let kept = indexed_file_matching_disk(library.id, &kept_path);
         file_repo
-            .files
-            .lock()
-            .unwrap()
-            .insert(kept.id, kept.clone());
+            .create(indexed_file_matching_disk(library.id, &kept_path))
+            .await
+            .unwrap();
 
         assert_eq!(service.scan_library(library.id).await.unwrap(), 0);
 
@@ -1830,12 +1924,10 @@ mod library_scans {
             service,
             ..
         } = indexed_library_harness(root, &["gone.mp4"]).await;
-        let kept = indexed_file_matching_disk(library.id, &kept_path);
-        file_repo
-            .files
-            .lock()
-            .unwrap()
-            .insert(kept.id, kept.clone());
+        let kept = file_repo
+            .create(indexed_file_matching_disk(library.id, &kept_path))
+            .await
+            .unwrap();
 
         assert_eq!(service.scan_library(library.id).await.unwrap(), 0);
 
@@ -1858,38 +1950,23 @@ mod library_scans {
         // and this run owns it, and the child is guaranteed absent.
         let dir = TempDir::new().unwrap();
         let root_path = dir.path().join("beam-nonexistent-root");
-        let library = Library {
-            id: Uuid::new_v4(),
-            name: "Bad Library".to_string(),
-            root_path: root_path.clone(),
-            description: None,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-            last_scan_started_at: None,
-            last_scan_finished_at: None,
-            last_scan_file_count: None,
-        };
-        lib_repo
-            .libraries
-            .lock()
-            .unwrap()
-            .insert(library.id, library.clone());
+        let library = lib_repo
+            .create(CreateLibrary {
+                name: "Bad Library".to_string(),
+                root_path: root_path.clone(),
+                description: None,
+            })
+            .await
+            .unwrap();
 
         let admin_log_repo = Arc::new(InMemoryAdminLogRepository::default());
         let admin_log_svc = admin_log_repo.clone() as Arc<dyn AdminLogRepository>;
 
-        let service = LocalIndexService::new(
-            lib_repo.clone(),
-            Arc::new(InMemoryFileRepository::default()),
-            Arc::new(InMemoryMovieRepository::default()),
-            Arc::new(InMemoryShowRepository::default()),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-            Arc::new(MockHashService::new()),
-            Arc::new(MockMediaInfoService::new()),
-            notification_svc.clone(),
-            admin_log_svc,
-            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-        );
+        let service = IndexServiceBuilder::new()
+            .library_repo(lib_repo.clone())
+            .notifications(notification_svc.clone())
+            .admin_log_repo(admin_log_svc)
+            .build();
 
         let result = service.scan_library(library.id).await;
         let err = result.expect_err("a missing root must fail the scan");
@@ -1956,18 +2033,10 @@ mod library_scans {
             .unwrap();
 
         // No expectations: reaching the hasher or the prober would be a bug.
-        let service = LocalIndexService::new(
-            lib_repo.clone(),
-            file_repo.clone(),
-            Arc::new(InMemoryMovieRepository::default()),
-            Arc::new(InMemoryShowRepository::default()),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-            Arc::new(MockHashService::new()),
-            Arc::new(MockMediaInfoService::new()),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(InMemoryAdminLogRepository::default()),
-            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-        );
+        let service = IndexServiceBuilder::new()
+            .library_repo(lib_repo.clone())
+            .file_repo(file_repo.clone())
+            .build();
 
         let err = service
             .scan_library(library.id)
@@ -2010,18 +2079,12 @@ mod library_scans {
             .times(1)
             .returning(|_| Ok(31337));
 
-        let service = LocalIndexService::new(
-            lib_repo.clone(),
-            file_repo.clone(),
-            Arc::new(InMemoryMovieRepository::default()),
-            Arc::new(InMemoryShowRepository::default()),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-            Arc::new(mock_hash),
-            Arc::new(mock_media_info),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(InMemoryAdminLogRepository::default()),
-            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-        );
+        let service = IndexServiceBuilder::new()
+            .library_repo(lib_repo.clone())
+            .file_repo(file_repo.clone())
+            .hash_service(Arc::new(mock_hash))
+            .media_info(Arc::new(mock_media_info))
+            .build();
 
         let result = service.scan_library(library.id).await;
         assert_eq!(result.unwrap(), 1);
@@ -2052,19 +2115,15 @@ mod library_scans {
         let file_path = dir.path().join("corrupt.mp4");
         std::fs::write(&file_path, b"not a real mp4 container at all").unwrap();
 
-        let service = LocalIndexService::new(
-            lib_repo.clone(),
-            file_repo.clone(),
-            Arc::new(InMemoryMovieRepository::default()),
-            Arc::new(InMemoryShowRepository::default()),
-            Arc::new(InMemoryMediaStreamRepository::default()),
+        let service = IndexServiceBuilder::new()
+            .library_repo(lib_repo.clone())
+            .file_repo(file_repo.clone())
             // Every file is hashed before it is probed.
-            Arc::new(crate::services::hash::LocalHashService::default()),
-            Arc::new(crate::services::media_info::LocalMediaInfoService::default()),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(InMemoryAdminLogRepository::default()),
-            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-        );
+            .hash_service(Arc::new(crate::services::hash::LocalHashService::default()))
+            .media_info(Arc::new(
+                crate::services::media_info::LocalMediaInfoService::default(),
+            ))
+            .build();
 
         let result = service.scan_library(library.id).await;
         assert_eq!(result.unwrap(), 1, "scan must succeed despite corrupt file");
@@ -2099,18 +2158,14 @@ mod library_scans {
         let admin_log_repo = Arc::new(InMemoryAdminLogRepository::default());
         let admin_log_svc = admin_log_repo.clone() as Arc<dyn AdminLogRepository>;
 
-        let service = LocalIndexService::new(
-            lib_repo.clone(),
-            file_repo.clone(),
-            Arc::new(InMemoryMovieRepository::default()),
-            Arc::new(InMemoryShowRepository::default()),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-            Arc::new(mock_hash),
-            Arc::new(mock_media_info),
-            notification_svc.clone(),
-            admin_log_svc,
-            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-        );
+        let service = IndexServiceBuilder::new()
+            .library_repo(lib_repo.clone())
+            .file_repo(file_repo.clone())
+            .hash_service(Arc::new(mock_hash))
+            .media_info(Arc::new(mock_media_info))
+            .notifications(notification_svc.clone())
+            .admin_log_repo(admin_log_svc)
+            .build();
 
         // Scan should succeed overall; the failing file is not counted
         let result = service.scan_library(library.id).await;
@@ -2146,18 +2201,9 @@ mod library_scans {
         assert!(library.last_scan_started_at.is_none());
         assert!(library.last_scan_finished_at.is_none());
 
-        let service = LocalIndexService::new(
-            lib_repo.clone(),
-            Arc::new(InMemoryFileRepository::default()),
-            Arc::new(InMemoryMovieRepository::default()),
-            Arc::new(InMemoryShowRepository::default()),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-            Arc::new(MockHashService::new()),
-            Arc::new(MockMediaInfoService::new()),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(InMemoryAdminLogRepository::default()),
-            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-        );
+        let service = IndexServiceBuilder::new()
+            .library_repo(lib_repo.clone())
+            .build();
 
         service.scan_library(library.id).await.unwrap();
 
@@ -2175,18 +2221,11 @@ mod library_scans {
         let dir = TempDir::new().unwrap();
         let library = make_library_in_tempdir(&lib_repo, &dir).await;
 
-        let service = LocalIndexService::new(
-            lib_repo.clone(),
-            Arc::new(InMemoryFileRepository::default()),
-            Arc::new(InMemoryMovieRepository::default()),
-            Arc::new(InMemoryShowRepository::default()),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-            Arc::new(MockHashService::new()),
-            Arc::new(MockMediaInfoService::new()),
-            notification_svc.clone(),
-            admin_log_svc,
-            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-        );
+        let service = IndexServiceBuilder::new()
+            .library_repo(lib_repo.clone())
+            .notifications(notification_svc.clone())
+            .admin_log_repo(admin_log_svc)
+            .build();
 
         service.scan_library(library.id).await.unwrap();
 
@@ -2231,49 +2270,29 @@ mod library_scans {
         // stays unchanged
         let stays_path = dir.path().join("stays.mkv");
         std::fs::write(&stays_path, b"hello").unwrap(); // 5 bytes
-        let file_a = beam_domain::models::MediaFile {
-            id: Uuid::new_v4(),
-            library_id: library.id,
-            path: stays_path.clone(),
-            hash: 0,
-            size_bytes: 5,
-            mtime: None,
-            identity: None,
-            mime_type: None,
-            duration: None,
-            container_format: None,
-            content: None,
-            status: FileStatus::Known,
-            classifier_version: 0,
-            container_tags: None,
-            scanned_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-            missing_since: None,
-        };
-        file_repo.files.lock().unwrap().insert(file_a.id, file_a);
+        file_repo
+            .create(CreateMediaFile {
+                hash: 0,
+                size_bytes: 5,
+                mime_type: None,
+                container_format: None,
+                ..create_media_file(library.id, stays_path.clone())
+            })
+            .await
+            .unwrap();
 
         // File B: exists in DB only (phantom, no matching disk file) → will be marked missing
         let phantom_path = dir.path().join("phantom.mkv");
-        let file_b = beam_domain::models::MediaFile {
-            id: Uuid::new_v4(),
-            library_id: library.id,
-            path: phantom_path,
-            hash: 0,
-            size_bytes: 100,
-            mtime: None,
-            identity: None,
-            mime_type: None,
-            duration: None,
-            container_format: None,
-            content: None,
-            status: FileStatus::Known,
-            classifier_version: 0,
-            container_tags: None,
-            scanned_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-            missing_since: None,
-        };
-        file_repo.files.lock().unwrap().insert(file_b.id, file_b);
+        file_repo
+            .create(CreateMediaFile {
+                hash: 0,
+                size_bytes: 100,
+                mime_type: None,
+                container_format: None,
+                ..create_media_file(library.id, phantom_path)
+            })
+            .await
+            .unwrap();
 
         // File C: exists on disk only (not in DB) → added as Unknown (its
         // probe fails)
@@ -2288,18 +2307,13 @@ mod library_scans {
             .expect_get_video_metadata()
             .returning(|_| Err(MetadataError::UnknownError("ffmpeg failed".to_string())));
 
-        let service = LocalIndexService::new(
-            lib_repo.clone(),
-            file_repo.clone(),
-            Arc::new(InMemoryMovieRepository::default()),
-            Arc::new(InMemoryShowRepository::default()),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-            Arc::new(unchanged_hash),
-            Arc::new(failing_probe),
-            Arc::new(InMemoryNotificationService::new()),
-            admin_log_svc,
-            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-        );
+        let service = IndexServiceBuilder::new()
+            .library_repo(lib_repo.clone())
+            .file_repo(file_repo.clone())
+            .hash_service(Arc::new(unchanged_hash))
+            .media_info(Arc::new(failing_probe))
+            .admin_log_repo(admin_log_svc)
+            .build();
 
         let added = service.scan_library(library.id).await.unwrap();
         assert_eq!(added, 1);
@@ -2337,44 +2351,28 @@ mod library_scans {
         // As a row records it: at the precision a repository keeps.
         let (size_bytes, mtime) = read_fs_meta(file_path.parent().unwrap(), &file_path).unwrap();
 
-        let existing = MediaFile {
-            id: Uuid::new_v4(),
-            library_id: library.id,
-            path: file_path.clone(),
-            hash: 4242,
-            size_bytes,
-            mtime,
-            identity: None,
-            mime_type: Some("video/mp4".to_string()),
-            // Probed: a row whose probe never succeeded is probed again.
-            duration: Some(Duration::from_secs(60)),
-            container_format: Some("mp4".to_string()),
-            content: None,
-            status: FileStatus::Known,
-            classifier_version: 0,
-            container_tags: None,
-            scanned_at: Utc::now(),
-            updated_at: Utc::now(),
-            missing_since: None,
-        };
         file_repo
-            .files
-            .lock()
-            .unwrap()
-            .insert(existing.id, existing);
+            .create(CreateMediaFile {
+                hash: 4242,
+                size_bytes,
+                mtime,
+                mime_type: Some("video/mp4".to_string()),
+                // Probed: a row whose probe never succeeded is probed again.
+                duration: Some(Duration::from_secs(60)),
+                container_format: Some("mp4".to_string()),
+                // A Known row is a movie's or an episode's file (the `files` CHECK).
+                content: Some(MediaFileContent::movie(Uuid::new_v4())),
+                status: FileStatus::Known,
+                classifier_version: CLASSIFIER_VERSION,
+                ..create_media_file(library.id, file_path.clone())
+            })
+            .await
+            .unwrap();
 
-        let service = LocalIndexService::new(
-            lib_repo.clone(),
-            file_repo.clone(),
-            Arc::new(InMemoryMovieRepository::default()),
-            Arc::new(InMemoryShowRepository::default()),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-            Arc::new(MockHashService::new()),
-            Arc::new(MockMediaInfoService::new()),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(InMemoryAdminLogRepository::default()),
-            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-        );
+        let service = IndexServiceBuilder::new()
+            .library_repo(lib_repo.clone())
+            .file_repo(file_repo.clone())
+            .build();
 
         service.scan_library(library.id).await.unwrap();
 
@@ -2397,31 +2395,22 @@ mod library_scans {
         std::fs::write(&file_path, b"same content as hash").unwrap();
         let disk_meta = std::fs::metadata(&file_path).unwrap();
 
-        let existing = MediaFile {
-            id: Uuid::new_v4(),
-            library_id: library.id,
-            path: file_path.clone(),
-            hash: 8888,
-            size_bytes: disk_meta.len(), // size matches
-            mtime: None,                 // stale → suspected
-            mime_type: Some("video/mp4".to_string()),
-            identity: None,
-            duration: Some(Duration::from_secs(60)),
-            container_format: Some("mp4".to_string()),
-            // A Known row is a movie's or an episode's file (the `files` CHECK).
-            content: Some(MediaFileContent::movie(Uuid::new_v4())),
-            status: FileStatus::Known,
-            classifier_version: CLASSIFIER_VERSION,
-            container_tags: None,
-            scanned_at: Utc::now(),
-            updated_at: Utc::now(),
-            missing_since: None,
-        };
         file_repo
-            .files
-            .lock()
-            .unwrap()
-            .insert(existing.id, existing);
+            .create(CreateMediaFile {
+                hash: 8888,
+                size_bytes: disk_meta.len(), // size matches
+                mtime: None,                 // stale → suspected
+                mime_type: Some("video/mp4".to_string()),
+                duration: Some(Duration::from_secs(60)),
+                container_format: Some("mp4".to_string()),
+                // A Known row is a movie's or an episode's file (the `files` CHECK).
+                content: Some(MediaFileContent::movie(Uuid::new_v4())),
+                status: FileStatus::Known,
+                classifier_version: CLASSIFIER_VERSION,
+                ..create_media_file(library.id, file_path.clone())
+            })
+            .await
+            .unwrap();
 
         let mut mock_hash = MockHashService::new();
         mock_hash
@@ -2429,18 +2418,13 @@ mod library_scans {
             .times(1)
             .returning(|_| Ok(8888));
 
-        let service = LocalIndexService::new(
-            lib_repo.clone(),
-            file_repo.clone(),
-            Arc::new(InMemoryMovieRepository::default()),
-            Arc::new(InMemoryShowRepository::default()),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-            Arc::new(mock_hash),
-            Arc::new(MockMediaInfoService::new()), // no expectation: ffmpeg must NOT be called
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(InMemoryAdminLogRepository::default()),
-            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-        );
+        // The prober is left a strict mock with no expectation: ffmpeg must
+        // NOT be called.
+        let service = IndexServiceBuilder::new()
+            .library_repo(lib_repo.clone())
+            .file_repo(file_repo.clone())
+            .hash_service(Arc::new(mock_hash))
+            .build();
 
         service.scan_library(library.id).await.unwrap();
 
@@ -2461,31 +2445,20 @@ mod library_scans {
         let file_path = dir.path().join("movie.mp4");
         std::fs::write(&file_path, b"new content").unwrap();
 
-        let existing = MediaFile {
-            id: Uuid::new_v4(),
-            library_id: library.id,
-            path: file_path.clone(),
-            hash: 100,
-            size_bytes: 999, // wrong size → suspected
-            mtime: None,
-            identity: None,
-            mime_type: Some("video/mp4".to_string()),
-            duration: None,
-            container_format: Some("mp4".to_string()),
-            // A Known row is a movie's or an episode's file (the `files` CHECK).
-            content: Some(MediaFileContent::movie(Uuid::new_v4())),
-            status: FileStatus::Known,
-            classifier_version: CLASSIFIER_VERSION,
-            container_tags: None,
-            scanned_at: Utc::now(),
-            updated_at: Utc::now(),
-            missing_since: None,
-        };
         file_repo
-            .files
-            .lock()
-            .unwrap()
-            .insert(existing.id, existing);
+            .create(CreateMediaFile {
+                hash: 100,
+                size_bytes: 999, // wrong size → suspected
+                mime_type: Some("video/mp4".to_string()),
+                container_format: Some("mp4".to_string()),
+                // A Known row is a movie's or an episode's file (the `files` CHECK).
+                content: Some(MediaFileContent::movie(Uuid::new_v4())),
+                status: FileStatus::Known,
+                classifier_version: CLASSIFIER_VERSION,
+                ..create_media_file(library.id, file_path.clone())
+            })
+            .await
+            .unwrap();
 
         let mut mock_hash = MockHashService::new();
         mock_hash
@@ -2498,18 +2471,12 @@ mod library_scans {
             .times(1)
             .returning(|_| Err(MetadataError::UnknownError("ffmpeg failed".into())));
 
-        let service = LocalIndexService::new(
-            lib_repo.clone(),
-            file_repo.clone(),
-            Arc::new(InMemoryMovieRepository::default()),
-            Arc::new(InMemoryShowRepository::default()),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-            Arc::new(mock_hash),
-            Arc::new(mock_media_info),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(InMemoryAdminLogRepository::default()),
-            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-        );
+        let service = IndexServiceBuilder::new()
+            .library_repo(lib_repo.clone())
+            .file_repo(file_repo.clone())
+            .hash_service(Arc::new(mock_hash))
+            .media_info(Arc::new(mock_media_info))
+            .build();
 
         service.scan_library(library.id).await.unwrap();
 
@@ -2534,30 +2501,16 @@ mod library_scans {
         std::fs::create_dir_all(file_path.parent().unwrap()).unwrap();
         std::fs::write(&file_path, b"new content").unwrap();
 
-        let existing = MediaFile {
-            id: Uuid::new_v4(),
-            library_id: library.id,
-            path: file_path.clone(),
-            hash: 100,
-            size_bytes: 999, // wrong size → suspected
-            mtime: None,
-            identity: None,
-            mime_type: Some("video/x-matroska".to_string()),
-            duration: Some(Duration::from_secs(60)),
-            container_format: Some("matroska".to_string()),
-            content: None,
-            status: FileStatus::Unknown,
-            classifier_version: CLASSIFIER_VERSION,
-            container_tags: None,
-            scanned_at: Utc::now(),
-            updated_at: Utc::now(),
-            missing_since: None,
-        };
         file_repo
-            .files
-            .lock()
-            .unwrap()
-            .insert(existing.id, existing);
+            .create(CreateMediaFile {
+                hash: 100,
+                size_bytes: 999, // wrong size → suspected
+                duration: Some(Duration::from_secs(60)),
+                classifier_version: CLASSIFIER_VERSION,
+                ..create_media_file(library.id, file_path.clone())
+            })
+            .await
+            .unwrap();
 
         let mut mock_hash = MockHashService::new();
         mock_hash
@@ -2570,18 +2523,12 @@ mod library_scans {
             .times(1)
             .returning(|_| Err(MetadataError::UnknownError("ffmpeg failed".into())));
 
-        let service = LocalIndexService::new(
-            lib_repo.clone(),
-            file_repo.clone(),
-            Arc::new(InMemoryMovieRepository::default()),
-            Arc::new(InMemoryShowRepository::default()),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-            Arc::new(mock_hash),
-            Arc::new(mock_media_info),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(InMemoryAdminLogRepository::default()),
-            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-        );
+        let service = IndexServiceBuilder::new()
+            .library_repo(lib_repo.clone())
+            .file_repo(file_repo.clone())
+            .hash_service(Arc::new(mock_hash))
+            .media_info(Arc::new(mock_media_info))
+            .build();
 
         service
             .scan_library(library.id)
@@ -2614,18 +2561,12 @@ mod library_scans {
             .times(1)
             .returning(|_| Ok(make_video_metadata()));
 
-        let service = LocalIndexService::new(
-            lib_repo.clone(),
-            file_repo.clone(),
-            Arc::new(InMemoryMovieRepository::default()),
-            Arc::new(InMemoryShowRepository::default()),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-            Arc::new(mock_hash),
-            Arc::new(mock_media_info),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(InMemoryAdminLogRepository::default()),
-            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-        );
+        let service = IndexServiceBuilder::new()
+            .library_repo(lib_repo.clone())
+            .file_repo(file_repo.clone())
+            .hash_service(Arc::new(mock_hash))
+            .media_info(Arc::new(mock_media_info))
+            .build();
 
         service
             .reconcile_path(library.id, file_path.clone(), FsEventKind::Created)
@@ -2643,18 +2584,10 @@ mod library_scans {
         let lib_repo = Arc::new(InMemoryLibraryRepository::default());
         let file_repo = Arc::new(InMemoryFileRepository::default());
 
-        let service = LocalIndexService::new(
-            lib_repo.clone(),
-            file_repo.clone(),
-            Arc::new(InMemoryMovieRepository::default()),
-            Arc::new(InMemoryShowRepository::default()),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-            Arc::new(MockHashService::new()),
-            Arc::new(MockMediaInfoService::new()),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(InMemoryAdminLogRepository::default()),
-            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-        );
+        let service = IndexServiceBuilder::new()
+            .library_repo(lib_repo.clone())
+            .file_repo(file_repo.clone())
+            .build();
 
         // No library matches this id; reconcile_path must be a no-op.
         service
@@ -2666,7 +2599,7 @@ mod library_scans {
             .await
             .unwrap();
 
-        assert!(file_repo.files.lock().unwrap().is_empty());
+        assert_eq!(file_repo.count_all().await.unwrap(), 0);
     }
 
     #[tokio::test]
@@ -2694,18 +2627,13 @@ mod library_scans {
             .times(2)
             .returning(|_| Ok(make_video_metadata()));
 
-        let service = LocalIndexService::new(
-            lib_repo.clone(),
-            file_repo.clone(),
-            Arc::new(InMemoryMovieRepository::default()),
-            Arc::new(InMemoryShowRepository::default()),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-            Arc::new(mock_hash),
-            Arc::new(mock_media_info),
-            Arc::new(InMemoryNotificationService::new()),
-            admin_log_svc,
-            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-        );
+        let service = IndexServiceBuilder::new()
+            .library_repo(lib_repo.clone())
+            .file_repo(file_repo.clone())
+            .hash_service(Arc::new(mock_hash))
+            .media_info(Arc::new(mock_media_info))
+            .admin_log_repo(admin_log_svc)
+            .build();
 
         service.scan_library(library.id).await.unwrap();
 
@@ -2742,18 +2670,12 @@ mod library_scans {
             .times(2)
             .returning(|_| Ok(make_video_metadata()));
 
-        let service = LocalIndexService::new(
-            lib_repo.clone(),
-            file_repo.clone(),
-            Arc::new(InMemoryMovieRepository::default()),
-            Arc::new(InMemoryShowRepository::default()),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-            Arc::new(mock_hash),
-            Arc::new(mock_media_info),
-            Arc::new(InMemoryNotificationService::new()),
-            Arc::new(InMemoryAdminLogRepository::default()),
-            Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-        );
+        let service = IndexServiceBuilder::new()
+            .library_repo(lib_repo.clone())
+            .file_repo(file_repo.clone())
+            .hash_service(Arc::new(mock_hash))
+            .media_info(Arc::new(mock_media_info))
+            .build();
 
         let total = service
             .scan_all_libraries(ScanTrigger::Periodic)

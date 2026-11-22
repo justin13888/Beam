@@ -38,6 +38,7 @@ async fn find_or_create_episode_inserts_with_do_nothing_on_the_pair_then_reads_t
             title: "Seven".to_string(),
             runtime: None,
             air_date: None,
+            numbering: beam_domain::utils::media_path::EpisodeNumbering::Standard,
         })
         .await;
     drop(repo);

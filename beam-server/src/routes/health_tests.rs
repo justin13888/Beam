@@ -89,4 +89,58 @@ mod tests {
         assert_eq!(body["checks"]["database"]["detail"], "connection refused");
         assert!(body["uptime_secs"].is_u64());
     }
+
+    /// The `beam_dependency_up{dependency="database"}` gauge each probe run
+    /// leaves behind, recorded through a local recorder on a current-thread
+    /// runtime so the handler's facade calls land in this test's snapshot.
+    fn database_up_after_probing(probe: InMemoryDependencyProbe) -> Option<f64> {
+        use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a current-thread runtime");
+
+        metrics::with_local_recorder(&recorder, || {
+            runtime.block_on(async {
+                client(Arc::new(probe)).get("/v1/health").send().await;
+            });
+        });
+
+        snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .find_map(|(key, _, _, value)| {
+                let key = key.key();
+                let labels: Vec<_> = key.labels().map(|l| (l.key(), l.value())).collect();
+                match value {
+                    DebugValue::Gauge(up)
+                        if key.name() == "beam_dependency_up"
+                            && labels == [("dependency", "database")] =>
+                    {
+                        Some(up.into_inner())
+                    }
+                    _ => None,
+                }
+            })
+    }
+
+    #[test]
+    fn a_passing_probe_exports_the_database_as_up() {
+        assert_eq!(
+            database_up_after_probing(InMemoryDependencyProbe::healthy()),
+            Some(1.0)
+        );
+    }
+
+    #[test]
+    fn a_failing_probe_exports_the_database_as_down() {
+        assert_eq!(
+            database_up_after_probing(InMemoryDependencyProbe::failing("connection refused")),
+            Some(0.0)
+        );
+    }
 }

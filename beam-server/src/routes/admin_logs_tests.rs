@@ -11,7 +11,8 @@ use beam_domain::models::enrichment::EnrichmentTargetId;
 use beam_domain::models::{AdminLog, AdminLogCategory, CreateAdminLog};
 use beam_domain::repositories::{AdminLogRepository, EnrichmentStateRepository};
 use beam_index::services::notification::{
-    AdminEvent, EventCategory, NewAdminEvent, NotificationService,
+    AdminEvent, EventCategory, LibraryChangeCursor, LibraryChanges, NewAdminEvent,
+    NotificationService,
 };
 use kynos::http::StatusCode;
 use serde_json::Value;
@@ -68,6 +69,12 @@ impl NotificationService for FiniteEventFeed {
 
     fn recent_events(&self, limit: usize) -> Vec<AdminEvent> {
         stamped(&self.events).into_iter().take(limit).collect()
+    }
+
+    fn library_changed(&self, _library_id: uuid::Uuid) {}
+
+    fn library_changes(&self, _since: Option<LibraryChangeCursor>) -> LibraryChanges {
+        unreachable!("the admin event routes never read the library change feed")
     }
 }
 
@@ -494,6 +501,12 @@ impl NotificationService for LaggingEventFeed {
 
     fn recent_events(&self, _limit: usize) -> Vec<AdminEvent> {
         Vec::new()
+    }
+
+    fn library_changed(&self, _library_id: uuid::Uuid) {}
+
+    fn library_changes(&self, _since: Option<LibraryChangeCursor>) -> LibraryChanges {
+        unreachable!("the admin event routes never read the library change feed")
     }
 }
 

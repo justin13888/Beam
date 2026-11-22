@@ -115,7 +115,7 @@ pub(super) mod tests {
                 shows.clone(),
                 genres.clone(),
             )),
-            sources: Arc::new(SourceCatalog::new(crate::services::sources::SourceRepositories {movies: movies.clone(), files, streams, sidecars, chapters: Arc::new(beam_domain::repositories::chapter::in_memory::InMemoryChapterRepository::default()), trickplay: Arc::new(beam_domain::repositories::trickplay::in_memory::InMemoryTrickplayRepository::default()),})),
+            sources: Arc::new(SourceCatalog::new(crate::services::sources::SourceRepositories {movies: movies.clone(), files, streams, sidecars, chapters: Arc::new(beam_domain::repositories::chapter::in_memory::InMemoryChapterRepository::default()), trickplay: Arc::new(beam_domain::repositories::trickplay::in_memory::InMemoryTrickplayRepository::default()), markers: Arc::new(beam_domain::repositories::markers::in_memory::InMemoryMarkerRepository::default()),})),
             movies,
             shows,
             genres,
@@ -247,6 +247,9 @@ pub(super) mod tests {
             air_date: None,
             runtime: None,
             thumbnail_url: None,
+            numbering: beam_domain::utils::media_path::EpisodeNumbering::Standard,
+            absolute_number: None,
+            absolute_season_number: None,
             created_at: chrono::Utc::now(),
         };
         let episode_id = ep.id;
@@ -462,6 +465,9 @@ pub(super) mod tests {
             air_date: None,
             runtime: None,
             thumbnail_url: None,
+            numbering: beam_domain::utils::media_path::EpisodeNumbering::Standard,
+            absolute_number: None,
+            absolute_season_number: None,
             created_at: chrono::Utc::now(),
         };
         let episode_id = ep.id;
@@ -653,6 +659,9 @@ pub(super) mod tests {
             air_date: None,
             runtime: None,
             thumbnail_url: Some("https://image.tmdb.org/t/p/w300/still.jpg".to_string()),
+            numbering: beam_domain::utils::media_path::EpisodeNumbering::Standard,
+            absolute_number: None,
+            absolute_season_number: None,
             created_at: chrono::Utc::now(),
         };
         let episode_id = episode.id;

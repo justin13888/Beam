@@ -167,9 +167,7 @@ async fn a_row_without_an_identity_is_given_one_without_a_hash() {
     let files = same_size_same_mtime(&h, &["Heat (1995).mkv", "Ronin (1998).mkv"]).await;
     let (heat, heat_id) = files[0].clone();
     let (ronin, ronin_id) = files[1].clone();
-    for row in h.file_repo.files.lock().unwrap().values_mut() {
-        row.identity = None;
-    }
+    h.rerecord_identities(|_| None).await;
     let hashes = h.hashes();
 
     h.scan().await;
@@ -317,11 +315,13 @@ async fn a_chmod_on_a_network_library_costs_one_hash() {
 /// ctime -- as a network or FUSE filesystem can renumber a file after a
 /// remount or a cache eviction, while the file itself is untouched.
 #[cfg(unix)]
-fn renumber_recorded_inodes(h: &Harness) {
-    for row in h.file_repo.files.lock().unwrap().values_mut() {
-        let identity = row.identity.as_mut().expect("a Unix file has an identity");
+async fn renumber_recorded_inodes(h: &Harness) {
+    h.rerecord_identities(|identity| {
+        let mut identity = identity.expect("a Unix file has an identity");
         identity.inode = !identity.inode;
-    }
+        Some(identity)
+    })
+    .await;
 }
 
 /// A library on a network or FUSE filesystem is compared by size, mtime and
@@ -341,7 +341,7 @@ async fn a_network_library_whose_inodes_are_renumbered_is_not_hashed_again() {
     let before = [h.present(&heat).await, h.present(&ronin).await];
     let hashes = h.hashes();
 
-    renumber_recorded_inodes(&h);
+    renumber_recorded_inodes(&h).await;
     let progress = h.scan().await;
 
     assert_eq!(h.hashes(), hashes, "nothing is hashed");
@@ -369,7 +369,7 @@ async fn a_local_library_whose_inodes_differ_hashes_each_file_once() {
     let before = [h.present(&heat).await, h.present(&ronin).await];
     let hashes = h.hashes();
 
-    renumber_recorded_inodes(&h);
+    renumber_recorded_inodes(&h).await;
     let progress = h.scan().await;
 
     assert_eq!(h.hashes(), hashes + 2, "each file is hashed");
@@ -403,7 +403,7 @@ async fn a_library_whose_filesystem_cannot_be_classified_compares_inodes() {
     h.scan().await;
     let hashes = h.hashes();
 
-    renumber_recorded_inodes(&h);
+    renumber_recorded_inodes(&h).await;
     h.scan().await;
 
     assert_eq!(h.hashes(), hashes + 1, "the renumbered file is hashed");

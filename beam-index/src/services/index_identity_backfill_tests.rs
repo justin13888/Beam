@@ -187,18 +187,11 @@ async fn a_failed_backfill_does_not_hold_up_the_scan_and_is_retried() {
         .times(1)
         .returning(|_| Ok(Vec::new()));
     movie_repo.expect_delete_orphaned().returning(|_| Ok(0));
-    let service = LocalIndexService::new(
-        library_repo.clone(),
-        Arc::new(InMemoryFileRepository::default()),
-        Arc::new(movie_repo),
-        Arc::new(InMemoryShowRepository::default()),
-        Arc::new(InMemoryMediaStreamRepository::default()),
-        Arc::new(MockHashService::new()),
-        Arc::new(MockMediaInfoService::new()),
-        Arc::new(InMemoryNotificationService::new()),
-        Arc::new(InMemoryAdminLogRepository::default()) as Arc<dyn AdminLogRepository>,
-        Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-    );
+    let service = IndexServiceBuilder::new()
+        .library_repo(library_repo.clone())
+        .movie_repo(Arc::new(movie_repo))
+        .admin_log_repo(Arc::new(InMemoryAdminLogRepository::default()))
+        .build();
 
     service
         .scan_all_libraries(ScanTrigger::Periodic)
@@ -354,9 +347,13 @@ async fn an_unkeyed_husk_is_retired(enriched: bool) {
     assert_eq!(show.title, "Show X");
     assert_eq!(show.identity_key.as_deref(), Some("show x|"));
     assert_eq!(show.tmdb_id, None, "the husk's match does not carry over");
-    let files = h.file_repo.files.lock().unwrap().clone();
+    let files = h
+        .file_repo
+        .find_all_by_library_including_missing(h.library.id)
+        .await
+        .unwrap();
     assert_eq!(files.len(), 3);
-    for file in files.values() {
+    for file in &files {
         let Some(MediaFileContent::Episode { episode_id, .. }) = file.content else {
             panic!("{} is not an episode file", file.path.display());
         };

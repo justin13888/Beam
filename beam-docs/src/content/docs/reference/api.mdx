@@ -10,14 +10,18 @@ designed so that other clients could be too.
 
 ## Interactive documentation
 
-A running server serves browsable API docs:
+A running server serves browsable API docs. With the bundled Compose files, open them on the
+server's own host:
 
 ```
-http://<your-server>:8000/openapi
+http://localhost:8000/openapi
 ```
 
 The OpenAPI document itself is at `/api-doc/openapi.json`. It is generated from the server's own
 handler definitions rather than maintained by hand, so it cannot drift from the implementation.
+
+Neither is reachable from another machine. The server's port is published on `127.0.0.1` only,
+and the reverse proxy forwards only `/v1`, so the docs are not part of what Beam serves publicly.
 
 ## Authentication
 

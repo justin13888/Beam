@@ -30,9 +30,14 @@ eyre = "0.6.14"
 # only the formats providers actually serve posters in; AVIF and GIF are
 # served at their original size rather than pulling in a C AV1 decoder.
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
+# Signs the file-scoped media grants a cast receiver or external player fetches
+# a file with (ADR-0022). Already in the tree through hkdf, against the same
+# digest 0.11 as sha2.
+hmac = "0.13"
 kynos = { workspace = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
+metrics-process = { workspace = true }
 mutants = { workspace = true }
 sea-orm = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
@@ -54,6 +59,8 @@ beam-auth = { path = "../beam-auth", features = ["test-utils"] }
 beam-domain = { path = "../beam-domain", features = ["test-utils"] }
 beam-index = { path = "../beam-index", features = ["test-utils"] }
 metrics-util = { workspace = true }
+# Paused time, so the metrics upkeep schedule is tested without waiting on it.
+tokio = { workspace = true, features = ["test-util"] }
 mockall = "0.15.0"
 # The harness of the opt-in `e2e-server` tier (tests/e2e_server.rs). An empty
 # library unless that feature is on.
@@ -71,6 +78,7 @@ rustix = { version = "1.1", features = ["fs"] }
 # infrastructure (NFR-201); `mise run e2e:server` turns it on.
 e2e-server = ["beam-test-support/e2e-server"]
 vendored-ffmpeg = ["beam-index/vendored-ffmpeg"]
+prebuilt-ffmpeg = ["beam-index/prebuilt-ffmpeg"]
 # The feature set cargo-mutants builds this package with.
 #
 # cargo-mutants builds each package on its own, so it needs one *unqualified*

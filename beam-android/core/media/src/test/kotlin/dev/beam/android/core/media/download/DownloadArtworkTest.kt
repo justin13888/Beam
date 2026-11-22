@@ -5,15 +5,12 @@ package dev.beam.android.core.media.download
 
 import android.content.Context
 import android.util.Base64
-import androidx.core.net.toUri
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.database.StandaloneDatabaseProvider
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.cache.NoOpCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
-import androidx.media3.exoplayer.offline.Download
 import androidx.media3.exoplayer.offline.DownloadManager
-import androidx.media3.exoplayer.offline.DownloadRequest
 import androidx.test.core.app.ApplicationProvider
 import coil3.ImageLoader
 import coil3.decode.DataSource
@@ -24,8 +21,6 @@ import coil3.request.SuccessResult
 import dev.beam.android.core.media.http.BeamHttpClientFactory
 import dev.beam.android.core.media.http.BeamImageLoader
 import dev.beam.android.core.media.http.ServerCallFactory
-import dev.beam.android.core.model.DownloadRecord
-import dev.beam.android.core.testing.FakePlaybackRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
@@ -49,6 +44,8 @@ import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.GraphicsMode
+import uniffi.beam_client_core.BeamClient
+import java.io.File
 import java.io.IOException
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
@@ -57,12 +54,13 @@ import java.util.concurrent.TimeUnit
 /**
  * A download's poster, from enqueue to removal.
  *
- * Everything below the network is real: Media3's download manager, the title
- * store, the app's own image loader and its disk cache on a temporary
- * directory. Only the wire is faked, because "the device is offline" is the
- * one condition the feature exists for and the one a test cannot otherwise
- * produce. (That the loader authenticates is `BeamImageLoaderTest`'s concern;
- * here no server is signed in, so every fetch goes out on the plain client.)
+ * Everything below the network is real: Media3's download manager, the core
+ * and the records it keeps, the app's own image loader and its disk cache on
+ * a temporary directory. Only the wire is faked, because "the device is
+ * offline" is the one condition the feature exists for and the one a test
+ * cannot otherwise produce. (That the loader authenticates is
+ * `BeamImageLoaderTest`'s concern; here no server is signed in, so every
+ * fetch goes out on the plain client.)
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
@@ -110,10 +108,9 @@ class DownloadArtworkTest {
     private lateinit var database: StandaloneDatabaseProvider
     private lateinit var cache: SimpleCache
     private lateinit var media3: DownloadManager
-    private lateinit var titles: DownloadTitleStore
+    private lateinit var core: BeamClient
     private lateinit var artwork: DownloadArtwork
     private lateinit var downloads: BeamDownloadManager
-    private val playback = FakePlaybackRepository()
 
     @Before
     fun setUp() {
@@ -138,9 +135,9 @@ class DownloadArtworkTest {
             )
         // Only the artwork is under test; the media bytes are not fetched.
         media3.pauseDownloads()
-        titles = FileDownloadTitleStore(context)
+        core = BeamClient(InMemoryKeyValueStore())
         artwork = DownloadArtwork(context, temp.newFolder("download-artwork")) { loader }
-        downloads = BeamDownloadManager(media3, titles, artwork)
+        downloads = BeamDownloadManager(media3, InProcessDownloadCommands { media3 }, core, artwork)
     }
 
     @After
@@ -148,6 +145,7 @@ class DownloadArtworkTest {
         media3.release()
         cache.release()
         database.close()
+        core.close()
         loader.shutdown()
         Dispatchers.resetMain()
     }
@@ -155,10 +153,10 @@ class DownloadArtworkTest {
     @Test
     fun `a poster fetched at enqueue renders with the network gone`() =
         runTest {
-            enqueue("f1", POSTER)
+            enqueue(F1, POSTER)
 
             online = false
-            val result = renderRecordOf("f1")
+            val result = renderRecordOf(F1)
 
             assertTrue("rendered offline, got $result", result is SuccessResult)
             assertEquals(DataSource.DISK, (result as SuccessResult).dataSource)
@@ -168,25 +166,25 @@ class DownloadArtworkTest {
     @Test
     fun `a kept poster outlives the image cache dropping it`() =
         runTest {
-            enqueue("f1", POSTER)
+            enqueue(F1, POSTER)
 
             online = false
             // What enough browsing does to an LRU cache, all at once.
             loader.diskCache!!.clear()
-            val result = renderRecordOf("f1")
+            val result = renderRecordOf(F1)
 
             assertTrue("rendered offline from the kept copy, got $result", result is SuccessResult)
             assertEquals(listOf(POSTER), fetched)
         }
 
     @Test
-    fun `a download whose poster could not be kept still names the poster's URL`() =
+    fun `the record names a path on disk, never the poster's URL`() =
         runTest {
-            online = false
-            enqueue("f1", POSTER)
+            enqueue(F1, POSTER)
 
-            // Online, the screen still fetches it like any other poster.
-            assertEquals(POSTER, recordOf("f1").posterUrl)
+            val path = recordOf(F1).artworkPath!!
+            assertEquals(artwork.pathFor(POSTER), path)
+            assertTrue(File(path).isFile)
         }
 
     @Test
@@ -194,12 +192,12 @@ class DownloadArtworkTest {
         runTest {
             online = false
             // A poster is decoration; losing it must not lose the download.
-            enqueue("f1", POSTER)
-            assertTrue("the download was still recorded", titles.get("f1") != null)
+            enqueue(F1, POSTER)
+            assertEquals("the download was still recorded", listOf(F1), core.downloads().map { it.fileId })
             assertFalse(isOnDisk(POSTER))
 
             online = true
-            enqueue("f1", POSTER)
+            enqueue(F1, POSTER)
 
             assertTrue(isOnDisk(POSTER))
         }
@@ -207,11 +205,11 @@ class DownloadArtworkTest {
     @Test
     fun `a poster already kept is not fetched again`() =
         runTest {
-            enqueue("e1", POSTER)
+            enqueue(E1, POSTER)
             // Without the kept copy, a second pin would have to go back to the wire.
             loader.diskCache!!.clear()
 
-            enqueue("e2", POSTER)
+            enqueue(E2, POSTER)
 
             assertEquals(listOf(POSTER), fetched)
             assertTrue(isOnDisk(POSTER))
@@ -223,11 +221,11 @@ class DownloadArtworkTest {
             // A regular file where the store's directory should be: every write into it fails.
             val blocked = temp.newFile("not-a-directory")
             artwork = DownloadArtwork(context, blocked) { loader }
-            downloads = BeamDownloadManager(media3, titles, artwork)
+            downloads = BeamDownloadManager(media3, InProcessDownloadCommands { media3 }, core, artwork)
 
-            enqueue("f1", POSTER)
+            enqueue(F1, POSTER)
 
-            assertTrue("the download was still recorded", titles.get("f1") != null)
+            assertEquals("the download was still recorded", listOf(F1), core.downloads().map { it.fileId })
             assertEquals(listOf(POSTER), fetched)
             assertFalse(isOnDisk(POSTER))
         }
@@ -235,10 +233,10 @@ class DownloadArtworkTest {
     @Test
     fun `removing the download releases its poster`() =
         runTest {
-            enqueue("f1", POSTER)
+            enqueue(F1, POSTER)
             assertTrue(isOnDisk(POSTER))
 
-            downloads.remove("f1")
+            downloads.remove(F1)
 
             assertFalse(isOnDisk(POSTER))
         }
@@ -247,23 +245,23 @@ class DownloadArtworkTest {
     fun `a poster shared by two downloads is kept until the last is removed`() =
         runTest {
             // Two episodes of one series carry the series poster.
-            enqueue("e1", POSTER)
-            enqueue("e2", POSTER)
+            enqueue(E1, POSTER)
+            enqueue(E2, POSTER)
 
-            downloads.remove("e1")
+            downloads.remove(E1)
             assertTrue("still needed by e2", isOnDisk(POSTER))
 
-            downloads.remove("e2")
+            downloads.remove(E2)
             assertFalse(isOnDisk(POSTER))
         }
 
     @Test
     fun `removing a download leaves other downloads' posters alone`() =
         runTest {
-            enqueue("f1", POSTER)
-            enqueue("f2", OTHER_POSTER)
+            enqueue(F1, POSTER)
+            enqueue(F2, OTHER_POSTER)
 
-            downloads.remove("f1")
+            downloads.remove(F1)
 
             assertFalse(isOnDisk(POSTER))
             assertTrue(isOnDisk(OTHER_POSTER))
@@ -272,8 +270,8 @@ class DownloadArtworkTest {
     @Test
     fun `removing every download releases every poster`() =
         runTest {
-            enqueue("f1", POSTER)
-            enqueue("f2", OTHER_POSTER)
+            enqueue(F1, POSTER)
+            enqueue(F2, OTHER_POSTER)
             assertTrue(isOnDisk(POSTER) && isOnDisk(OTHER_POSTER))
 
             downloads.removeAll()
@@ -285,83 +283,99 @@ class DownloadArtworkTest {
     @Test
     fun `a poster shared with a download cleared by remove-all is released with the last`() =
         runTest {
-            enqueue("e1", POSTER)
+            enqueue(E1, POSTER)
             downloads.removeAll()
 
             // A later episode of the same series brings the poster back ...
-            enqueue("e2", POSTER)
+            enqueue(E2, POSTER)
             assertTrue(isOnDisk(POSTER))
 
             // ... and removing it must not find e1 still holding it.
-            downloads.remove("e2")
+            downloads.remove(E2)
 
             assertFalse(isOnDisk(POSTER))
+        }
+
+    @Test
+    fun `forgetting a server releases the posters only its downloads kept`() =
+        runTest {
+            enqueue(H1, POSTER, server = "https://home.test")
+            enqueue(C1, POSTER, server = "https://cabin.test")
+            enqueue(C2, OTHER_POSTER, server = "https://cabin.test")
+
+            downloads.removeServer(core.addServer("https://cabin.test", null).id)
+
+            assertTrue("still shown by the other server's download", isOnDisk(POSTER))
+            assertFalse(isOnDisk(OTHER_POSTER))
+            assertEquals(listOf(H1), core.downloads().map { it.fileId })
         }
 
     @Test
     fun `a download removed while its poster is still fetching leaves no poster behind`() =
         runTest {
             val held = Stall().also { stall = it }
-            val enqueueing = async(Dispatchers.Default) { enqueue("f1", POSTER) }
+            val enqueueing = async(Dispatchers.Default) { enqueue(F1, POSTER) }
             assertTrue(
                 "the poster fetch reached the wire",
                 held.reached.await(STALL_TIMEOUT_SECONDS, TimeUnit.SECONDS),
             )
 
-            // Removed before the poster's bytes have landed: nothing to evict yet.
-            downloads.remove("f1")
+            // Removed before the poster's bytes have landed: nothing to delete yet.
+            downloads.remove(F1)
             held.released.countDown()
             enqueueing.await()
 
             assertFalse(isOnDisk(POSTER))
         }
 
+    /** Queue [fileId] on the server at [server], made the active one. */
     private suspend fun enqueue(
         fileId: String,
         posterUrl: String,
-    ) = downloads.enqueue(
-        fileId = fileId,
-        serverId = "s1",
-        mediaId = "m-$fileId",
-        title = "Title $fileId",
-        subtitle = null,
-        posterUrl = posterUrl,
-        repository = playback,
-    )
+        server: String = "https://beam.test",
+    ) {
+        core.selectServer(core.addServer(server, null).id)
+        downloads.enqueue(
+            fileId = fileId,
+            mediaId = "m-$fileId",
+            episodeId = null,
+            title = "Title $fileId",
+            subtitle = null,
+            posterUrl = posterUrl,
+        )
+    }
 
     /** The record the downloads screen would be handed for [fileId]. */
-    private fun recordOf(fileId: String): DownloadRecord =
-        Download(
-            DownloadRequest.Builder(fileId, "https://beam.test/v1/files/$fileId".toUri()).build(),
-            Download.STATE_COMPLETED,
-            0L,
-            0L,
-            0L,
-            Download.STOP_REASON_NONE,
-            Download.FAILURE_REASON_NONE,
-        ).toRecord(titles, artwork)
+    private suspend fun recordOf(fileId: String) = core.downloads().single { it.fileId == fileId }
 
     /**
-     * Render [fileId]'s poster the way `Artwork` does: the record's poster as
-     * the model, default keys. The memory cache is bypassed because a fresh
-     * process has none.
+     * Render [fileId]'s poster the way the downloads screen does: the record's
+     * kept copy as the model, default keys. The memory cache is bypassed
+     * because a fresh process has none.
      */
     private suspend fun renderRecordOf(fileId: String): ImageResult =
         loader.execute(
             ImageRequest
                 .Builder(context)
-                .data(recordOf(fileId).posterUrl)
+                .data(File(recordOf(fileId).artworkPath!!).toURI().toString())
                 .memoryCachePolicy(CachePolicy.DISABLED)
                 .build(),
         )
 
-    /** Whether the downloads screen would render [url] from a kept copy. */
-    private fun isOnDisk(url: String): Boolean = artwork.displayUrl(url) != url
+    /** Whether a copy of [url] is kept on disk. */
+    private fun isOnDisk(url: String): Boolean = File(artwork.pathFor(url)).isFile
 
     private companion object {
         const val POSTER = "https://beam.test/v1/artwork/media/m1/poster"
         const val OTHER_POSTER = "https://beam.test/v1/artwork/media/m2/poster"
         const val STALL_TIMEOUT_SECONDS = 10L
+        const val F1 = "f1000000-0000-4000-8000-000000000001"
+        const val F2 = "f2000000-0000-4000-8000-000000000002"
+        const val E1 = "e1000000-0000-4000-8000-000000000001"
+        const val E2 = "e2000000-0000-4000-8000-000000000002"
+        const val H1 = "a1000000-0000-4000-8000-000000000001"
+        const val C1 = "c1000000-0000-4000-8000-000000000001"
+        const val C2 = "c2000000-0000-4000-8000-000000000002"
 
         /** A 1x1 PNG: the smallest thing the decoder accepts as an image. */
         val POSTER_PNG: ByteArray =

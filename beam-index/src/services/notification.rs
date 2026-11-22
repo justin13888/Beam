@@ -200,11 +200,111 @@ impl NewAdminEvent {
     }
 }
 
+/// A position in a process's [`LibraryChangeLog`] (issue #454): every
+/// `library_changed` event after it is news to whoever holds it.
+///
+/// `epoch` names the process that issued it. A cursor from another process
+/// -- the server restarted, and its sequence started again from zero --
+/// cannot be compared with this one's, so it reads as a reset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LibraryChangeCursor {
+    pub epoch: Uuid,
+    pub sequence: u64,
+}
+
+/// What changed since a [`LibraryChangeCursor`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LibraryChanges {
+    /// Where the next read continues from.
+    pub cursor: LibraryChangeCursor,
+    /// What the holder of the old cursor is to refetch.
+    pub changed: ChangedLibraries,
+}
+
+/// The libraries a [`LibraryChanges`] says changed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ChangedLibraries {
+    /// These libraries, each once, in no particular order. Empty when
+    /// nothing changed.
+    Only(Vec<Uuid>),
+    /// Anything may have changed: there was no cursor, or it was issued by
+    /// another process, or it is ahead of this one's sequence.
+    All,
+}
+
+/// The coalesced `library_changed { library_id }` events of one process
+/// (issue #454): for each library, the sequence number of the latest change
+/// to it. A reader learns which libraries changed since its cursor, not how
+/// often or how -- no file path, so nothing leaks past a user's access.
+///
+/// Bounded by the number of libraries ever changed in this process, not by
+/// the number of changes.
+#[derive(Debug)]
+pub struct LibraryChangeLog {
+    epoch: Uuid,
+    state: RwLock<LibraryChangeState>,
+}
+
+#[derive(Debug, Default)]
+struct LibraryChangeState {
+    sequence: u64,
+    latest: std::collections::HashMap<Uuid, u64>,
+}
+
+impl LibraryChangeLog {
+    /// An empty log for a process named `epoch`.
+    #[must_use]
+    pub fn new(epoch: Uuid) -> Self {
+        Self {
+            epoch,
+            state: RwLock::new(LibraryChangeState::default()),
+        }
+    }
+
+    /// Record a change to `library_id`.
+    pub fn record(&self, library_id: Uuid) {
+        let mut state = self.state.write();
+        state.sequence += 1;
+        let sequence = state.sequence;
+        state.latest.insert(library_id, sequence);
+    }
+
+    /// The libraries changed after `since`.
+    #[must_use]
+    pub fn since(&self, since: Option<LibraryChangeCursor>) -> LibraryChanges {
+        let state = self.state.read();
+        let cursor = LibraryChangeCursor {
+            epoch: self.epoch,
+            sequence: state.sequence,
+        };
+        let changed = match since {
+            Some(since) if since.epoch == self.epoch && since.sequence <= state.sequence => {
+                ChangedLibraries::Only(
+                    state
+                        .latest
+                        .iter()
+                        .filter(|(_, sequence)| **sequence > since.sequence)
+                        .map(|(library_id, _)| *library_id)
+                        .collect(),
+                )
+            }
+            Some(_) | None => ChangedLibraries::All,
+        };
+        LibraryChanges { cursor, changed }
+    }
+}
+
 pub trait NotificationService: Send + Sync + std::fmt::Debug {
     /// Stamps `event` with an id and the current time, and publishes it.
     fn publish(&self, event: NewAdminEvent);
     fn subscribe(&self) -> broadcast::Receiver<AdminEvent>;
     fn recent_events(&self, limit: usize) -> Vec<AdminEvent>;
+    /// Publish `library_changed { library_id }` (issue #454): what the
+    /// library holds changed, so a client showing it is to refetch. Unlike
+    /// an [`AdminEvent`] it is for every user who can see the library.
+    fn library_changed(&self, library_id: Uuid);
+    /// The libraries changed since `since`.
+    fn library_changes(&self, since: Option<LibraryChangeCursor>) -> LibraryChanges;
 }
 
 #[derive(Debug, Clone)]
@@ -216,6 +316,7 @@ pub struct LocalNotificationService {
     clock: Arc<dyn Clock>,
     /// Source of each published event's id.
     ids: Arc<dyn IdGenerator>,
+    library_changes: Arc<LibraryChangeLog>,
 }
 
 impl LocalNotificationService {
@@ -234,6 +335,7 @@ impl LocalNotificationService {
             max_log_size: DEFAULT_LOG_SIZE,
             clock,
             ids,
+            library_changes: Arc::new(LibraryChangeLog::new(Uuid::new_v4())),
         }
     }
 }
@@ -268,6 +370,14 @@ impl NotificationService for LocalNotificationService {
         let events: Vec<_> = log.iter().rev().take(limit).cloned().collect();
         events.into_iter().rev().collect()
     }
+
+    fn library_changed(&self, library_id: Uuid) {
+        self.library_changes.record(library_id);
+    }
+
+    fn library_changes(&self, since: Option<LibraryChangeCursor>) -> LibraryChanges {
+        self.library_changes.since(since)
+    }
 }
 
 /// Test doubles. Gated behind `test-utils` so downstream crates can depend on
@@ -289,6 +399,7 @@ pub mod in_memory {
     pub struct InMemoryNotificationService {
         sender: broadcast::Sender<AdminEvent>,
         event_log: Arc<RwLock<VecDeque<AdminEvent>>>,
+        library_changes: Arc<LibraryChangeLog>,
     }
 
     impl InMemoryNotificationService {
@@ -297,6 +408,7 @@ pub mod in_memory {
             Self {
                 sender,
                 event_log: Arc::new(RwLock::new(VecDeque::new())),
+                library_changes: Arc::new(LibraryChangeLog::new(Uuid::new_v4())),
             }
         }
 
@@ -326,6 +438,14 @@ pub mod in_memory {
             let log = self.event_log.read();
             let events: Vec<_> = log.iter().rev().take(limit).cloned().collect();
             events.into_iter().rev().collect()
+        }
+
+        fn library_changed(&self, library_id: Uuid) {
+            self.library_changes.record(library_id);
+        }
+
+        fn library_changes(&self, since: Option<LibraryChangeCursor>) -> LibraryChanges {
+            self.library_changes.since(since)
         }
     }
 }
@@ -486,6 +606,85 @@ mod tests {
             .map(|event| event.category)
             .collect();
         assert_eq!(kept, vec![EventCategory::System]);
+    }
+
+    fn only(changes: &LibraryChanges) -> Vec<Uuid> {
+        match &changes.changed {
+            ChangedLibraries::Only(ids) => {
+                let mut ids = ids.clone();
+                ids.sort();
+                ids
+            }
+            ChangedLibraries::All => panic!("expected the changed libraries, got a reset"),
+        }
+    }
+
+    /// A reader learns each library changed after its cursor once, however
+    /// many times it changed, and nothing it already read.
+    #[test]
+    fn library_changes_since_a_cursor_are_each_library_changed_after_it_once() {
+        let svc = LocalNotificationService::new();
+        let (films, shows) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        let start = svc.library_changes(None);
+        assert_eq!(start.changed, ChangedLibraries::All, "no cursor is a reset");
+
+        svc.library_changed(films);
+        svc.library_changed(shows);
+        svc.library_changed(films);
+        let first = svc.library_changes(Some(start.cursor));
+        assert_eq!(only(&first), vec![films, shows]);
+        assert_eq!(first.cursor.epoch, start.cursor.epoch);
+
+        let nothing = svc.library_changes(Some(first.cursor));
+        assert_eq!(only(&nothing), Vec::<Uuid>::new());
+        assert_eq!(nothing.cursor, first.cursor, "no change, no new position");
+
+        svc.library_changed(shows);
+        assert_eq!(only(&svc.library_changes(Some(first.cursor))), vec![shows]);
+        // An older cursor still sees everything after it.
+        assert_eq!(
+            only(&svc.library_changes(Some(start.cursor))),
+            vec![films, shows]
+        );
+    }
+
+    /// A cursor this process did not issue -- another process's, or one past
+    /// its sequence -- cannot say what the reader missed, so it is a reset.
+    #[test]
+    fn a_cursor_from_another_process_or_ahead_of_this_one_is_a_reset() {
+        let svc = LocalNotificationService::new();
+        svc.library_changed(Uuid::from_u128(1));
+        let now = svc.library_changes(None).cursor;
+
+        let foreign = LibraryChangeCursor {
+            epoch: Uuid::from_u128(99),
+            sequence: now.sequence,
+        };
+        assert_eq!(
+            svc.library_changes(Some(foreign)).changed,
+            ChangedLibraries::All
+        );
+        let ahead = LibraryChangeCursor {
+            sequence: now.sequence + 1,
+            ..now
+        };
+        assert_eq!(
+            svc.library_changes(Some(ahead)).changed,
+            ChangedLibraries::All
+        );
+        assert_eq!(
+            svc.library_changes(Some(now)).changed,
+            ChangedLibraries::Only(Vec::new()),
+            "the cursor at the head is not ahead of it"
+        );
+    }
+
+    /// Two processes never issue the same epoch, so a restart is a reset.
+    #[test]
+    fn each_service_names_its_own_epoch() {
+        let first = LocalNotificationService::new().library_changes(None).cursor;
+        let second = LocalNotificationService::new().library_changes(None).cursor;
+        assert_ne!(first.epoch, second.epoch);
     }
 
     /// The log is bounded: past its size the oldest event is evicted, and a

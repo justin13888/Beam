@@ -567,3 +567,225 @@ fn a_library_stays_retired_while_any_delete_of_it_is_in_flight() {
         Some(ScanRefused::Retired)
     );
 }
+
+// ─── metrics (issue #457) ───────────────────────────────────────────────────
+
+mod metrics {
+    use super::*;
+    use crate::test_metrics::MetricsCapture;
+
+    fn registered(
+        coordinator: &ScanCoordinator,
+        library: Uuid,
+        trigger: ScanTrigger,
+        clock: &Arc<TestClock>,
+    ) -> ScanTicket {
+        let job = ScanJob {
+            trigger,
+            ..queued(library, clock)
+        };
+        coordinator.register(job, clock.clone()).unwrap()
+    }
+
+    /// A successful scan is timed from when it started running, not from
+    /// when it was queued, and stamps the library's last success.
+    #[test]
+    fn a_successful_scan_records_its_duration_and_last_success() {
+        let capture = MetricsCapture::new();
+        let _recorder = capture.install();
+        let clock = Arc::new(TestClock::starting_at(instant(0)));
+        let coordinator = ScanCoordinator::new();
+        let library = Uuid::new_v4();
+        let label = library.to_string();
+        let ticket = registered(&coordinator, library, ScanTrigger::Periodic, &clock);
+
+        clock.advance(Duration::from_secs(5));
+        ticket.start();
+        let running = capture.snapshot();
+        assert_eq!(
+            running.gauge("beam_scan_in_progress", &[("library", &label)]),
+            Some(1.0)
+        );
+        assert!(!running.has("beam_scan_last_success_timestamp_seconds"));
+
+        clock.advance(Duration::from_secs(7));
+        ticket.succeed(ScanProgress::default());
+        drop(ticket);
+
+        let done = capture.snapshot();
+        assert_eq!(
+            done.histogram(
+                "beam_scan_duration_seconds",
+                &[("library", &label), ("trigger", "periodic")]
+            ),
+            Some(vec![7.0])
+        );
+        assert_eq!(
+            done.gauge(
+                "beam_scan_last_success_timestamp_seconds",
+                &[("library", &label)]
+            ),
+            Some(1_700_000_012.0)
+        );
+        assert_eq!(
+            done.gauge("beam_scan_in_progress", &[("library", &label)]),
+            Some(0.0)
+        );
+        assert!(
+            !done.has("beam_scan_failures_total"),
+            "dropping a finished ticket is not a failure"
+        );
+    }
+
+    /// A scan that fails, or whose task goes away, is counted as failed and
+    /// leaves no success behind; a scan cancelled because its library is
+    /// being deleted is not a failure.
+    #[test]
+    fn failed_and_interrupted_scans_are_counted_and_cancelled_ones_are_not() {
+        let capture = MetricsCapture::new();
+        let _recorder = capture.install();
+        let clock = Arc::new(TestClock::new());
+        let coordinator = ScanCoordinator::new();
+        let library = Uuid::new_v4();
+        let label = library.to_string();
+        let failures = || {
+            capture
+                .snapshot()
+                .counter("beam_scan_failures_total", &[("library", &label)])
+                .unwrap_or(0)
+        };
+
+        let ticket = registered(&coordinator, library, ScanTrigger::Manual, &clock);
+        ticket.start();
+        ticket.fail("internal error");
+        drop(ticket);
+        assert_eq!(failures(), 1);
+
+        let ticket = registered(&coordinator, library, ScanTrigger::Manual, &clock);
+        ticket.start();
+        drop(ticket);
+        assert_eq!(failures(), 2, "an interrupted scan is a failure");
+
+        let ticket = registered(&coordinator, library, ScanTrigger::Manual, &clock);
+        ticket.start();
+        ticket.fail(CANCELLED);
+        assert_eq!(failures(), 2, "a cancelled running scan is not a failure");
+        let after_cancel = capture.snapshot();
+        assert_eq!(
+            after_cancel.gauge("beam_scan_in_progress", &[("library", &label)]),
+            Some(0.0),
+            "a cancelled scan is no longer in progress"
+        );
+        drop(ticket);
+
+        let ticket = registered(&coordinator, library, ScanTrigger::Manual, &clock);
+        coordinator.cancel(library, clock.now());
+        drop(ticket);
+        assert_eq!(failures(), 2, "a cancelled queued scan is not a failure");
+
+        let finished = capture.snapshot();
+        assert!(!finished.has("beam_scan_duration_seconds"));
+        assert!(!finished.has("beam_scan_last_success_timestamp_seconds"));
+    }
+
+    /// Forgetting a deleted library zeroes its scan series, which the
+    /// exporter would otherwise keep at their last values until restart; a
+    /// scan still running against it -- one that outlived its stop timeout
+    /// -- writes none of them back.
+    #[test]
+    fn forgetting_a_library_zeroes_its_series_and_a_late_scan_writes_none_back() {
+        let capture = MetricsCapture::new();
+        let _recorder = capture.install();
+        let clock = Arc::new(TestClock::starting_at(instant(0)));
+        let coordinator = ScanCoordinator::new();
+        let library = Uuid::new_v4();
+        let label = library.to_string();
+        let series = |name: &str| capture.snapshot().gauge(name, &[("library", &label)]);
+        let titles = |kind: &str| {
+            capture.snapshot().gauge(
+                "beam_library_titles",
+                &[("library", &label), ("kind", kind)],
+            )
+        };
+        let kinds = ["movie", "show", "season", "episode"];
+        let counts = LibraryTitleCounts {
+            movies: 1,
+            shows: 2,
+            seasons: 3,
+            episodes: 4,
+        };
+
+        let ticket = registered(&coordinator, library, ScanTrigger::Periodic, &clock);
+        ticket.start();
+        ticket.record_file_count(3);
+        ticket.record_title_counts(counts);
+        ticket.succeed(ScanProgress::default());
+        drop(ticket);
+        assert_eq!(
+            series("beam_scan_last_success_timestamp_seconds"),
+            Some(1_700_000_000.0)
+        );
+        assert_eq!(series("beam_library_files"), Some(3.0));
+        for (kind, count) in kinds.into_iter().zip([1.0, 2.0, 3.0, 4.0]) {
+            assert_eq!(titles(kind), Some(count), "{kind} is recorded");
+        }
+
+        let late = registered(&coordinator, library, ScanTrigger::Manual, &clock);
+        late.start();
+        assert_eq!(series("beam_scan_in_progress"), Some(1.0));
+
+        coordinator.forget(library);
+        for name in [
+            "beam_scan_in_progress",
+            "beam_scan_last_success_timestamp_seconds",
+            "beam_library_files",
+        ] {
+            assert_eq!(series(name), Some(0.0), "{name} is zeroed on forget");
+        }
+        for kind in kinds {
+            assert_eq!(titles(kind), Some(0.0), "{kind} is zeroed on forget");
+        }
+
+        clock.advance(Duration::from_secs(60));
+        late.record_file_count(5);
+        late.record_title_counts(counts);
+        late.succeed(ScanProgress::default());
+        drop(late);
+        for name in [
+            "beam_scan_in_progress",
+            "beam_scan_last_success_timestamp_seconds",
+            "beam_library_files",
+        ] {
+            assert_eq!(series(name), Some(0.0), "{name} stays zeroed");
+        }
+        for kind in kinds {
+            assert_eq!(titles(kind), Some(0.0), "{kind} stays zeroed");
+        }
+        assert!(
+            capture
+                .snapshot()
+                .histogram(
+                    "beam_scan_duration_seconds",
+                    &[("library", &label), ("trigger", "manual")]
+                )
+                .is_none(),
+            "the late scan is not timed"
+        );
+    }
+
+    /// Each trigger has its own label, so a dashboard can tell the startup
+    /// scan from the periodic one.
+    #[test]
+    fn every_trigger_has_a_distinct_label() {
+        let triggers = [
+            ScanTrigger::Manual,
+            ScanTrigger::Startup,
+            ScanTrigger::Periodic,
+            ScanTrigger::NewlyPolled,
+            ScanTrigger::Created,
+        ];
+        let labels: std::collections::HashSet<&str> =
+            triggers.iter().map(|trigger| trigger.label()).collect();
+        assert_eq!(labels.len(), triggers.len());
+    }
+}

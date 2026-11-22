@@ -1,6 +1,5 @@
 package dev.beam.android.core.media.download
 
-import dev.beam.android.core.model.DownloadRecord
 import dev.beam.android.core.model.ThemeMode
 import dev.beam.android.core.model.UserPreferences
 import dev.beam.android.core.testing.FakePreferencesRepository
@@ -11,6 +10,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Test
+import uniffi.beam_client_core.DownloadRecord
 
 /**
  * The download repository follows the stored cellular preference itself, so
@@ -53,11 +53,11 @@ class CellularPreferenceTest {
 
         override suspend fun enqueue(
             fileId: String,
-            serverId: String,
             mediaId: String,
             title: String,
             subtitle: String?,
             posterUrl: String?,
+            episodeId: String?,
         ) = Unit
 
         override suspend fun pause(fileId: String) = Unit
@@ -67,6 +67,8 @@ class CellularPreferenceTest {
         override suspend fun remove(fileId: String) = Unit
 
         override suspend fun removeAll() = Unit
+
+        override suspend fun removeServer(serverId: String) = Unit
 
         override suspend fun setRequiresUnmeteredNetwork(required: Boolean) {
             unmeteredRequirements += required

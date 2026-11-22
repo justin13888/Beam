@@ -5,13 +5,12 @@ use super::*;
 use crate::probe::metadata::VideoFileMetadata;
 use crate::services::hash::MockHashService;
 use crate::services::media_info::MockMediaInfoService;
-use crate::services::notification::InMemoryNotificationService;
-use beam_domain::repositories::admin_log::in_memory::InMemoryAdminLogRepository;
 use beam_domain::repositories::file::MockFileRepository;
 use beam_domain::repositories::library::MockLibraryRepository;
 use beam_domain::repositories::movie::MockMovieRepository;
 use beam_domain::repositories::show::MockShowRepository;
 use beam_domain::repositories::stream::MockMediaStreamRepository;
+use beam_domain::test_utils::media_file;
 use std::path::PathBuf;
 use tempfile::TempDir;
 
@@ -119,22 +118,13 @@ async fn test_process_file_movie_success() {
     mock_file_repo.expect_create().times(1).returning(move |_| {
         Ok(beam_domain::models::MediaFile {
             id: file_id,
-            library_id: Uuid::new_v4(),
-            path: PathBuf::from("test"),
             hash: 12345,
             size_bytes: 1024,
-            mtime: None,
-            identity: None,
             mime_type: Some("video/mp4".to_string()),
-            duration: None,
             container_format: None,
             content: Some(beam_domain::models::MediaFileContent::movie(entry_id)),
             status: FileStatus::Known,
-            classifier_version: 0,
-            container_tags: None,
-            scanned_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-            missing_since: None,
+            ..media_file(Uuid::new_v4(), "test")
         })
     });
 
@@ -143,18 +133,15 @@ async fn test_process_file_movie_success() {
         .times(1)
         .returning(|_| Ok(0u32));
 
-    let service = LocalIndexService::new(
-        Arc::new(mock_library_repo),
-        Arc::new(mock_file_repo),
-        Arc::new(mock_movie_repo),
-        Arc::new(mock_show_repo),
-        Arc::new(mock_stream_repo),
-        Arc::new(mock_hash_service),
-        Arc::new(mock_media_info_service),
-        Arc::new(InMemoryNotificationService::new()),
-        Arc::new(InMemoryAdminLogRepository::default()),
-        Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-    );
+    let service = IndexServiceBuilder::new()
+        .library_repo(Arc::new(mock_library_repo))
+        .file_repo(Arc::new(mock_file_repo))
+        .movie_repo(Arc::new(mock_movie_repo))
+        .show_repo(Arc::new(mock_show_repo))
+        .stream_repo(Arc::new(mock_stream_repo))
+        .hash_service(Arc::new(mock_hash_service))
+        .media_info(Arc::new(mock_media_info_service))
+        .build();
 
     let result = service
         .process_new_file(
@@ -273,6 +260,9 @@ async fn test_process_file_episode_success() {
                 air_date: None,
                 runtime: None,
                 thumbnail_url: None,
+                numbering: beam_domain::utils::media_path::EpisodeNumbering::Standard,
+                absolute_number: None,
+                absolute_season_number: None,
                 created_at: chrono::Utc::now(),
             })
         });
@@ -291,22 +281,12 @@ async fn test_process_file_episode_success() {
     mock_file_repo.expect_create().times(1).returning(move |_| {
         Ok(beam_domain::models::MediaFile {
             id: file_id,
-            library_id: Uuid::new_v4(),
-            path: PathBuf::from("test"),
             hash: 67890,
             size_bytes: 500 * 1024 * 1024,
-            mtime: None,
-            identity: None,
-            mime_type: Some("video/x-matroska".to_string()),
-            duration: None,
             container_format: None,
             content: Some(beam_domain::models::MediaFileContent::episode(episode_id)),
             status: FileStatus::Known,
-            classifier_version: 0,
-            container_tags: None,
-            scanned_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-            missing_since: None,
+            ..media_file(Uuid::new_v4(), "test")
         })
     });
 
@@ -315,18 +295,15 @@ async fn test_process_file_episode_success() {
         .times(1)
         .returning(|_| Ok(0u32));
 
-    let service = LocalIndexService::new(
-        Arc::new(mock_library_repo),
-        Arc::new(mock_file_repo),
-        Arc::new(mock_movie_repo),
-        Arc::new(mock_show_repo),
-        Arc::new(mock_stream_repo),
-        Arc::new(mock_hash_service),
-        Arc::new(mock_media_info_service),
-        Arc::new(InMemoryNotificationService::new()),
-        Arc::new(InMemoryAdminLogRepository::default()),
-        Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-    );
+    let service = IndexServiceBuilder::new()
+        .library_repo(Arc::new(mock_library_repo))
+        .file_repo(Arc::new(mock_file_repo))
+        .movie_repo(Arc::new(mock_movie_repo))
+        .show_repo(Arc::new(mock_show_repo))
+        .stream_repo(Arc::new(mock_stream_repo))
+        .hash_service(Arc::new(mock_hash_service))
+        .media_info(Arc::new(mock_media_info_service))
+        .build();
 
     let result = service
         .process_new_file(
@@ -347,18 +324,13 @@ async fn test_process_file_missing_path_reports_no_filesystem_path() {
     let path = temp_dir.path().join("movies/Vanished (2020).mkv");
     // Nothing is created: metadata cannot be read, so the file is refused
     // before any repository, hash, or probe call.
-    let service = LocalIndexService::new(
-        Arc::new(MockLibraryRepository::new()),
-        Arc::new(MockFileRepository::new()),
-        Arc::new(MockMovieRepository::new()),
-        Arc::new(MockShowRepository::new()),
-        Arc::new(MockMediaStreamRepository::new()),
-        Arc::new(MockHashService::new()),
-        Arc::new(MockMediaInfoService::new()),
-        Arc::new(InMemoryNotificationService::new()),
-        Arc::new(InMemoryAdminLogRepository::default()),
-        Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-    );
+    let service = IndexServiceBuilder::new()
+        .library_repo(Arc::new(MockLibraryRepository::new()))
+        .file_repo(Arc::new(MockFileRepository::new()))
+        .movie_repo(Arc::new(MockMovieRepository::new()))
+        .show_repo(Arc::new(MockShowRepository::new()))
+        .stream_repo(Arc::new(MockMediaStreamRepository::new()))
+        .build();
 
     let err = service
         .process_new_file(
@@ -398,18 +370,15 @@ async fn test_process_file_hash_failure_reports_no_filesystem_path() {
         .times(1)
         .return_once(move |_| Err(io_error));
 
-    let service = LocalIndexService::new(
-        Arc::new(MockLibraryRepository::new()),
-        Arc::new(MockFileRepository::new()),
-        Arc::new(MockMovieRepository::new()),
-        Arc::new(MockShowRepository::new()),
-        Arc::new(MockMediaStreamRepository::new()),
-        Arc::new(mock_hash),
-        Arc::new(mock_media_info),
-        Arc::new(InMemoryNotificationService::new()),
-        Arc::new(InMemoryAdminLogRepository::default()),
-        Arc::new(beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository::default()),
-    );
+    let service = IndexServiceBuilder::new()
+        .library_repo(Arc::new(MockLibraryRepository::new()))
+        .file_repo(Arc::new(MockFileRepository::new()))
+        .movie_repo(Arc::new(MockMovieRepository::new()))
+        .show_repo(Arc::new(MockShowRepository::new()))
+        .stream_repo(Arc::new(MockMediaStreamRepository::new()))
+        .hash_service(Arc::new(mock_hash))
+        .media_info(Arc::new(mock_media_info))
+        .build();
 
     let err = service
         .process_new_file(

@@ -9,10 +9,10 @@
 //! actually wrote. The backfill of legacy titles and the rekey passes are in
 //! the `backfill` and `rekey` modules, over this file's harness.
 
+use super::test_harness::IndexServiceBuilder;
 use super::*;
 use crate::services::hash::MockHashService;
 use crate::services::media_info::MockMediaInfoService;
-use crate::services::notification::InMemoryNotificationService;
 use beam_domain::models::access::AccessPolicy;
 use beam_domain::models::{CreateLibrary, CreateMovie, CreateMovieEntry, Library, Movie, Show};
 use beam_domain::providers::enrichment::{MovieEnrichment, ShowEnrichment};
@@ -23,8 +23,8 @@ use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
 use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
 use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
 use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
-use beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository;
 use beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository;
+use beam_domain::test_utils::create_media_file;
 use tempfile::TempDir;
 
 /// What the service writes files through, built over the harness's in-memory
@@ -142,21 +142,21 @@ impl Harness {
             Some(wrap) => wrap(file_repo.clone()),
             None => file_repo.clone() as Arc<dyn FileRepository>,
         };
-        let service = LocalIndexService::new(
-            library_repo.clone(),
-            service_files,
-            service_movies.unwrap_or_else(|| movie_repo.clone() as Arc<dyn MovieRepository>),
-            show_repo.clone(),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-            Arc::new(hasher),
-            Arc::new(prober),
-            Arc::new(InMemoryNotificationService::new()),
-            admin_log_repo.clone() as Arc<dyn AdminLogRepository>,
-            watch_state.clone(),
-        )
-        .with_missing_file_grace(grace)
-        .with_enrichment_repo(enrichment_repo.clone())
-        .with_user_list_repo(lists.clone());
+        let service = IndexServiceBuilder::new()
+            .library_repo(library_repo.clone())
+            .file_repo(service_files)
+            .movie_repo(
+                service_movies.unwrap_or_else(|| movie_repo.clone() as Arc<dyn MovieRepository>),
+            )
+            .show_repo(show_repo.clone())
+            .hash_service(Arc::new(hasher))
+            .media_info(Arc::new(prober))
+            .admin_log_repo(admin_log_repo.clone())
+            .progress_repo(watch_state.clone())
+            .build()
+            .with_missing_file_grace(grace)
+            .with_enrichment_repo(enrichment_repo.clone())
+            .with_user_list_repo(lists.clone());
 
         Self {
             _dir: dir,
@@ -286,6 +286,11 @@ impl Harness {
             updated_at: now,
         };
         let id = movie.id;
+        // `rekey(id, None, v)` could leave a created movie keyless, but no
+        // `MovieRepository` method sets the chosen `created_at` -- creation
+        // stamps the wall clock -- or leaves the row with no rules version,
+        // as a pre-key build did. So the row is put in the double's map,
+        // as the shared contract's own fixture does.
         self.movie_repo.movies.lock().unwrap().insert(id, movie);
         for rel in rels {
             let entry = self
@@ -338,6 +343,11 @@ impl Harness {
             updated_at: now,
         };
         let id = show.id;
+        // `rekey(id, None, v)` could leave a created show keyless, but no
+        // `ShowRepository` method sets the chosen `created_at` -- creation
+        // stamps the wall clock -- or leaves the row with no rules version,
+        // as a pre-key build did. So the row is put in the double's map,
+        // as the shared contract's own fixture does.
         self.show_repo.shows.lock().unwrap().insert(id, show);
         let season = self.show_repo.find_or_create_season(id, 1).await.unwrap();
         for (n, rel) in rels.iter().enumerate() {
@@ -349,6 +359,7 @@ impl Harness {
                     title: format!("Episode {}", n + 1),
                     runtime: None,
                     air_date: None,
+                    numbering: beam_domain::utils::media_path::EpisodeNumbering::Standard,
                 })
                 .await
                 .unwrap();
@@ -364,22 +375,22 @@ impl Harness {
         let path = self.write(rel);
         let (size_bytes, mtime) = read_fs_meta(path.parent().unwrap(), &path).unwrap();
         // Distinct from the scan's hashes, which count up from 1.
-        let hash = u64::MAX - self.file_repo.files.lock().unwrap().len() as u64;
+        let held = self
+            .file_repo
+            .find_all_by_library_including_missing(self.library.id)
+            .await
+            .unwrap()
+            .len();
+        let hash = u64::MAX - held as u64;
         self.file_repo
             .create(CreateMediaFile {
-                library_id: self.library.id,
-                path,
                 hash,
                 size_bytes,
                 mtime,
-                identity: None,
-                mime_type: Some("video/x-matroska".to_string()),
-                duration: None,
                 container_format: None,
                 content: Some(content),
                 status: FileStatus::Known,
-                classifier_version: 0,
-                container_tags: None,
+                ..create_media_file(self.library.id, path)
             })
             .await
             .unwrap();
@@ -427,10 +438,14 @@ impl Harness {
 
     /// The show's episodes by number in season 1, each with its files'
     /// paths relative to the root.
-    fn season_one(&self, show: Uuid) -> Vec<(u32, Vec<String>)> {
+    async fn season_one(&self, show: Uuid) -> Vec<(u32, Vec<String>)> {
         let seasons = self.show_repo.seasons.lock().unwrap().clone();
         let episodes = self.show_repo.episodes.lock().unwrap().clone();
-        let files = self.file_repo.files.lock().unwrap().clone();
+        let files = self
+            .file_repo
+            .find_all_by_library_including_missing(self.library.id)
+            .await
+            .unwrap();
         let mut out: Vec<(u32, Vec<String>)> = episodes
             .values()
             .filter(|e| {
@@ -440,7 +455,7 @@ impl Harness {
             })
             .map(|e| {
                 let mut paths: Vec<String> = files
-                    .values()
+                    .iter()
                     .filter(|f| {
                         matches!(f.content, Some(MediaFileContent::Episode { episode_id, .. }) if episode_id == e.id)
                     })
@@ -531,11 +546,11 @@ impl Harness {
     async fn mark_every_file_missing(&self) {
         let ids: Vec<Uuid> = self
             .file_repo
-            .files
-            .lock()
+            .find_all_by_library(self.library.id)
+            .await
             .unwrap()
-            .keys()
-            .copied()
+            .into_iter()
+            .map(|file| file.id)
             .collect();
         self.file_repo
             .mark_missing(ids, chrono::Utc::now())

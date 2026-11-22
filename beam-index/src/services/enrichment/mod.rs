@@ -40,6 +40,7 @@ use crate::services::notification::{
     EnrichmentEvent, EventCategory, EventLevel, NewAdminEvent, NotificationService,
 };
 use beam_domain::services::Clock;
+use beam_domain::utils::media_path::EpisodeNumbering;
 
 /// Tunables for the enrichment sweep. All fields are independent of any
 /// concrete provider so they can be exercised with
@@ -267,6 +268,25 @@ pub struct SweepReport {
     pub skipped_no_providers: bool,
 }
 
+/// Pokes the enrichment worker into sweeping now rather than at its next
+/// interval. The indexer holds one so a title it queues is enriched within
+/// seconds (issue #449); the periodic sweep stays the backstop for a wake
+/// that is lost or that arrives mid-sweep.
+pub trait EnrichmentWake: Send + Sync + std::fmt::Debug {
+    /// Ask for a sweep. Cheap and non-blocking; several wakes before the
+    /// worker next waits collapse into one sweep.
+    fn wake(&self);
+}
+
+/// The worker's own handle, [`MetadataEnrichmentService::notify_handle`]:
+/// a wake while it sweeps is kept as a permit, so the titles queued during
+/// that sweep are swept straight after it.
+impl EnrichmentWake for tokio::sync::Notify {
+    fn wake(&self) {
+        self.notify_one();
+    }
+}
+
 #[derive(Debug)]
 pub struct MetadataEnrichmentService {
     state_repo: Arc<dyn EnrichmentStateRepository>,
@@ -350,7 +370,27 @@ impl MetadataEnrichmentService {
 
     /// Processes up to `policy.batch_size` due rows. Stops early if the
     /// provider reports rate-limiting.
+    ///
+    /// Then refreshes `beam_enrichment_pending` (issue #457) -- even when no
+    /// provider is configured, since titles keep queueing up regardless.
     pub async fn sweep_once(&self) -> SweepReport {
+        let report = self.sweep_due().await;
+        self.record_queue_depth().await;
+        report
+    }
+
+    /// Set `beam_enrichment_pending` to the titles still pending
+    /// enrichment, due or backing off. A count that fails leaves the gauge
+    /// as it was.
+    async fn record_queue_depth(&self) {
+        match self.state_repo.count_by_status().await {
+            Ok(counts) => metrics::gauge!("beam_enrichment_pending").set(counts.pending as f64),
+            Err(err) => warn!(error = %err, "failed to count the enrichment queue"),
+        }
+    }
+
+    /// [`Self::sweep_once`]'s sweep, without the queue gauge.
+    async fn sweep_due(&self) -> SweepReport {
         if self.provider.available_providers().is_empty() {
             return SweepReport {
                 skipped_no_providers: true,
@@ -631,32 +671,34 @@ impl MetadataEnrichmentService {
     /// for from the provider's season of the same number. Never fabricates
     /// seasons or episodes that scanning hasn't created.
     ///
-    /// A local episode the provider's season has no episode for is read as
-    /// an absolute number (issue #267): `Show - 030` is indexed as episode 30
-    /// of season 1, or of its season folder's season, and the provider's
-    /// absolute order ([`matcher::absolute_episode`]) says which episode that
-    /// is. It takes that episode's metadata where it stands. Episode 30 of
-    /// season 1 is taken wherever the order places it; of a later season,
-    /// only when the order places it in that season, since a season folder
-    /// and the number must agree. Specials keep their own numbering: the
-    /// absolute order counts none of them.
+    /// Absolutely numbered episodes are re-homed first
+    /// ([`Self::rehome_absolute_episodes`]), so each takes the metadata of
+    /// the place it now has. One left where it was indexed -- its re-home
+    /// failed -- takes the metadata of the episode its running number names
+    /// where it stands (issue #267), on the same terms. An episode numbered
+    /// any other way that the provider does not list is left as it is.
     async fn enrich_seasons(&self, show_id: uuid::Uuid, ref_id: &ExternalMediaRef) {
+        let mut fetched = SeasonCache::default();
+        self.rehome_absolute_episodes(show_id, ref_id, &mut fetched)
+            .await;
         let Ok(seasons) = self.show_repo.find_seasons_by_show_id(show_id).await else {
             return;
         };
-        let mut fetched = SeasonCache::default();
         for season in seasons {
             let season_number = season.season_number;
             let provider_season = fetched.get(&*self.provider, ref_id, season_number).await;
-            let unplaced: Vec<u32> = match self
+            // `(episode_number, absolute_number)` of each absolutely numbered
+            // episode the provider's season does not list.
+            let unplaced: Vec<(u32, u32)> = match self
                 .show_repo
                 .find_episodes_by_season_id(season.id)
                 .await
             {
                 Ok(episodes) => episodes
                     .into_iter()
-                    .map(|episode| episode.episode_number)
-                    .filter(|number| {
+                    .filter(|episode| episode.numbering == EpisodeNumbering::Absolute)
+                    .filter_map(|episode| Some((episode.episode_number, episode.absolute_number?)))
+                    .filter(|(number, _)| {
                         provider_season.as_ref().is_none_or(|provider| {
                             !provider
                                 .episodes
@@ -673,15 +715,12 @@ impl MetadataEnrichmentService {
 
             let mut placed = Vec::new();
             if season_number != matcher::SPECIALS_SEASON && !unplaced.is_empty() {
+                let through = unplaced.iter().map(|(_, absolute)| *absolute).max();
                 let order = fetched
-                    .absolute_order(
-                        &*self.provider,
-                        ref_id,
-                        unplaced.iter().copied().max().unwrap_or(0),
-                    )
+                    .absolute_order(&*self.provider, ref_id, through.unwrap_or(0))
                     .await;
-                for number in unplaced {
-                    let Some((in_season, episode)) = matcher::absolute_episode(&order, number)
+                for (number, absolute) in unplaced {
+                    let Some((in_season, episode)) = matcher::absolute_episode(&order, absolute)
                     else {
                         continue;
                     };
@@ -709,6 +748,85 @@ impl MetadataEnrichmentService {
                 .await
             {
                 warn!(error = %err, show_id = %show_id, season_number, "failed to persist season enrichment");
+            }
+        }
+    }
+
+    /// Move each absolutely numbered episode of `show_id` to the season and
+    /// episode the provider's absolute order ([`matcher::absolute_episode`])
+    /// puts its running number at (issue #334), merging it into an episode
+    /// already there ([`ShowRepository::rehome_episode`]). `Show - 030` is
+    /// indexed as episode 30 of season 1, or of its season folder's season:
+    /// of season 1 it moves wherever the order places it; of a later season
+    /// only within that season, since a season folder and the number must
+    /// agree. One re-homed before follows the order from wherever it now is,
+    /// and one already at its place stays. A place another running number
+    /// holds is never merged into: two running numbers are not one episode.
+    /// Specials keep their own numbering: the order counts none of them.
+    /// Best-effort: a failure leaves the episode where it was.
+    async fn rehome_absolute_episodes(
+        &self,
+        show_id: uuid::Uuid,
+        ref_id: &ExternalMediaRef,
+        fetched: &mut SeasonCache,
+    ) {
+        let Ok(seasons) = self.show_repo.find_seasons_by_show_id(show_id).await else {
+            return;
+        };
+        let mut episodes = Vec::new();
+        for season in seasons
+            .iter()
+            .filter(|season| season.season_number != matcher::SPECIALS_SEASON)
+        {
+            match self.show_repo.find_episodes_by_season_id(season.id).await {
+                Ok(list) => episodes.extend(list.into_iter().map(|e| (season.season_number, e))),
+                Err(err) => {
+                    // Without every place's holder a move could merge two
+                    // running numbers: nothing moves this time.
+                    warn!(error = %err, show_id = %show_id, "failed to read a season's episodes");
+                    return;
+                }
+            }
+        }
+        let Some(through) = episodes.iter().filter_map(|(_, e)| e.absolute_number).max() else {
+            return;
+        };
+        let order = fetched
+            .absolute_order(&*self.provider, ref_id, through)
+            .await;
+        let mut held: std::collections::HashMap<(u32, u32), Option<u32>> = episodes
+            .iter()
+            .map(|(season, e)| ((*season, e.episode_number), e.absolute_number))
+            .collect();
+        for (season_number, episode) in episodes {
+            let Some(absolute) = episode.absolute_number else {
+                continue;
+            };
+            let Some((in_season, provider_episode)) = matcher::absolute_episode(&order, absolute)
+            else {
+                continue;
+            };
+            let from = (season_number, episode.episode_number);
+            let to = (in_season, provider_episode.episode_number);
+            let as_indexed = episode.episode_number == absolute
+                && episode.absolute_season_number == Some(season_number);
+            if from == to || (as_indexed && season_number != 1 && in_season != season_number) {
+                continue;
+            }
+            if held
+                .get(&to)
+                .is_some_and(|holder| holder.is_some_and(|other| other != absolute))
+            {
+                continue;
+            }
+            match self.show_repo.rehome_episode(episode.id, to.0, to.1).await {
+                Ok(_) => {
+                    held.remove(&from);
+                    held.insert(to, Some(absolute));
+                }
+                Err(err) => {
+                    warn!(error = %err, show_id = %show_id, absolute, "failed to re-home an episode");
+                }
             }
         }
     }

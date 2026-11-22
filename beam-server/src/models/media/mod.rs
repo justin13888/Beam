@@ -13,15 +13,11 @@ pub use movie::*;
 pub use show::*;
 pub use source::*;
 
-/// Media metadata
-// Externally tagged (`{"Movie": {...}}`) for now. Internally tagged
-// (`#[serde(tag = "media_type", rename_all = "snake_case")]`), Kynos describes
-// it as a `oneOf` of inline `allOf` branches, each narrowing `media_type` to a
-// `const`, under a `discriminator` with no `mapping`; spargen before 0.6
-// dispatched such members on a tag it invented instead of the value the server
-// sends (getkono/spargen#403). 0.6 carries the fix, so nothing blocks the move;
-// the tagging, and wire rule R9 against single-key `oneOf` wrappers, are #300.
+/// Media metadata: a movie or a show, told apart by `media_type` beside its
+/// fields (`{"media_type": "movie", "id": ...}`), never a single-key wrapper
+/// (wire rule R9).
 #[derive(Clone, Debug, Serialize, serde::Deserialize, Schema)]
+#[serde(tag = "media_type", rename_all = "snake_case")]
 pub enum MediaMetadata {
     Show(ShowMetadata),
     Movie(MovieMetadata),

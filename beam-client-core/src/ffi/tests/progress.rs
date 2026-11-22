@@ -120,7 +120,7 @@ async fn a_progress_sample_the_server_refuses_is_dropped() {
 
 /// What `PUT /v1/files/{id}/progress` answers: the state the server now
 /// holds, which is what `ProgressOutcome::Sent` reports back.
-const PROGRESS_ACK: &str = r#"{"played":false,"position_secs":45.0,"play_count":0}"#;
+pub(super) const PROGRESS_ACK: &str = r#"{"played":false,"position_secs":45.0,"play_count":0}"#;
 
 /// Queue one sample for each of [`FILE_A`] then [`FILE_B`], a second
 /// apart, against a server that cannot be reached.
@@ -565,4 +565,211 @@ async fn an_unreachable_server_queues_progress_and_reports_network() {
         ),
         "an outage is not a sign-out"
     );
+}
+
+/// Where an offline Play of `file_id` starts, by the core's own answer.
+async fn local_start(client: &BeamClient, file_id: &str) -> f64 {
+    client
+        .local_start_position_secs(file_id.to_owned())
+        .await
+        .expect("the record is readable")
+}
+
+/// Point `server_id` at a server that acknowledges one progress report.
+fn acknowledging(client: &BeamClient, server_id: &str) -> Arc<CannedBackend> {
+    answer_with(
+        client,
+        server_id,
+        vec![crate::transport::CannedAnswer::respond(
+            200,
+            JSON,
+            PROGRESS_ACK,
+        )],
+    )
+}
+
+/// A Play with no network starts where this device last recorded the
+/// viewer (issue #487): the position queued for that file, through the
+/// start rule -- and the start for a file it never reported.
+#[tokio::test]
+async fn an_offline_play_starts_from_the_position_queued_for_its_file() {
+    let (client, id, _storage, clock) = clocked_client().await;
+    queue_two_samples(&client, &id, &clock).await;
+
+    assert_eq!(local_start(&client, FILE_A).await, 30.0);
+    assert_eq!(local_start(&client, FILE_B).await, 60.0);
+    assert_eq!(
+        local_start(&client, &uuid::Uuid::nil().to_string()).await,
+        0.0
+    );
+}
+
+/// A sample the server acknowledged leaves the queue, and with it went the
+/// only copy on the device: a title watched online and played from its
+/// download later, offline, started over.
+#[tokio::test]
+async fn a_position_the_server_acknowledged_still_resumes_offline() {
+    let (client, id, storage, clock) = clocked_client().await;
+    acknowledging(&client, &id);
+    assert_eq!(
+        client
+            .report_progress(FILE_A.to_owned(), 120.0, Some(7200.0), true)
+            .await
+            .expect("sent"),
+        ProgressOutcome::Sent {
+            position_secs: 45.0
+        }
+    );
+    assert!(queued(&storage, &id).await.is_empty());
+
+    // Another server active by the time the download plays: a file's id
+    // names it on every server, so the position is still found.
+    clock.advance_secs(1);
+    sign_in_to(&client, "https://other.test", "other-value").await;
+
+    assert_eq!(local_start(&client, FILE_A).await, 120.0);
+}
+
+/// The start rule still applies: a title stopped in its credits starts
+/// over, as it would from the server's own position.
+#[tokio::test]
+async fn a_position_recorded_near_the_end_starts_offline_at_the_start() {
+    let (client, id, _storage, _clock) = clocked_client().await;
+    acknowledging(&client, &id);
+    client
+        .report_progress(FILE_A.to_owned(), 7000.0, Some(7200.0), true)
+        .await
+        .expect("sent");
+
+    assert_eq!(local_start(&client, FILE_A).await, 0.0);
+}
+
+/// A queue written before positions were recorded has no record beside it,
+/// so the newer of the two is where Play starts.
+#[tokio::test]
+async fn the_newer_of_the_queued_and_the_recorded_position_wins() {
+    let (client, id, storage, clock) = clocked_client().await;
+    acknowledging(&client, &id);
+    client
+        .report_progress(FILE_A.to_owned(), 120.0, Some(7200.0), true)
+        .await
+        .expect("sent");
+    let recorded_at = clock.now_unix();
+    let queue_one = |position_secs: f64, captured_at_unix: i64| {
+        let entries = vec![QueuedProgress {
+            file_id: FILE_A.to_owned(),
+            position_secs,
+            duration_secs: Some(7200.0),
+            captured_at_unix,
+            attempts: 0,
+            rejections: 0,
+            not_before_unix: captured_at_unix,
+        }];
+        let storage = Arc::clone(&storage);
+        let key = format!("progress_queue/{id}");
+        async move {
+            storage
+                .put(key, serde_json::to_string(&entries).expect("encodes"))
+                .await
+                .expect("writable");
+        }
+    };
+
+    queue_one(50.0, recorded_at - 10).await;
+    assert_eq!(
+        local_start(&client, FILE_A).await,
+        120.0,
+        "older than the record"
+    );
+
+    clock.advance_secs(20);
+    queue_one(200.0, recorded_at + 10).await;
+    assert_eq!(
+        local_start(&client, FILE_A).await,
+        200.0,
+        "newer than the record"
+    );
+}
+
+/// Removing a server forgets what the viewer watched on it, here as in the
+/// queue.
+#[tokio::test]
+async fn removing_a_server_forgets_the_positions_recorded_for_it() {
+    let (client, id, storage, _clock) = clocked_client().await;
+    acknowledging(&client, &id);
+    client
+        .report_progress(FILE_A.to_owned(), 120.0, Some(7200.0), true)
+        .await
+        .expect("sent");
+    assert!(storage.has_plain(&format!("progress_last/{id}")));
+
+    client.remove_server(id.clone()).await.expect("removed");
+
+    assert!(!storage.has_plain(&format!("progress_last/{id}")));
+    assert_eq!(local_start(&client, FILE_A).await, 0.0);
+}
+
+/// A sample the server refused is neither sent nor queued, but the viewer
+/// was still there: the device records it all the same.
+#[tokio::test]
+async fn a_position_the_server_refused_is_still_where_an_offline_play_starts() {
+    let (client, _) = client_answering(
+        400,
+        r#"{"type":"about:blank","status":400,"detail":"refused"}"#,
+    )
+    .await;
+    let file_id = uuid::Uuid::nil().to_string();
+
+    let outcome = client
+        .report_progress(file_id.clone(), 120.0, Some(7200.0), true)
+        .await
+        .expect("a refused send is an outcome, not an error");
+
+    assert!(
+        matches!(outcome, ProgressOutcome::Dropped { .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(local_start(&client, &file_id).await, 120.0);
+}
+
+/// The record is written after the send, so storage the device cannot write
+/// fails the call -- as a queue it cannot write does -- without holding back
+/// the position the server keeps.
+#[tokio::test]
+async fn storage_that_cannot_record_the_position_does_not_hold_back_the_send() {
+    let (client, id, storage, _clock) = clocked_client().await;
+    let backend = acknowledging(&client, &id);
+    storage.set_failure(FailureMode::FailWrites);
+
+    let error = client
+        .report_progress(FILE_A.to_owned(), 120.0, Some(7200.0), true)
+        .await
+        .expect_err("the record could not be written");
+
+    assert!(matches!(error, BeamError::Storage { .. }), "{error:?}");
+    assert_eq!(backend.recorded().len(), 1, "the send went out first");
+}
+
+/// A failed send's sample is the one copy bound for the server, so it is
+/// queued before the device records the position: a record that cannot be
+/// written fails the call without costing the retry.
+#[tokio::test]
+async fn storage_that_cannot_record_the_position_does_not_lose_the_queued_retry() {
+    let (client, id, storage, _clock) = clocked_client().await;
+    answer_with(
+        &client,
+        &id,
+        vec![crate::transport::CannedAnswer::Unreachable],
+    );
+    storage.set_failure(FailureMode::FailWritesUnder("progress_last/"));
+
+    let error = client
+        .report_progress(FILE_A.to_owned(), 120.0, Some(7200.0), true)
+        .await
+        .expect_err("the record could not be written");
+
+    assert!(matches!(error, BeamError::Storage { .. }), "{error:?}");
+    let queued = queued(&storage, &id).await;
+    assert_eq!(queued.len(), 1, "the retry sample was queued first");
+    assert_eq!(queued[0].position_secs, 120.0);
 }

@@ -1,0 +1,23 @@
+{{- if and .Values.metrics.enabled .Values.metrics.grafanaDashboard.enabled }}
+{{- $dashboard := .Values.metrics.grafanaDashboard }}
+# The Grafana dashboard sidecar loads every ConfigMap carrying its label. The
+# dashboard is read verbatim from dashboards/beam.json, never templated, so
+# Grafana's own {{ "{{" }}...{{ "}}" }} legends reach it unchanged.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "beam.fullname" . }}-dashboard
+  labels:
+    {{- include "beam.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+    {{- with $dashboard.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with $dashboard.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+data:
+  beam.json: |-
+    {{- .Files.Get "dashboards/beam.json" | nindent 4 }}
+{{- end }}

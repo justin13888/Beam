@@ -290,13 +290,7 @@ async fn a_row_from_older_rules_is_reclassified_by_the_nfo_beside_it() {
 
     // As a build before this NFO support left it.
     let id = h.file("Lost/Pilot Part One.mkv").id;
-    h.file_repo
-        .files
-        .lock()
-        .unwrap()
-        .get_mut(&id)
-        .unwrap()
-        .classifier_version = CLASSIFIER_VERSION - 1;
+    h.classify_by_older_rules("Lost/Pilot Part One.mkv").await;
     h.write(
         "Lost/Pilot Part One.nfo",
         "<episodedetails><season>1</season><episode>1</episode></episodedetails>",

@@ -171,16 +171,14 @@ export function HistoryPage() {
 				<>
 					<ul className="space-y-3">
 						{rows.map(({ item, metadata }) => {
-							const isMovie = "Movie" in metadata;
-							const media = isMovie ? metadata.Movie : metadata.Show;
-							const title = media.title.original;
+							const title = metadata.title.original;
 							// A show's first season can lack art, so take the first
 							// season that actually has a poster (matching explore).
 							const poster = artworkSrc(
-								isMovie
-									? metadata.Movie.poster_url
-									: (metadata.Show.seasons.find((s) => s.poster_url)
-											?.poster_url ?? null),
+								metadata.media_type === "movie"
+									? metadata.poster_url
+									: (metadata.seasons.find((s) => s.poster_url)?.poster_url ??
+											null),
 							);
 							const progressPct = item.duration_secs
 								? Math.min(100, (item.position_secs / item.duration_secs) * 100)
@@ -210,9 +208,9 @@ export function HistoryPage() {
 											<h3 className="truncate text-sm font-medium text-white">
 												{title}
 											</h3>
-											{!isMovie && item.episode_id && (
+											{metadata.media_type === "show" && item.episode_id && (
 												<span className="rounded bg-gray-700 px-1.5 py-0.5 text-[10px] font-medium text-gray-300">
-													{episodeLabel(metadata.Show, item.episode_id)}
+													{episodeLabel(metadata, item.episode_id)}
 												</span>
 											)}
 										</div>

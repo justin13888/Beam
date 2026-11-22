@@ -41,14 +41,8 @@ async fn a_file_placed_by_its_tags_keeps_its_place_when_it_is_reclassified() {
     // As the next classifier version would find the row; and a re-probe
     // would no longer see the tags, so only the stored ones can place it.
     h.tags.lock().unwrap().clear();
-    let id = h.file("The Office/The Dundies.m4v").id;
-    h.file_repo
-        .files
-        .lock()
-        .unwrap()
-        .get_mut(&id)
-        .unwrap()
-        .classifier_version = CLASSIFIER_VERSION - 1;
+    h.classify_by_older_rules("The Office/The Dundies.m4v")
+        .await;
     h.scan().await;
 
     let file = h.file("The Office/The Dundies.m4v");

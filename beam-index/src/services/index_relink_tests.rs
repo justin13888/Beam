@@ -14,6 +14,7 @@
 
 use std::sync::atomic::AtomicUsize;
 
+use super::test_harness::IndexServiceBuilder;
 use super::*;
 use crate::library_file::test_support::snapshot;
 use crate::probe::metadata::MetadataError;
@@ -30,9 +31,9 @@ use beam_domain::repositories::file::in_memory::InMemoryFileRepository;
 use beam_domain::repositories::library::in_memory::InMemoryLibraryRepository;
 use beam_domain::repositories::movie::in_memory::InMemoryMovieRepository;
 use beam_domain::repositories::show::in_memory::InMemoryShowRepository;
-use beam_domain::repositories::stream::in_memory::InMemoryMediaStreamRepository;
 use beam_domain::repositories::watch_state::in_memory::InMemoryWatchStateRepository;
 use beam_domain::services::TestClock;
+use beam_domain::test_utils::media_file;
 use tempfile::TempDir;
 
 fn instant(secs: i64) -> DateTime<Utc> {
@@ -137,22 +138,25 @@ impl Harness {
             })
             .await
             .unwrap();
-        let service = LocalIndexService::new(
-            library_repo.clone(),
-            file_repo.clone(),
-            Arc::new(InMemoryMovieRepository::with_files(file_repo.clone())),
-            Arc::new(InMemoryShowRepository::with_files(file_repo.clone())),
-            Arc::new(InMemoryMediaStreamRepository::default()),
-            hasher.clone(),
-            prober.clone(),
-            notifications.clone(),
-            admin_log_repo.clone() as Arc<dyn AdminLogRepository>,
-            progress.clone(),
-        )
-        .with_clock(clock)
-        // A local filesystem, whatever the temporary directory is on: its
-        // inode numbers are compared unless `configure` says otherwise.
-        .with_filesystem_probe(Arc::new(FixedFilesystemProbe(FilesystemKind::Local)));
+        let service = IndexServiceBuilder::new()
+            .library_repo(library_repo.clone())
+            .file_repo(file_repo.clone())
+            .movie_repo(Arc::new(InMemoryMovieRepository::with_files(
+                file_repo.clone(),
+            )))
+            .show_repo(Arc::new(InMemoryShowRepository::with_files(
+                file_repo.clone(),
+            )))
+            .hash_service(hasher.clone())
+            .media_info(prober.clone())
+            .notifications(notifications.clone())
+            .admin_log_repo(admin_log_repo.clone())
+            .progress_repo(progress.clone())
+            .build()
+            .with_clock(clock)
+            // A local filesystem, whatever the temporary directory is on: its
+            // inode numbers are compared unless `configure` says otherwise.
+            .with_filesystem_probe(Arc::new(FixedFilesystemProbe(FilesystemKind::Local)));
         let service = configure(service);
         Self {
             dir,
@@ -249,7 +253,38 @@ impl Harness {
     }
 
     async fn row_count(&self) -> usize {
-        self.file_repo.files.lock().unwrap().len()
+        self.file_repo
+            .find_all_by_library_including_missing(self.library.id)
+            .await
+            .unwrap()
+            .len()
+    }
+
+    /// Re-record every present row's identity as `change` makes it, as a
+    /// re-stat of each file at its own path would.
+    async fn rerecord_identities(
+        &self,
+        change: impl Fn(Option<FileIdentity>) -> Option<FileIdentity>,
+    ) {
+        let rows = self
+            .file_repo
+            .find_all_by_library(self.library.id)
+            .await
+            .unwrap();
+        let relinks = rows
+            .into_iter()
+            .map(|row| FileRelink {
+                id: row.id,
+                path: row.path,
+                size_bytes: row.size_bytes,
+                mtime: row.mtime,
+                identity: change(row.identity),
+            })
+            .collect();
+        self.file_repo
+            .relink(relinks, Vec::new(), Utc::now())
+            .await
+            .unwrap();
     }
 
     async fn move_logs(&self) -> Vec<AdminLog> {
