@@ -25,9 +25,9 @@ use crate::state::AppState;
 /// Everything `GET /v1/media` accepts.
 ///
 /// A struct rather than a `parameters(...)` entry beside a
-/// `req.query::<T>(name)` call for each parameter. The pair used to be maintained by hand, so a
-/// renamed parameter changed one and not the other; here the field *is* the
-/// parameter and the type *is* the schema.
+/// `req.query::<T>(name)` call for each parameter. The pair used to be
+/// maintained by hand, so a renamed parameter changed one and not the other;
+/// here the field *is* the parameter and the type *is* the schema.
 #[derive(Debug, Default, Serialize, Deserialize, Schema, QueryParams)]
 pub struct BrowseQuery {
     /// Page forwards: this many items (1-100, default 20), after `after` or
