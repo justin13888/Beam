@@ -110,12 +110,14 @@ pub struct GrantedFile {
 ///
 /// Accepted by the four delivery operations alone, through [`DeliveryAuth`];
 /// every other operation names only [`SessionCookie`], so a grant opens no
-/// part of the API. Verifying one reads no store, so it declares no 503.
+/// part of the API. Its signature reads no store, but its user's `disabled`
+/// flag is read on every use, so it declares the 503 that read can fail with.
 #[derive(SecurityScheme)]
 #[security(
     api_key(in = "query", name = "grant"),
     name = "MediaGrant",
     credential = GrantedFile,
+    unavailable,
     description = "Short-lived signature over one file and one user, issued by \
                    `POST /v1/files/{file_id}/grant` (ADR-0022). Fetches that \
                    file's bytes and nothing else, under the user's access policy."
@@ -281,8 +283,17 @@ impl Authenticates<MediaGrant> for AppState {
 }
 
 impl Authenticator<MediaGrant, AppState> for MediaGrantAuthenticator {
-    /// A grant this process signed and whose expiry has not passed on the
-    /// injected clock; anything else is a 401, whichever check refused it.
+    /// A grant this process signed, whose expiry has not passed on the
+    /// injected clock, and whose user exists and is not disabled; anything
+    /// else is a 401, whichever check refused it.
+    ///
+    /// The user row is read on every use because disabling an account
+    /// revokes its sessions so that it cannot act again until re-enabled
+    /// (`PATCH /v1/admin/users/{id}`), and a grant minted before the disable
+    /// would otherwise keep fetching for the rest of its lifetime. A grant of
+    /// a re-enabled user works again until it expires, as the account does.
+    /// A *user store failure* is a 503, for the reason a session store
+    /// failure is one in [`SessionAuthenticator`].
     ///
     /// The reason is logged at `debug`, never the grant: a grant read from a
     /// log can be presented again until it expires.
@@ -298,6 +309,27 @@ impl Authenticator<MediaGrant, AppState> for MediaGrantAuthenticator {
                 tracing::debug!(%refused, "media grant refused");
                 AuthRejection::unauthenticated()
             })?;
+
+        let user = context
+            .services
+            .user_repo
+            .find_by_id(claims.user_id)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "user lookup failed while verifying a media grant");
+                AuthRejection::unavailable::<MediaGrant>()
+            })?;
+        match user {
+            Some(user) if !user.disabled => {}
+            Some(_) => {
+                tracing::debug!(user_id = %claims.user_id, "media grant of a disabled user refused");
+                return Err(AuthRejection::unauthenticated());
+            }
+            None => {
+                tracing::debug!(user_id = %claims.user_id, "media grant of an unknown user refused");
+                return Err(AuthRejection::unauthenticated());
+            }
+        }
 
         Ok(GrantedFile {
             user_id: claims.user_id,

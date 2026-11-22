@@ -30,8 +30,8 @@ worth far less to whoever reads it.
 the server's origin as every source URL is.
 
 - **Token.** `file_id || user_id || expiry || tag`, base64url without padding, where `tag` is
-  HMAC-SHA256 over a domain label and the first three fields. Verifying one reads no store, and the
-  tag is checked in constant time before the expiry.
+  HMAC-SHA256 over a domain label and the first three fields. Verifying the signature reads no
+  store, and the tag is checked in constant time before the expiry.
 - **Key.** 32 random bytes drawn when the server builds its state, never persisted or configured.
   A restart voids every grant outstanding, which is also the only way to revoke them all; Beam
   runs exactly one server replica (ADR-0018), so no second process needs the key.
@@ -51,6 +51,15 @@ the server's origin as every source URL is.
 - **Access.** The grant acts for its user under their access policy, checked on every request
   exactly as a session's is. A file the user may not see cannot be granted (404), and a title
   hidden after a grant was issued is hidden from it from that request on.
+- **A disabled user.** Disabling an account revokes its sessions so that it cannot act again until
+  re-enabled (`PATCH /v1/admin/users/{id}`, issue #85). A grant is held to that too: every use
+  reads the user row, and a grant of a disabled or deleted user is a 401 -- one primary-key read
+  per request a grant makes, against a stateless check that would let a disabled account keep
+  fetching for four hours. A grant of a re-enabled user works again until it expires, as the
+  account does. A failed read is a 503, which `MediaGrant` declares, as `BeamSession` does for
+  its store.
+- **Both credentials.** A request carrying the session cookie and a grant is the session's: the
+  cookie is tried first, so a browser that holds both acts as the session it signed in as.
 
 ## Consequences
 
@@ -60,8 +69,9 @@ the server's origin as every source URL is.
 - `/v1` gains one operation and one security alternative on four existing ones. Both are additive
   under ADR-0021: a client that never asks for a grant sees no change.
 - A leaked grant URL lets its reader fetch that one file until it expires, under the issuing
-  user's policy. That is the residual risk this ADR accepts; there is no per-grant revocation,
-  because a store of grants would cost the stateless check its point.
+  user's policy, unless the user is disabled first. That is the residual risk this ADR accepts;
+  there is no per-grant revocation, because a store of grants would cost the signature check its
+  point.
 - `beam-client-core` exposes the grant as `BeamClient::media_grant`, resolving both URLs against
   the server's origin, so a platform can hand an absolute URL to AirPlay, Cast or an external
   player.

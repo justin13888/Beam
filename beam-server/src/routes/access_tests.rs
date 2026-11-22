@@ -543,7 +543,19 @@ impl Fixture {
 
     /// A session for a new user, and the user.
     async fn viewer(&self) -> (String, Uuid) {
-        let user_id = Uuid::new_v4();
+        // A real user row, as the login flow provisions: a media grant reads
+        // its user's row on every use (ADR-0022).
+        let user_id = self
+            .state
+            .services
+            .user_repo
+            .create(beam_auth::utils::models::test_utils::create_user(
+                "https://idp.test",
+                &Uuid::new_v4().to_string(),
+            ))
+            .await
+            .expect("the in-memory user repository provisions a user")
+            .id;
         let token = self
             .state
             .services

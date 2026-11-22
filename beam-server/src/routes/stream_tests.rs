@@ -144,11 +144,27 @@ fn make_test_state_on(
 ) -> TestFixture {
     let session_store = Arc::new(InMemorySessionStore::default());
     let user_repo = Arc::new(InMemoryUserRepository::default());
+    let state = make_state(library, clock, user_repo.clone(), session_store.clone());
 
+    TestFixture {
+        state,
+        session_store,
+        user_repo,
+    }
+}
+
+/// The state every fixture serves: `library`'s files, read on `clock`, for
+/// the users `user_repo` holds.
+fn make_state(
+    library: StubLibraryService,
+    clock: Arc<dyn beam_domain::services::Clock>,
+    user_repo: Arc<dyn UserRepository>,
+    session_store: Arc<dyn SessionStore>,
+) -> AppState {
     let services = AppServices {
         library: Arc::new(library),
-        user_repo: user_repo.clone(),
-        session_store: session_store.clone(),
+        user_repo,
+        session_store,
         ..crate::routes::test_support::idle_services()
     };
 
@@ -162,19 +178,13 @@ fn make_test_state_on(
         ..Default::default()
     };
 
-    let state = AppState::with_clock(
+    AppState::with_clock(
         config,
         services,
         Arc::new(crate::services::health::InMemoryDependencyProbe::healthy()),
         clock,
         None,
-    );
-
-    TestFixture {
-        state,
-        session_store,
-        user_repo,
-    }
+    )
 }
 
 /// Seeds a user + session directly (bypassing the OIDC login flow, which
@@ -213,6 +223,11 @@ async fn seed_session_token(fixture: &TestFixture) -> String {
 /// The four delivery operations and the grant that opens them, alone, so
 /// nothing else can answer.
 fn build_client(fixture: &TestFixture) -> TestClient<AppState> {
+    build_client_over(&fixture.state)
+}
+
+/// [`build_client`] over a state no [`TestFixture`] holds.
+fn build_client_over(state: &AppState) -> TestClient<AppState> {
     let service = Router::new()
         .nest(
             "/v1",
@@ -224,7 +239,7 @@ fn build_client(fixture: &TestFixture) -> TestClient<AppState> {
                 grant_file,
             ]),
         )
-        .build(fixture.state.clone())
+        .build(state.clone())
         .expect("the delivery router describes itself");
 
     TestClient::new(service)
@@ -769,6 +784,114 @@ async fn a_grant_opens_no_other_operation() {
         .send()
         .await
         .assert_status(StatusCode::OK);
+}
+
+/// Disabling an account stops it acting until it is re-enabled, and a grant
+/// it minted beforehand is no exception: through the admin service's real
+/// disable, both URLs are refused on their next request, and work again once
+/// the account is re-enabled.
+#[tokio::test]
+async fn a_grant_of_a_disabled_user_is_401_until_re_enabled() {
+    let granted = grant_fixture(Arc::new(beam_domain::services::RealClock)).await;
+    let grant = granted.grant(GRANT).await;
+    let user_id = granted
+        .fixture
+        .user_repo
+        .find_by_oidc_identity("https://test.example", "subj-1")
+        .await
+        .unwrap()
+        .expect("the seeded user exists")
+        .id;
+    let admin = uuid::Uuid::from_u128(0xad);
+    let admin_users = granted.fixture.state.services.admin_users();
+
+    admin_users
+        .set_disabled(admin, user_id, true)
+        .await
+        .unwrap();
+    for url in [&grant.stream_url, &grant.download_url] {
+        granted
+            .client
+            .get(url)
+            .send()
+            .await
+            .assert_status(StatusCode::UNAUTHORIZED);
+    }
+
+    admin_users
+        .set_disabled(admin, user_id, false)
+        .await
+        .unwrap();
+    granted
+        .client
+        .get(&grant.stream_url)
+        .send()
+        .await
+        .assert_status(StatusCode::OK);
+}
+
+/// A grant whose user cannot be read is neither honoured nor called invalid:
+/// the 503 `MediaGrant` declares, so a receiver retries rather than giving
+/// up on a grant that may be fine.
+#[tokio::test]
+async fn a_grant_whose_user_cannot_be_read_is_503() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("granted.mkv");
+    std::fs::write(&path, GRANTED_BYTES).unwrap();
+    let users = beam_auth::utils::repository::in_memory::FailingUserRepository::new(
+        InMemoryUserRepository::default(),
+        beam_auth::utils::repository::in_memory::UserRepositoryOperation::FindById,
+    );
+    let state = make_state(
+        StubLibraryService::new(vec![make_located_file(
+            TEST_FILE_ID,
+            path.to_str().unwrap(),
+        )]),
+        Arc::new(beam_domain::services::RealClock),
+        Arc::new(users),
+        Arc::new(InMemorySessionStore::default()),
+    );
+    let token = state
+        .media_grants()
+        .issue(
+            TEST_FILE_ID.parse().unwrap(),
+            uuid::Uuid::from_u128(1),
+            chrono::Utc::now(),
+        )
+        .token;
+
+    build_client_over(&state)
+        .get(&format!("{STREAM}?grant={token}"))
+        .send()
+        .await
+        .assert_status(StatusCode::SERVICE_UNAVAILABLE);
+}
+
+/// A request carrying both the session cookie and a grant is the session's:
+/// the cookie is tried first. The grant names one file and the request asks
+/// for another, which the grant alone would answer 404; the session may
+/// fetch any file its policy shows, so it is the other file's bytes.
+#[tokio::test]
+async fn a_request_with_both_a_cookie_and_a_grant_is_the_sessions() {
+    let granted = grant_fixture(Arc::new(beam_domain::services::RealClock)).await;
+    let grant = granted.grant(GRANT).await;
+    let (_, token) = grant.stream_url.split_once("?grant=").unwrap();
+    let other = format!("/v1/files/{OTHER_FILE_ID}/stream?grant={token}");
+
+    granted
+        .client
+        .get(&other)
+        .send()
+        .await
+        .assert_status(StatusCode::NOT_FOUND);
+    let both = granted
+        .client
+        .get(&other)
+        .cookie("beam_session", &granted.session)
+        .send()
+        .await;
+    assert_eq!(both.status(), StatusCode::OK);
+    assert_eq!(both.bytes().as_ref(), b"ANOTHER FILE");
 }
 
 /// A request without a Range header must return 200 and advertise that ranges

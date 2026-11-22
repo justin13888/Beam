@@ -55,6 +55,10 @@ handed a URL and fetches it itself, with no cookie. For it, a signed-in session 
 - A grant presented for a different file is 404. Every request made with a grant is held to the
   issuing user's access policy, so a title hidden after the grant was issued is hidden from it too.
 - An expired or altered grant is 401; the reason is logged at `debug`, and the grant itself never.
+- A grant of a disabled user is 401: the user row is read on every use, so disabling an account
+  stops its grants on their next request, as it revokes its sessions. A failed read is a 503.
+- A request carrying both the session cookie and a grant is the session's: the cookie is tried
+  first.
 
 ## Device authorization grant
 
