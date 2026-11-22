@@ -29,7 +29,9 @@ use kynos::prelude::*;
 use kynos::test::TestClient;
 use tempfile::TempDir;
 
-use crate::routes::stream::{download_file, head_download_file, head_stream_file, stream_file};
+use crate::routes::stream::{
+    MediaGrantUrls, download_file, grant_file, head_download_file, head_stream_file, stream_file,
+};
 use crate::services::library::{LibraryError, LibraryService, LocatedFile};
 use crate::state::{AppServices, AppState};
 
@@ -131,13 +133,38 @@ fn make_test_state(files: Vec<LocatedFile>) -> TestFixture {
 }
 
 fn make_test_state_over(library: StubLibraryService) -> TestFixture {
+    make_test_state_on(library, Arc::new(beam_domain::services::RealClock))
+}
+
+/// [`make_test_state_over`] on `clock`, which every grant's expiry is read
+/// against.
+fn make_test_state_on(
+    library: StubLibraryService,
+    clock: Arc<dyn beam_domain::services::Clock>,
+) -> TestFixture {
     let session_store = Arc::new(InMemorySessionStore::default());
     let user_repo = Arc::new(InMemoryUserRepository::default());
+    let state = make_state(library, clock, user_repo.clone(), session_store.clone());
 
+    TestFixture {
+        state,
+        session_store,
+        user_repo,
+    }
+}
+
+/// The state every fixture serves: `library`'s files, read on `clock`, for
+/// the users `user_repo` holds.
+fn make_state(
+    library: StubLibraryService,
+    clock: Arc<dyn beam_domain::services::Clock>,
+    user_repo: Arc<dyn UserRepository>,
+    session_store: Arc<dyn SessionStore>,
+) -> AppState {
     let services = AppServices {
         library: Arc::new(library),
-        user_repo: user_repo.clone(),
-        session_store: session_store.clone(),
+        user_repo,
+        session_store,
         ..crate::routes::test_support::idle_services()
     };
 
@@ -151,18 +178,13 @@ fn make_test_state_over(library: StubLibraryService) -> TestFixture {
         ..Default::default()
     };
 
-    let state = AppState::new(
+    AppState::with_clock(
         config,
         services,
         Arc::new(crate::services::health::InMemoryDependencyProbe::healthy()),
+        clock,
         None,
-    );
-
-    TestFixture {
-        state,
-        session_store,
-        user_repo,
-    }
+    )
 }
 
 /// Seeds a user + session directly (bypassing the OIDC login flow, which
@@ -198,8 +220,14 @@ async fn seed_session_token(fixture: &TestFixture) -> String {
         .expect("seed session should succeed")
 }
 
-/// The four delivery operations alone, so nothing else can answer.
+/// The four delivery operations and the grant that opens them, alone, so
+/// nothing else can answer.
 fn build_client(fixture: &TestFixture) -> TestClient<AppState> {
+    build_client_over(&fixture.state)
+}
+
+/// [`build_client`] over a state no [`TestFixture`] holds.
+fn build_client_over(state: &AppState) -> TestClient<AppState> {
     let service = Router::new()
         .nest(
             "/v1",
@@ -208,9 +236,10 @@ fn build_client(fixture: &TestFixture) -> TestClient<AppState> {
                 head_stream_file,
                 download_file,
                 head_download_file,
+                grant_file,
             ]),
         )
-        .build(fixture.state.clone())
+        .build(state.clone())
         .expect("the delivery router describes itself");
 
     TestClient::new(service)
@@ -509,6 +538,360 @@ async fn stream_file_with_an_unknown_session_cookie_is_401() {
         .await;
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+// ─── POST /v1/files/{file_id}/grant (ADR-0022) ────────────────────────────
+
+const GRANT: &str = "/v1/files/11111111-1111-1111-1111-111111111111/grant";
+const OTHER_FILE_ID: &str = "22222222-2222-2222-2222-222222222222";
+
+/// Two files on disk in one temp folder, served on `clock`: the one
+/// [`TEST_FILE_ID`] names and another, so a grant can be presented for the
+/// wrong one.
+struct GrantFixture {
+    _dir: TempDir,
+    fixture: TestFixture,
+    client: TestClient<AppState>,
+    session: String,
+}
+
+const GRANTED_BYTES: &[u8] = b"THE GRANTED FILE'S BYTES";
+
+async fn grant_fixture(clock: Arc<dyn beam_domain::services::Clock>) -> GrantFixture {
+    let dir = TempDir::new().unwrap();
+    let granted = dir.path().join("granted.mkv");
+    let other = dir.path().join("other.mkv");
+    std::fs::write(&granted, GRANTED_BYTES).unwrap();
+    std::fs::write(&other, b"ANOTHER FILE").unwrap();
+
+    let fixture = make_test_state_on(
+        StubLibraryService::new(vec![
+            make_located_file(TEST_FILE_ID, granted.to_str().unwrap()),
+            make_located_file(OTHER_FILE_ID, other.to_str().unwrap()),
+        ]),
+        clock,
+    );
+    let client = build_client(&fixture);
+    let session = seed_session_token(&fixture).await;
+    GrantFixture {
+        _dir: dir,
+        fixture,
+        client,
+        session,
+    }
+}
+
+impl GrantFixture {
+    /// A grant of `path`'s file, issued to the signed-in session.
+    async fn grant(&self, path: &str) -> MediaGrantUrls {
+        let response = self
+            .client
+            .post(path)
+            .cookie("beam_session", &self.session)
+            .send()
+            .await;
+        assert_eq!(response.status(), StatusCode::OK, "{}", response.text());
+        response.json()
+    }
+}
+
+/// The outcome of the whole design: a client holding no cookie fetches the
+/// file through either URL, ranged as a player asks, and the stream is the
+/// file's bytes while the download is its attachment.
+#[tokio::test]
+async fn a_grant_fetches_its_file_with_no_cookie() {
+    let granted = grant_fixture(Arc::new(beam_domain::services::RealClock)).await;
+    let grant = granted.grant(GRANT).await;
+
+    assert!(grant.stream_url.starts_with(STREAM), "{}", grant.stream_url);
+    let streamed = granted.client.get(&grant.stream_url).send().await;
+    assert_eq!(streamed.status(), StatusCode::OK);
+    assert_eq!(streamed.bytes().as_ref(), GRANTED_BYTES);
+
+    let ranged = granted
+        .client
+        .get(&grant.stream_url)
+        .header("range", "bytes=4-10")
+        .send()
+        .await;
+    assert_eq!(ranged.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(ranged.bytes().as_ref(), &GRANTED_BYTES[4..=10]);
+
+    assert!(
+        grant.download_url.starts_with(DOWNLOAD),
+        "{}",
+        grant.download_url
+    );
+    let downloaded = granted.client.get(&grant.download_url).send().await;
+    assert_eq!(downloaded.status(), StatusCode::OK);
+    assert!(
+        downloaded
+            .header("content-disposition")
+            .is_some_and(|disposition| disposition.contains("granted.mkv")),
+        "{:?}",
+        downloaded.header("content-disposition")
+    );
+    assert_eq!(
+        granted
+            .client
+            .head(&grant.stream_url)
+            .send()
+            .await
+            .header("content-length"),
+        Some(GRANTED_BYTES.len().to_string().as_str())
+    );
+}
+
+/// A grant is honoured until the instant it names and refused from then on,
+/// read on the injected clock, so a player still fetching at the expiry is
+/// refused its next range.
+#[tokio::test]
+async fn a_grant_is_refused_from_its_expiry() {
+    let clock = Arc::new(beam_domain::services::TestClock::starting_at(
+        chrono::DateTime::parse_from_rfc3339("2026-03-01T20:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc),
+    ));
+    let granted = grant_fixture(clock.clone()).await;
+    let grant = granted.grant(GRANT).await;
+    let lifetime = (grant.expires_at - beam_domain::services::Clock::now(clock.as_ref()))
+        .to_std()
+        .expect("a grant expires in the future");
+    assert!(
+        lifetime >= std::time::Duration::from_secs(60 * 60),
+        "a grant outlives a film: {lifetime:?}"
+    );
+
+    clock.advance(lifetime - std::time::Duration::from_secs(1));
+    granted
+        .client
+        .get(&grant.stream_url)
+        .send()
+        .await
+        .assert_status(StatusCode::OK);
+
+    clock.advance(std::time::Duration::from_secs(1));
+    for url in [&grant.stream_url, &grant.download_url] {
+        granted
+            .client
+            .get(url)
+            .send()
+            .await
+            .assert_status(StatusCode::UNAUTHORIZED);
+    }
+}
+
+/// A grant whose signature does not cover what it says -- one character
+/// changed anywhere in it -- is refused as no credential at all.
+#[tokio::test]
+async fn a_tampered_grant_is_401() {
+    let granted = grant_fixture(Arc::new(beam_domain::services::RealClock)).await;
+    let grant = granted.grant(GRANT).await;
+    let (path, token) = grant
+        .stream_url
+        .split_once("?grant=")
+        .expect("the grant travels in the query");
+
+    for at in [0, token.len() / 2, token.len() - 1] {
+        let mut tampered = token.as_bytes().to_vec();
+        tampered[at] = if tampered[at] == b'A' { b'B' } else { b'A' };
+        let tampered = String::from_utf8(tampered).unwrap();
+        granted
+            .client
+            .get(&format!("{path}?grant={tampered}"))
+            .send()
+            .await
+            .assert_status(StatusCode::UNAUTHORIZED);
+    }
+}
+
+/// A grant names one file. For any other it is the 404 of a file its user
+/// may not see, so it reveals nothing about the ids it does not name.
+#[tokio::test]
+async fn a_grant_for_one_file_is_not_found_for_another() {
+    let granted = grant_fixture(Arc::new(beam_domain::services::RealClock)).await;
+    let grant = granted.grant(GRANT).await;
+    let (_, token) = grant.stream_url.split_once("?grant=").unwrap();
+
+    for endpoint in ["stream", "download"] {
+        granted
+            .client
+            .get(&format!(
+                "/v1/files/{OTHER_FILE_ID}/{endpoint}?grant={token}"
+            ))
+            .send()
+            .await
+            .assert_status(StatusCode::NOT_FOUND);
+    }
+}
+
+/// Only a session may issue a grant: a grant cannot mint another, and a
+/// request with neither is refused.
+#[tokio::test]
+async fn issuing_a_grant_needs_a_session() {
+    let granted = grant_fixture(Arc::new(beam_domain::services::RealClock)).await;
+    let grant = granted.grant(GRANT).await;
+    let (_, token) = grant.stream_url.split_once("?grant=").unwrap();
+
+    for path in [GRANT.to_owned(), format!("{GRANT}?grant={token}")] {
+        granted
+            .client
+            .post(&path)
+            .send()
+            .await
+            .assert_status(StatusCode::UNAUTHORIZED);
+    }
+}
+
+/// A file the index does not have is refused at issue, while the client can
+/// still say so, rather than on every use of a grant that could never work.
+#[tokio::test]
+async fn a_grant_of_a_file_the_index_does_not_have_is_404() {
+    let granted = grant_fixture(Arc::new(beam_domain::services::RealClock)).await;
+
+    granted
+        .client
+        .post("/v1/files/33333333-3333-3333-3333-333333333333/grant")
+        .cookie("beam_session", &granted.session)
+        .send()
+        .await
+        .assert_status(StatusCode::NOT_FOUND);
+}
+
+/// A grant opens the delivery operations and nothing else: presented to the
+/// served router's other operations -- one keyed by the same file among
+/// them -- it is no credential.
+#[tokio::test]
+async fn a_grant_opens_no_other_operation() {
+    let granted = grant_fixture(Arc::new(beam_domain::services::RealClock)).await;
+    let grant = granted.grant(GRANT).await;
+    let (_, token) = grant.stream_url.split_once("?grant=").unwrap();
+    let served = crate::routes::test_support::served_client(granted.fixture.state.clone());
+
+    for path in [
+        format!("/v1/me/language-preferences?grant={token}"),
+        format!("/v1/files/{TEST_FILE_ID}/trickplay/0?grant={token}"),
+        format!("/v1/files/{TEST_FILE_ID}/subtitles/{OTHER_FILE_ID}?grant={token}"),
+    ] {
+        served
+            .get(&path)
+            .send()
+            .await
+            .assert_status(StatusCode::UNAUTHORIZED);
+    }
+    served
+        .get(&grant.stream_url)
+        .send()
+        .await
+        .assert_status(StatusCode::OK);
+}
+
+/// Disabling an account stops it acting until it is re-enabled, and a grant
+/// it minted beforehand is no exception: through the admin service's real
+/// disable, both URLs are refused on their next request, and work again once
+/// the account is re-enabled.
+#[tokio::test]
+async fn a_grant_of_a_disabled_user_is_401_until_re_enabled() {
+    let granted = grant_fixture(Arc::new(beam_domain::services::RealClock)).await;
+    let grant = granted.grant(GRANT).await;
+    let user_id = granted
+        .fixture
+        .user_repo
+        .find_by_oidc_identity("https://test.example", "subj-1")
+        .await
+        .unwrap()
+        .expect("the seeded user exists")
+        .id;
+    let admin = uuid::Uuid::from_u128(0xad);
+    let admin_users = granted.fixture.state.services.admin_users();
+
+    admin_users
+        .set_disabled(admin, user_id, true)
+        .await
+        .unwrap();
+    for url in [&grant.stream_url, &grant.download_url] {
+        granted
+            .client
+            .get(url)
+            .send()
+            .await
+            .assert_status(StatusCode::UNAUTHORIZED);
+    }
+
+    admin_users
+        .set_disabled(admin, user_id, false)
+        .await
+        .unwrap();
+    granted
+        .client
+        .get(&grant.stream_url)
+        .send()
+        .await
+        .assert_status(StatusCode::OK);
+}
+
+/// A grant whose user cannot be read is neither honoured nor called invalid:
+/// the 503 `MediaGrant` declares, so a receiver retries rather than giving
+/// up on a grant that may be fine.
+#[tokio::test]
+async fn a_grant_whose_user_cannot_be_read_is_503() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("granted.mkv");
+    std::fs::write(&path, GRANTED_BYTES).unwrap();
+    let users = beam_auth::utils::repository::in_memory::FailingUserRepository::new(
+        InMemoryUserRepository::default(),
+        beam_auth::utils::repository::in_memory::UserRepositoryOperation::FindById,
+    );
+    let state = make_state(
+        StubLibraryService::new(vec![make_located_file(
+            TEST_FILE_ID,
+            path.to_str().unwrap(),
+        )]),
+        Arc::new(beam_domain::services::RealClock),
+        Arc::new(users),
+        Arc::new(InMemorySessionStore::default()),
+    );
+    let token = state
+        .media_grants()
+        .issue(
+            TEST_FILE_ID.parse().unwrap(),
+            uuid::Uuid::from_u128(1),
+            chrono::Utc::now(),
+        )
+        .token;
+
+    build_client_over(&state)
+        .get(&format!("{STREAM}?grant={token}"))
+        .send()
+        .await
+        .assert_status(StatusCode::SERVICE_UNAVAILABLE);
+}
+
+/// A request carrying both the session cookie and a grant is the session's:
+/// the cookie is tried first. The grant names one file and the request asks
+/// for another, which the grant alone would answer 404; the session may
+/// fetch any file its policy shows, so it is the other file's bytes.
+#[tokio::test]
+async fn a_request_with_both_a_cookie_and_a_grant_is_the_sessions() {
+    let granted = grant_fixture(Arc::new(beam_domain::services::RealClock)).await;
+    let grant = granted.grant(GRANT).await;
+    let (_, token) = grant.stream_url.split_once("?grant=").unwrap();
+    let other = format!("/v1/files/{OTHER_FILE_ID}/stream?grant={token}");
+
+    granted
+        .client
+        .get(&other)
+        .send()
+        .await
+        .assert_status(StatusCode::NOT_FOUND);
+    let both = granted
+        .client
+        .get(&other)
+        .cookie("beam_session", &granted.session)
+        .send()
+        .await;
+    assert_eq!(both.status(), StatusCode::OK);
+    assert_eq!(both.bytes().as_ref(), b"ANOTHER FILE");
 }
 
 /// A request without a Range header must return 200 and advertise that ranges

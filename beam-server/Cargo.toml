@@ -30,6 +30,10 @@ eyre = "0.6.14"
 # only the formats providers actually serve posters in; AVIF and GIF are
 # served at their original size rather than pulling in a C AV1 decoder.
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
+# Signs the file-scoped media grants a cast receiver or external player fetches
+# a file with (ADR-0022). Already in the tree through hkdf, against the same
+# digest 0.11 as sha2.
+hmac = "0.13"
 kynos = { workspace = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }

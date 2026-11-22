@@ -659,6 +659,83 @@ async fn the_highest_playable_source_is_selected() {
     );
 }
 
+const GRANTED_FILE: &str = "b2b2b2b2-0000-4000-8000-000000000002";
+
+/// A grant is asked for of the file it names, as the signed-in session, and
+/// both URLs come back absolute on the server's origin: an AirPlay receiver
+/// or an external player is handed them with nothing else attached.
+#[tokio::test]
+async fn a_media_grant_is_asked_for_by_the_session_and_resolved_to_absolute_urls() {
+    let (client, backend) = client_answering_in_turn(vec![(
+        200,
+        "application/json",
+        r#"{"stream_url":"/v1/files/b2b2b2b2-0000-4000-8000-000000000002/stream?grant=abc_-9",
+            "download_url":"/v1/files/b2b2b2b2-0000-4000-8000-000000000002/download?grant=abc_-9",
+            "expires_at":"2026-03-01T20:00:00Z"}"#,
+    )])
+    .await;
+
+    let grant = client
+        .media_grant(GRANTED_FILE.to_owned())
+        .await
+        .expect("the server granted it");
+
+    assert_eq!(
+        grant,
+        crate::ffi::MediaGrant {
+            stream_url: format!("https://beam.test/v1/files/{GRANTED_FILE}/stream?grant=abc_-9"),
+            download_url: format!(
+                "https://beam.test/v1/files/{GRANTED_FILE}/download?grant=abc_-9"
+            ),
+            expires_at_unix: 1_772_395_200,
+        }
+    );
+    let asked = backend.recorded().pop().expect("one request");
+    assert_eq!(asked.method, reqwest::Method::POST);
+    assert_eq!(asked.url.path(), format!("/v1/files/{GRANTED_FILE}/grant"));
+    assert_eq!(cookies_of(&asked), vec!["beam_session=opaque-value"]);
+}
+
+/// A grant URL off the server's origin is no grant: it fails rather than
+/// handing a player somewhere else.
+#[tokio::test]
+async fn a_media_grant_off_the_servers_origin_is_refused() {
+    let (client, _) = client_answering_in_turn(vec![(
+        200,
+        "application/json",
+        r#"{"stream_url":"https://elsewhere.test/stream?grant=abc",
+            "download_url":"/v1/files/b2b2b2b2-0000-4000-8000-000000000002/download?grant=abc",
+            "expires_at":"2026-03-01T20:00:00Z"}"#,
+    )])
+    .await;
+
+    assert!(matches!(
+        client.media_grant(GRANTED_FILE.to_owned()).await,
+        Err(BeamError::InvalidServerUrl { .. })
+    ));
+}
+
+/// A file the viewer may not see is the server's 404, and a malformed id
+/// never reaches the server.
+#[tokio::test]
+async fn a_media_grant_of_a_hidden_or_malformed_file_is_refused() {
+    let (client, _) = client_answering(
+        404,
+        r#"{"type":"https://beam.justinchung.net/reference/errors/#file-not-found",
+            "title":"File not found","status":404,"detail":"File not found"}"#,
+    )
+    .await;
+
+    assert!(matches!(
+        client.media_grant(GRANTED_FILE.to_owned()).await,
+        Err(BeamError::NotFound { .. })
+    ));
+    assert!(matches!(
+        client.media_grant("not-a-uuid".to_owned()).await,
+        Err(BeamError::BadRequest { .. })
+    ));
+}
+
 #[tokio::test]
 async fn selection_is_refused_before_the_profile_is_set() {
     let client = client_answering_sources(TWO_H264_SOURCES).await;

@@ -48,6 +48,7 @@ use crate::{
         },
         lists::{ListDependencies, ListService},
         markers::{MarkerDependencies, MarkerService},
+        media_grant::MediaGrantSigner,
         metadata::{DbMetadataService, MetadataRepositories, MetadataService},
         people::PeopleService,
         playback::{DbPlaybackService, PlaybackRepositories, PlaybackService},
@@ -85,6 +86,10 @@ pub struct AppStateInner {
     /// and therefore the exported description -- does not depend on
     /// configuration.
     metrics: Option<PrometheusHandle>,
+    /// Signs and verifies the file-scoped media grants (ADR-0022) under a key
+    /// drawn when the state is built and never persisted, so a restart voids
+    /// every grant outstanding.
+    media_grants: MediaGrantSigner,
 }
 
 impl AppState {
@@ -112,6 +117,7 @@ impl AppState {
                 start_instant: clock.monotonic(),
                 clock,
                 metrics,
+                media_grants: MediaGrantSigner::random(),
             }),
         }
     }
@@ -123,6 +129,11 @@ impl AppState {
     /// its constructor. The seam is unchanged; only where it is read from moved.
     pub fn clock(&self) -> &Arc<dyn Clock> {
         &self.inner.clock
+    }
+
+    /// The signer of this process's media grants (ADR-0022).
+    pub fn media_grants(&self) -> &MediaGrantSigner {
+        &self.inner.media_grants
     }
 
     /// The Prometheus handle, or `None` when no recorder was installed.

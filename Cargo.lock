@@ -724,6 +724,7 @@ dependencies = [
  "confique",
  "dotenvy",
  "eyre",
+ "hmac 0.13.0",
  "http",
  "image",
  "kynos",

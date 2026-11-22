@@ -19,7 +19,9 @@ mod playback;
 mod progress;
 mod telemetry;
 
-pub use playback::{PlaybackHttpConfig, PlaybackPlan, RebufferMonitor, ServerHttpConfig};
+pub use playback::{
+    MediaGrant, PlaybackHttpConfig, PlaybackPlan, RebufferMonitor, ServerHttpConfig,
+};
 
 use crate::api::Client as GeneratedClient;
 use crate::api::{MiddlewareBackend, ReqwestBackend};
