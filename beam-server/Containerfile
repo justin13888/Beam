@@ -52,6 +52,13 @@ RUN wget -q https://ffmpeg.org/releases/ffmpeg-9.0.tar.xz && \
 # Chef: Setup chef image
 # ----------------------------------------------------
 FROM docker.io/rust:1-slim-trixie AS chef
+# Every stage compiles with the image's own toolchain (the latest stable, as
+# rust-toolchain.toml's `stable` is). Without this, the `COPY . .` before the
+# final build brings in rust-toolchain.toml, whose `stable` is a different
+# rustup toolchain name from the image's exact release: rustup would download
+# a second compiler plus every Android/Apple target, and the build would not
+# reuse the dependencies `cargo chef cook` compiled.
+ENV RUSTUP_TOOLCHAIN=${RUST_VERSION}
 RUN cargo install cargo-chef --locked
 WORKDIR /app
 
