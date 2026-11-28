@@ -405,7 +405,7 @@ jobs:
       - uses: ./.github/actions/setup-ffmpeg
 
       # Gates lines, regions, and functions. Regions stand in for branches:
-      # cargo-llvm-cov's --branch needs nightly, and rust-toolchain.toml pins
+      # cargo-llvm-cov's --branch needs nightly, and rust-toolchain.toml selects
       # stable. Thresholds are calibrated a few points under measured (see
       # mise.toml and docs/testing.md). Ratchet them up over time; do not relax
       # one to make a red pull request pass.
