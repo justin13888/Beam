@@ -90,8 +90,8 @@ conflicts on — the same reasoning that has `beam-android` generate its binding
 blockers rather than worked around:
 
 1. `aarch64-apple-tvos` is a Tier 3 Rust target. rustup ships no `rust-std` for it, so building the
-   core for tvOS needs a nightly toolchain and `-Z build-std`, against a repository that pins stable
-   in `rust-toolchain.toml`.
+   core for tvOS needs a nightly toolchain and `-Z build-std`, against a repository that builds on
+   stable via `rust-toolchain.toml`.
 2. tvOS has no `WKWebView`. The `beam_session` cookie lift is the only authentication flow the
    server supports (NFR-605), and it needs a web view whose cookie jar the app can read. There is no
    such thing on tvOS, so a tvOS client cannot sign in at all until a native token mint exists.

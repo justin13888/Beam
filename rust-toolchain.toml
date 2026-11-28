@@ -1,5 +1,8 @@
+# Floats on the latest stable release: a new Rust release is picked up with no
+# bump anywhere, and anything it breaks (a new lint, a changed diagnostic) is
+# fixed in-repo when it lands. `rust-version` in Cargo.toml is only a floor.
 [toolchain]
-channel = "1.94.0"
+channel = "stable"
 components = ["rustfmt", "clippy", "llvm-tools-preview"]
 # beam-client-core cross-compiles to these for the Android client (#67).
 # Listing them here rather than in a build script means rustup, CI's

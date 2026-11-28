@@ -71,7 +71,7 @@ one failure mode a mutation setup must not have. `mise run check:mutants-skip-fa
 explicit annotation, in `mise run ci` and in `pre-push`.
 
 **Gate regions and functions alongside lines.** `cargo-llvm-cov`'s `--branch` needs a nightly
-toolchain and `rust-toolchain.toml` pins stable, so `--fail-under-regions` is the branch gate: LLVM
+toolchain and `rust-toolchain.toml` selects stable, so `--fail-under-regions` is the branch gate: LLVM
 regions are a superset of branches, and region coverage is what correlates with mutation score.
 Thresholds are calibrated a few points under measured and ratcheted, never relaxed.
 

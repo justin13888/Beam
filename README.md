@@ -115,7 +115,7 @@ for the full reference).
 macOS and Linux are the supported development platforms, and both follow the same steps:
 
 0. Install [`rustup`](https://rustup.rs/) and [`mise`](https://mise.jdx.dev/) 2026.5.0 or later
-   (mise supplies Bun, the JDK, `nasm` and the rest of the tooling; rustup reads the pin in
+   (mise supplies Bun, the JDK, `nasm` and the rest of the tooling; rustup reads the toolchain from
    `rust-toolchain.toml`). On macOS, the Apple client also needs Xcode, which nothing can install
    for you.
 1. Clone repository

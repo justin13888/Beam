@@ -26,7 +26,7 @@ Containerfiles from source, including compiling FFmpeg — the single largest de
 **`mise.toml` is the single source of truth for tools and commands.** Every check has exactly one
 definition, as a mise task. CI (`.github/workflows/ci.yml`) and the git hooks (`hk.pkl`) both invoke
 `mise run <task>`; neither restates a command. Adding a check means adding a task. Rust is the one
-deliberate exception: `rust-toolchain.toml` keeps the pin, because rustup and rust-analyzer already
+deliberate exception: `rust-toolchain.toml` selects the toolchain (latest stable), because rustup and rust-analyzer already
 honor it and duplicating it in `mise.toml` would recreate the very drift this ADR removes.
 
 **`hk` runs the git hooks.** `pre-commit` is staged-file-scoped and auto-fixing; `commit-msg` runs
